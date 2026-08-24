@@ -18,20 +18,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tests.quantization.utils import is_quant_method_supported
-from vllm.config import (
-    CompilationConfig,
-    ModelConfig,
-    VllmConfig,
-    set_current_vllm_config,
+from tests.quantization.utils import (
+    is_quant_method_supported,
+    load_model_without_vllm_runner,
 )
+from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _get_auto_awq_config_source() -> str:
@@ -204,47 +199,39 @@ def test_auto_awq_quantization_method(
 ):
     """Test that quantization='auto_awq' loads and runs correctly."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    model_config = ModelConfig(
-        model=model_id,
+    model, vllm_config = load_model_without_vllm_runner(
+        model_id,
+        Qwen2ForCausalLM,
         dtype=torch.float16,
         quantization="auto_awq",
-        max_model_len=2048,
-    )
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        compilation_config=CompilationConfig(mode=0),
+        model_config_kwargs={"max_model_len": 2048},
     )
     target_device = torch.device(current_platform.device_type)
 
-    with set_current_vllm_config(vllm_config):
-        with set_default_torch_dtype(model_config.dtype), target_device:
-            model = Qwen2ForCausalLM(vllm_config=vllm_config)
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        AutoAWQLinearMethod,
+        AutoAWQMarlinLinearMethod,
+    )
 
-        model_loader = DefaultModelLoader(vllm_config.load_config)
-        model.load_weights(model_loader.get_all_weights(model_config, model))
-        process_weights_after_loading(model, model_config, target_device)
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
+    assert isinstance(
+        qkv_proj.quant_method,
+        (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
+    ), (
+        "Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod, "
+        f"got {type(qkv_proj.quant_method)}"
+    )
 
-        from vllm.model_executor.layers.quantization.auto_awq import (
-            AutoAWQLinearMethod,
-            AutoAWQMarlinLinearMethod,
-        )
-
-        qkv_proj = model.model.layers[0].self_attn.qkv_proj
-        assert isinstance(
-            qkv_proj.quant_method,
-            (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
-        ), (
-            "Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod, "
-            f"got {type(qkv_proj.quant_method)}"
-        )
-
-        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
-        input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
-        positions = torch.arange(input_ids.numel(), device=target_device)
-        with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
-            hidden_states = model(input_ids, positions, None)
-            logits = model.compute_logits(hidden_states)
-        assert torch.isfinite(logits).all()
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
+    positions = torch.arange(input_ids.numel(), device=target_device)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 def test_auto_awq_config_get_name():

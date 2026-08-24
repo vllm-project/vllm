@@ -18,12 +18,8 @@ from compressed_tensors.quantization import (
 )
 
 from tests.models.utils import check_logprobs_close
-from vllm.config import (
-    CompilationConfig,
-    ModelConfig,
-    VllmConfig,
-    set_current_vllm_config,
-)
+from tests.quantization.utils import load_model_without_vllm_runner
+from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
@@ -60,12 +56,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -343,43 +336,34 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
 def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
-    model_config = ModelConfig(model=model_path, dtype="bfloat16")
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        compilation_config=CompilationConfig(mode=0),
-    )
+    model, vllm_config = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
     target_device = torch.device(current_platform.device_type)
 
-    with set_current_vllm_config(vllm_config):
-        with set_default_torch_dtype(model_config.dtype), target_device:
-            model = LlamaForCausalLM(vllm_config=vllm_config)
+    layer = model.model.layers[0]
+    qkv_proj = layer.self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(
+        qkv_proj.scheme,
+        (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8),
+    )
+    assert qkv_proj.input_scale.dtype is torch.float32
 
-        model_loader = DefaultModelLoader(vllm_config.load_config)
-        model.load_weights(model_loader.get_all_weights(model_config, model))
-        process_weights_after_loading(model, model_config, target_device)
+    if isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8):
+        assert len(qkv_proj.input_scale.shape) == 0
+        assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+        assert qkv_proj.weight_scale.dtype is torch.float32
+        assert len(qkv_proj.weight_scale.shape) == 0
 
-        layer = model.model.layers[0]
-        qkv_proj = layer.self_attn.qkv_proj
-        assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(
-            qkv_proj.scheme,
-            (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8),
-        )
-        assert qkv_proj.input_scale.dtype is torch.float32
-
-        if isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8):
-            assert len(qkv_proj.input_scale.shape) == 0
-            assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
-            assert qkv_proj.weight_scale.dtype is torch.float32
-            assert len(qkv_proj.weight_scale.shape) == 0
-
-        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
-        input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
-        positions = torch.arange(input_ids.numel(), device=target_device)
-        with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
-            hidden_states = model(input_ids, positions, None)
-            logits = model.compute_logits(hidden_states)
-        assert torch.isfinite(logits).all()
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
+    positions = torch.arange(input_ids.numel(), device=target_device)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():

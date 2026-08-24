@@ -7,21 +7,14 @@ import pytest
 import torch
 from packaging import version
 
-from vllm.config import (
-    CompilationConfig,
-    ModelConfig,
-    VllmConfig,
-    set_current_vllm_config,
-)
+from tests.quantization.utils import load_model_without_vllm_runner
+from vllm.config import set_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
@@ -85,33 +78,25 @@ def test_qwenvl_int8wo_model_loading_with_params(
 ):
     torch._dynamo.reset()
     model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
-    model_config = ModelConfig(
-        model=model_name,
+    model, vllm_config = load_model_without_vllm_runner(
+        model_name,
+        Qwen2_5_VLForConditionalGeneration,
         quantization="torchao",
-        dtype="bfloat16",
+        vllm_config_kwargs={
+            "load_config": LoadConfig(pt_load_map_location=f"{DEVICE_TYPE}:0")
+        },
     )
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        load_config=LoadConfig(pt_load_map_location=f"{DEVICE_TYPE}:0"),
-        compilation_config=CompilationConfig(mode=0),
-    )
-    target_device = torch.device(DEVICE_TYPE)
 
-    with set_current_vllm_config(vllm_config):
-        with set_default_torch_dtype(model_config.dtype), target_device:
-            model = Qwen2_5_VLForConditionalGeneration(vllm_config=vllm_config)
-
-        model_loader = DefaultModelLoader(vllm_config.load_config)
-        model.load_weights(model_loader.get_all_weights(model_config, model))
-        process_weights_after_loading(model, model_config, target_device)
-
-        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
-        input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
-        positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE).expand(3, -1)
-        with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
-            hidden_states = model(input_ids, positions, None)
-            logits = model.compute_logits(hidden_states)
-        assert torch.isfinite(logits).all()
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE).expand(3, -1)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")

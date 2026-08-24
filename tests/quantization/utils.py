@@ -2,11 +2,61 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+from typing import Any
 
 import regex as re
+import torch
 
+from vllm.config import (
+    CompilationConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.quantization import get_quantization_config
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
+
+
+def load_model_without_vllm_runner(
+    model_path: str,
+    model_class: type[torch.nn.Module],
+    *,
+    dtype: str | torch.dtype = "bfloat16",
+    quantization: str | None = None,
+    model_config_kwargs: dict[str, Any] | None = None,
+    vllm_config_kwargs: dict[str, Any] | None = None,
+    model_loader_cls: type = DefaultModelLoader,
+) -> tuple[torch.nn.Module, VllmConfig]:
+    """Instantiate a model, load weights, and process them for inference."""
+    model_config = ModelConfig(
+        model=model_path,
+        dtype=dtype,
+        quantization=quantization,
+        **(model_config_kwargs or {}),
+    )
+    vllm_config_args = dict(vllm_config_kwargs or {})
+    vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
+    vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
+    target_device = torch.device(current_platform.device_type)
+
+    with set_current_vllm_config(vllm_config):
+        with set_default_torch_dtype(model_config.dtype), target_device:
+            model = model_class(vllm_config=vllm_config)
+
+        model_loader = model_loader_cls(vllm_config.load_config)
+        model_loader.load_weights(model, model_config)
+        if any(
+            getattr(getattr(module, "quant_method", None), "uses_meta_device", False)
+            for module in model.modules()
+        ):
+            finalize_layerwise_processing(model, model_config)
+        process_weights_after_loading(model, model_config, target_device)
+
+    return model, vllm_config
 
 
 def is_quant_method_supported(quant_method: str) -> bool:

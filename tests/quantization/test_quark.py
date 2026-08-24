@@ -17,13 +17,9 @@ import pytest
 import torch
 from packaging import version
 
+from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import (
-    CompilationConfig,
-    ModelConfig,
-    VllmConfig,
-    set_current_vllm_config,
-)
+from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
@@ -43,14 +39,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -94,28 +87,6 @@ except huggingface_hub.errors.RepositoryNotFoundError:
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-
-def load_model_without_vllm_runner(
-    model_path: str, model_class: type[torch.nn.Module]
-) -> tuple[torch.nn.Module, VllmConfig]:
-    """Instantiate a model and load its real checkpoint weights."""
-    model_config = ModelConfig(model=model_path, dtype="bfloat16")
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        compilation_config=CompilationConfig(mode=0),
-    )
-    target_device = torch.device(DEVICE_TYPE)
-
-    with set_current_vllm_config(vllm_config):
-        with set_default_torch_dtype(model_config.dtype), target_device:
-            model = model_class(vllm_config=vllm_config)
-
-        model_loader = DefaultModelLoader(vllm_config.load_config)
-        model.load_weights(model_loader.get_all_weights(model_config, model))
-        process_weights_after_loading(model, model_config, target_device)
-
-    return model, vllm_config
 
 
 def test_quark_config_has_no_model_specific_fused_mappings():

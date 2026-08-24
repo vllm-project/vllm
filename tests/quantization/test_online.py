@@ -13,11 +13,11 @@ from torch.distributed import ProcessGroup
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
+    load_model_without_vllm_runner,
 )
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
-from vllm.config import CompilationConfig, ModelConfig, VllmConfig
 from vllm.config.quantization import resolve_quantization_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
@@ -196,36 +196,31 @@ def test_online_quantization(
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
 
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
-    model_config = ModelConfig(
-        model=model_name,
+    model, vllm_config = load_model_without_vllm_runner(
+        model_name,
+        GraniteMoeModel,
         dtype="bfloat16",
         quantization=quant_scheme,
-        quantization_config=resolve_quantization_config(
-            quant_scheme, online_quant_args
-        ),
-        hf_overrides={"num_hidden_layers": 3},
-    )
-    model_config.hf_config.update(
-        {
-            "vocab_size": 256,
-            "hidden_size": 256,
-            "intermediate_size": 512,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 4,
-            "max_position_embeddings": 64,
-            "num_local_experts": 4,
-            "num_experts_per_tok": 2,
-        }
-    )
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        compilation_config=CompilationConfig(mode=0),
+        model_config_kwargs={
+            "quantization_config": resolve_quantization_config(
+                quant_scheme, online_quant_args
+            ),
+            "hf_overrides": {
+                "num_hidden_layers": 3,
+                "vocab_size": 256,
+                "hidden_size": 256,
+                "intermediate_size": 512,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "max_position_embeddings": 64,
+                "num_local_experts": 4,
+                "num_experts_per_tok": 2,
+            },
+        },
+        model_loader_cls=DummyModelLoader,
     )
 
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
-    model = DummyModelLoader(vllm_config.load_config).load_model(
-        vllm_config, model_config
-    )
 
     o_proj = model.model.layers[0].self_attn.o_proj
     moe = model.model.layers[0].block_sparse_moe.experts
