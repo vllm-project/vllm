@@ -61,10 +61,14 @@ pub struct EngineCoreReadyResponse {
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
-    /// World size (TP * PP) from the parallel config.
+    /// Per-DP-engine world size (TP * PP * PCP) from the parallel config.
+    /// Deployment-wide world size also multiplies by `data_parallel_size`.
     pub world_size: u64,
-    /// Data parallelism size from the parallel config.
-    pub data_parallel_size: u64,
+    /// Data-parallel size from this EngineCore's effective parallel config.
+    /// Dense independent-DP ranks are reconfigured to report `1`; the client
+    /// transport owns the deployment-wide data-parallel size.
+    #[serde(rename = "data_parallel_size")]
+    pub effective_data_parallel_size: u64,
     // Required discovery metadata; EngineCore and client versions must match.
     /// Tensor-parallel size of this engine.
     pub tensor_parallel_size: u32,

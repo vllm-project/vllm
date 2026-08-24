@@ -152,25 +152,6 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
 
 
 class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-        if not mm_data:
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -235,8 +216,9 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()
-        newline_prompt = "\n"
-        newline_token_id = tokenizer.encode(newline_prompt)[-1]  # 108
+        vocab = tokenizer.get_vocab()
+        newline_token_id = vocab["\n"]
+
         # Force to add newline at the end of prompt for paligemma's format
         # This step can NOT be replacemented by current PromptUpdate methods
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
@@ -275,6 +257,8 @@ class PaliGemmaForConditionalGeneration(
             "lm_head.": "language_model.lm_head.",
         }
     )
+
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -378,8 +362,6 @@ class PaliGemmaForConditionalGeneration(
         if image_input is None:
             return []
         vision_embeddings = self._process_image_input(image_input)
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-        vision_embeddings = vision_embeddings * (self.config.hidden_size**-0.5)
         return vision_embeddings
 
     def forward(
