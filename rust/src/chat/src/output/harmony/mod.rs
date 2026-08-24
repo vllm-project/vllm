@@ -11,7 +11,7 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
 use openai_harmony::{HarmonyEncoding, StreamableParser};
-use vllm_text::output::DecodedTextEvent;
+use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result as ChatResult;
 use crate::error::{Error, Result};
@@ -345,9 +345,12 @@ async fn harmony_assistant_event_stream(
                 .await;
             }
             DecodedTextEvent::TextDelta {
-                delta: _, // harmony takes raw token IDs as input, so we ignore text deltas here
-                token_ids,
-                logprobs,
+                decoded: _, // harmony takes raw token IDs as input, so we ignore decoded text here
+                sampled:
+                    SampledDelta {
+                        token_ids,
+                        logprobs,
+                    },
                 finished,
             } => {
                 for event in state.process_token_ids(&token_ids)? {

@@ -728,15 +728,14 @@ fn decoded_completion_stream(
     if chunks.is_empty() {
         events.push({
             DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: Vec::new(),
-                logprobs: None,
-                finished: Some(Finished {
+                decoded: vllm_text::DecodedText::default(),
+                sampled: vllm_text::SampledDelta::default(),
+                finished: Some(Box::new(Finished {
                     usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                }),
+                })),
             }
         });
     } else {
@@ -749,10 +748,15 @@ fn decoded_completion_stream(
                 ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
-                delta: chunk.delta,
-                token_ids: chunk.token_ids,
-                logprobs: None,
-                finished,
+                decoded: vllm_text::DecodedText {
+                    text: chunk.delta,
+                    ..Default::default()
+                },
+                sampled: vllm_text::SampledDelta {
+                    token_ids: chunk.token_ids,
+                    logprobs: None,
+                },
+                finished: finished.map(Box::new),
             });
         }
     }
