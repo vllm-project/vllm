@@ -135,6 +135,22 @@ def dual_encoder_has_text_tokens(
     return bool((~is_multimodal).any().item())
 
 
+def merge_dual_encoder_text_and_vision(
+    text_features: torch.Tensor,
+    vision_embeds: torch.Tensor,
+    is_multimodal: torch.Tensor | None,
+) -> torch.Tensor:
+    """Restore vision embeddings on multimodal tokens after the text encoder.
+
+    The model runner builds ``is_multimodal`` on CPU; text and vision features
+    are on the compute device.
+    """
+    if is_multimodal is None or not bool(is_multimodal.any().item()):
+        return text_features
+    mm_mask = is_multimodal.to(device=vision_embeds.device, non_blocking=True)
+    return torch.where(mm_mask.unsqueeze(-1), vision_embeds, text_features)
+
+
 class CLIPProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(CLIPConfig)
@@ -978,10 +994,9 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             raise NotImplementedError
 
         text_features = self.get_text_features(input_ids, positions, inputs_embeds)
-        mm_mask = self._mm_token_mask
-        if mm_mask is None or not bool(mm_mask.any().item()):
-            return text_features
-        return torch.where(mm_mask.unsqueeze(-1), vision_embeds, text_features)
+        return merge_dual_encoder_text_and_vision(
+            text_features, vision_embeds, self._mm_token_mask
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(

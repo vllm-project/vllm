@@ -57,7 +57,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .clip import dual_encoder_has_text_tokens
+from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -1143,10 +1143,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             raise NotImplementedError
 
         text_features = self.get_text_features(input_ids, positions, inputs_embeds)
-        mm_mask = self._mm_token_mask
-        if mm_mask is None or not bool(mm_mask.any().item()):
-            return text_features
-        return torch.where(mm_mask.unsqueeze(-1), vision_embeds, text_features)
+        return merge_dual_encoder_text_and_vision(
+            text_features, vision_embeds, self._mm_token_mask
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
