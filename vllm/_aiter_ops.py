@@ -2009,6 +2009,31 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
+    @functools.cache
+    def gdn_fused_conv_supports_qkvz_layout(cls) -> bool:
+        """Probe whether the GDN fused reshape+conv kernel accepts `qkvz_layout`.
+
+        Added in https://github.com/ROCm/aiter/pull/3251. Older builds only
+        understand Qwen3-Next's interleaved packing, so flat-layout models must
+        keep using the generic GDN path against them.
+        """
+        if not cls._gdn_triton_kernels_importable():
+            return False
+
+        import inspect
+
+        from aiter.ops.triton.causal_conv1d_update_single_token import (
+            fused_reshape_causal_conv1d_update_single_token,
+        )
+
+        return (
+            "qkvz_layout"
+            in inspect.signature(
+                fused_reshape_causal_conv1d_update_single_token
+            ).parameters
+        )
+
+    @classmethod
     @if_aiter_supported
     @functools.cache
     def fused_moe_supports_gate_mode(cls) -> bool:

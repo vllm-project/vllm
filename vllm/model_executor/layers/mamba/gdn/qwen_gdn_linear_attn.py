@@ -76,6 +76,10 @@ GDN_AITER_TRITON_AVAILABLE = (
     or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
 )
 
+GDN_AITER_SUPPORTS_QKVZ_LAYOUT = (
+    GDN_AITER_TRITON_AVAILABLE and rocm_aiter_ops.gdn_fused_conv_supports_qkvz_layout()
+)
+
 if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.causal_conv1d_update_single_token import (
         fused_reshape_causal_conv1d_update_single_token as gdn_aiter_fused_reshape_causal_conv1d_update_single_token,  # noqa: E501
@@ -88,6 +92,18 @@ logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+
+def _resolve_aiter_conv_layout_kwargs(qkvz_layout: str) -> dict[str, str]:
+    """AITER fused reshape+conv kwargs selecting the qkvz packing.
+
+    Older AITER builds have no ``qkvz_layout`` parameter and assume the
+    interleaved packing, which is also the parameter's default, so the argument
+    is omitted entirely against them.
+    """
+    if not GDN_AITER_SUPPORTS_QKVZ_LAYOUT:
+        return {}
+    return {"qkvz_layout": qkvz_layout}
 
 
 def _resolve_gdn_prefill_backend(
@@ -379,6 +395,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
+        self._aiter_conv_layout_kwargs = _resolve_aiter_conv_layout_kwargs(
+            self.qkvz_layout
+        )
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
@@ -1188,9 +1208,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
         qkvz/ba layout.
 
-        For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
-        the packed layout and falls through to ``_forward_core``.
+        For decode-only (no spec, no prefill) batches, dispatches directly to
+        ``_forward_core_decode_aiter``. Otherwise unpacks the packed layout and
+        falls through to ``_forward_core``.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1211,11 +1231,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
-        # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
-        # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
-        # the generic path below to split/rearrange inputs correctly.
+        # The AITER fused reshape/conv kernel reads Qwen3.5's flat q/k/v/z
+        # layout only from the build that added ``qkvz_layout``; before that it
+        # assumed Qwen3-Next's interleaved GQA packing, so flat-layout models
+        # must fall through to the generic path that rearranges inputs itself.
         if (
-            self.gqa_interleaved_layout
+            (self.gqa_interleaved_layout or GDN_AITER_SUPPORTS_QKVZ_LAYOUT)
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -1607,6 +1628,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
+                **self._aiter_conv_layout_kwargs,
             )
         )
 
