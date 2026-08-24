@@ -2,7 +2,7 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
-- label: Entrypoints Unit Tests
+- label: ":nvidia: (H200) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests
   timeout_in_minutes: 25
@@ -11,11 +11,21 @@ steps:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
   - tests/entrypoints/weight_transfer
+  - tests/entrypoints/launchers
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/launchers
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Unit"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
 
-- label: Entrypoints Integration (LLM)
+- label: ":nvidia: (H200) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
   timeout_in_minutes: 60
@@ -31,13 +41,14 @@ steps:
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
+      label: ":amd: (MI300) Entrypoints Integration (LLM)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
-- label: Entrypoints Integration (API Server)
+- label: ":nvidia: (H200) Entrypoints Integration (API Server)"
   key: entrypoints-integration-api-server
   device: h200_35gb
   timeout_in_minutes: 75
@@ -54,13 +65,14 @@ steps:
   - pytest -v -s entrypoints/scale_out
   mirror:
     amd:
+      label: ":amd: (MI300) Entrypoints Integration (API Server)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
-- label: Entrypoints Integration (API Server OpenAI - Part 1)
+- label: ":nvidia: (H200) Entrypoints Integration (API Server OpenAI - Part 1)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-1
   timeout_in_minutes: 68
@@ -75,13 +87,14 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
+      label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 1)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
-- label: Entrypoints Integration (API Server OpenAI - Part 2)
+- label: ":nvidia: (H200) Entrypoints Integration (API Server OpenAI - Part 2)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-2
   timeout_in_minutes: 83
@@ -97,13 +110,14 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
+      label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 2)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
 
-- label: Entrypoints Integration (API Server Generate)
+- label: ":nvidia: (H200) Entrypoints Integration (API Server Generate)"
   device: h200_35gb
   key: entrypoints-integration-api-server-generate
   timeout_in_minutes: 50
@@ -122,13 +136,14 @@ steps:
   - pytest -v -s entrypoints/anthropic
   mirror:
     amd:
+      label: ":amd: (MI300) Entrypoints Integration (API Server Generate)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
-- label: Entrypoints Integration (Responses API)
+- label: ":nvidia: (H200) Entrypoints Integration (Responses API)"
   device: h200_35gb
   key: entrypoints-integration-responses-api
   timeout_in_minutes: 50
@@ -139,8 +154,16 @@ steps:
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Responses API)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      depends_on:
+      - image-build-amd
 
-- label: Entrypoints Integration (Speech to Text)
+- label: ":nvidia: (H200) Entrypoints Integration (Speech to Text)"
   device: h200_35gb
   key: entrypoints-integration-speech_to_text
   timeout_in_minutes: 45
@@ -153,7 +176,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
 
-- label: Entrypoints Integration (Multimodal)
+- label: ":nvidia: (H200) Entrypoints Integration (Multimodal)"
   device: h200_35gb
   key: entrypoints-integration-multimodal
   timeout_in_minutes: 45
@@ -165,8 +188,16 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Multimodal)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
 
-- label: Entrypoints Integration (Pooling)
+- label: ":nvidia: (H200) Entrypoints Integration (Pooling)"
   device: h200_35gb
   key: entrypoints-integration-pooling
   timeout_in_minutes: 75
@@ -179,7 +210,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
 
-- label: OpenAI API Correctness
+- label: ":nvidia: (H200) OpenAI API Correctness"
   key: openai-api-correctness
   timeout_in_minutes: 20
   device: h200_18gb
@@ -190,6 +221,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/
   mirror:
     amd:
+      label: ":amd: (MI300) OpenAI API Correctness"
       dind: false
       device: mi300_1
       timeout_in_minutes: 30

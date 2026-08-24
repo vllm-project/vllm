@@ -223,7 +223,8 @@ def do_expand_kernel(
     offset_cm = tl.arange(0, BLOCK_M)
     c_ptr = (
         out_ptr
-        + ram[:, None] * output_d0_stride
+        # int64 to keep the row offset from overflowing at long context lengths
+        + ram[:, None].to(tl.int64) * output_d0_stride
         + offset_cn[None, :] * output_d1_stride
     )
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < (cur_slice_start + N))
@@ -291,7 +292,10 @@ def do_shrink_kernel(
     # Identify A and B block pointers
     offset_k = pid_sk * BLOCK_K + tl.arange(0, BLOCK_K)
     a_ptr = (
-        input_ptr + ram[:, None] * input_d0_stride + offset_k[None, :] * input_d1_stride
+        input_ptr
+        # int64 to keep the row offset from overflowing at long context lengths
+        + ram[:, None].to(tl.int64) * input_d0_stride
+        + offset_k[None, :] * input_d1_stride
     )
     b_ptr = (
         cur_lora_ptr
