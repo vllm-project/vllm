@@ -33,10 +33,7 @@ class KVConnector:
         pass
 
     def post_forward(
-        self,
-        finished_req_ids: set[str],
-        wait_for_save: bool = True,
-        async_load: bool = False,
+        self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         return None
 
@@ -57,6 +54,7 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
+        self._pending_load_start = False
         self._disabled = False
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
@@ -68,10 +66,16 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
 
-        if not scheduler_output.async_load:
+        if scheduler_output.has_sync_kv_loads:
+            # Sync loads need to run before this step's forward.
             self._start_load_kv()
+        else:
+            # Start any async loads in post-forward instead, keeping
+            # their host-side submission cost off the critical path.
+            self._pending_load_start = True
 
     def _start_load_kv(self) -> None:
+        self._pending_load_start = False
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
             self.kv_connector.start_load_kv(get_forward_context())
@@ -80,15 +84,12 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context())
 
     def post_forward(
-        self,
-        finished_req_ids: set[str],
-        wait_for_save: bool = True,
-        async_load: bool = False,
+        self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
 
-        if async_load:
+        if self._pending_load_start:
             self._start_load_kv()
 
         output = KVConnectorOutput()
@@ -112,11 +113,7 @@ class ActiveKVConnector(KVConnector):
 
         self.pre_forward(scheduler_output)
         finished_req_ids = scheduler_output.finished_req_ids
-        kv_connector_output = self.post_forward(
-            finished_req_ids,
-            wait_for_save=False,
-            async_load=scheduler_output.async_load,
-        )
+        kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     def set_disabled(self, disabled: bool) -> None:

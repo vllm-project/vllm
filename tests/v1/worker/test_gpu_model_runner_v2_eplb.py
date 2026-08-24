@@ -181,7 +181,6 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
-        async_load=False,
         num_tokens_across_dp=None,
     )
     runner.req_states = SimpleNamespace()

@@ -71,16 +71,6 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
-    async_load: bool = False
-    """Allow ``start_load_kv`` to run after the current Model Runner V2 forward.
-
-    This does not make KV loading asynchronous. It only changes the start order
-    for scheduler steps that already contain asynchronous KV loads and no
-    synchronous KV loads. Enable it only when the connector's entire start hook
-    is safe after the forward. For ``MultiConnector``, set it on the top-level
-    config only after verifying every child.
-    """
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

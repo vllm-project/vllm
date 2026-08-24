@@ -44,27 +44,29 @@ def _make_connector(
     return connector
 
 
-def _scheduler_output(async_load: bool) -> SimpleNamespace:
+def _scheduler_output(has_sync_kv_loads: bool) -> SimpleNamespace:
     return SimpleNamespace(
         kv_connector_metadata=object(),
         finished_req_ids=set(),
-        async_load=async_load,
+        has_sync_kv_loads=has_sync_kv_loads,
     )
 
 
-@pytest.mark.parametrize("async_load", [False, True])
-def test_async_load_start_phase(
+@pytest.mark.parametrize("has_sync_kv_loads", [False, True])
+def test_load_start_phase(
     monkeypatch: pytest.MonkeyPatch,
-    async_load: bool,
+    has_sync_kv_loads: bool,
 ):
     events: list[str] = []
     connector = _make_connector(monkeypatch, events)
-    output = _scheduler_output(async_load)
+    output = _scheduler_output(has_sync_kv_loads)
 
     connector.pre_forward(output)  # type: ignore[arg-type]
-    assert events == (["handle", "bind"] if async_load else ["handle", "bind", "start"])
+    assert events == (
+        ["handle", "bind", "start"] if has_sync_kv_loads else ["handle", "bind"]
+    )
 
-    connector.post_forward(set(), async_load=output.async_load)
+    connector.post_forward(set())
     assert events == ["handle", "bind", "start", "wait", "clear"]
 
 
@@ -72,13 +74,6 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     events: list[str] = []
     connector = _make_connector(monkeypatch, events)
 
-    connector.no_forward(_scheduler_output(True))  # type: ignore[arg-type]
+    connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
     assert events == ["handle", "bind", "start", "clear"]
-
-
-def test_async_load_is_explicit_boolean():
-    assert not KVTransferConfig().async_load
-    assert KVTransferConfig(async_load=True).async_load
-    with pytest.raises(ValueError):
-        KVTransferConfig(async_load=None)  # type: ignore[arg-type]

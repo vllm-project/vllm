@@ -1670,7 +1670,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
-            async_load=scheduler_output.async_load,
         )
 
         if not self.is_last_pp_rank:
@@ -1695,7 +1694,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
-        async_load = self.execute_model_state.async_load
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1713,9 +1711,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
             # Post-step KV connector related operations.
-            kv_connector_output = self.kv_connector.post_forward(
-                finished_req_ids, async_load=async_load
-            )
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
@@ -1833,9 +1829,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(
-            finished_req_ids, async_load=async_load
-        )
+        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
@@ -1855,13 +1849,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
-        async_load = self.execute_model_state.async_load
         self.execute_model_state = None
 
         # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(
-            finished_req_ids, async_load=async_load
-        )
+        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
@@ -1968,7 +1959,6 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
-    async_load: bool
 
 
 class BatchReqState(NamedTuple):
