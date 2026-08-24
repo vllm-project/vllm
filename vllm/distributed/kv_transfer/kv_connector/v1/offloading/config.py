@@ -155,12 +155,13 @@ def build_offloading_config(
                 return False
             if spec.kv_quant_mode.is_per_token_head:
                 return False
-            if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+            if type(spec) is MLAAttentionSpec:
                 return (
-                    type(spec) is MLAAttentionSpec
-                    and spec.tokens_per_state == 1
+                    spec.tokens_per_state == 1
                     and spec.real_page_size_bytes % spec.block_size == 0
                 )
+            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
+                return False
             if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
                 return False
             return (
