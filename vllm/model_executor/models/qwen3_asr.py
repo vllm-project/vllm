@@ -81,6 +81,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -328,7 +329,7 @@ class Qwen3ASRMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             ),
         ]
@@ -361,6 +362,7 @@ class Qwen3ASRForConditionalGeneration(
     }
 
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    supports_tower_connector_lora = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -372,6 +374,8 @@ class Qwen3ASRForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "model.multi_modal_projector.linear_1.": "audio_tower.proj1.",
             "model.multi_modal_projector.linear_2.": "audio_tower.proj2.",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 
@@ -545,10 +549,7 @@ class Qwen3ASRForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights
@@ -691,7 +692,7 @@ class Qwen3ASRForConditionalGeneration(
             full_lang_name = cls.supported_languages.get(lang_code, lang_code)
             prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
-        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_token_ids = cached_encode(tokenizer, prompt)
 
         return TokensPrompt(
             prompt_token_ids=prompt_token_ids,

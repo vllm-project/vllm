@@ -865,6 +865,8 @@ def nvfp4_w4a16_moe_quant_config(
     g2_alphas: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -877,6 +879,8 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -1317,6 +1321,8 @@ class FusedMoEConfig:
     # consumer; read through `use_deferred_moe_finalize`, which applies the
     # guards. Kernels without the capability ignore it. Default False.
     defer_moe_finalize: bool = False
+    # Optional consumer capacity for deferred finalize. Negative means unbounded.
+    defer_moe_finalize_max_num_tokens: int = -1
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
@@ -1443,9 +1449,25 @@ class FusedMoEConfig:
         ``defer_moe_finalize`` is set after construction, like
         ``skip_final_all_reduce``.
         """
-        # Without TP there is no all-reduce for the top-k reduction to fuse
-        # into, so the deferred form buys nothing.
-        return self.defer_moe_finalize and self.tp_size > 1
+        # The consumer fuses a TP all-reduce. Other parallel modes require a
+        # combine or reduce-scatter after the experts and cannot defer it.
+        return (
+            self.defer_moe_finalize
+            and self.tp_size > 1
+            and self.dp_size == 1
+            and self.ep_size == 1
+            and self.pcp_size == 1
+            and not self.is_sequence_parallel
+        )
+
+    def should_defer_moe_finalize(self, num_tokens: int) -> bool:
+        """Return whether this invocation may defer the top-k reduction."""
+        max_num_tokens = self.defer_moe_finalize_max_num_tokens
+        return (
+            self.use_deferred_moe_finalize
+            and num_tokens > 0
+            and (max_num_tokens < 0 or num_tokens <= max_num_tokens)
+        )
 
     @property
     def use_deepep_ht_kernels(self):
