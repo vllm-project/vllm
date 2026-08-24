@@ -11,6 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
+    NCCL_UNIQUE_ID_BYTES,
     NCCLLibrary,
     buffer_type,
     cudaStream_t,
@@ -58,6 +59,9 @@ def register_nccl_symmetric_ops(pynccl_comm):
 
 
 class PyNcclCommunicator:
+    # None for communicators built via `from_unique_id_bytes` (no process group).
+    group: ProcessGroup | StatelessProcessGroup | None
+
     def __init__(
         self,
         group: ProcessGroup | StatelessProcessGroup,
@@ -144,6 +148,77 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    @classmethod
+    def from_unique_id_bytes(
+        cls,
+        unique_id_bytes: bytes,
+        rank: int,
+        world_size: int,
+        device: int | str | torch.device,
+        library_path: str | None = None,
+    ) -> "PyNcclCommunicator":
+        """Build a communicator from pre-shared ``ncclUniqueId`` bytes.
+
+        For peers that cannot join a ``StatelessProcessGroup`` / TCPStore (e.g. a
+        torch-free JAX trainer): every rank passes the same id, minted once via
+        ``ncclGetUniqueId`` and shared out of band. There is no barrier, so all
+        ranks must enter init concurrently or ``ncclCommInitRank`` hangs.
+
+        Warm-up handshake: immediately after ``ncclCommInitRank`` this issues a
+        one-element ``all_reduce`` (mirroring ``__init__``). It is a collective,
+        so every peer -- including a foreign, non-vLLM rank -- must issue a
+        matching one-element ``all_reduce`` before any other collective, or all
+        ranks deadlock.
+        """
+        if len(unique_id_bytes) != NCCL_UNIQUE_ID_BYTES:
+            raise ValueError(
+                f"expected a {NCCL_UNIQUE_ID_BYTES}-byte NCCL unique id, "
+                f"got {len(unique_id_bytes)} bytes"
+            )
+        if not 0 <= rank < world_size:
+            raise ValueError(f"rank {rank} out of range for world_size {world_size}")
+
+        self = cls.__new__(cls)
+        self.rank = rank
+        self.world_size = world_size
+        self.group = None
+
+        if self.world_size == 1 or envs.VLLM_DISABLE_PYNCCL:
+            self.available = False
+            self.disabled = True
+            return self
+        try:
+            self.nccl = NCCLLibrary(library_path)
+        except Exception as e:
+            # Unlike the TCPStore path, silently disabling here leaves the peer
+            # blocked in ncclCommInitRank until timeout. The caller explicitly
+            # asked to join from a unique id, so fail loudly instead.
+            raise RuntimeError(
+                "failed to load the NCCL library for unique-id rendezvous"
+            ) from e
+
+        self.available = True
+        self.disabled = False
+        self.nccl_version = self.nccl.ncclGetRawVersion()
+        self.unique_id = self.nccl.unique_id_from_bytes(unique_id_bytes)
+
+        if isinstance(device, int):
+            device = torch.device(f"cuda:{device}")
+        elif isinstance(device, str):
+            device = torch.device(device)
+        assert isinstance(device, torch.device)
+        self.device = device
+        with torch.accelerator.device_index(device.index):
+            self.comm = self.nccl.ncclCommInitRank(
+                self.world_size, self.unique_id, self.rank
+            )
+            stream = current_stream()
+            data = torch.zeros(1, device=device)
+            self.all_reduce(data)
+            stream.synchronize()
+            del data
+        return self
 
     def destroy(self):
         if self.available and not self.disabled:
