@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from collections.abc import Mapping
 from typing import Any
 
@@ -103,13 +104,12 @@ class DFlashSpeculator(DraftModelSpeculator):
     @property
     def attn_vllm_config(self) -> VllmConfig:
         # The draft's attention differs from the target's in causality.
-        return replace(
-            self.vllm_config,
-            attention_config=replace(
-                self.vllm_config.attention_config,
-                use_non_causal=self.requires_non_causal,
-            ),
+        config = copy.copy(super().attn_vllm_config)
+        config.attention_config = replace(
+            self.vllm_config.attention_config,
+            use_non_causal=self.requires_non_causal,
         )
+        return config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
