@@ -9,7 +9,7 @@ paths call kernels that only exist for SM90+.
 | Baseline | upstream vLLM `017e9f4448` (`0.27.2rc1.dev163`) |
 | Branch | `sm89` — one commit on top of the baseline; the diff **is** the adaptation |
 | Diff | 21 edits across 9 files + 3 new operator files (+2018 / −41) |
-| Requires | FlashInfer **`0.6.14+sm89`** (see [FlashInfer](#flashinfer)) |
+| Requires | FlashInfer **`0.6.17+sm89.1`** (see [FlashInfer](#flashinfer)) |
 | License | Apache-2.0, same as vLLM |
 
 ---
@@ -56,31 +56,28 @@ the configuration stays rebuildable; see [`assets/`](assets/) for provenance,
 checksum and license.
 
 ```bash
-uv pip install ./assets/flashinfer_python-0.6.14+sm89-py3-none-any.whl
+uv pip install ./assets/flashinfer_python-0.6.17+sm89.1-py3-none-any.whl
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-
-# Required. The 0.6.14 port emulates the block-scaled MMA incorrectly: it applies
-# one scale to all four accumulators (which belong to different rows/columns) and
-# does not range-handle degenerate E8M0 encodings. Both are silent — the first
-# degrades long-context quality, the second emits garbage from the first token.
-# This installs the 0.6.17+sm89.1 revision of the file. See assets/README.md.
-python assets/patch-flashinfer-sm89-mma-scales.py
 ```
 
 Verify before installing:
 
 ```
-sha256  95ea827b9a6303fc974f7b2872befb23efed9a3eb85074b262261e3c3944730b
+sha256  d3f483f4cf111c7f7990357112022fdeada887c2af61ec3319b9aa84930b4326
 ```
 
-Once installed it reports version `0.6.14+sm89`, which is what
+Once installed it reports version `0.6.17+sm89.1`, which is what
 `has_flashinfer_sparse_mla_sm89()` probes for. **Check that string, not
-`pip list`** — stock FlashInfer `0.6.14` is 6 KB smaller and one filename suffix
-away, installs and imports cleanly, and then rejects SM89 at backend selection.
-[`assets/README.md`](assets/README.md) has three probes that tell the two apart.
+`pip list`** — a stock FlashInfer of the same version installs and imports
+cleanly, then rejects SM89 at backend selection.
+[`assets/README.md`](assets/README.md) has three probes that tell them apart, and
+explains why `0.6.14+sm89` is not usable: it emulates the block-scaled MMA with
+one scale for all four accumulators, which decays long-context quality silently.
 
-After patching, point `FLASHINFER_CACHE_DIR` at a fresh directory so stale
-cached kernels are not reused.
+Whenever you change FlashInfer version, point `FLASHINFER_CACHE_DIR` at a
+**fresh** directory — these kernels are JIT source compiled at runtime, and a
+populated cache keeps serving the old ones, so the upgrade appears to do
+nothing.
 
 Then overlay this branch's changed files onto the installed package, or install
 from source.
@@ -162,6 +159,10 @@ config. Set `SM89_BLOCK_M_LOW_LIMIT=0` to restore upstream behaviour.
 8 × RTX 4090, TP4 × PP2, `--max-model-len 131072`, `--gpu-memory-utilization 0.95`,
 prefix caching on, CUDA graphs on. Random-input benchmark, 1024 in / 256 out,
 `temperature=0`, median of repeated runs.
+
+> Measured against FlashInfer `0.6.14+sm89`, before the upgrade documented above.
+> The change is a correctness fix in the scale handling, not a throughput one, so
+> these are expected to hold — but they have not been re-measured.
 
 | | |
 |---|---|
