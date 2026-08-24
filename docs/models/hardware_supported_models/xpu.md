@@ -68,7 +68,3 @@
 | ----------------------- | ------------------------------ | --------------- |
 | Qwen/Qwen3-Embedding-8B | Qwen3ForTextEmbedding          | BF16/Online FP8 |
 | Qwen/Qwen3-Reranker-8B  | Qwen3ForSequenceClassification | BF16/Online FP8 |
-
-✅ Runs and optimized.
-🟨 Runs and correct but not optimized to green yet.
-❌ Does not pass accuracy test or does not run.
