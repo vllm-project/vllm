@@ -64,6 +64,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.multimodal.processing.processor import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -353,8 +354,10 @@ def _mtd_field_config(
                 "audio",
                 audio_chunk_counts,
             ),
-            audio_chunk_counts=MultiModalFieldConfig.batched("audio"),
-            audio_token_lengths=MultiModalFieldConfig.batched("audio"),
+            audio_chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
+            audio_token_lengths=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
         )
     return fields
 
@@ -459,37 +462,29 @@ class MossTranscribeDiarizeDummyInputsBuilder(
 class MossTranscribeDiarizeMultiModalProcessor(
     BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-        audios = _get_audios_from_mm_data(mm_data)
-        if not audios:
-            input_ids = tokenizer.encode(
-                prompt,
-                add_special_tokens=tok_kwargs.get("add_special_tokens", False),
-            )
-            return BatchFeature({"input_ids": [input_ids]}, tensor_type="pt")
-
-        processed = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, audio=audios),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
-        return _add_vllm_audio_metadata(processed, len(audios))
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return mm_items.get_count("audio", strict=False) > 0
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        audios = _get_audios_from_mm_data(mm_data)
+
+        return dict(audio=audios), hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        audios = _get_audios_from_mm_data(mm_data)
+        if audios:
+            processed_data = _add_vllm_audio_metadata(processed_data, len(audios))
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -541,7 +536,7 @@ class MossTranscribeDiarizeMultiModalProcessor(
                 raise ValueError("Audio input is too short to produce any tokens.")
             return num_tokens
 
-        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(item_idx: int) -> PromptUpdateDetails:
             num_tokens = get_num_tokens(item_idx)
             audio_tokens = processor._audio_span_ids(num_tokens)
             return PromptUpdateDetails.select_token_id(
@@ -552,7 +547,9 @@ class MossTranscribeDiarizeMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=AUDIO_PLACEHOLDER,
+                target=cached_encode(
+                    tokenizer, AUDIO_PLACEHOLDER, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]

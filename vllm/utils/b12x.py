@@ -5,12 +5,19 @@
 import functools
 import importlib
 import importlib.util
-from collections.abc import Iterable
-from dataclasses import fields, is_dataclass
+from collections.abc import Callable, Hashable, Iterable
+from dataclasses import dataclass, fields, is_dataclass
 from types import ModuleType
 from typing import Any
 
 import torch
+
+
+@dataclass(frozen=True)
+class B12xWarmupUnit:
+    name: str
+    key: Hashable
+    compile: Callable[[], None]
 
 
 @functools.cache
@@ -43,6 +50,10 @@ def get_b12x_mxfp8_linear() -> ModuleType | None:
 
 def get_b12x_tensor_fp8_linear() -> ModuleType | None:
     return _get_submodule("b12x.gemm.tensor_fp8_linear")
+
+
+def get_b12x_fused_moe() -> ModuleType | None:
+    return _get_submodule("b12x.moe.fused_moe")
 
 
 def b12x_warmup_token_counts(
