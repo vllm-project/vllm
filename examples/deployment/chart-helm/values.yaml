@@ -145,6 +145,9 @@ keda:
 #     prometheus.io/path: "/metrics"
 podAnnotations: {}
 
+# -- Image pull secrets for pulling from private registries (e.g. GHCR).
+# List of secret references in the format: [{name: "secret-name"}, ...]
+imagePullSecrets: []
 
 # -- Configmap
 configs: {}

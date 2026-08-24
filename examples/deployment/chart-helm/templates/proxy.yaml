@@ -49,11 +49,15 @@ spec:
           ports:
             - name: proxy-port
               containerPort: {{ .Values.proxy.env.LISTEN_PORT | int }}
-          {{- if .Values.proxy.resources }}
-          resources:
-            {{- toYaml .Values.proxy.resources | nindent 12 }}
-          {{- end }}
-      {{- with .Values.proxy.nodeSelector }}
+           {{- if .Values.proxy.resources }}
+           resources:
+             {{- toYaml .Values.proxy.resources | nindent 12 }}
+           {{- end }}
+       {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+       {{- with .Values.proxy.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
