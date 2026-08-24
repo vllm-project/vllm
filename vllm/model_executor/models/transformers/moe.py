@@ -163,8 +163,7 @@ class MoEMixin(MixtureOfExperts):
         experts_name = "experts"
         text_config = self.text_config
 
-        # Positional arguments. Any of these may be sized per decoder layer, so
-        # they are resolved with `maybe_per_layer` once the layer is known.
+        # Positional arguments
         num_experts = self.model_config.get_num_experts()
         top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"], None)
         assert top_k is not None

@@ -310,10 +310,7 @@ T = TypeVar("T")
 
 
 def maybe_per_layer(value: T | list[T], layer_idx: int) -> T:
-    """Pick `layer_idx`'s entry from a config field that may be sized per layer.
-
-    Most configs state MoE hyperparameters once for the whole model, but some
-    (e.g. Hunyuan) give every decoder layer its own entry."""
+    """Pick `layer_idx`'s entry from a config field that may be sized per layer."""
     return value[layer_idx] if isinstance(value, list) else value
 
 
