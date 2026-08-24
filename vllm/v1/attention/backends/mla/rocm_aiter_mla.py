@@ -974,10 +974,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.flat_kv_indptr[num_rows + 1 :].fill_(self.flat_kv_indptr[num_rows])
             flat_kv_indptr = self.flat_kv_indptr[: num_rows + 1]
             # One device->host read serves both uses below; a sync is legal here
-            # because the builder runs outside the captured region. Gluon turns
-            # min_kv_seq_len into its split count, so it has to be the shortest
-            # row actually submitted, not the shortest per-request length those
-            # rows were cut from.
+            # because the builder runs outside the captured region.
+            #
+            # What min_kv_seq_len buys depends on the aiter version. Up to
+            # v0.1.19 the bh16 regimes capped NUM_KV_SPLITS with it, so it had
+            # to be the shortest row actually submitted -- not the shortest
+            # per-request length those rows were cut from -- or a split could
+            # come out empty. From v0.1.20 (ROCm/aiter#4555) both bh16 regimes
+            # size the split count from the launch budget alone and derive the
+            # real partition from the runtime KV length, so they never read it.
+            # bh64 still does, but only to assert a lower bound, and small-head
+            # verify never routes there. Keep sending the shortest submitted
+            # row: it is the only value that is right on both, and it is free
+            # here because total_entries needs this read regardless.
             min_kv_seq_len, total_entries = torch.stack(
                 (row_len.min(), self.flat_kv_indptr[num_rows])
             ).tolist()
