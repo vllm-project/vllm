@@ -3066,6 +3066,36 @@ def test_unify_kv_cache_page_size_scales_block_before_padding():
     assert unified["small_attn_layer"].page_size_bytes == 32768
 
 
+def test_unify_kv_cache_page_size_scales_pre_padded_spec_from_natural_page():
+    """A pre-padded spec scales from its natural page, not the padded one.
+
+    Producers can hand this function attention specs that already carry
+    ``page_size_padded``. The scale ratio must come from the natural page and
+    the scaled candidate must drop the stale padding: keeping it would
+    under-scale the block size and, once the grown natural page outruns the
+    old padding, trip the ``page_size_padded >= unpadded`` assertion.
+    """
+    from dataclasses import replace
+
+    # Natural 16 KiB page pre-padded to 24 KiB, next to a 40 KiB layer.
+    # 40960 % 24576 != 0 forces the pad branch; the ratio must be
+    # 40960 // 16384 == 2, not 40960 // 24576 == 1.
+    pre_padded = replace(new_kv_cache_spec(block_size=16), page_size_padded=24576)
+    large = new_kv_cache_spec(block_size=40)
+    assert pre_padded.page_size_bytes == 24576
+    assert large.page_size_bytes % pre_padded.page_size_bytes != 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"pre_padded_layer": pre_padded, "large_attn_layer": large}
+    )
+
+    assert unified["pre_padded_layer"].block_size == 32
+    assert unified["pre_padded_layer"].unpadded_page_size_bytes == 32768
+    assert unified["pre_padded_layer"].page_size_padded == 40960
+    assert unified["pre_padded_layer"].page_size_bytes == 40960
+    assert unified["large_attn_layer"] == large
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.

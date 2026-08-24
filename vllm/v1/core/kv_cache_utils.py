@@ -1114,9 +1114,17 @@ def unify_kv_cache_spec_page_size(
                 # head next to an nvfp4 primary lands at block_size 16 against
                 # a ~3 MiB page, so one request claims ~51x the blocks it
                 # needs. Growing the block size first leaves only the
-                # remainder to pad.
-                ratio = max_page_size // layer_page_size
-                scaled = replace(layer_spec, block_size=layer_spec.block_size * ratio)
+                # remainder to pad. The ratio is taken from the natural page
+                # and any pre-existing padding is dropped from the scaled
+                # candidate: a pre-padded spec would otherwise under-scale and
+                # trip the ``page_size_padded >= unpadded`` assertion once the
+                # grown natural page outruns the stale padding.
+                ratio = max_page_size // layer_spec.unpadded_page_size_bytes
+                scaled = replace(
+                    layer_spec,
+                    block_size=layer_spec.block_size * ratio,
+                    page_size_padded=None,
+                )
                 if ratio > 1 and scaled.page_size_bytes <= max_page_size:
                     layer_spec = scaled
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
