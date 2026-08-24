@@ -661,7 +661,8 @@ __global__ void fusedKimiK3MLAKeyConcatDsMlaInsertKernel(
 // run right before forward_mqa. Q_FP8 quantizes mqa_q; KV_FP8 quantizes the
 // plain per-tensor cache. (ds_mla cache uses the separate kernel below.)
 // ────────────────────────────────────────────────────────────────────────────
-template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE>
+template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE,
+          bool C1_PDL = false>
 __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
     const scalar_t* __restrict__ ql_nope, int64_t const qn_tok_stride,
     int64_t const qn_head_stride, const scalar_t* __restrict__ q_pe,
@@ -687,14 +688,17 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
   int const slotIdx = globalWarpIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaGridDependencySynchronize();
-#endif
-
   const float* rope_cache = nullptr;
   if constexpr (APPLY_ROPE) {
     rope_cache = cos_sin_cache + position_ids[tokenIdx] * kQkRopeHeadDim;
   }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+  if constexpr (C1_PDL) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
+#endif
 
   if (slotIdx < num_heads) {
     float const qsi = Q_FP8 ? __ldg(q_scale_inv) : 1.0f;
@@ -719,12 +723,14 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
   }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaTriggerProgrammaticLaunchCompletion();
+  if constexpr (!C1_PDL) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
 #endif
 }
 
 // Decode epilogue for fp8_ds_mla: concat mqa_q (bf16) + ds_mla cache insert.
-template <typename scalar_t, bool APPLY_ROPE>
+template <typename scalar_t, bool APPLY_ROPE, bool C1_PDL = false>
 __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
     const scalar_t* __restrict__ ql_nope, int64_t const qn_tok_stride,
     int64_t const qn_head_stride, const scalar_t* __restrict__ q_pe,
@@ -746,14 +752,17 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
   int const slotIdx = globalWarpIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaGridDependencySynchronize();
-#endif
-
   const float* rope_cache = nullptr;
   if constexpr (APPLY_ROPE) {
     rope_cache = cos_sin_cache + position_ids[tokenIdx] * kQkRopeHeadDim;
   }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+  if constexpr (C1_PDL) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
+#endif
 
   if (slotIdx < num_heads) {
     writeLatent576<scalar_t, false, APPLY_ROPE>(
@@ -774,7 +783,9 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
   }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaTriggerProgrammaticLaunchCompletion();
+  if constexpr (!C1_PDL) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
 #endif
 }
 
@@ -1367,33 +1378,41 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
-              reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
-              ql_nope.stride(0), ql_nope.stride(1),
-              reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
-              q_pe.stride(0), q_pe.stride(1),
-              reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
-              kv_c_normed.stride(0),
-              reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
-              k_pe.stride(0), mqa_q.mutable_data_ptr(), mqa_q.stride(0),
-              mqa_q.stride(1), k_cache.mutable_data_ptr(), k_cache.stride(0),
-              k_cache.stride(1), slot_mapping.const_data_ptr<int64_t>(),
-              nullptr, nullptr, num_tokens, num_heads,
-              static_cast<int>(cache_block_size),
-              apply_rope ? position_ids.value().const_data_ptr<int64_t>()
-                         : nullptr,
-              apply_rope ? reinterpret_cast<float const*>(
-                               cos_sin_cache.value().const_data_ptr())
-                         : nullptr);
+        auto dispatch = [&](auto optimize_token) {
+          constexpr bool OPTIMIZE = decltype(optimize_token)::value;
+          auto launch = [&](auto kernel) {
+            kk3::launchPdl(
+                kernel, num_tokens, num_heads, stream,
+                reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
+                ql_nope.stride(0), ql_nope.stride(1),
+                reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
+                q_pe.stride(0), q_pe.stride(1),
+                reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
+                kv_c_normed.stride(0),
+                reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
+                k_pe.stride(0), mqa_q.mutable_data_ptr(), mqa_q.stride(0),
+                mqa_q.stride(1), k_cache.mutable_data_ptr(), k_cache.stride(0),
+                k_cache.stride(1), slot_mapping.const_data_ptr<int64_t>(),
+                nullptr, nullptr, num_tokens, num_heads,
+                static_cast<int>(cache_block_size),
+                apply_rope ? position_ids.value().const_data_ptr<int64_t>()
+                           : nullptr,
+                apply_rope ? reinterpret_cast<float const*>(
+                                 cos_sin_cache.value().const_data_ptr())
+                           : nullptr);
+          };
+          if (apply_rope) {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<
+                   scalar_t, false, false, true, OPTIMIZE>);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<
+                   scalar_t, false, false, false, OPTIMIZE>);
+          }
         };
-        if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
-                                                               false, true>);
+        if (num_tokens == 1) {
+          dispatch(std::true_type{});
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
-                                                               false, false>);
+          dispatch(std::false_type{});
         }
       });
 }
@@ -1442,34 +1461,42 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
-              reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
-              ql_nope.stride(0), ql_nope.stride(1),
-              reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
-              q_pe.stride(0), q_pe.stride(1),
-              reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
-              kv_c_normed.stride(0),
-              reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
-              k_pe.stride(0), mqa_q.mutable_data_ptr(), mqa_q.stride(0),
-              mqa_q.stride(1), k_cache.mutable_data_ptr(), k_cache.stride(0),
-              k_cache.stride(1), slot_mapping.const_data_ptr<int64_t>(),
-              q_scale_inv.const_data_ptr<float>(),
-              cache_scale_inv.const_data_ptr<float>(), num_tokens, num_heads,
-              static_cast<int>(cache_block_size),
-              apply_rope ? position_ids.value().const_data_ptr<int64_t>()
-                         : nullptr,
-              apply_rope ? reinterpret_cast<float const*>(
-                               cos_sin_cache.value().const_data_ptr())
-                         : nullptr);
+        auto dispatch = [&](auto optimize_token) {
+          constexpr bool OPTIMIZE = decltype(optimize_token)::value;
+          auto launch = [&](auto kernel) {
+            kk3::launchPdl(
+                kernel, num_tokens, num_heads, stream,
+                reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
+                ql_nope.stride(0), ql_nope.stride(1),
+                reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
+                q_pe.stride(0), q_pe.stride(1),
+                reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
+                kv_c_normed.stride(0),
+                reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
+                k_pe.stride(0), mqa_q.mutable_data_ptr(), mqa_q.stride(0),
+                mqa_q.stride(1), k_cache.mutable_data_ptr(), k_cache.stride(0),
+                k_cache.stride(1), slot_mapping.const_data_ptr<int64_t>(),
+                q_scale_inv.const_data_ptr<float>(),
+                cache_scale_inv.const_data_ptr<float>(), num_tokens, num_heads,
+                static_cast<int>(cache_block_size),
+                apply_rope ? position_ids.value().const_data_ptr<int64_t>()
+                           : nullptr,
+                apply_rope ? reinterpret_cast<float const*>(
+                                 cos_sin_cache.value().const_data_ptr())
+                           : nullptr);
+          };
+          if (apply_rope) {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<
+                   scalar_t, true, true, true, OPTIMIZE>);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<
+                   scalar_t, true, true, false, OPTIMIZE>);
+          }
         };
-        if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
-                                                               true, true>);
+        if (num_tokens == 1) {
+          dispatch(std::true_type{});
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
-                                                               true, false>);
+          dispatch(std::false_type{});
         }
       });
 }
@@ -1508,33 +1535,43 @@ void fused_kimi_k3_mla_decode_q_concat_ds_mla_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_ds_mla_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
-              reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
-              ql_nope.stride(0), ql_nope.stride(1),
-              reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
-              q_pe.stride(0), q_pe.stride(1),
-              reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
-              kv_c_normed.stride(0),
-              reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
-              k_pe.stride(0),
-              reinterpret_cast<scalar_t*>(mqa_q.mutable_data_ptr()),
-              mqa_q.stride(0), mqa_q.stride(1),
-              reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
-              k_cache.stride(0), k_cache.stride(1),
-              slot_mapping.const_data_ptr<int64_t>(), num_tokens, num_heads,
-              static_cast<int>(cache_block_size),
-              apply_rope ? position_ids.value().const_data_ptr<int64_t>()
-                         : nullptr,
-              apply_rope ? reinterpret_cast<float const*>(
-                               cos_sin_cache.value().const_data_ptr())
-                         : nullptr);
+        auto dispatch = [&](auto optimize_token) {
+          constexpr bool OPTIMIZE = decltype(optimize_token)::value;
+          auto launch = [&](auto kernel) {
+            kk3::launchPdl(
+                kernel, num_tokens, num_heads, stream,
+                reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
+                ql_nope.stride(0), ql_nope.stride(1),
+                reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
+                q_pe.stride(0), q_pe.stride(1),
+                reinterpret_cast<scalar_t const*>(kv_c_normed.const_data_ptr()),
+                kv_c_normed.stride(0),
+                reinterpret_cast<scalar_t const*>(k_pe.const_data_ptr()),
+                k_pe.stride(0),
+                reinterpret_cast<scalar_t*>(mqa_q.mutable_data_ptr()),
+                mqa_q.stride(0), mqa_q.stride(1),
+                reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+                k_cache.stride(0), k_cache.stride(1),
+                slot_mapping.const_data_ptr<int64_t>(), num_tokens, num_heads,
+                static_cast<int>(cache_block_size),
+                apply_rope ? position_ids.value().const_data_ptr<int64_t>()
+                           : nullptr,
+                apply_rope ? reinterpret_cast<float const*>(
+                                 cos_sin_cache.value().const_data_ptr())
+                           : nullptr);
+          };
+          if (apply_rope) {
+            launch(kk3::fusedKimiK3MLADecodeQConcatDsMlaKernel<scalar_t, true,
+                                                               OPTIMIZE>);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatDsMlaKernel<scalar_t, false,
+                                                               OPTIMIZE>);
+          }
         };
-        if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatDsMlaKernel<scalar_t, true>);
+        if (num_tokens == 1) {
+          dispatch(std::true_type{});
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatDsMlaKernel<scalar_t, false>);
+          dispatch(std::false_type{});
         }
       });
 }

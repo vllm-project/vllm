@@ -150,7 +150,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.scale = self.qk_head_dim**-0.5
         self.rms_norm_eps = config.rms_norm_eps
         self.layer_name = prefix
-
         self.rotary_emb: RotaryEmbedding | None = None
         if use_rope:
             rope_parameters = dict(config.rope_parameters)

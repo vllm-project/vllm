@@ -222,6 +222,52 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
     _assert_cache_matches_reference(mixed_cache, reference_cache, initial_cache)
 
 
+@pytest.mark.parametrize("cache_format", ["bf16", "fp8", "fp8_ds_mla"])
+def test_decode_concat_c1_pdl_matches_reference(cache_format: str) -> None:
+    """Exercise the automatically selected C=1 PDL specialization."""
+    inputs = {name: value[:1] for name, value in _inputs().items()}
+    slots = torch.tensor([0], device="cuda", dtype=torch.int64)
+    scale_inv = torch.ones(1, device="cuda", dtype=torch.float32)
+    kwargs = {
+        "ds_mla": cache_format == "fp8_ds_mla",
+        "q_scale_inv": scale_inv if cache_format == "fp8" else None,
+        "cache_scale_inv": scale_inv if cache_format == "fp8" else None,
+    }
+    initial_cache = _make_cache(cache_format)
+    cache = initial_cache.clone()
+    reference_cache = initial_cache.clone()
+    if cache_format == "fp8_ds_mla":
+        ops.concat_and_cache_mla(
+            inputs["kv_c"],
+            inputs["k_pe"],
+            reference_cache,
+            slots,
+            cache_format,
+            scale_inv,
+        )
+    else:
+        latent = torch.cat((inputs["kv_c"], inputs["k_pe"]), dim=-1)
+        reference_cache.view(-1, CACHE_ENTRY)[0].copy_(
+            latent[0].to(reference_cache.dtype)
+        )
+
+    output = fused_mla_decode_q_concat_kv_cache_insert(
+        inputs["ql_nope"],
+        inputs["q_pe"],
+        inputs["kv_c"],
+        inputs["k_pe"],
+        cache,
+        slots,
+        **kwargs,
+    )
+
+    expected = _latent_query(inputs["ql_nope"], inputs["q_pe"])
+    if cache_format == "fp8":
+        expected = expected.to(torch.float8_e4m3fn)
+    assert torch.equal(output, expected)
+    assert torch.equal(cache, reference_cache)
+
+
 def test_ds_mla_cache_insert_bit_compatible_with_reference() -> None:
     """Fused ds_mla insertion must match the reference bit-for-bit."""
     torch.manual_seed(0)
