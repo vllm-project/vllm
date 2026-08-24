@@ -1,0 +1,64 @@
+name: Build and Publish Queue Architecture Images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "examples/deployment/queue-architecture/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-sidecar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push sidecar image
+        uses: docker/build-push-action@v5
+        with:
+          context: examples/deployment/queue-architecture
+          file: examples/deployment/queue-architecture/Dockerfile.sidecar
+          push: true
+          tags: |
+            ghcr.io/rvo-redplatform/vllm-sidecar:latest
+            ghcr.io/rvo-redplatform/vllm-sidecar:${{ github.sha }}
+
+  build-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push proxy image
+        uses: docker/build-push-action@v5
+        with:
+          context: examples/deployment/queue-architecture
+          file: examples/deployment/queue-architecture/Dockerfile.proxy
+          push: true
+          tags: |
+            ghcr.io/rvo-redplatform/vllm-proxy:latest
+            ghcr.io/rvo-redplatform/vllm-proxy:${{ github.sha }}

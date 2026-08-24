@@ -1,0 +1,82 @@
+{{- if .Values.proxy.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-deployment-proxy" .Release.Name | quote }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.proxy.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "chart.labels" . | nindent 6 }}
+      app: proxy
+  template:
+    metadata:
+      labels:
+        {{- include "chart.labels" . | nindent 8 }}
+        app: proxy
+      {{- with .Values.proxy.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      containers:
+        - name: "proxy"
+          image: "{{ required "Required value 'proxy.image.repository' must be defined !" .Values.proxy.image.repository }}:{{ required "Required value 'proxy.image.tag' must be defined !" .Values.proxy.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDIS_ADDR
+              value: {{ .Values.proxy.env.REDIS_ADDR | quote }}
+            - name: STREAM_NAME
+              value: {{ .Values.proxy.env.STREAM_NAME | quote }}
+            - name: LISTEN_PORT
+              value: {{ .Values.proxy.env.LISTEN_PORT | quote }}
+            {{- if .Values.proxy.env.MAX_BODY_BYTES }}
+            - name: MAX_BODY_BYTES
+              value: {{ .Values.proxy.env.MAX_BODY_BYTES | quote }}
+            {{- end }}
+            {{- if .Values.proxy.env.REQUEST_TIMEOUT }}
+            - name: REQUEST_TIMEOUT
+              value: {{ .Values.proxy.env.REQUEST_TIMEOUT | quote }}
+            {{- end }}
+            {{- if .Values.proxy.env.STREAM_TIMEOUT }}
+            - name: STREAM_TIMEOUT
+              value: {{ .Values.proxy.env.STREAM_TIMEOUT | quote }}
+            {{- end }}
+          ports:
+            - name: proxy-port
+              containerPort: {{ .Values.proxy.env.LISTEN_PORT | int }}
+          {{- if .Values.proxy.resources }}
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+          {{- end }}
+      {{- with .Values.proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-service-proxy" .Release.Name | quote }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: proxy-port
+      port: {{ .Values.proxy.servicePort | default 8080 }}
+      targetPort: proxy-port
+      protocol: TCP
+  selector:
+    {{- include "chart.labels" . | nindent 4 }}
+    app: proxy
+{{- end }}
