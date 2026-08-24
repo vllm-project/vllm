@@ -464,6 +464,35 @@ def test_deepseek_v4_b12x_activation_selection(
     assert experts_cls is B12xExperts
 
 
+def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit flashinfer_cutlass must try the W4A8 variant when the BF16
+    variant is unsupported (the BF16 variant is gated to SM90)."""
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
+    monkeypatch.setattr(FlashInferExperts, "_supports_current_device", lambda: True)
+
+    def sm120_quant_gate(weight_key, activation_key):
+        return (weight_key, activation_key) == (
+            mxfp4_oracle.kMxfp4Static,
+            mxfp4_oracle.kMxfp8Dynamic,
+        )
+
+    monkeypatch.setattr(
+        FlashInferExperts, "_supports_quant_scheme", staticmethod(sm120_quant_gate)
+    )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
+    config.moe_backend = "flashinfer_cutlass"
+
+    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+
+    assert backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8
+    assert experts_cls is FlashInferExperts
+
+
 def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
