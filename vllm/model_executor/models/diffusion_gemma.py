@@ -126,7 +126,7 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
         return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     # fp32 before tanh for numerical stability (matches HF DiffusionGemma).
     # Compiling fuses the cast/div/tanh/mul into one elementwise kernel over
@@ -454,7 +454,7 @@ class DiffusionGemmaForConditionalGeneration(
         raise ValueError(f"Unsupported modality: {modality}")
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compute_num_rejected(
     num_logits: torch.Tensor,
     num_sampled: torch.Tensor,
@@ -466,7 +466,7 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Logits from the model [num_decode * CL, vocab]
     logits: torch.Tensor,
@@ -776,7 +776,7 @@ class DiffusionGemmaModelState(ModelState):
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
 
-        # Per-step MM data produced by get_mm_embeddings and consumed by
+        # Per-step MM data produced by prepare_inputs_embeds and consumed by
         # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed) so that
         # prepare_inputs can call embed_input_ids directly into the
         # persistent _inputs_embeds_buf, avoiding the intermediate copy
@@ -874,7 +874,7 @@ class DiffusionGemmaModelState(ModelState):
         if idx is not None:
             self.diffusion_states.remove_request(idx)
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
