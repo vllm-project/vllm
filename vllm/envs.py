@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
+    VLLM_DISABLE_NCCL_COMM_SUSPEND: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
@@ -1222,6 +1223,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
+    ),
+    # Disable releasing NCCL communicator memory during sleep mode
+    # (ncclCommSuspend/ncclCommResume). Escape hatch for this experimental
+    # path; sleep still releases weights/KV-cache memory as before.
+    "VLLM_DISABLE_NCCL_COMM_SUSPEND": lambda: (
+        os.getenv("VLLM_DISABLE_NCCL_COMM_SUSPEND", "False").lower() in ("true", "1")
     ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.
