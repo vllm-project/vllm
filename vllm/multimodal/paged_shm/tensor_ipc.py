@@ -39,7 +39,6 @@ Enabled when `multimodal_config.is_paged_shm_enabled()` is True.
 """
 
 import logging
-import time
 import weakref
 from contextlib import ExitStack
 

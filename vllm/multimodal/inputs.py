@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
 
-    from vllm.renderers.paged_shm.types import PagedShmTensor
+    from vllm.multimodal.paged_shm.types import PagedShmTensor
 else:
     torch = LazyLoader("torch", globals(), "torch")
     PagedShmTensor = object

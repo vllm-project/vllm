@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.renderers.paged_shm.storage import PagedShmStorage
+from vllm.multimodal.paged_shm.storage import PagedShmStorage
 
 # ---------------------------------------------------------------------------
 # Helpers

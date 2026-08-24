@@ -4,8 +4,8 @@
 
 import pytest
 
-from vllm.renderers.paged_shm.manager import PagedShmManager
-from vllm.renderers.paged_shm.types import ShmWriteRequest
+from vllm.multimodal.paged_shm.manager import PagedShmManager
+from vllm.multimodal.paged_shm.types import ShmWriteRequest
 
 # ---------------------------------------------------------------------------
 # Fixtures

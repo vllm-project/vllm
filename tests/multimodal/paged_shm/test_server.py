@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.renderers.paged_shm.client import PagedShmClient
-from vllm.renderers.paged_shm.server import PagedShmServerProc
-from vllm.renderers.paged_shm.types import ShmWriteRequest
+from vllm.multimodal.paged_shm.client import PagedShmClient
+from vllm.multimodal.paged_shm.server import PagedShmServerProc
+from vllm.multimodal.paged_shm.types import ShmWriteRequest
 from vllm.utils import random_uuid
 
 # ---------------------------------------------------------------------------

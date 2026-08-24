@@ -34,7 +34,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.renderers.paged_shm.types import PagedShmTensor
+from vllm.multimodal.paged_shm.types import PagedShmTensor
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 

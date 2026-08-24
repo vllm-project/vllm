@@ -30,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
+from vllm.multimodal.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
@@ -54,7 +55,6 @@ from .inputs import (
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
-from .paged_shm.tensor_ipc import PagedShmTensorIPC
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:

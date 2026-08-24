@@ -1757,7 +1757,6 @@ class EngineCoreProc(EngineCore):
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
-
                         try:
                             request = self.preprocess_add_request(req)
                         except MultiModalCacheMissError as e:

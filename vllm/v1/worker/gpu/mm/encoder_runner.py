@@ -14,12 +14,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
-from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
