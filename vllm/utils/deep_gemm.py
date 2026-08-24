@@ -203,6 +203,21 @@ def _import_deep_gemm():
     return None
 
 
+def deep_gemm_supports_sm90_mega_moe() -> bool:
+    """Whether the resolved ``deep_gemm`` module has the SM90 (Hopper)
+    all-FP8 MegaMoE API (``fp8_mega_moe_sm90`` /
+    ``get_symm_buffer_for_sm90_mega_moe`` /
+    ``transform_weights_for_mega_moe_sm90``).
+    """
+    dg = _import_deep_gemm()
+    return (
+        dg is not None
+        and hasattr(dg, "fp8_mega_moe_sm90")
+        and hasattr(dg, "get_symm_buffer_for_sm90_mega_moe")
+        and hasattr(dg, "transform_weights_for_mega_moe_sm90")
+    )
+
+
 def _apply_pdl(mod, enable: bool = True) -> None:
     mod_name = getattr(mod, "__name__", str(mod))
     try:
@@ -766,6 +781,40 @@ def should_use_deepgemm_for_fp8_linear(
     )
 
 
+_validated_mega_moe_ep_groups: set[int] = set()
+
+
+def mega_moe_topology(ep_group) -> None:
+    group_key = id(ep_group.cpu_group)
+    if group_key in _validated_mega_moe_ep_groups:
+        return
+
+    visible_device_id = current_platform.logical_device_id_to_visible_device_id(
+        ep_group.device_index
+    )
+    physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+        visible_device_id
+    )
+    device_id = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
+    gathered_device_ids = [
+        torch.zeros(1, dtype=torch.int, device="cpu")
+        for _ in range(ep_group.world_size)
+    ]
+    torch.distributed.all_gather(
+        gathered_device_ids, device_id, group=ep_group.cpu_group
+    )
+    physical_device_ids = [device.item() for device in gathered_device_ids]
+    if not current_platform.is_fully_connected(physical_device_ids):
+        raise RuntimeError(
+            "DeepSeek V4 MegaMoE requires every GPU in the expert-parallel "
+            "group to be connected by NVLink with native peer atomics. The EP "
+            f"group uses physical GPUs {physical_device_ids}, which are not in "
+            "one fully connected NVLink domain. Use a different MoE backend or "
+            "change the GPU topology."
+        )
+    _validated_mega_moe_ep_groups.add(group_key)
+
+
 __all__ = [
     "calc_diff",
     "DeepGemmQuantScaleFMT",
@@ -790,4 +839,5 @@ __all__ = [
     "pack_ue8m0_to_int",
     "get_mn_major_tma_aligned_packed_ue8m0_tensor",
     "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
+    "mega_moe_topology",
 ]

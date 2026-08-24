@@ -80,8 +80,12 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.sm90_mega_moe import (
+    DeepseekV4MegaMoESM90Experts,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.deep_gemm import mega_moe_topology
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -774,12 +778,31 @@ class DeepseekV4MoE(nn.Module):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently supports sqrtsoftplus routing only."
             )
-        if self.use_mega_moe and getattr(config, "expert_dtype", "fp4") != "fp4":
-            raise NotImplementedError(
-                "DeepSeek V4 MegaMoE only supports fp4 experts; got expert_dtype="
-                f"{config.expert_dtype!r}. Drop --kernel-config moe_backend="
-                "deep_gemm_mega_moe for this checkpoint."
+        self.expert_dtype = getattr(config, "expert_dtype", "fp4")
+        if self.use_mega_moe:
+            device_capability = typing.cast(
+                typing.Any, current_platform.get_device_capability()
             )
+            device_capability_major = device_capability.major
+            if self.expert_dtype == "fp4" and device_capability_major >= 10:
+                raise NotImplementedError(
+                    "DeepSeek V4 MegaMoE fp4 experts require SM100 GPUs. "
+                    "Drop --kernel-config moe_backend=deep_gemm_mega_moe or "
+                    "use an fp8 checkpoint on this GPU. "
+                    f"{device_capability_major} {self.expert_dtype}"
+                )
+            if self.expert_dtype == "fp8" and device_capability_major != 9:
+                raise NotImplementedError(
+                    "DeepSeek V4 MegaMoE fp8 experts require SM90 (Hopper) "
+                    "GPUs; got compute capability "
+                    f"{device_capability_major}.x. Drop --kernel-config "
+                    "moe_backend=deep_gemm_mega_moe for this GPU."
+                )
+            if self.expert_dtype not in ("fp4", "fp8"):
+                raise NotImplementedError(
+                    "DeepSeek V4 MegaMoE only supports fp4 (SM100) and fp8 "
+                    f"(SM90) experts; got expert_dtype={self.expert_dtype!r}."
+                )
 
         self.gate = GateLinear(
             input_size=config.hidden_size,
@@ -840,6 +863,7 @@ class DeepseekV4MoE(nn.Module):
         prefix: str,
     ) -> None:
         self.ep_group = get_ep_group()
+        mega_moe_topology(self.ep_group)
         self.ep_size = self.ep_group.world_size
         self.ep_rank = self.ep_group.rank_in_group
 
@@ -872,8 +896,12 @@ class DeepseekV4MoE(nn.Module):
             and not envs.VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION
             and (self.use_sequence_parallel or self.tp_size == 1)
         )
-
-        self.experts = DeepseekV4MegaMoEExperts(
+        experts_cls = (
+            DeepseekV4MegaMoESM90Experts
+            if self.expert_dtype == "fp8"
+            else DeepseekV4MegaMoEExperts
+        )
+        self.experts = experts_cls(
             vllm_config,
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
