@@ -46,15 +46,9 @@ from transformers.models.cohere_compass.image_processing_cohere_compass import (
     CohereCompassImageProcessor,
     smart_resize as image_smart_resize,
 )
-from transformers.models.cohere_compass.video_processing_cohere_compass import (
-    CohereCompassVideoProcessor,
-    smart_resize as video_smart_resize,
-)
-from transformers.video_utils import VideoMetadata
-
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -83,19 +77,13 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
-    compute_retained_tokens_count,
-    compute_retention_mask,
     recompute_mrope_positions,
 )
 from vllm.multimodal.inputs import (
     ImageItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalFieldElem,
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
-    PlaceholderRange,
-    VideoItem,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
@@ -110,7 +98,6 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
-    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
@@ -152,10 +139,6 @@ from .vision import (
 )
 
 logger = init_logger(__name__)
-
-# We use 2048 dummy video frames that would generate vision embeddings
-# of the maximum size.
-DUMMY_VIDEO_NUM_FRAMES = 2048
 
 # ---------------------------------------------------------------------------
 # Triton kernel: fused bilinear position-embedding interpolation
@@ -411,91 +394,6 @@ class Cohere_VLImageEmbeddingInputs(TensorSchema):
 
 Cohere_VLImageInputs: TypeAlias = (
     Cohere_VLImagePixelInputs | Cohere_VLImageEmbeddingInputs
-)
-
-
-class Cohere_VLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - nv: Number of videos
-        - ctps: Number of channels * temporal_patch_size * patch_size *
-          patch_size
-
-    Historical context:
-        - pixel_values_videos shape: (num_patches, num_channels *
-          temporal_patch_size * patch_size * patch_size)
-        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
-          format
-        - second_per_grid_ts: The video time interval (in seconds) for each
-          grid along the temporal dimension in the 3D position IDs. Returned
-          when `videos` is not `None`.
-        - timestamps: List of timestamp values (in seconds) for each frame
-          after merging. Length equals the temporal dimension after merging.
-    """
-
-    type: Literal["pixel_values_videos"]
-
-    pixel_values_videos: Annotated[
-        torch.Tensor,
-        TensorShape("np", "ctps"),
-    ]
-
-    video_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("nv", 3),
-    ]
-
-    second_per_grid_ts: Annotated[
-        torch.Tensor | None,
-        TensorShape("nv"),
-    ]
-
-    timestamps: list[list[float]] | None = None
-
-
-class Cohere_VLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of video features
-        - hs: Hidden size
-        - nv: Number of videos
-
-    Historical context:
-        - video_embeds shape: (num_video_features, hidden_size)
-        - num_video_features varies based on the number and resolution of the
-          videos.
-        - hidden_size must match the hidden size of language model backbone.
-        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
-          format
-        - second_per_grid_ts: The video time interval (in seconds) for each
-          grid along the temporal dimension in the 3D position IDs. Returned
-          when `videos` is not `None`.
-        - timestamps: List of timestamp values (in seconds) for each frame
-          after merging. Length equals the temporal dimension after merging.
-    """
-
-    type: Literal["video_embeds"]
-
-    video_embeds: Annotated[
-        torch.Tensor,
-        TensorShape("nf", "hs"),
-    ]
-
-    video_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("nv", 3),
-    ]
-
-    second_per_grid_ts: Annotated[
-        torch.Tensor | None,
-        TensorShape("nv"),
-    ] = None
-    timestamps: list[list[float]] | None = None
-
-
-Cohere_VLVideoInputs: TypeAlias = (
-    Cohere_VLVideoPixelInputs | Cohere_VLVideoEmbeddingInputs
 )
 
 
@@ -1128,12 +1026,6 @@ def _create_cohere_compass_field_factory(
             image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
         )
 
-        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_grid_sizes = video_grid_thw.prod(-1)
-        video_embed_grid_sizes = (
-            video_grid_sizes // spatial_merge_size // spatial_merge_size
-        )
-
         return {
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_pixel_grid_sizes
@@ -1142,14 +1034,6 @@ def _create_cohere_compass_field_factory(
                 "image", image_embed_grid_sizes
             ),
             "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            "pixel_values_videos": MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes
-            ),
-            "video_embeds": MultiModalFieldConfig.flat_from_sizes(
-                "video", video_embed_grid_sizes
-            ),
-            "video_grid_thw": MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            "timestamps": MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         }
 
     return _field_config
@@ -1175,22 +1059,6 @@ class CohereCompassMultiModalDataParser(MultiModalDataParser):
             )
 
         return super()._parse_image_data(data)
-
-    def _parse_video_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="video",
-                required_fields={"video_embeds", "video_grid_thw"},
-                fields_factory=_create_cohere_compass_field_factory(
-                    self._spatial_merge_size
-                ),
-            )
-
-        return super()._parse_video_data(data)
 
 
 class CohereCompassProcessingInfo(BaseProcessingInfo):
@@ -1222,23 +1090,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         )
         return num_image_tokens
 
-    def get_num_video_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
-        image_processor: CohereCompassImageProcessor,
-        mm_kwargs: Mapping[str, object],
-    ) -> int:
-        _, num_video_tokens = self._get_vision_info(
-            image_width=image_width,
-            image_height=image_height,
-            num_frames=num_frames,
-            image_processor=image_processor,
-            mm_kwargs=mm_kwargs,
-        )
-        return num_video_tokens
 
     def get_image_size_with_most_features(
         self, max_pixels: int | None = None
@@ -1304,29 +1155,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
             mm_kwargs={},
         )
 
-    def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        num_frames = start_num_frames
-
-        while True:
-            next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
-                image_width=target_width,
-                image_height=target_height,
-                num_frames=next_num_frames,
-                image_processor=image_processor,
-                mm_kwargs={},
-            )
-
-            if next_max_tokens > max_tokens:
-                break
-
-            num_frames = next_num_frames
-
-        return num_frames
-
     def get_hf_config(self) -> CohereCompassConfig:
         return self.ctx.get_hf_config(CohereCompassConfig)
 
@@ -1340,8 +1168,8 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> CohereCompassImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_video_processor(self, **kwargs: object) -> CohereCompassVideoProcessor:
-        return self.get_hf_processor(**kwargs).video_processor
+    def get_video_processor(self, **kwargs: object) -> None:
+        return None
 
     def get_data_parser(self):
         return CohereCompassMultiModalDataParser(
@@ -1356,11 +1184,9 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-        image_processor: CohereCompassImageProcessor | CohereCompassVideoProcessor,
+        image_processor: CohereCompassImageProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        is_video = isinstance(image_processor, CohereCompassVideoProcessor)
-
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
@@ -1377,15 +1203,8 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
             size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
-            if is_video:
-                smart_resize = video_smart_resize
-                extra_kwargs = {
-                    "num_frames": num_frames,
-                    "temporal_factor": temporal_patch_size,
-                }
-            else:
-                smart_resize = image_smart_resize
-                extra_kwargs = {}
+            smart_resize = image_smart_resize
+            extra_kwargs = {}
 
             resized_height, resized_width = smart_resize(
                 height=image_height,
@@ -1410,112 +1229,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        max_videos = mm_counts.get("video", 0)
-        max_total_frames = self._get_max_video_frames(seq_len, start_num_frames=2)
-        max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1),
-            DUMMY_VIDEO_NUM_FRAMES,
-        )
-        return max(max_frames_per_video, 1)
-
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        video_processor = self.get_video_processor()
-
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
-        video_size = mm_kwargs.get("size", video_processor.size)
-        temporal_patch_size = mm_kwargs.get(
-            "temporal_patch_size", video_processor.temporal_patch_size
-        )
-
-        # video_max_pixels contains the temporal compression factor,
-        # so we divide by 2 to get the maximum number of image pixels.
-        video_max_pixels = video_size["longest_edge"]
-        target_width, target_height = self.get_image_size_with_most_features(
-            max_pixels=video_max_pixels // temporal_patch_size
-        )
-        num_video_soft_tokens = self.get_num_video_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=2,
-            image_processor=video_processor,
-            mm_kwargs={},
-        )
-        return num_video_soft_tokens
-
-    def _calculate_timestamps(
-        self, indices: list[int] | torch.Tensor, video_fps: float, merge_size: int
-    ):
-        if not isinstance(indices, list):
-            indices = indices.tolist()
-        if len(indices) % merge_size != 0:
-            # don't update metadata's frames_indices directly
-            indices = indices + [indices[-1]] * (merge_size - len(indices) % merge_size)
-        timestamps = [idx / video_fps for idx in indices]
-        timestamps = [
-            (timestamps[i] + timestamps[i + merge_size - 1]) / 2
-            for i in range(0, len(timestamps), merge_size)
-        ]
-        return timestamps
-
-    def _get_video_second_idx(
-        self,
-        metadata: dict[str, Any],
-        do_sample_frames: bool | None = None,
-        sampled_fps: float | None = None,
-        sampled_num_frames: int | None = None,
-    ) -> list[int]:
-        video_processor = self.get_video_processor()
-        temporal_patch_size = video_processor.temporal_patch_size
-        indices = metadata["frames_indices"]
-
-        # metadata["fps"] refers to the true fps of the input video.
-        video_fps = metadata["fps"]
-        if do_sample_frames is None:
-            do_sample_frames = metadata.get("do_sample_frames", False)
-
-        # If video frames are sampled in HF processor (instead of vLLM
-        # video loader), we need to re-calculate the indices from original
-        # metadata.
-        if do_sample_frames:
-            total_num_frames = metadata["total_num_frames"]
-
-            # When num_frames is explicitly provided, use it directly
-            # instead of computing from fps. This mirrors the behavior of
-            # HF's CohereCompassVideoProcessor.sample_frames where num_frames
-            # and fps are mutually exclusive.
-            if sampled_num_frames is not None:
-                num_frames = sampled_num_frames
-            else:
-                # here video_fps is the fps of the sampled video, and
-                # metadata["fps"] refers to the fps of the original video.
-                sampled_fps = sampled_fps if sampled_fps else video_processor.fps
-                num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
-
-            num_frames = min(
-                min(
-                    max(num_frames, video_processor.min_frames),
-                    video_processor.max_frames,
-                ),
-                total_num_frames,
-            )
-            indices = (
-                np.linspace(0, total_num_frames - 1, num_frames)
-                .round()
-                .astype(int)
-                .tolist()
-            )
-        timestamps = self._calculate_timestamps(indices, video_fps, temporal_patch_size)
-        return timestamps
-
 
 class CohereCompassDummyInputsBuilder(
     BaseDummyInputsBuilder[CohereCompassProcessingInfo]
@@ -1531,87 +1244,11 @@ class CohereCompassDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
         image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
 
         target_image_width, target_image_height = (
             self.info.get_image_size_with_most_features()
         )
-
-        # treat videos as special images
-        target_num_frames = 2
-        if video_overrides:
-            assert isinstance(video_overrides, VideoDummyOptions)
-            num_frames_override = video_overrides.num_frames
-            if num_frames_override:
-                if num_frames_override > target_num_frames:
-                    logger.warning(
-                        "video.num_frames override (%d) exceeds model's "
-                        "maximum number of frames (%d), will be ignored",
-                        num_frames_override,
-                        target_num_frames,
-                    )
-                if num_frames_override < 2:
-                    logger.warning(
-                        "video.num_frames override (%d) cannot be less "
-                        "than 2, will be ignored",
-                        num_frames_override,
-                    )
-                target_num_frames = min(target_num_frames, num_frames_override)
-        target_num_frames = max(target_num_frames, 2)
-
-        video_processor = self.info.get_video_processor()
-
-        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({})
-        video_size = mm_kwargs.get("size", video_processor.size)
-        temporal_patch_size = mm_kwargs.get(
-            "temporal_patch_size", video_processor.temporal_patch_size
-        )
-
-        # video_max_pixels contains the temporal compression factor,
-        # so we divide by 2 to get the maximum number of image pixels.
-        video_max_pixels = video_size["longest_edge"]
-        target_video_width, target_video_height = (
-            self.info.get_image_size_with_most_features(
-                max_pixels=video_max_pixels // temporal_patch_size
-            )
-        )
-        target_video_size, _ = self.info._get_vision_info(
-            image_width=target_video_width,
-            image_height=target_video_height,
-            num_frames=target_num_frames,
-            image_processor=video_processor,
-            mm_kwargs={},
-        )
-        # NOTE: we need to do this check here since Cohere Compass resizes video
-        # frames depending on how many frames there are.
-        target_video_width, target_video_height = (
-            target_video_size.width,
-            target_video_size.height,
-        )
-        if video_overrides:
-            assert isinstance(video_overrides, VideoDummyOptions)
-            width_override = video_overrides.width
-            if width_override:
-                if width_override > target_video_width:
-                    logger.warning(
-                        "video.width override (%d) exceeds model's "
-                        "maximum width (%d), will be ignored",
-                        width_override,
-                        target_video_width,
-                    )
-                target_video_width = min(target_video_width, width_override)
-            height_override = video_overrides.height
-            if height_override:
-                if height_override > target_video_height:
-                    logger.warning(
-                        "video.height override (%d) exceeds model's "
-                        "maximum height (%d), will be ignored",
-                        height_override,
-                        target_video_height,
-                    )
-                target_video_height = min(target_video_height, height_override)
 
         return {
             "image": self._get_dummy_images(
@@ -1620,47 +1257,7 @@ class CohereCompassDummyInputsBuilder(
                 num_images=num_images,
                 overrides=image_overrides,
             ),
-            "video": self._get_dummy_videos(
-                width=target_video_width,
-                height=target_video_height,
-                num_frames=target_num_frames,
-                num_videos=num_videos,
-            ),
         }
-
-    def _get_dummy_videos(
-        self,
-        *,
-        width: int,
-        height: int,
-        num_frames: int,
-        num_videos: int,
-        overrides: VideoDummyOptions | None = None,
-    ) -> list[VideoItem]:
-        videos = super()._get_dummy_videos(
-            width=width,
-            height=height,
-            num_frames=num_frames,
-            num_videos=num_videos,
-            overrides=overrides,
-        )
-        videos = [v.copy() for v in videos]
-
-        video_items = []
-        for video in videos:
-            video_num_frames = video.shape[0]
-            video_metadata = {
-                "fps": 2.0,
-                "duration": video_num_frames / 2.0,
-                "total_num_frames": video_num_frames,
-                "frames_indices": list(range(video_num_frames)),
-                "video_backend": "opencv",
-                "do_sample_frames": False,
-            }
-            video_items.append((video, video_metadata))
-
-        return video_items
-
 
 class CohereCompassMultiModalProcessor(
     BaseMultiModalProcessor[CohereCompassProcessingInfo]
@@ -1673,129 +1270,6 @@ class CohereCompassMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
-        processor = self.info.get_hf_processor(**mm_kwargs)
-        video_prompt_token = (
-            processor.vision_start_token
-            + processor.video_token
-            + processor.vision_end_token
-        )
-
-        # Separate video processing from image processing. Because the videos
-        # are processed into several image patches
-        if videos := mm_data.pop("videos", []):
-            video_grid_thw_lst = []
-            pixel_values_videos_lst = []
-            timestamps_per_video = []
-
-            for item in videos:
-                video_array, metadata = item
-
-                # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
-                # the sampled frames indices of pre-sampled videos, which is
-                # used to calculate the timestamps. Make sure that
-                # do_sample_frames in mm_kwargs is false for presampled videos.
-
-                # NOTE: a copy of is created to update do_sample_frames,
-                # otherwise mm_hash for the object will be incorrect.
-                video_mm_kwargs = dict(**mm_kwargs)
-                if "do_sample_frames" not in video_mm_kwargs:
-                    # already have "do_sample_frames" in
-                    # mm_kwargs, don't overwrite it.
-                    video_mm_kwargs["do_sample_frames"] = metadata.get(
-                        "do_sample_frames", False
-                    )
-
-                metadata = VideoMetadata(
-                    **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
-                )
-
-                # Compute timestamps here where we have access to metadata
-                timestamps = self.info._get_video_second_idx(
-                    metadata=metadata,
-                    do_sample_frames=video_mm_kwargs["do_sample_frames"],
-                    sampled_fps=video_mm_kwargs.get("fps"),
-                    sampled_num_frames=video_mm_kwargs.get("num_frames"),
-                )
-                timestamps_per_video.append(timestamps)
-
-                video_mm_data = dict()
-                video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[metadata]]
-
-                # When num_frames is specified, explicitly set fps=None
-                # to prevent HF's BaseVideoProcessor.preprocess() from
-                # filling in the class default (fps=2) via setdefault(),
-                # which would conflict with num_frames (mutually exclusive).
-                if "num_frames" in video_mm_kwargs and "fps" not in video_mm_kwargs:
-                    video_mm_kwargs["fps"] = None
-
-                video_outputs = super()._call_hf_processor(
-                    prompt=video_prompt_token,
-                    mm_data=video_mm_data,
-                    mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
-                )
-
-                merge_size = processor.video_processor.merge_size
-                # Get video grid info for EVS calculation.
-                video_grid_thw = video_outputs["video_grid_thw"]
-                num_frames = int(video_grid_thw[0, 0])
-                tokens_per_frame_base = int(video_grid_thw[0, 1:].prod()) // (
-                    merge_size**2
-                )
-
-                # Apply EVS if enabled.
-                video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
-                if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                    num_tokens = compute_retained_tokens_count(
-                        tokens_per_frame=tokens_per_frame_base,
-                        num_frames=num_frames,
-                        q=video_pruning_rate,
-                    )
-                    # Here we just need placeholders that won't actually be replaced -
-                    # we just need to make sure the total number of tokens is correct
-                    # assign all tokens to the first frame.
-                    tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
-                    select_token_id = False
-                else:
-                    tokens_per_frame = [tokens_per_frame_base] * num_frames
-                    select_token_id = True
-
-                # Generate the video replacement with EVS-adjusted token counts
-                tokenizer = self.info.get_tokenizer()
-                hf_config = self.info.get_hf_config()
-                video_repl = CohereCompassMultiModalProcessor.get_video_repl(
-                    tokens_per_frame=tokens_per_frame,
-                    timestamps=timestamps,
-                    tokenizer=tokenizer,
-                    vision_start_token_id=hf_config.vision_start_token_id,
-                    vision_end_token_id=hf_config.vision_end_token_id,
-                    video_token_id=hf_config.video_token_id,
-                    select_token_id=select_token_id,
-                )
-
-                # Convert token IDs to text for the HF processor flow
-                video_placeholder = tokenizer.decode(
-                    video_repl.full, skip_special_tokens=False
-                )
-                input_ids = video_outputs.pop("input_ids")
-                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
-                prompt = prompt.replace(
-                    video_prompt_token,
-                    video_placeholder,
-                    1,
-                )
-
-                video_grid_thw_lst.append(video_outputs["video_grid_thw"])
-                pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
-            video_outputs = dict(
-                pixel_values_videos=torch.cat(pixel_values_videos_lst),
-                video_grid_thw=torch.cat(video_grid_thw_lst),
-                timestamps=timestamps_per_video,
-            )
-        else:
-            video_outputs = dict()
-
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -1804,7 +1278,6 @@ class CohereCompassMultiModalProcessor(
         )
         combined_outputs = dict(
             processed_outputs,
-            **video_outputs,
         )
         return BatchFeature(combined_outputs)
 
@@ -1825,18 +1298,6 @@ class CohereCompassMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        hf_config = self.info.get_hf_config()
-
-        video_token_id = hf_config.video_token_id
-        vision_start_token_id = hf_config.vision_start_token_id
-        vision_end_token_id = hf_config.vision_end_token_id
-        video_prompt_token = (
-            hf_processor.vision_start_token
-            + hf_processor.video_token
-            + hf_processor.vision_end_token
-        )
-
         merge_length = image_processor.merge_size**2
 
         def get_image_replacement_cohere_compass(item_idx: int):
@@ -1847,125 +1308,13 @@ class CohereCompassMultiModalProcessor(
             num_tokens = int(grid_thw.prod()) // merge_length
             return [hf_processor.image_token_id] * num_tokens
 
-        def get_video_replacement_cohere_compass(item_idx: int):
-            out_item = out_mm_kwargs["video"][item_idx]
-            grid_thw = out_item["video_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            sampled_fps = hf_processor_mm_kwargs.get("fps")
-            if is_list_of(sampled_fps, float):
-                sampled_fps = sampled_fps[item_idx]
-
-            timestamps = out_item["timestamps"].data
-            assert len(timestamps) == grid_thw[0], (
-                f"The timestamps length({len(timestamps)}) should be equal "
-                f"video length ({grid_thw[0]})."
-            )
-
-            # Compute tokens per frame, with EVS support
-            num_frames = int(grid_thw[0])
-            tokens_per_frame_base = int(grid_thw[1:].prod()) // merge_length
-
-            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
-            if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                num_tokens = compute_retained_tokens_count(
-                    tokens_per_frame=tokens_per_frame_base,
-                    num_frames=num_frames,
-                    q=video_pruning_rate,
-                )
-                tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
-                select_token_id = False
-            else:
-                tokens_per_frame = [tokens_per_frame_base] * num_frames
-                select_token_id = True
-
-            return CohereCompassMultiModalProcessor.get_video_repl(
-                tokens_per_frame=tokens_per_frame,
-                timestamps=timestamps,
-                tokenizer=tokenizer,
-                vision_start_token_id=vision_start_token_id,
-                vision_end_token_id=vision_end_token_id,
-                video_token_id=video_token_id,
-                select_token_id=select_token_id,
-            )
-
         return [
             PromptReplacement(
                 modality="image",
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_cohere_compass,
             ),
-            # NOTE: We match string on purpose since searching sequence of
-            # token ids takes more time.
-            PromptReplacement(
-                modality="video",
-                target=video_prompt_token,
-                replacement=get_video_replacement_cohere_compass,
-            ),
         ]
-
-    @staticmethod
-    def get_video_repl(
-        *,
-        tokens_per_frame: list[int],
-        timestamps: list[float | int],
-        tokenizer: TokenizerLike,
-        vision_start_token_id: int,
-        vision_end_token_id: int,
-        video_token_id: int,
-        select_token_id: bool = False,
-    ) -> PromptUpdateDetails[list[int]]:
-        """Build prompt replacement for a video in Cohere Compass format.
-
-        The replacement structure for each frame is:
-        timestamp_tokens + vision_start_token + video_tokens + vision_end_token
-
-        Args:
-            tokens_per_frame: Number of video tokens per frame (can vary per frame for
-                EVS).
-            timestamps: List of timestamps in seconds for each frame
-            tokenizer: Tokenizer to encode timestamp strings
-            vision_start_token_id: Token ID for vision start marker
-            vision_end_token_id: Token ID for vision end marker
-            video_token_id: Token ID for video content
-
-        Returns:
-            PromptUpdateDetails with full token sequence
-        """
-        assert len(timestamps) == len(tokens_per_frame), (
-            "timestamps and tokens_per_frame must have the same length"
-        )
-
-        # Tokenize timestamp strings independently to avoid tokenizer merging
-        # tokens across boundaries.
-        # TODO: switch to `_seq2tokens` which has some caching.
-        timestamp_token_ids = [
-            tokenizer.encode(f"<{timestamp:.1f} seconds>", add_special_tokens=False)
-            for timestamp in timestamps
-        ]
-
-        # Build the full token sequence
-        all_token_ids = []
-        for frame_timestamp_ids, num_tokens in zip(
-            timestamp_token_ids, tokens_per_frame
-        ):
-            # Add timestamp tokens
-            all_token_ids.extend(frame_timestamp_ids)
-
-            # Add vision tokens: vision_start + video_tokens + vision_end
-            all_token_ids.append(vision_start_token_id)
-            all_token_ids.extend([video_token_id] * num_tokens)
-            all_token_ids.append(vision_end_token_id)
-
-        if select_token_id:
-            return PromptUpdateDetails.select_token_id(all_token_ids, video_token_id)
-
-        # NOTE: we use `from_seq` instead of `select_token_id` because we want all
-        # tokens in the placeholder to be initially marked as candidates. Then
-        # in `get_input_embeddings``, we refine the mask to only replace
-        # `video_token_id` / `image_token_id`` positions with video/image embeddings,
-        # keeping text embeddings for timestamps and structural tokens.
-        return PromptUpdateDetails.from_seq(all_token_ids)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -2025,7 +1374,6 @@ class CohereCompassForConditionalGeneration(
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
@@ -2146,10 +1494,10 @@ class CohereCompassForConditionalGeneration(
         # prune+append for video). The encoder CUDA graph path bypasses that
         # post-process, producing inconsistent embedding formats vs eager. So
         # disable CUDA graph for all modalities when pruning is on.
-        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
+        modalities = [] if self.is_multimodal_pruning_enabled else ["image"]
 
         # Compute max_frames_per_video for budget sizing.
-        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
+        max_frames = 1
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -2172,18 +1520,7 @@ class CohereCompassForConditionalGeneration(
     ) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
-        elif "video_grid_thw" in mm_kwargs:
-            return "video"
         raise AssertionError("This line should be unreachable.")
-
-    def get_max_frames_per_video(self) -> int:
-        mm_registry = MULTIMODAL_REGISTRY
-        info = mm_registry.get_processing_info(self.model_config)
-        max_frames_per_video = info.get_num_frames_with_most_features(
-            seq_len=self.model_config.max_model_len,
-            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
-        )
-        return max_frames_per_video
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -2208,8 +1545,6 @@ class CohereCompassForConditionalGeneration(
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
             return mm_kwargs["pixel_values"]
-        elif modality == "video":
-            return mm_kwargs["pixel_values_videos"]
         raise AssertionError("This line should be unreachable.")
 
     def _get_grid_thw_by_modality(
@@ -2247,16 +1582,10 @@ class CohereCompassForConditionalGeneration(
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
 
         if len(indices) == 0:
-            if self.get_input_modality(mm_kwargs) == "image":
-                return {
-                    "pixel_values": pixel_values[:0],
-                    "image_grid_thw": [],
-                }
-            else:
-                return {
-                    "pixel_values_videos": pixel_values[:0],
-                    "video_grid_thw": [],
-                }
+            return {
+                "pixel_values": pixel_values[:0],
+                "image_grid_thw": [],
+            }
 
         # Compute cumulative patch offsets for slicing pixel_values
         patches_per_item = [t * h * w for t, h, w in grid_thw]
@@ -2269,16 +1598,10 @@ class CohereCompassForConditionalGeneration(
         )
         selected_grid = [grid_thw[i] for i in indices]
 
-        if self.get_input_modality(mm_kwargs) == "image":
-            return {
-                "pixel_values": selected_pv,
-                "image_grid_thw": selected_grid,
-            }
-        else:
-            return {
-                "pixel_values_videos": selected_pv,
-                "video_grid_thw": selected_grid,
-            }
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_thw": selected_grid,
+        }
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -2298,33 +1621,11 @@ class CohereCompassForConditionalGeneration(
         # max_batch_size.
         per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
-        frames_per_item = max_frames_per_batch // max_batch_size
-        if frames_per_item > 1:
-            # Build the capture grid using a video-format layout so that
-            # cu_seqlens is sized for video replays from the start.
-            # cu_seqlens has one entry per attention sequence (one per frame),
-            # so using T > 1 per item makes the buffer large enough without
-            # relying solely on padding.
-            # Ceiling ensures frames_per_item * tokens_per_frame >= per_mm_item_output
-            # so the pixel_values buffer covers any valid single-item replay.
-            tokens_per_frame = (
-                per_mm_item_output + frames_per_item - 1
-            ) // frames_per_item
-            # Video-format grid_config (T=frames_per_item).
-            grid_config = [
-                [
-                    frames_per_item,
-                    spatial_merge_size,
-                    tokens_per_frame * spatial_merge_size,
-                ]
-                for _ in range(max_batch_size)
-            ]
-        else:
-            # Image-format grid_config (T=1).
-            grid_config = [
-                [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
-                for _ in range(max_batch_size)
-            ]
+        # Image-format grid_config (T=1).
+        grid_config = [
+            [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
+            for _ in range(max_batch_size)
+        ]
 
         # Create dummy pixel_values
         patch_embed = self.visual.patch_embed
@@ -2352,8 +1653,7 @@ class CohereCompassForConditionalGeneration(
             device=device,
         )
 
-        # Just use image-modality dummy input_buffer for capturing, since it's also
-        # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
+        # Just use image-modality dummy input_buffer for capturing
         values = metadata | {
             "pixel_values": dummy_pixel_values,
         }
@@ -2375,11 +1675,6 @@ class CohereCompassForConditionalGeneration(
             metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
-            )
-        elif modality == "video":
-            metadata = self.visual.prepare_encoder_metadata(
-                grid_thw_list,
-                max_frames_per_batch=max_frames_per_batch,
             )
         else:
             raise AssertionError("This line should be unreachable.")
@@ -2429,34 +1724,6 @@ class CohereCompassForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-    def _parse_and_validate_video_input(
-        self, **kwargs: object
-    ) -> Cohere_VLVideoInputs | None:
-        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
-        video_embeds = kwargs.pop("video_embeds", None)
-        video_grid_thw = kwargs.pop("video_grid_thw", None)
-        second_per_grid_ts = kwargs.pop("second_per_grid_ts", None)
-        timestamps = kwargs.pop("timestamps", None)
-
-        if pixel_values_videos is None and video_embeds is None:
-            return None
-
-        if pixel_values_videos is not None:
-            return Cohere_VLVideoPixelInputs(
-                type="pixel_values_videos",
-                pixel_values_videos=pixel_values_videos,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                timestamps=timestamps,
-            )
-
-        if video_embeds is not None:
-            return Cohere_VLVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-                timestamps=timestamps,
-            )
 
     def _process_image_input(
         self, image_input: Cohere_VLImageInputs
@@ -2480,31 +1747,6 @@ class CohereCompassForConditionalGeneration(
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return image_embeds.split(sizes)
 
-    def _process_video_input(
-        self, video_input: Cohere_VLVideoInputs
-    ) -> tuple[torch.Tensor, ...]:
-        grid_thw = video_input["video_grid_thw"]
-        assert grid_thw.ndim == 2
-
-        if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
-        else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
-            )
-            if self.use_data_parallel:
-                grid_thw_list = grid_thw.tolist()
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
-                )
-            else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
-
-        # Split concatenated embeddings for each video item.
-        merge_size = self.visual.spatial_merge_size
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return video_embeds.split(sizes)
-
     def _postprocess_image_embeds_evs(
         self,
         image_embeds_split: tuple[torch.Tensor, ...],
@@ -2512,8 +1754,7 @@ class CohereCompassForConditionalGeneration(
     ) -> tuple[torch.Tensor, ...]:
         """
         Append mrope positions for each for images.
-        This is necessary to recover correct mrope
-        positions after video pruning
+        This is necessary to recover correct mrope positions
 
         Args:
             image_embeds_split: Tuple of image embeddings for
@@ -2548,235 +1789,6 @@ class CohereCompassForConditionalGeneration(
             image_embeds_split = tuple(image_embeds_out)
         return image_embeds_split
 
-    def _postprocess_video_embeds_evs(
-        self,
-        video_embeds_split: tuple[torch.Tensor, ...],
-        video_input: Cohere_VLVideoInputs,
-    ) -> tuple[torch.Tensor, ...]:
-        """
-        Prunes video embeddings via Efficient Video Sampling (EVS)
-        and then appends mrope positions for each retained embeddings
-
-        Args:
-            video_embeds_split: Tuple of video embeddings for each video item.
-            video_input: Video input data.
-
-        Returns:
-            Tuple of video embeddings for each video item.
-            Resulting embeddings will have extra 5 channels for computed mrope
-            positions, and whether the index corresponds to a video embedding.
-        """
-        grid_thw = video_input["video_grid_thw"]
-        assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
-        merge_size = self.visual.spatial_merge_size
-
-        # Apply EVS to each video.
-        video_embeds_out = []
-        for video_idx, (emb, size) in enumerate(zip(video_embeds_split, grid_thw_list)):
-            # Compute positions.
-            timestamps = video_input.timestamps[video_idx]
-            num_frames = len(timestamps)
-
-            t, h, w = size
-            if self.is_multimodal_pruning_enabled:
-                # For each video, compute retention mask using EVS.
-                # retention_mask: [11424].
-                retention_mask = compute_retention_mask(
-                    emb,
-                    size,
-                    spatial_merge_size=self.visual.spatial_merge_size,
-                    q=self.video_pruning_rate,
-                )
-                # Apply retention mask.
-                emb = emb[retention_mask]
-
-                # Calculate the actual number of retained tokens per frame.
-                num_frames, rows, cols = (
-                    t,
-                    h // merge_size,
-                    w // merge_size,
-                )
-                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
-                num_tokens_per_frame = (
-                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
-                )
-            else:
-                feature_size = emb.shape[0] // num_frames
-                num_tokens_per_frame = [feature_size] * num_frames
-                retention_mask = None
-
-            emb = self._create_final_video_embeddings(
-                video_embeddings=emb,
-                num_tokens_per_frame=num_tokens_per_frame,
-                timestamps=timestamps,
-                video_grid_thw=size,
-                retention_mask=retention_mask,
-            )
-
-            video_embeds_out.append(emb)
-
-        return tuple(video_embeds_out)
-
-    def _create_final_video_embeddings(
-        self,
-        video_embeddings: torch.Tensor,
-        num_tokens_per_frame: list[int],
-        timestamps: list[float],
-        video_grid_thw: list[int],
-        retention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Create final embeddings that combine video embeddings with
-        text embeddings of indicator tokens.
-
-        These final embeddings contain:
-        - Actual video embeddings in positions corresponding to video content
-        - Text embeddings for indicator tokens (<img>, </img>, and
-          frame separation text) in their respective positions
-
-        These embeddings will replace the placeholder embeddings to create
-        input_embeds for the LLM.
-        """
-
-        device = video_embeddings.device
-
-        # Generate video replacement token IDs using get_video_repl
-        # This tokenizes each frame separator independently, then uses pre-tokenized
-        # special tokens to ensure consistent tokenization regardless of
-        # num_tokens_per_frame values.
-        video_repl = CohereCompassMultiModalProcessor.get_video_repl(
-            tokens_per_frame=num_tokens_per_frame,
-            tokenizer=self._tokenizer,
-            timestamps=timestamps,
-            vision_start_token_id=self.config.vision_start_token_id,
-            vision_end_token_id=self.config.vision_end_token_id,
-            video_token_id=self.config.video_token_id,
-            select_token_id=self.is_multimodal_pruning_enabled,
-        )
-
-        repl_token_ids = torch.tensor(video_repl.full, device=device)
-        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
-        is_video_embed = torch.isin(repl_token_ids, embed_token_id)
-
-        # Get text embeddings for indicator tokens (has only `visual_dim``).
-        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
-
-        if self.use_deepstack:
-            (
-                deepstack_input_embeds,
-                multimodal_embeddings,
-            ) = self._compute_deepstack_embeds(
-                inputs_embeds=text_embeddings,
-                multimodal_embeddings=[video_embeddings],
-                is_multimodal=is_video_embed,
-            )
-        else:
-            deepstack_input_embeds = None
-            multimodal_embeddings = [video_embeddings]
-
-        merged_embeddings = _merge_multimodal_embeddings(
-            inputs_embeds=text_embeddings,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_video_embed,
-        )
-
-        to_concat = [merged_embeddings]
-        if deepstack_input_embeds is not None:
-            to_concat.append(
-                deepstack_input_embeds.permute(1, 0, 2).reshape(
-                    deepstack_input_embeds.shape[1], -1
-                )
-            )
-
-        expanded_positions = None
-        if self.is_multimodal_pruning_enabled:
-            is_vision_start = repl_token_ids.eq(self.config.vision_start_token_id)
-            expanded_positions = self._get_expanded_positions(
-                device=merged_embeddings.device,
-                seq_len=merged_embeddings.shape[0],
-                video_grid_thw=video_grid_thw,
-                num_tokens_per_frame=num_tokens_per_frame,
-                timestamps=timestamps,
-                is_video_embed=is_video_embed,
-                is_vision_start=is_vision_start,
-                retention_mask=retention_mask,
-            )
-            to_concat.append(expanded_positions)
-
-        final_video_embeddings = torch.cat(to_concat, dim=-1)
-
-        return final_video_embeddings
-
-    def _get_expanded_positions(
-        self,
-        device,
-        seq_len,
-        video_grid_thw,
-        num_tokens_per_frame,
-        timestamps,
-        is_video_embed,
-        is_vision_start,
-        retention_mask,
-    ):
-        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
-
-        # Expand positions to match the full sequence length
-        # (includes both video tokens and indicator tokens)
-        # Shape: [full_length, 5] where positions are filled for video tokens
-        # and zeros for indicator tokens.
-        # Channel 3 flags VISION_START tokens so that
-        # recompute_mrope_positions can reliably count timestamp tokens
-        # (even when early frames have all video tokens pruned).
-        # Channel 4 flags video-embedding tokens.
-        expanded_positions = torch.zeros(
-            seq_len,
-            5,  # [t_index, h_index, w_index, is_vision_start, is_video]
-            device=device,
-            dtype=torch.long,
-        )
-        _, h, w = video_grid_thw
-        merge_size = self.visual.spatial_merge_size
-        num_frames = len(num_tokens_per_frame)
-        unpruned_token_ids = CohereCompassMultiModalProcessor.get_video_repl(
-            tokens_per_frame=[(h // merge_size) * (w // merge_size)] * num_frames,
-            tokenizer=self._tokenizer,
-            timestamps=timestamps,
-            vision_start_token_id=self.config.vision_start_token_id,
-            vision_end_token_id=self.config.vision_end_token_id,
-            video_token_id=self.config.video_token_id,
-        ).full
-        unpruned_token_ids_tensor = torch.tensor(unpruned_token_ids, device=device)
-        mm_feature = MultiModalFeatureSpec(
-            data=MultiModalKwargsItem(
-                {
-                    "video_grid_thw": MultiModalFieldElem(
-                        data=torch.tensor(video_grid_thw),
-                        field=None,  # HACK.
-                    ),
-                }
-            ),
-            modality="video",
-            identifier="DUMMY",
-            mm_position=PlaceholderRange(offset=0, length=len(unpruned_token_ids)),
-        )
-        original_mrope = (
-            self.get_mrope_input_positions(
-                input_tokens=unpruned_token_ids,
-                mm_features=[mm_feature],
-            )[0]
-            .to(device, non_blocking=True)
-            .permute(1, 0)
-        )
-        full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
-        expanded_positions[is_video_embed, :3] = original_mrope[full_is_video_embed][
-            retention_mask
-        ]
-        expanded_positions[~is_video_embed, :3] = original_mrope[~full_is_video_embed]
-        expanded_positions[..., 3] = is_vision_start
-        expanded_positions[..., 4] = is_video_embed
-
-        return expanded_positions
-
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
         for input_key in kwargs:
@@ -2785,13 +1797,6 @@ class CohereCompassForConditionalGeneration(
                 and "image" not in mm_input_by_modality
             ):
                 mm_input_by_modality["image"] = self._parse_and_validate_image_input(
-                    **kwargs
-                )
-            if (
-                input_key in ("pixel_values_videos", "video_embeds")
-                and "video" not in mm_input_by_modality
-            ):
-                mm_input_by_modality["video"] = self._parse_and_validate_video_input(
                     **kwargs
                 )
         return mm_input_by_modality
@@ -2924,7 +1929,7 @@ class CohereCompassForConditionalGeneration(
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor corresponding to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image).
         multimodal_embeddings: list[torch.Tensor] = []
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -2937,13 +1942,6 @@ class CohereCompassForConditionalGeneration(
                     image_embeddings, multimodal_input
                 )
                 multimodal_embeddings.extend(image_embeddings)
-            if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
-                if self.is_multimodal_pruning_enabled:
-                    video_embeddings = self._postprocess_video_embeds_evs(
-                        video_embeddings, multimodal_input
-                    )
-                multimodal_embeddings.extend(video_embeddings)
 
         embeddings_tuple = tuple(multimodal_embeddings)
         return embeddings_tuple
@@ -3056,10 +2054,6 @@ class CohereCompassForConditionalGeneration(
                     `None` if no images are passed.
                 - image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in
                     LLM. `None` if no images are passed.
-                - pixel_values_videos: Pixel values of videos to be fed to a
-                    model. `None` if no videos are passed.
-                - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
-                    LLM. `None` if no videos are passed.
         """
 
         if intermediate_tensors is not None:
