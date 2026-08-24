@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -426,15 +427,19 @@ class AiterFlashAttentionMetadataBuilder(
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
+        supports_prequantized_qkv = True
+        found_layer = False
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
                 continue
+            found_layer = True
             assert isinstance(layer.impl, AiterFlashAttentionImpl), (
                 "Aiter Flash Attention Metadata Builder can only be used "
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            supports_prequantized_qkv &= layer.impl.supports_prequantized_qkv_input
 
         while len(sliding_window_configs) > 0:
             sliding_window_config = sliding_window_configs.pop()
@@ -444,9 +449,25 @@ class AiterFlashAttentionMetadataBuilder(
                 )
                 self.aot_sliding_window = sliding_window_config
 
+        direct_context_mode = os.environ.get(
+            "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER",
+            "0",
+        ).lower()
+        self.direct_fp8_context_gather = (
+            found_layer
+            and supports_prequantized_qkv
+            and direct_context_mode in ("1", "true", "auto")
+            and is_quantized_kv_cache(self.cache_config.cache_dtype)
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+        workspace_dtype = (
+            current_platform.fp8_dtype()
+            if self.direct_fp8_context_gather
+            else self.model_config.dtype
+        )
         self.extend_workspace = torch.empty(
             [2, _CP_TOKENS_PER_ITER_ROCM, self.num_heads_kv, self.headdim],
-            dtype=self.model_config.dtype,
+            dtype=workspace_dtype,
             device=device,
         )
         self.scale = torch.tensor([1.0], dtype=torch.float, device=self.device)
@@ -988,6 +1009,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         token_to_batch = chunk_context_metadata.token_to_batch
         total_token_per_batch = chunk_context_metadata.total_token_per_batch
         key_fetched, value_fetched = workspace[0], workspace[1]
+        direct_fp8_context_gather = (
+            prequantized_qkv is not None
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and key_fetched.dtype == current_platform.fp8_dtype()
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
         chunked_output = None
         chunked_lse = None
         for chunk_idx in range(num_chunks):
@@ -1002,17 +1029,33 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_kv=cu_seqlens_kv[chunk_idx],
                 token_to_batch=token_to_batch[chunk_idx],
                 seq_starts=chunk_starts[chunk_idx],
-                dequant=is_quantized_kv_cache(self.kv_cache_dtype),
+                dequant=(
+                    is_quantized_kv_cache(self.kv_cache_dtype)
+                    and not direct_fp8_context_gather
+                ),
                 kv_cache_layout="SHUFFLE"
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
+            chunk_query = query
+            chunk_key = key_fetched
+            chunk_value = value_fetched
+            chunk_q_descale = chunk_k_descale = chunk_v_descale = None
+            if direct_fp8_context_gather:
+                assert prequantized_qkv is not None
+                batch_size = cu_seqlens_q.numel() - 1
+                descale_shape = (batch_size, self.num_kv_heads)
+                chunk_query = prequantized_qkv.query
+                chunk_q_descale = prequantized_qkv.query_descale
+                chunk_k_descale = k_scale.expand(descale_shape)
+                chunk_v_descale = v_scale.expand(descale_shape)
+
             suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
-                q=query,
-                k=key_fetched,
-                v=value_fetched,
+                q=chunk_query,
+                k=chunk_key,
+                v=chunk_value,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
@@ -1025,6 +1068,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
                 sink_ptr=self.sinks,
+                q_descale=chunk_q_descale,
+                k_descale=chunk_k_descale,
+                v_descale=chunk_v_descale,
             )
             if chunked_output is None:
                 chunked_output = suf_out
