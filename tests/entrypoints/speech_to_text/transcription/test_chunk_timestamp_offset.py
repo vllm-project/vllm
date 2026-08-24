@@ -41,7 +41,6 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
         overlap_chunk_second=1,
         min_energy_split_window_size=1600,
     )
-    serving.max_audio_filesize_mb = 100.0
     serving.model_cls = MagicMock()
     serving.model_cls.validate_language.side_effect = lambda lang: lang
     serving.model_cls.supports_explicit_language_detection = False
