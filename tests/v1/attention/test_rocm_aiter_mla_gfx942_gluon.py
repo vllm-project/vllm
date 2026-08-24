@@ -175,13 +175,13 @@ def test_gfx942_gluon_graph_normalizes_q_and_flattens_cache():
 def test_gfx942_gluon_graph_passes_ragged_metadata_directly(monkeypatch):
     q_nope, q_pe, kv_cache = _inputs()
     metadata = _metadata()
-    graph = mock.Mock(side_effect=lambda *args: args[3].fill_(7))
+    graph = mock.Mock(side_effect=lambda *args, **kwargs: args[2].fill_(7))
 
     monkeypatch.setattr(rocm_aiter_mla, "_on_gfx942", lambda: True)
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
     monkeypatch.setattr(
         rocm_aiter_mla,
-        "_get_mla_gluon_gfx942",
+        "_get_triton_mla_decode_fwd",
         lambda: graph,
     )
 
@@ -200,9 +200,11 @@ def test_gfx942_gluon_graph_passes_ragged_metadata_directly(monkeypatch):
         KV_LORA_RANK,
     )
     assert torch.all(output == 7)
-    graph_q_nope, graph_q_pe, graph_kv, graph_o, page_table, seq_info, scale = (
-        graph.call_args.args
-    )
+    _, graph_kv, graph_o, _, _, _, _, scale, _, _, _, _, _ = graph.call_args.args
+    graph_q_nope = graph.call_args.kwargs["q_nope"]
+    graph_q_pe = graph.call_args.kwargs["q_pe"]
+    page_table = graph.call_args.kwargs["page_table"]
+    seq_info = graph.call_args.kwargs["seq_info"]
     assert graph_q_nope.shape == (
         NUM_REQS,
         QLEN,
@@ -254,7 +256,7 @@ def test_gfx942_gluon_graph_unsupported_cases_fall_back(monkeypatch, unsupported
     )
     monkeypatch.setattr(
         rocm_aiter_mla,
-        "_get_mla_gluon_gfx942",
+        "_get_triton_mla_decode_fwd",
         lambda: None if unsupported == "symbol" else graph,
     )
     monkeypatch.setattr(rocm_aiter_mla.rocm_aiter_ops, "mla_decode_fwd", asm)
@@ -279,7 +281,7 @@ def test_gfx942_gluon_graph_runtime_errors_propagate(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
     monkeypatch.setattr(
         rocm_aiter_mla,
-        "_get_mla_gluon_gfx942",
+        "_get_triton_mla_decode_fwd",
         lambda: mock.Mock(side_effect=RuntimeError("kernel failed")),
     )
     monkeypatch.setattr(rocm_aiter_mla.rocm_aiter_ops, "mla_decode_fwd", asm)
