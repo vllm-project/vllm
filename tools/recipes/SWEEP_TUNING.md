@@ -71,37 +71,12 @@ vllm serve --config sweep/recommended-config.yml
 
 ## vLLM CPU Docker Shell
 
-From the vLLM source tree:
+Use the common CPU container setup in
+[RUNTIME_TUNING.md](RUNTIME_TUNING.md#vllm-cpu-docker-shell). It ensures
+hardware detection runs against the same effective CPU, NUMA, memory, and
+cgroup limits used by the deployment.
 
-```bash
-mkdir -p recipe-output
-
-docker run --rm -it \
-  --entrypoint bash \
-  --security-opt seccomp=unconfined \
-  --cap-add SYS_NICE \
-  --shm-size=4g \
-  -p 8000:8000 \
-  -v "$PWD/tools/recipes:/recipes:ro" \
-  -v "$PWD/recipe-output:/output" \
-  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-  -w /output \
-  vllm/vllm-openai-cpu:latest-x86_64
-```
-
-`/output` is writable; `/recipes` remains read-only.
-
-Recipe-only conversion inside the container:
-
-```bash
-python3 /recipes/recipe_json_to_vllm_config.py \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --hardware xeon6 \
-  --config-out /output/config.yml \
-  --env-out /output/env.sh
-```
-
-Initial suggestion plus sweep:
+Inside that container, generate the initial suggestion plus sweep package:
 
 ```bash
 python3 /recipes/recipe_json_to_vllm_config.py \
@@ -119,14 +94,15 @@ python3 /recipes/recipe_json_to_vllm_config.py \
   --sweep-out-dir /output/sweep
 ```
 
-Use the initial suggestion immediately if desired:
+The initial configuration can be deployed directly:
 
 ```bash
 source /output/env.sh
 vllm serve --config /output/config.yml
 ```
 
-Stop that manually started server before running the sweep.
+Stop that manually started server before running the sweep, because
+`run_sweep.sh` starts and stops its own vLLM servers.
 
 ```bash
 /output/sweep/run_sweep.sh --dry-run
