@@ -604,6 +604,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.prefill_backend is not None
+            and type(self.prefill_backend).get_name() == "FLASH_ATTN"
+        ):
+            from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+                _FA4_MLA_PREFILL_KERNEL,
+            )
+
+            _FA4_MLA_PREFILL_KERNEL.register_warmup()
+
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (

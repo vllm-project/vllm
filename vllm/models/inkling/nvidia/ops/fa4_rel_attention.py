@@ -211,15 +211,13 @@ class InklingFA4RelAttentionKernel(
         is_local: bool,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: int,
-        rel_extent: int,
         dtype: torch.dtype,
         kv_dtype: torch.dtype,
-        block_size: int,
         window_size: tuple[int, int],
         max_kv_len: int,
         query_len: int,
         num_reqs: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         max_seqlen_q = bucket_max_seqlen_q(query_len)
         num_splits = inkling_fa4_num_splits(
@@ -231,14 +229,12 @@ class InklingFA4RelAttentionKernel(
             max_kv_len=max_kv_len,
         )
         return self.CompileKey(
+            **compile_key_fields,
             is_local=is_local,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            rel_extent=rel_extent,
             dtype=dtype,
             kv_dtype=kv_dtype,
-            block_size=block_size,
             window_size=window_size,
             max_seqlen_q=max_seqlen_q,
             num_splits=num_splits,
@@ -433,4 +429,4 @@ class InklingFA4RelAttentionKernel(
         )
 
 
-INKLING_FA4_REL_ATTENTION_KERNEL = InklingFA4RelAttentionKernel()
+_INKLING_FA4_REL_ATTENTION_KERNEL = InklingFA4RelAttentionKernel()
