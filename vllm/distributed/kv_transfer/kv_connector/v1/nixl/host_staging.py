@@ -10,9 +10,7 @@ destination. Requests complete only after every chunk reaches host memory.
 from __future__ import annotations
 
 import ctypes
-import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,7 +22,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _CUDA_MEMCPY_DEVICE_TO_HOST = 2
-_SHUTDOWN_TIMEOUT_S = 2.0
 _SHUTDOWN_POLL_INTERVAL_S = 0.001
 
 
@@ -168,7 +165,6 @@ class HostWriteStager:
         self._copy_stream = torch.cuda.Stream(device=device)
         self._reqs: dict[str, _ReqState] = {}
         self._closed = False
-        self._shutdown_thread: threading.Thread | None = None
 
         logger.info(
             "NIXL host write staging enabled: %.2f GiB device staging across "
@@ -264,8 +260,8 @@ class HostWriteStager:
             finally:
                 slot.event.record(stream)
 
-    def advance(self) -> tuple[set[str], set[str]]:
-        """Drive the pipeline. Returns (fully staged req_ids, failed req_ids)."""
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Return successfully and unsuccessfully completed request IDs."""
         done: set[str] = set()
         failed: set[str] = set()
         for req_id, state in list(self._reqs.items()):
@@ -366,7 +362,7 @@ class HostWriteStager:
                     else:
                         slot.pool.free_slots.append(slot)
                 state.reading = still_reading
-        self.advance()
+        self.get_finished()
         if self._reqs:
             return False
         self._copy_stream.synchronize()
@@ -376,50 +372,8 @@ class HostWriteStager:
         self._closed = True
         return True
 
-    def _reap_shutdown(self, on_complete: Callable[[], None] | None) -> None:
-        try:
-            while not self._poll_shutdown(cancel=True):
-                time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
-            if on_complete is not None:
-                on_complete()
-            logger.info("Deferred NIXL host-staging cleanup completed.")
-        finally:
-            self._shutdown_thread = None
-
-    def shutdown(
-        self,
-        drain_timeout: float | None = None,
-        on_complete: Callable[[], None] | None = None,
-    ) -> bool:
-        """Bound shutdown and defer cleanup while transfers remain active."""
-        if self._shutdown_thread is not None:
-            return False
-        if self._closed:
-            return True
-        if drain_timeout is None:
-            drain_timeout = _SHUTDOWN_TIMEOUT_S
-
+    def shutdown(self) -> None:
+        """Abort active requests and block until staging resources are safe."""
         self._begin_shutdown()
-        deadline = time.monotonic() + drain_timeout
-        drained = self._poll_shutdown()
-        while not drained and time.monotonic() < deadline:
+        while not self._poll_shutdown(cancel=True):
             time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
-            drained = self._poll_shutdown()
-        if not drained:
-            drained = self._poll_shutdown(cancel=True)
-        if drained:
-            return True
-
-        logger.warning(
-            "NIXL host-staging shutdown timed out after %.1fs; retaining "
-            "registered memory until active operations become terminal.",
-            drain_timeout,
-        )
-        self._shutdown_thread = threading.Thread(
-            target=self._reap_shutdown,
-            args=(on_complete,),
-            name="vllm-nixl-host-staging-shutdown",
-            daemon=True,
-        )
-        self._shutdown_thread.start()
-        return False
