@@ -28,8 +28,8 @@ from vllm.utils.cache import LRUCache
 from .types import ShmSlot, ShmWriteRequest
 
 # Special reference count values
-REF_WRITING = -1  # Item is being written (not yet readable)
-REF_IDLE = 0  # Item is idle and may be cached
+_REF_WRITING = -1  # Item is being written (not yet readable)
+_REF_IDLE = 0  # Item is idle and may be cached
 
 
 class PagedShmManager:
@@ -100,7 +100,7 @@ class PagedShmManager:
                 size=item.size,
                 use_cache=item.use_cache,
                 blocks=blocks,
-                ref_count=REF_WRITING,
+                ref_count=_REF_WRITING,
             )
             self._all_items[item.uuid] = new_item
             allocated.append(new_item)
@@ -117,19 +117,19 @@ class PagedShmManager:
         immediately to free resources.
         """
         item = self._get_item(uuid)
-        if item.ref_count != REF_WRITING:
+        if item.ref_count != _REF_WRITING:
             raise ValueError(f"UUID {uuid} not being written")
 
         if open_n_reads <= 0:
             if item.use_cache:
                 # Normal cacheable idle item: put into LRU
-                item.ref_count = REF_IDLE
+                item.ref_count = _REF_IDLE
                 self._total_available_blocks += item.n_block()
                 self._lru_cache.put(uuid, item)
             else:
                 # Non-cacheable: release immediately
                 # Set ref_count to idle to allow delete, then delete
-                item.ref_count = REF_IDLE
+                item.ref_count = _REF_IDLE
                 self.delete(uuid, force=False)
         else:
             item.ref_count = open_n_reads
@@ -140,11 +140,11 @@ class PagedShmManager:
         it is removed from the LRU cache (making its blocks unavailable for eviction).
         """
         item = self._get_item(uuid)
-        if item.ref_count == REF_WRITING:
+        if item.ref_count == _REF_WRITING:
             raise ValueError(f"UUID {uuid} is being written")
 
         # If the item is idle and cacheable, take it out of the cache
-        update_cache = item.use_cache and item.ref_count == REF_IDLE
+        update_cache = item.use_cache and item.ref_count == _REF_IDLE
         if update_cache:
             self._lru_cache.pop(uuid)
             self._total_available_blocks -= len(item.blocks)
@@ -159,16 +159,16 @@ class PagedShmManager:
           - For non-cacheable items: delete immediately to free blocks.
         """
         item = self._get_item(uuid)
-        if item.ref_count == REF_WRITING:
+        if item.ref_count == _REF_WRITING:
             raise ValueError(f"UUID {uuid} being written")
-        if item.ref_count == REF_IDLE:
+        if item.ref_count == _REF_IDLE:
             raise ValueError(f"UUID {uuid} not being read")
 
         if item.ref_count > 0:
             item.ref_count -= 1
 
         # Now handle the case when ref_count becomes idle
-        if item.ref_count == REF_IDLE:
+        if item.ref_count == _REF_IDLE:
             if not item.use_cache:
                 # Non-cacheable item is no longer needed
                 self.delete(uuid, force=False)
@@ -183,7 +183,7 @@ class PagedShmManager:
         If force=True, the item is deleted regardless of ref_count.
         """
         item = self._get_item(uuid)
-        if not force and item.ref_count != REF_IDLE:
+        if not force and item.ref_count != _REF_IDLE:
             raise ValueError(f"UUID {uuid} is busy now")
 
         # Check whether the item was in the LRU cache (its blocks are already
@@ -219,9 +219,9 @@ class PagedShmManager:
         cached_blocks = self._total_available_blocks - len(self._free_blocks)
 
         for item in self._all_items.values():
-            if item.ref_count == REF_WRITING:
+            if item.ref_count == _REF_WRITING:
                 writing_count += 1
-            elif item.ref_count == REF_IDLE:
+            elif item.ref_count == _REF_IDLE:
                 idle_count += 1
             else:
                 reading_count += 1
@@ -256,3 +256,14 @@ class PagedShmManager:
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
         return item
+
+    def _get_item_blocks_copy(self, uuid: str) -> tuple[int, list[int]]:
+        """
+        This is used for PagedShmServer token-based open_read.
+        """
+        item = self._all_items.get(uuid)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+        if item.ref_count == _REF_WRITING:
+            raise RuntimeError(f"Item {uuid} is still being written")
+        return item.size, item.blocks.copy()

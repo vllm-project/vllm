@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.network_utils import get_open_zmq_ipc_path
 
-from .constant import (
+from .constants import (
     CLEANUP_INTERVAL,
     CLOSE_READ,
     CLOSE_WRITE,
@@ -35,7 +35,7 @@ from .constant import (
     SHUTDOWN,
     WAIT_WRITE,
 )
-from .manager import REF_WRITING, PagedShmManager
+from .manager import PagedShmManager
 from .storage import PagedShmStorage
 from .types import ShmAllocation, ShmWriteRequest
 
@@ -95,21 +95,6 @@ class PagedShmServer:
         self._read_tokens: dict[str, str] = {}
         # Reverse mapping: real_uuid -> set of tokens
         self._item_to_read_tokens: dict[str, set[str]] = {}
-
-    # ------------------------------------------------------------------
-    # Internal helper to get blocks without changing ref_count
-    # ------------------------------------------------------------------
-    def _get_item_blocks_no_ref(self, uuid: str) -> tuple[int, list[int]]:
-        """
-        Retrieve size and block list for an item without modifying its
-        reference count. This is used for token-based open_read.
-        """
-        item = self.manager._all_items.get(uuid)
-        if item is None:
-            raise ValueError(f"UUID {uuid} not found")
-        if item.ref_count == REF_WRITING:
-            raise RuntimeError(f"Item {uuid} is still being written")
-        return item.size, item.blocks.copy()
 
     # ------------------------------------------------------------------
     # Generic queue cleanup helper
@@ -344,7 +329,7 @@ class PagedShmServer:
                 )
             # Get the item info without modifying ref_count
             try:
-                size, blocks = self._get_item_blocks_no_ref(real_uuid)
+                size, blocks = self.manager._get_item_blocks_copy(real_uuid)
             except RuntimeError as e:
                 # If item not found or still being written, delegate to waiting logic
                 if "still being written" in str(e):
@@ -479,7 +464,7 @@ class PagedShmServer:
                 try:
                     if is_token:
                         # Token path: do not increase ref_count
-                        size, blocks = self._get_item_blocks_no_ref(real_uuid)
+                        size, blocks = self.manager._get_item_blocks_copy(real_uuid)
                         resp = ShmAllocation(
                             uuid=real_uuid, size=size, blocks=blocks, use_cache=True
                         )

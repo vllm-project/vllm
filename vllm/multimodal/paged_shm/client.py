@@ -49,7 +49,7 @@ import zmq
 from vllm.config import ModelConfig
 from vllm.utils.torch_utils import DeviceLikeType
 
-from .constant import (
+from .constants import (
     CLOSE_READ,
     CLOSE_WRITE,
     DEBUG_CLEAN,
@@ -73,6 +73,12 @@ MAX_POOL_SIZE = 64
 
 class _BaseClient:
     """Base class for ZMQ REQ‑socket communication with the PagedShmServer."""
+
+    _ctx: zmq.Context
+    _address: str
+    _socket_timeout_ms: int
+    _pool: queue.Queue
+    _max_pool_size: int
 
     def _build_frames(self, command: bytes, payload: str | None = None) -> list[bytes]:
         """Build multipart message for a REQ socket."""
@@ -103,6 +109,45 @@ class _BaseClient:
             raise RuntimeError(f"Unknown server status: {status!r}")
 
         return data.decode("utf-8")
+
+    def _init_sock(self) -> zmq.Socket:
+        """Create and connect a new REQ socket with configured timeouts."""
+        sock = self._ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.RCVTIMEO, self._socket_timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self._socket_timeout_ms)
+        sock.connect(self._address)
+        return sock
+
+    def _request(self, command: bytes, payload: str | None = None) -> str:
+        """
+        Send a command to the server and return the decoded response.
+
+        Uses a socket from the pool; if pool is empty, creates a new one.
+        Sockets are returned to the pool if the total pool size is below
+        `_max_pool_size`, otherwise they are closed.
+        """
+        try:
+            sock = self._pool.get_nowait()
+        except queue.Empty:
+            sock = self._init_sock()
+
+        try:
+            frames = self._build_frames(command, payload)
+            sock.send_multipart(frames)
+            response = sock.recv_multipart()
+            return self._parse_response(response)
+        except zmq.ZMQError as e:
+            logger.debug("ZMQ error during request: %s", e)
+            sock.close(linger=0)
+            raise
+        except Exception:
+            sock.close(linger=0)
+            raise
+        else:
+            if self._pool.qsize() < self._max_pool_size:
+                self._pool.put(sock)
+            else:
+                sock.close(linger=0)
 
 
 # ---------------------------------------------------------------------------
@@ -553,49 +598,6 @@ class PagedShmClient(_BaseClient):
 
     def close(self) -> None:
         self._resources.close()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _init_sock(self) -> zmq.Socket:
-        """Create and connect a new REQ socket with configured timeouts."""
-        sock = self._ctx.socket(zmq.REQ)
-        sock.setsockopt(zmq.RCVTIMEO, self._socket_timeout_ms)
-        sock.setsockopt(zmq.SNDTIMEO, self._socket_timeout_ms)
-        sock.connect(self._address)
-        return sock
-
-    def _request(self, command: bytes, payload: str | None = None) -> str:
-        """
-        Send a command to the server and return the decoded response.
-
-        Uses a socket from the pool; if pool is empty, creates a new one.
-        Sockets are returned to the pool if the total pool size is below
-        `_max_pool_size`, otherwise they are closed.
-        """
-        try:
-            sock = self._pool.get_nowait()
-        except queue.Empty:
-            sock = self._init_sock()
-
-        try:
-            frames = self._build_frames(command, payload)
-            sock.send_multipart(frames)
-            response = sock.recv_multipart()
-            return self._parse_response(response)
-        except zmq.ZMQError as e:
-            logger.debug("ZMQ error during request: %s", e)
-            sock.close(linger=0)
-            raise
-        except Exception:
-            sock.close(linger=0)
-            raise
-        else:
-            if self._pool.qsize() < self._max_pool_size:
-                self._pool.put(sock)
-            else:
-                sock.close(linger=0)
 
 
 def _close_sock_pool(pool: queue.Queue):
