@@ -501,6 +501,9 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
 class Qwen2_5OmniThinkerMultiModalProcessor(
     BaseMultiModalProcessor[Qwen2_5OmniThinkerProcessingInfo]
 ):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
@@ -509,12 +512,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         mm_counts = mm_items.get_all_counts()
-        if hf_kwargs.get("use_audio_in_video") and (
-            mm_counts.get("audio", 0) < mm_counts.get("video", 0)
-        ):
-            raise ValueError(
-                "Video doesn't have audio track with `audio_in_video=True`"
-            )
+        if hf_kwargs.get("use_audio_in_video"):
+            num_videos = mm_counts.get("video", 0)
+            if mm_counts.get("audio", 0) < num_videos:
+                raise ValueError(
+                    "Video doesn't have audio track with `audio_in_video=True`"
+                )
+
+            if num_videos and "text" in hf_inputs.hf_data:
+                standalone_mm_counts = dict(mm_counts)
+                standalone_mm_counts["audio"] -= num_videos
+                hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
 
         hf_data = hf_inputs.hf_data
         normalized_kwargs = hf_inputs.hf_kwargs

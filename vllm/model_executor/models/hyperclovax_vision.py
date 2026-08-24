@@ -229,6 +229,9 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         hf_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
         for k, v in processed_data.items():
             if isinstance(v, list) and len(v) > 0:
                 assert len(v) == 1

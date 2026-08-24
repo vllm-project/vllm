@@ -473,7 +473,8 @@ class MossTranscribeDiarizeMultiModalProcessor(
         hf_kwargs: Mapping[str, object],
     ) -> HFMultiModalInputs:
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
-        hf_inputs.hf_data["audio"] = _get_audios_from_mm_data(hf_inputs.hf_data)
+        if hf_inputs.hf_data:
+            hf_inputs.hf_data["audio"] = _get_audios_from_mm_data(hf_inputs.hf_data)
 
         return hf_inputs
 
