@@ -162,11 +162,6 @@ class PCPManager:
                     "MRV2 PCP speculative decoding does not support adaptive "
                     "verification yet."
                 )
-            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                raise NotImplementedError(
-                    "MRV2 PCP speculative decoding currently requires "
-                    "cudagraph_mode=NONE."
-                )
         if (
             is_sparse_mla
             and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
