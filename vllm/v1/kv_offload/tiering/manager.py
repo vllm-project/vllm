@@ -585,11 +585,15 @@ class TieringOffloadingManager(OffloadingManager):
             return None
 
         if primary_result.keys_to_store:
-            state = self._req_state[req_context.req_id]
-            state.pending_primary_stores += 1
+            state = self._req_state.get(req_context.req_id)
+            if state is not None:
+                state.pending_primary_stores += 1
 
         # Step 3: For request-level tiers, cascade blocks already in primary
-        request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
+        state = self._req_state.get(req_context.req_id)
+        request_level_tiers = (
+            state.request_level_tiers if state is not None else None
+        )
         if request_level_tiers:
             keys_to_store_set = set(primary_result.keys_to_store)
             keys_already_in_primary = tuple(
@@ -699,10 +703,11 @@ class TieringOffloadingManager(OffloadingManager):
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
         req_id = req_context.req_id
-        state = self._req_state[req_id]
-        assert state.pending_primary_stores > 0
-        state.pending_primary_stores -= 1
-        self._maybe_finalize_request(req_id)
+        state = self._req_state.get(req_id)
+        if state is not None:
+            assert state.pending_primary_stores > 0
+            state.pending_primary_stores -= 1
+            self._maybe_finalize_request(req_id)
 
     def create_store_job(
         self,
@@ -772,9 +777,10 @@ class TieringOffloadingManager(OffloadingManager):
         exclude_tier_idx: int | None = None,
     ) -> None:
         self.primary_tier.on_request_finished(req_context)
-        state = self._req_state[req_context.req_id]
-        state.is_finished = True
-        self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
+        state = self._req_state.get(req_context.req_id)
+        if state is not None:
+            state.is_finished = True
+            self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
 
     def _maybe_finalize_request(
         self,
@@ -787,7 +793,9 @@ class TieringOffloadingManager(OffloadingManager):
         It is delayed until pending GPU->primary stores finish, since their
         complete_store() callbacks may still submit primary->secondary stores.
         """
-        state = self._req_state[req_id]
+        state = self._req_state.get(req_id)
+        if state is None:
+            return
         if not state.is_finished:
             return
         if state.pending_primary_stores != 0:
@@ -800,7 +808,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             tier.on_request_finished(state.req_context)
         self._metrics.on_request_finished(state.req_context)
-        del self._req_state[req_id]
+        self._req_state.pop(req_id, None)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:

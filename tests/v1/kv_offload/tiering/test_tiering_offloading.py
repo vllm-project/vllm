@@ -979,6 +979,25 @@ class TestTieringOffloadingManager:
         self.secondary_tier2.on_request_finished.assert_called_once_with(ctx)
         assert ctx.req_id not in self.manager._req_state
 
+    def test_complete_store_and_on_request_finished_unknown_request(
+        self, manager_setup
+    ):
+        """Operations on unknown or already finalized request IDs should not crash with KeyError."""
+        blocks = to_keys(range(2))
+        ctx = ReqContext(req_id="req_unknown_or_aborted")
+
+        # 1. Start, store, and finish request to finalize and remove it from _req_state
+        self._start_request(ctx)
+        self.manager.prepare_store(blocks, ctx)
+        self.manager.on_request_finished(ctx)
+        self.manager.complete_store(blocks, ctx, success=False)
+        assert ctx.req_id not in self.manager._req_state
+
+        # 2. Simulate late/redundant async callbacks on already finalized request
+        self.manager.complete_store(blocks, ctx, success=False)
+        self.manager.on_request_finished(ctx)
+        assert ctx.req_id not in self.manager._req_state
+
     def test_reset_cache_finalizes_delayed_secondary_request(self, manager_setup):
         """reset_cache abandons pending primary stores and finalizes secondaries."""
         blocks = to_keys(range(2))

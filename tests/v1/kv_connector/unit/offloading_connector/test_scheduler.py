@@ -292,6 +292,33 @@ def test_abort_queued_request_does_not_build_store_job(
     assert queued_req_id not in runner.connector_scheduler._req_status
 
 
+def test_calc_and_submit_stores_bounds_chunks_by_available_block_ids():
+    """Verify num_chunks is bounded by available block IDs to prevent AssertionError."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.num_computed_tokens = 30
+    request.num_tokens = 30
+    request.is_finished.return_value = False
+
+    req_status = scheduler._req_status["req"]
+    group_state = req_status.group_states[0]
+
+    # Populate 4 offload keys but only 1 block id (simulating lag during async sync)
+    group_state.offload_keys = [make_offload_key(f"k{i}".encode(), 0) for i in range(4)]
+    group_state.block_ids = [11]
+
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(list(keys))
+    )
+
+    # _build_store_jobs should safely bound num_chunks without AssertionError
+    scheduler._build_store_jobs(
+        scheduler_output=SimpleNamespace(
+            num_scheduled_tokens={"req": 0}, finished_req_ids=[]
+        ),
+    )
+
+
 def test_scheduler_reports_lookup_sync_delay(request_runner):
     runner = request_runner(
         block_size=4,
