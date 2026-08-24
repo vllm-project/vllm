@@ -696,7 +696,6 @@ mod tests {
     }
 
     struct AttributionCase<'a> {
-        name: &'static str,
         tokenizer: &'a dyn Tokenizer,
         prompt_token_ids: Vec<u32>,
         token_ids: Vec<u32>,
@@ -707,225 +706,239 @@ mod tests {
         expected_full: DecodedText,
     }
 
-    #[test]
-    fn token_attribution_invariants() {
-        let utf8 = Utf8Backend;
-        let pieces = PieceBackend;
-        let special = SpecialTokenBackend;
-        let utf8_special = Utf8SpecialBackend;
+    fn run_attribution_case(case: AttributionCase<'_>) {
+        let mut decoder = case.tokenizer.create_decode_stream(
+            &case.prompt_token_ids,
+            case.skip_special_tokens,
+            case.min_bytes_to_buffer,
+        );
+        let mut chunks = Vec::new();
 
-        let cases = vec![
-            AttributionCase {
-                name: "one visible anchor per ascii token",
-                tokenizer: &utf8,
-                prompt_token_ids: vec![],
-                token_ids: vec![b'o' as u32, b'k' as u32],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![
-                    decoded("o", &[b'o' as u32], &[visible(0)]),
-                    decoded("k", &[b'k' as u32], &[visible(0)]),
-                ],
-                expected_full: decoded(
-                    "ok",
-                    &[b'o' as u32, b'k' as u32],
-                    &[visible(0), visible(1)],
-                ),
-            },
-            AttributionCase {
-                name: "byte fallback tokens share one visible anchor",
-                tokenizer: &utf8,
-                prompt_token_ids: vec![],
-                token_ids: vec![0xe4, 0xbd, 0xa0],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded(
-                    "你",
-                    &[0xe4, 0xbd, 0xa0],
-                    &[visible(0), visible(0), visible(0)],
-                )],
-                expected_full: decoded(
-                    "你",
-                    &[0xe4, 0xbd, 0xa0],
-                    &[visible(0), visible(0), visible(0)],
-                ),
-            },
-            AttributionCase {
-                name: "holdback splits text without repeating the token anchor",
-                tokenizer: &pieces,
-                prompt_token_ids: vec![],
-                token_ids: vec![1],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 2,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded("ab", &[1], &[visible(0)]), decoded("cd", &[], &[])],
-                expected_full: decoded("abcd", &[1], &[visible(0)]),
-            },
-            AttributionCase {
-                name: "filtered special token is zero width at its byte boundary",
-                tokenizer: &special,
-                prompt_token_ids: vec![],
-                token_ids: vec![1, 0, 2],
-                skip_special_tokens: true,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![
-                    decoded("a", &[1], &[visible(0)]),
-                    decoded("", &[0], &[zero_width(0)]),
-                    decoded("b", &[2], &[visible(0)]),
-                ],
-                expected_full: decoded("ab", &[1, 0, 2], &[visible(0), zero_width(1), visible(1)]),
-            },
-            AttributionCase {
-                name: "zero width preserves order inside a byte fallback group",
-                tokenizer: &utf8_special,
-                prompt_token_ids: vec![],
-                token_ids: vec![0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
-                skip_special_tokens: true,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded(
-                    "你",
-                    &[0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
-                    &[visible(0), zero_width(0), visible(0), visible(0)],
-                )],
-                expected_full: decoded(
-                    "你",
-                    &[0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
-                    &[visible(0), zero_width(0), visible(0), visible(0)],
-                ),
-            },
-            AttributionCase {
-                name: "retained special token has a visible anchor",
-                tokenizer: &utf8_special,
-                prompt_token_ids: vec![],
-                token_ids: vec![SPECIAL_TOKEN_ID],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded("<special>", &[SPECIAL_TOKEN_ID], &[visible(0)])],
-                expected_full: decoded("<special>", &[SPECIAL_TOKEN_ID], &[visible(0)]),
-            },
-            AttributionCase {
-                name: "empty decode resolves to zero width on flush",
-                tokenizer: &pieces,
-                prompt_token_ids: vec![],
-                token_ids: vec![4],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded("", &[4], &[zero_width(0)])],
-                expected_full: decoded("", &[4], &[zero_width(0)]),
-            },
-            AttributionCase {
-                name: "incomplete utf8 tokens share the replacement character anchor on flush",
-                tokenizer: &utf8,
-                prompt_token_ids: vec![],
-                token_ids: vec![0xe4, 0xbd],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded("�", &[0xe4, 0xbd], &[visible(0), visible(0)])],
-                expected_full: decoded("�", &[0xe4, 0xbd], &[visible(0), visible(0)]),
-            },
-            AttributionCase {
-                name: "truncation converts a fully removed token to zero width",
-                tokenizer: &pieces,
-                prompt_token_ids: vec![],
-                token_ids: vec![2, 3],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 32,
-                truncate_output_to: Some(2),
-                expected_chunks: vec![decoded("ab", &[2, 3], &[visible(0), zero_width(2)])],
-                expected_full: decoded("ab", &[2, 3], &[visible(0), zero_width(2)]),
-            },
-            AttributionCase {
-                name: "truncation inside a token retains its first-byte anchor",
-                tokenizer: &pieces,
-                prompt_token_ids: vec![],
-                token_ids: vec![1],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 32,
-                truncate_output_to: Some(2),
-                expected_chunks: vec![decoded("ab", &[1], &[visible(0)])],
-                expected_full: decoded("ab", &[1], &[visible(0)]),
-            },
-            AttributionCase {
-                name: "prompt context contributes no generated-token anchors",
-                tokenizer: &utf8,
-                prompt_token_ids: vec![b'H' as u32, b'i' as u32],
-                token_ids: vec![b'!' as u32],
-                skip_special_tokens: false,
-                min_bytes_to_buffer: 0,
-                truncate_output_to: None,
-                expected_chunks: vec![decoded("!", &[b'!' as u32], &[visible(0)])],
-                expected_full: decoded("!", &[b'!' as u32], &[visible(0)]),
-            },
-        ];
-
-        for case in cases {
-            let mut decoder = case.tokenizer.create_decode_stream(
-                &case.prompt_token_ids,
-                case.skip_special_tokens,
-                case.min_bytes_to_buffer,
-            );
-            let mut chunks = Vec::new();
-
-            for token_id in &case.token_ids {
-                decoder.push_token(*token_id).unwrap();
-                while let Some(chunk) = decoder.next_chunk() {
-                    chunks.push(chunk);
-                }
+        for token_id in &case.token_ids {
+            decoder.push_token(*token_id).unwrap();
+            while let Some(chunk) = decoder.next_chunk() {
+                chunks.push(chunk);
             }
-            let (remaining, full) = decoder.flush(case.truncate_output_to).unwrap();
-            if let Some(remaining) = remaining {
-                chunks.push(remaining);
-            }
-
-            assert_eq!(chunks, case.expected_chunks, "{}: chunks", case.name);
-            assert_eq!(full, case.expected_full, "{}: full output", case.name);
-            assert_eq!(
-                full.attributions.len(),
-                case.token_ids.len(),
-                "{}: one attribution per pushed token",
-                case.name
-            );
-            assert_eq!(
-                full.attributions
-                    .iter()
-                    .map(|attribution| attribution.token_id)
-                    .collect::<Vec<_>>(),
-                case.token_ids,
-                "{}: attribution preserves pushed token IDs",
-                case.name
-            );
-
-            let mut reconstructed_text = String::new();
-            let mut reconstructed_attributions = Vec::new();
-            for chunk in &chunks {
-                let chunk_start = reconstructed_text.len() as u32;
-                reconstructed_text.push_str(&chunk.text);
-                reconstructed_attributions.extend(chunk.attributions.iter().map(|attribution| {
-                    TokenAttribution {
-                        token_id: attribution.token_id,
-                        anchor: attribution.anchor.offset_by(i64::from(chunk_start)),
-                    }
-                }));
-            }
-            assert_eq!(
-                reconstructed_text, full.text,
-                "{}: chunk text reconstructs full text",
-                case.name
-            );
-            assert_eq!(
-                reconstructed_attributions.as_slice(),
-                full.attributions.as_slice(),
-                "{}: chunk attributions reconstruct full attributions",
-                case.name
-            );
         }
+        let (remaining, full) = decoder.flush(case.truncate_output_to).unwrap();
+        if let Some(remaining) = remaining {
+            chunks.push(remaining);
+        }
+
+        assert_eq!(chunks, case.expected_chunks, "chunks");
+        assert_eq!(full, case.expected_full, "full output");
+        assert_eq!(
+            full.attributions.len(),
+            case.token_ids.len(),
+            "one attribution per pushed token"
+        );
+        assert_eq!(
+            full.attributions
+                .iter()
+                .map(|attribution| attribution.token_id)
+                .collect::<Vec<_>>(),
+            case.token_ids,
+            "attribution preserves pushed token IDs"
+        );
+
+        let mut reconstructed_text = String::new();
+        let mut reconstructed_attributions = Vec::new();
+        for chunk in &chunks {
+            let chunk_start = reconstructed_text.len() as u32;
+            reconstructed_text.push_str(&chunk.text);
+            reconstructed_attributions.extend(chunk.attributions.iter().map(|attribution| {
+                TokenAttribution {
+                    token_id: attribution.token_id,
+                    anchor: attribution.anchor.offset_by(i64::from(chunk_start)),
+                }
+            }));
+        }
+        assert_eq!(
+            reconstructed_text, full.text,
+            "chunk text reconstructs full text"
+        );
+        assert_eq!(
+            reconstructed_attributions.as_slice(),
+            full.attributions.as_slice(),
+            "chunk attributions reconstruct full attributions"
+        );
+    }
+
+    #[test]
+    fn attribution_ascii_tokens_have_one_visible_anchor_each() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &Utf8Backend,
+            prompt_token_ids: vec![],
+            token_ids: vec![b'o' as u32, b'k' as u32],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![
+                decoded("o", &[b'o' as u32], &[visible(0)]),
+                decoded("k", &[b'k' as u32], &[visible(0)]),
+            ],
+            expected_full: decoded("ok", &[b'o' as u32, b'k' as u32], &[visible(0), visible(1)]),
+        });
+    }
+
+    #[test]
+    fn attribution_byte_fallback_tokens_share_one_visible_anchor() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &Utf8Backend,
+            prompt_token_ids: vec![],
+            token_ids: vec![0xe4, 0xbd, 0xa0],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded(
+                "你",
+                &[0xe4, 0xbd, 0xa0],
+                &[visible(0), visible(0), visible(0)],
+            )],
+            expected_full: decoded(
+                "你",
+                &[0xe4, 0xbd, 0xa0],
+                &[visible(0), visible(0), visible(0)],
+            ),
+        });
+    }
+
+    #[test]
+    fn attribution_holdback_splits_text_without_repeating_token() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &PieceBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![1],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 2,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded("ab", &[1], &[visible(0)]), decoded("cd", &[], &[])],
+            expected_full: decoded("abcd", &[1], &[visible(0)]),
+        });
+    }
+
+    #[test]
+    fn attribution_filtered_special_token_is_zero_width_at_its_byte_boundary() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &SpecialTokenBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![1, 0, 2],
+            skip_special_tokens: true,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![
+                decoded("a", &[1], &[visible(0)]),
+                decoded("", &[0], &[zero_width(0)]),
+                decoded("b", &[2], &[visible(0)]),
+            ],
+            expected_full: decoded("ab", &[1, 0, 2], &[visible(0), zero_width(1), visible(1)]),
+        });
+    }
+
+    #[test]
+    fn attribution_zero_width_preserves_order_inside_byte_fallback_group() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &Utf8SpecialBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
+            skip_special_tokens: true,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded(
+                "你",
+                &[0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
+                &[visible(0), zero_width(0), visible(0), visible(0)],
+            )],
+            expected_full: decoded(
+                "你",
+                &[0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
+                &[visible(0), zero_width(0), visible(0), visible(0)],
+            ),
+        });
+    }
+
+    #[test]
+    fn attribution_retained_special_token_has_visible_anchor() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &Utf8SpecialBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![SPECIAL_TOKEN_ID],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded("<special>", &[SPECIAL_TOKEN_ID], &[visible(0)])],
+            expected_full: decoded("<special>", &[SPECIAL_TOKEN_ID], &[visible(0)]),
+        });
+    }
+
+    #[test]
+    fn attribution_empty_decode_resolves_to_zero_width_on_flush() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &PieceBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![4],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded("", &[4], &[zero_width(0)])],
+            expected_full: decoded("", &[4], &[zero_width(0)]),
+        });
+    }
+
+    #[test]
+    fn attribution_incomplete_utf8_tokens_share_replacement_anchor_on_flush() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &Utf8Backend,
+            prompt_token_ids: vec![],
+            token_ids: vec![0xe4, 0xbd],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded("�", &[0xe4, 0xbd], &[visible(0), visible(0)])],
+            expected_full: decoded("�", &[0xe4, 0xbd], &[visible(0), visible(0)]),
+        });
+    }
+
+    #[test]
+    fn attribution_truncation_converts_fully_removed_token_to_zero_width() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &PieceBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![2, 3],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 32,
+            truncate_output_to: Some(2),
+            expected_chunks: vec![decoded("ab", &[2, 3], &[visible(0), zero_width(2)])],
+            expected_full: decoded("ab", &[2, 3], &[visible(0), zero_width(2)]),
+        });
+    }
+
+    #[test]
+    fn attribution_truncation_inside_token_retains_first_byte_anchor() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &PieceBackend,
+            prompt_token_ids: vec![],
+            token_ids: vec![1],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 32,
+            truncate_output_to: Some(2),
+            expected_chunks: vec![decoded("ab", &[1], &[visible(0)])],
+            expected_full: decoded("ab", &[1], &[visible(0)]),
+        });
+    }
+
+    #[test]
+    fn attribution_excludes_prompt_context() {
+        run_attribution_case(AttributionCase {
+            tokenizer: &Utf8Backend,
+            prompt_token_ids: vec![b'H' as u32, b'i' as u32],
+            token_ids: vec![b'!' as u32],
+            skip_special_tokens: false,
+            min_bytes_to_buffer: 0,
+            truncate_output_to: None,
+            expected_chunks: vec![decoded("!", &[b'!' as u32], &[visible(0)])],
+            expected_full: decoded("!", &[b'!' as u32], &[visible(0)]),
+        });
     }
 
     #[test]
