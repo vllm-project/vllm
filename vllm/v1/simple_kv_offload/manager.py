@@ -743,6 +743,10 @@ class SimpleCPUOffloadScheduler:
         assert self._gpu_block_pool is not None
         for gpu_block_id, cpu_block in zip(gpu_block_ids, cpu_blocks):
             bhash = cpu_block.block_hash
+            # CPU blocks are stamped directly at allocation. Clear that primary
+            # hash before registration: _insert_block_hash() otherwise returns
+            # early and would not add the cache-map entry (or fine-grained
+            # secondary hashes).
             assert bhash is not None
             block_hashes = [bhash]
             block_hashes.extend(
@@ -848,6 +852,13 @@ class SimpleCPUOffloadScheduler:
                 if gpu_block.is_null or gpu_block.block_hash is None:
                     continue
                 if gpu_id in self._in_flight_store_gpu_blocks:
+                    continue
+                if (
+                    self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        gpu_block.block_hash
+                    )
+                    is not None
+                ):
                     continue
                 gpu_ids.append(gpu_id)
         if not gpu_ids:

@@ -502,7 +502,6 @@ def test_finished_eager_stores_are_batched() -> None:
             )
             assert cached is not None
 
-
     request = requests[0]
     cached_request = Request(
         request_id="req-finished-eager-load",
@@ -515,6 +514,59 @@ def test_finished_eager_stores_are_batched() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(
         cached_request, num_computed_tokens=0
     )
+    assert hit_tokens == 2 * BLOCK_SIZE
+    assert is_async is True
+
+    cached_gpu_blocks = fix.gpu_block_pool.get_new_blocks(2)
+    sched.update_state_after_alloc(
+        cached_request,
+        KVCacheBlocks(blocks=(cached_gpu_blocks,)),
+        num_external_tokens=hit_tokens,
+    )
+    load_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {cached_request.request_id: 1},
+            new_reqs={
+                cached_request.request_id: (
+                    [block.block_id for block in cached_gpu_blocks],
+                )
+            },
+        )
+    )
+    assert load_meta.load_event >= 0
+    assert len(load_meta.load_gpu_blocks) == 2
+    assert len(load_meta.load_cpu_blocks) == 2
+
+
+def test_finished_eager_store_skips_existing_cpu_cache_entries() -> None:
+    """A final flush must not consume CPU capacity for an existing hash."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    first = make_request(num_blocks=2)
+    first_blocks = _alloc_and_register(fix, first, num_blocks=2)
+    sched.update_state_after_alloc(first, first_blocks, num_external_tokens=0)
+    sched.request_finished_all_groups(first, first_blocks.get_block_ids())
+    first_meta = sched.build_connector_meta(make_scheduler_output({}))
+    simulate_store_completion(sched, first_meta.store_event)
+    free_blocks = get_cpu_free_blocks(sched)
+
+    duplicate = Request(
+        request_id="req-finished-eager-duplicate",
+        prompt_token_ids=first.prompt_token_ids,
+        sampling_params=first.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=first._block_hasher,
+    )
+    duplicate_blocks = _alloc_and_register(fix, duplicate, num_blocks=2)
+    sched.update_state_after_alloc(duplicate, duplicate_blocks, num_external_tokens=0)
+    sched.request_finished_all_groups(duplicate, duplicate_blocks.get_block_ids())
+
+    duplicate_meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert duplicate_meta.store_event == -1
+    assert get_cpu_free_blocks(sched) == free_blocks
+
 
 def test_finished_eager_store_is_reported_pending_before_metadata_build() -> None:
     """Queued finished stores must keep the connector pending until submitted."""
@@ -536,9 +588,7 @@ def test_finished_eager_store_is_reported_pending_before_metadata_build() -> Non
 
 def test_finished_eager_store_caches_all_groups() -> None:
     """The final flush retains completed blocks from every KV cache group."""
-    fix = make_scheduler(
-        num_cpu_blocks=8, num_gpu_blocks=16, num_groups=2, lazy=False
-    )
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, num_groups=2, lazy=False)
     sched = fix.scheduler
     request = make_request(num_blocks=2)
     group_blocks = tuple(
