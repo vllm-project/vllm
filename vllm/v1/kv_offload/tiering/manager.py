@@ -622,11 +622,6 @@ class TieringOffloadingManager(OffloadingManager):
         here. Parking on it would have no guarantee of ever draining, which is
         what makes parking HIT_PENDING safe, so it is rejected rather than
         guessed at.
-
-        Args:
-            keys: Blocks reported as already present in the primary tier.
-            req_context: Per-request context.
-            request_level_tiers: Tier indices that asked for request-level.
         """
         state = self._req_state[req_context.req_id]
         ready_keys = []
