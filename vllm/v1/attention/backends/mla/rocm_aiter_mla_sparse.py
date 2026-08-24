@@ -716,15 +716,15 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         )
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
 
-        # Run the gathered attention on aiter's Gluon kernel instead of the asm
-        # decode. It takes num_heads < 16 natively, gfx950 only.
+        # Run the gathered attention on aiter's Gluon kernel instead of_forward_mla. 
+        # It takes num_heads < 16 natively, gfx950 only.
         self.use_gluon_sparse_mla = False
         if envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA:
             reason = self._gluon_sparse_mla_unsupported_reason(vllm_config)
             if reason is not None:
                 logger.warning_once(
                     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 requested, but %s; "
-                    "using the asm sparse decode instead.",
+                    "using the _forward_mla instead.",
                     reason,
                 )
             else:
@@ -737,9 +737,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         self, vllm_config: VllmConfig
     ) -> str | None:
         """Why the Gluon kernel cannot serve this configuration, or None.
-
-        Every case here falls back to the asm decode, so enabling the flag can
-        only change which kernel runs, never whether a working setup starts.
+        Every case here falls back to the _forward_mla
         """
         if not _gluon_sparse_mla_supported():
             return "this device has no Gluon gathered-MLA build (requires gfx950)"
@@ -810,7 +808,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         """The same MQA operator as _forward_mla, on aiter's Gluon kernel.
 
         sparse_mla_fwd follows mla_decode_fwd's calling convention, so the
-        metadata passes straight through. Three things the asm path needs
+        metadata passes straight through. Three things the _forward_mla path needs
         and this one does not:
 
         - q head padding: the kernel runs num_heads < 16 natively.
