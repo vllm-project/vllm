@@ -46,6 +46,8 @@ from cohere.types import (
 )
 from pydantic import BaseModel, Field, field_validator
 
+from vllm.exceptions import VLLMValidationError
+
 # Re-export the SDK wire-format types alongside our local extensions so
 # ``vllm.entrypoints.cohere.serving`` and friends can import everything
 # they need from this module.
@@ -186,14 +188,18 @@ class CohereChatV2Request(BaseModel):
     @classmethod
     def _validate_model(cls, v: str) -> str:
         if not v:
-            raise ValueError("model is required")
+            raise VLLMValidationError("model is required", parameter="model")
         return v
 
     @field_validator("max_tokens")
     @classmethod
     def _validate_max_tokens(cls, v: int | None) -> int | None:
         if v is not None and v < 0:
-            raise ValueError("max_tokens must be non-negative")
+            raise VLLMValidationError(
+                "max_tokens must be non-negative",
+                parameter="max_tokens",
+                value=v,
+            )
         return v
 
     @field_validator("messages", mode="before")
@@ -233,7 +239,9 @@ class CohereChatV2Request(BaseModel):
     @classmethod
     def _validate_messages(cls, v: list[ChatMessageV2]) -> list[ChatMessageV2]:
         if not v:
-            raise ValueError("messages must contain at least one message")
+            raise VLLMValidationError(
+                "messages must contain at least one message", parameter="messages"
+            )
         return v
 
 
