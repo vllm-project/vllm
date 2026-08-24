@@ -1952,6 +1952,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             mm_items, hf_kwargs
         )
 
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
+
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
 
