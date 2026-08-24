@@ -27,9 +27,8 @@ def _processed_pixel_values(
     images: list[Image.Image],
     mm_processor_kwargs: dict[str, object],
 ) -> list[torch.Tensor]:
-    """Resize via the HF image processor and un-pad to per-image H×W."""
-    image_processor = hf_processor.image_processor
-    hf_out = image_processor(images=images, return_tensors="pt", **mm_processor_kwargs)
+    """Resize via the full HF processor and un-pad to per-image H×W."""
+    hf_out, _ = hf_processor._process_images(images, **mm_processor_kwargs)
     pixel_values = hf_out["pixel_values"]
     image_sizes = hf_out["image_sizes"]
     return [p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)]
@@ -72,12 +71,12 @@ def _expected_placeholder_tokens_per_image(
         patch_h = patch_w = int(patch_size)
 
     spatial_merge_size = getattr(hf_processor, "spatial_merge_size", 1)
-    assert image_h % patch_h == 0
-    assert image_w % patch_w == 0
+    merged_patch_h = patch_h * spatial_merge_size
+    merged_patch_w = patch_w * spatial_merge_size
+    assert image_h % merged_patch_h == 0
+    assert image_w % merged_patch_w == 0
 
-    return (image_h // (patch_h * spatial_merge_size)) * (
-        image_w // (patch_w * spatial_merge_size)
-    )
+    return (image_h // merged_patch_h) * (image_w // merged_patch_w)
 
 
 @pytest.mark.parametrize("model_id", [_MODEL_ID])
@@ -87,8 +86,8 @@ def _expected_placeholder_tokens_per_image(
         ({}, (448, 448), 256),
         ({"size": {"longest_edge": 1008}}, (1540, 1540), 1296),
         ({"size": {"longest_edge": 1288}}, (1536, 1187), 1656),
-        ({"size": {"longest_edge": 1008}}, (29, 29), 1),
-        ({"size": {"longest_edge": 1000}}, (1540, 1700), 1152),
+        ({"size": {"longest_edge": 1008}}, (29, 29), 4),
+        ({"size": {"longest_edge": 1000}}, (1540, 1700), 1188),
     ],
 )
 @pytest.mark.parametrize("num_imgs", [1, 2])
