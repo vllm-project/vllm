@@ -1908,6 +1908,10 @@ class ModelConfig:
         return self._model_info.has_noops
 
     @property
+    def kv_cache_config_builder_cls(self) -> str | None:
+        return self._model_info.kv_cache_config_builder_cls
+
+    @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
 

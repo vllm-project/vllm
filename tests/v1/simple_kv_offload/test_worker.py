@@ -22,11 +22,11 @@ if not current_platform.is_cuda_alike():
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
 from vllm.config import CacheConfig
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,
-    resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
