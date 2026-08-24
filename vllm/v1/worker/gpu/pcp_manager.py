@@ -15,11 +15,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_sampled_and_draft_tokens,
-    expand_idx_mapping,
-    prepare_pos_seq_lens,
 )
-from vllm.v1.worker.gpu.states import RequestState
 
 logger = init_logger(__name__)
 
@@ -49,7 +45,6 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
-        req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -67,7 +62,6 @@ class PCPManager:
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
-        self._req_states = req_states
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
@@ -78,11 +72,6 @@ class PCPManager:
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
             if max_num_local_reqs is not None and max_num_tokens is not None
-            else None
-        )
-        self._local_req_idx = (
-            torch.arange(max_num_local_reqs, dtype=torch.int32, device=device)
-            if max_num_local_reqs is not None
             else None
         )
         self._local_block_tables: tuple[torch.Tensor, ...] | None
@@ -330,9 +319,7 @@ class PCPManager:
         return segments_by_rank, per_rank_num_tokens
 
     def partition_batch(self, input_batch: InputBatch) -> InputBatch:
-        assert self._req_states is not None
         assert self._input_buffers is not None
-        req_states = self._req_states
         input_buffers = self._input_buffers
 
         global_batch = input_batch
@@ -432,6 +419,14 @@ class PCPManager:
             local_gather_idx,
             out=input_buffers.input_ids[:num_local_tokens_padded],
         )
+        # Keep the GPU request-state cursor materialized by prepare_inputs().
+        # The CPU cursor can lag after speculative rejection.
+        torch.index_select(
+            global_batch.positions,
+            0,
+            local_gather_idx,
+            out=input_buffers.positions[:num_local_tokens_padded],
+        )
 
         local_query_start_loc_np = np.empty(
             input_buffers.max_num_reqs + 1, dtype=np.int32
@@ -446,17 +441,16 @@ class PCPManager:
         local_to_global_req_idx = async_copy_to_gpu(
             local_to_global_req_idx_np, device=self.device
         )
-        local_start_pos = async_copy_to_gpu(local_start_pos_np, device=self.device)
-
-        assert self._local_req_idx is not None
-        prepare_pos_seq_lens(
-            self._local_req_idx[:num_local_reqs],
-            local_query_start_loc,
-            local_start_pos,
-            input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
-        )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
+        if num_local_tokens > 0:
+            local_end_positions = torch.index_select(
+                input_buffers.positions,
+                0,
+                local_query_start_loc[1:] - 1,
+            )
+            seq_lens.copy_(local_end_positions + 1)
+        else:
+            seq_lens.zero_()
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
@@ -468,65 +462,20 @@ class PCPManager:
                 is_padding, 0
             )
 
-        global_num_draft_tokens_per_req = global_batch.num_draft_tokens_per_req
-        if global_num_draft_tokens_per_req is None:
-            local_num_draft_tokens_per_req = None
-        else:
-            local_num_draft_tokens_per_req = global_num_draft_tokens_per_req[
-                local_to_global_batch_req_idx_np
-            ]
-            if num_local_tokens == 0:
-                local_num_draft_tokens_per_req.fill(0)
-
-        local_num_draft_tokens = (
-            int(local_num_draft_tokens_per_req.sum())
-            if local_num_draft_tokens_per_req is not None
-            else 0
-        )
-        total_num_logits = (
-            num_local_reqs + local_num_draft_tokens if num_local_tokens > 0 else 0
-        )
-        if total_num_logits == num_local_reqs:
+        total_num_logits = num_local_reqs if num_local_tokens > 0 else 0
+        if total_num_logits > 0:
             cu_num_logits_np = np.arange(num_local_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
-            )
-            expanded_idx_mapping = local_to_global_req_idx
-            expanded_local_pos = torch.zeros(
-                num_local_reqs, dtype=torch.int32, device=self.device
-            )
-        elif total_num_logits > 0:
-            assert local_num_draft_tokens_per_req is not None
-            local_num_logits_per_req = local_num_draft_tokens_per_req + 1
-            cu_num_logits_np = np.empty(num_local_reqs + 1, dtype=np.int32)
-            cu_num_logits_np[0] = 0
-            np.cumsum(local_num_logits_per_req, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
-            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                local_to_global_req_idx,
-                total_num_logits,
-                cu_num_logits,
-                int(local_num_logits_per_req.max()),
             )
         else:
             cu_num_logits_np = np.zeros(num_local_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.zeros(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
-            expanded_idx_mapping = local_to_global_req_idx[:0]
-            expanded_local_pos = torch.empty(0, dtype=torch.int32, device=self.device)
-        logits_indices = combine_sampled_and_draft_tokens(
-            input_buffers.input_ids,
-            local_to_global_req_idx,
-            req_states.last_sampled_tokens,
-            local_query_start_loc,
-            seq_lens,
-            req_states.prefill_len.gpu,
-            req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            1,
-        )
+        # Local logits are never sampled. The complete hidden-state tensor is
+        # restored first and sampled with the untouched global InputBatch.
+        logits_indices = local_query_start_loc[1:] - 1
 
         local_prefill_len_np = global_batch.prefill_len_np[
             local_to_global_batch_req_idx_np
@@ -559,13 +508,15 @@ class PCPManager:
             num_reqs_after_padding=num_local_reqs,
             idx_mapping=local_to_global_req_idx,
             idx_mapping_np=local_to_global_req_idx_np,
-            expanded_idx_mapping=expanded_idx_mapping,
-            expanded_local_pos=expanded_local_pos,
+            expanded_idx_mapping=local_to_global_req_idx,
+            expanded_local_pos=torch.zeros(
+                num_local_reqs, dtype=torch.int32, device=self.device
+            ),
             num_scheduled_tokens=local_num_scheduled_tokens,
             num_tokens=num_local_tokens,
             num_tokens_after_padding=num_local_tokens_padded,
-            num_draft_tokens=local_num_draft_tokens,
-            num_draft_tokens_per_req=local_num_draft_tokens_per_req,
+            num_draft_tokens=0,
+            num_draft_tokens_per_req=None,
             query_start_loc=local_query_start_loc,
             query_start_loc_np=local_query_start_loc_np[: num_local_reqs + 1],
             seq_lens=seq_lens,
@@ -659,9 +610,10 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
-    @property
-    def local_batch(self) -> InputBatch:
-        assert self._local_batch is not None
+    def local_batch_for(self, global_batch: InputBatch) -> InputBatch | None:
+        """Return this step's local view, never a stale view from an older step."""
+        if global_batch is not self._global_batch:
+            return None
         return self._local_batch
 
     def localize_tensor(
@@ -678,6 +630,19 @@ class PCPManager:
             out=out[:num_local_tokens],
         )
         return out[:num_local_tokens]
+
+    def localize_input_ids_for_draft(
+        self,
+        global_input_ids: torch.Tensor,
+        local_batch: InputBatch,
+    ) -> torch.Tensor:
+        """Reuse the consumed target-input buffer for rank-local draft IDs.
+
+        The target forward has finished, no supported post-forward path reads
+        these local IDs, and partition_batch rematerializes them next step.
+        """
+        assert local_batch is self._local_batch
+        return self.localize_tensor(global_input_ids, local_batch.input_ids)
 
     def restore_for_sampling(
         self,
@@ -721,7 +686,6 @@ def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
-    req_states: RequestState,
     block_tables: BlockTables,
     cls: type[PCPManager] = PCPManager,
 ) -> PCPManager | None:
@@ -740,7 +704,6 @@ def maybe_build_pcp_manager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
-        req_states=req_states,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         block_tables=block_tables,

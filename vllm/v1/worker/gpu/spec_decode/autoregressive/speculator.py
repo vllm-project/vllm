@@ -43,7 +43,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.inputs_embeds: torch.Tensor | None = None
         self.pcp_manager: PCPManager | None = None
-        self.pcp_input_ids: torch.Tensor | None = None
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
@@ -51,13 +50,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def set_pcp_manager(self, manager: "PCPManager") -> None:
         self.pcp_manager = manager
-        # DualChunkSwap can create two rank-local segments per global request.
-        self.input_buffers = InputBuffers(
-            max_num_reqs=2 * self.max_num_reqs,
-            max_num_tokens=self.max_num_tokens,
-            device=self.device,
-        )
-        self.pcp_input_ids = torch.empty_like(self.input_buffers.input_ids)
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -260,10 +252,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         else:
             hidden_states = last_hidden_states
-        if self.pcp_manager is None:
+        pcp_local_batch = (
+            self.pcp_manager.local_batch_for(input_batch)
+            if self.pcp_manager is not None
+            else None
+        )
+        if pcp_local_batch is None:
             self.hidden_states[:num_tokens_padded].copy_(hidden_states)
         else:
-            self.pcp_manager.localize_tensor(hidden_states, self.hidden_states)
+            # The target sampler needs globally restored hidden states, but the
+            # sharded drafter consumes the target's rank-local rows directly.
+            local_num_tokens = pcp_local_batch.num_tokens_after_padding
+            assert hidden_states.shape[0] == local_num_tokens
+            self.hidden_states[:local_num_tokens].copy_(hidden_states)
 
         self._copy_request_inputs(
             num_reqs,
@@ -286,23 +287,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         prefill_input_batch = input_batch
-        if self.pcp_manager is not None:
-            local_batch = self.pcp_manager.local_batch
-            assert self.pcp_input_ids is not None
-            local_input_ids = self.pcp_manager.localize_tensor(
+        if pcp_local_batch is not None:
+            assert self.pcp_manager is not None
+            self.pcp_manager.localize_input_ids_for_draft(
                 self.input_buffers.input_ids[:num_tokens_padded],
-                self.pcp_input_ids,
+                pcp_local_batch,
             )
-            local_num_tokens = local_batch.num_tokens_after_padding
-            self.input_buffers.input_ids[:local_num_tokens].copy_(local_input_ids)
-            self.input_buffers.positions[:local_num_tokens].copy_(local_batch.positions)
-            self.input_buffers.query_start_loc[: local_batch.num_reqs + 1].copy_(
-                local_batch.query_start_loc
-            )
-            self.input_buffers.seq_lens[: local_batch.num_reqs].copy_(
-                local_batch.seq_lens
-            )
-            prefill_input_batch = local_batch
+            prefill_input_batch = pcp_local_batch
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
@@ -343,9 +334,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
-                global_positions=(
-                    input_batch.positions if self.pcp_manager is not None else None
-                ),
+                pcp_local_batch=pcp_local_batch,
             )
         self.on_prefill_end(num_reqs)
 
@@ -404,7 +393,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_padding: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        input_ids = self.input_buffers.input_ids if input_ids is None else input_ids
+        positions = self.input_buffers.positions if positions is None else positions
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -425,15 +418,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     is_mm_embed.shape[0] if is_mm_embed is not None else num_tokens
                 )
                 self.inputs_embeds[:num_input_tokens] = self.model.embed_input_ids(
-                    self.input_buffers.input_ids[:num_input_tokens],
+                    input_ids[:num_input_tokens],
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
                 )
                 inputs_embeds = self.inputs_embeds[:num_tokens]
 
             model_inputs = dict(
-                input_ids=self.input_buffers.input_ids[:num_tokens],
-                positions=self.input_buffers.positions[:num_tokens],
+                input_ids=input_ids[:num_tokens],
+                positions=positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
@@ -465,11 +458,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        global_positions: torch.Tensor | None = None,
+        pcp_local_batch: InputBatch | None = None,
     ) -> None:
         is_padding = (
-            self.pcp_manager.local_batch.is_padding[:num_tokens]
-            if self.pcp_manager is not None
+            pcp_local_batch.is_padding[:num_tokens]
+            if pcp_local_batch is not None
             else None
         )
         last_hidden_states, hidden_states = self._run_model(
@@ -480,8 +473,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
             is_padding=is_padding,
+            input_ids=(
+                pcp_local_batch.input_ids if pcp_local_batch is not None else None
+            ),
+            positions=(
+                pcp_local_batch.positions if pcp_local_batch is not None else None
+            ),
         )
-        if self.pcp_manager is not None:
+        if pcp_local_batch is not None:
+            assert self.pcp_manager is not None
             assert cudagraph_runtime_mode == CUDAGraphMode.NONE
             local_last_hidden_states = last_hidden_states
             local_hidden_states = hidden_states
@@ -495,11 +495,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
 
         last_token_indices = self.last_token_indices[:num_reqs]
-        positions = (
-            self.input_buffers.positions
-            if global_positions is None
-            else global_positions
-        )[last_token_indices]
+        positions = self.input_buffers.positions[last_token_indices]
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
             sample_hidden_states,

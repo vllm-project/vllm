@@ -594,7 +594,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.device,
             self.supports_mm_inputs,
-            self.req_states,
             self.block_tables,
             cls=self.pcp_manager_cls,
         )
@@ -770,14 +769,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             spec_input_batch = input_batch
-            if self.pcp_manager is not None:
-                spec_hidden_states, spec_input_batch = (
-                    pcp.maybe_restore_pcp_for_sampling(
-                        self.pcp_manager,
-                        spec_hidden_states,
-                        input_batch,
-                    )
-                )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
                     input_batch=spec_input_batch,
@@ -1818,7 +1809,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
-        local_hidden_states = hidden_states
+        # Keep the target's rank-local representation for the sharded drafter.
+        # Sampling still restores the ordinary target hidden states globally.
         spec_hidden_states = hidden_states
         if self.speculator is not None and hasattr(
             self.model, "get_mtp_target_hidden_states"
@@ -1828,12 +1820,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
-        if spec_hidden_states is local_hidden_states:
-            spec_hidden_states = hidden_states
-        elif self.pcp_manager is not None:
-            spec_hidden_states = self.pcp_manager.restore_hidden_states(
-                spec_hidden_states
-            )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output

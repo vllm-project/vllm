@@ -284,19 +284,16 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     assert actual_feedback_hidden is hidden
 
 
-def test_pcp_input_buffers_allow_two_segments_per_request():
+def test_set_pcp_manager_keeps_speculator_owned_buffers():
     speculator = object.__new__(_TestSpeculator)
-    speculator.max_num_reqs = 6
-    speculator.max_num_tokens = 32
-    speculator.device = torch.device("cpu")
+    input_buffers = object()
+    speculator.input_buffers = input_buffers
 
     manager = Mock()
     speculator.set_pcp_manager(manager)
 
     assert speculator.pcp_manager is manager
-    assert speculator.input_buffers.max_num_reqs == 12
-    assert speculator.input_buffers.query_start_loc.shape == (13,)
-    assert speculator.input_buffers.seq_lens.shape == (12,)
+    assert speculator.input_buffers is input_buffers
 
 
 def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
@@ -307,7 +304,11 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     global_feedback = torch.tensor([[3.0], [7.0], [4.0], [8.0]])
     manager = Mock()
     padding = torch.tensor([False, True])
-    manager.local_batch = SimpleNamespace(is_padding=padding)
+    local_batch = SimpleNamespace(
+        input_ids=torch.arange(2),
+        positions=torch.arange(2),
+        is_padding=padding,
+    )
     manager.restore_hidden_states.side_effect = [global_logits, global_feedback]
     speculator.pcp_manager = manager
     speculator._run_model = Mock(return_value=(local_logits, local_feedback))
@@ -320,7 +321,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     speculator.draft_tokens = torch.zeros((2, 1), dtype=torch.int64)
     speculator.hidden_states = torch.zeros((4, 1))
     speculator.input_buffers = SimpleNamespace(
-        positions=torch.zeros(4, dtype=torch.int64)
+        positions=torch.arange(4, dtype=torch.int64)
     )
     speculator.sample_draft = Mock(return_value=torch.tensor([11, 22]))
     speculator._prefill(
@@ -331,7 +332,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         num_tokens_across_dp=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
         mm_inputs=None,
-        global_positions=torch.tensor([0, 1, 2, 3]),
+        pcp_local_batch=local_batch,
     )
 
     assert torch.equal(speculator.draft_tokens[:, 0], torch.tensor([11, 22]))
@@ -341,6 +342,8 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         speculator.sample_draft.call_args.args[0], torch.tensor([[5.0], [6.0]])
     )
     assert torch.equal(speculator._run_model.call_args.kwargs["is_padding"], padding)
+    assert speculator._run_model.call_args.kwargs["input_ids"] is local_batch.input_ids
+    assert speculator._run_model.call_args.kwargs["positions"] is local_batch.positions
 
 
 @pytest.mark.parametrize(
