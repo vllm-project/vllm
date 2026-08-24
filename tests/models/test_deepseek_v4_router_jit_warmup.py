@@ -23,6 +23,7 @@ if has_cutedsl():
         BF16x3SplitKReduceKernel,
     )
 
+
 @pytest.mark.parametrize(
     ("split_k", "expected_bn", "expected_bm", "expected_bs"),
     [(1, 16, 32, 1), (2, 16, 32, 2), (8, 1, 256, 8), (64, 1, 32, 64)],
