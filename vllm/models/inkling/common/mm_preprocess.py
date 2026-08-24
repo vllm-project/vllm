@@ -234,8 +234,9 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
             data["num_audio_tokens"] = torch.tensor(num_audio_tokens, dtype=torch.int64)
 
         processed_data = BatchFeature(data=data, tensor_type=None)
-        processed_data.update(passthrough_data)
-        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _tokenize_with_placeholders(
         self,

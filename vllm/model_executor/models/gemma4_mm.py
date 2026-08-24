@@ -573,9 +573,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         )
 
         if not hf_data:
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
@@ -757,9 +755,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             processed_data["input_features_mask"] = unpadded_masks
 
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
-
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,

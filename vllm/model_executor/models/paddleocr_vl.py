@@ -247,36 +247,35 @@ class PaddleOCRVLMultiModalProcessor(
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _apply_hf_processor_main(
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
+        hf_data: Mapping[str, object],
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
-
-        if not hf_data:
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
-
         final_mm_kwargs = dict(hf_kwargs or {})
         final_mm_kwargs.setdefault("images_kwargs", {})
         # vLLM use PIL.Image, always set channel_last
         final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
-        processed_data = self.info.ctx.call_hf_processor(
+        return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**final_mm_kwargs),
             hf_data,
             hf_kwargs,
         )
+
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
         num_patches_per_image = processed_data["image_grid_thw"].prod(-1)
         processed_data["pixel_values"] = processed_data["pixel_values"].split(
             num_patches_per_image.tolist()
         )
-        processed_data.update(passthrough_data)
-
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,

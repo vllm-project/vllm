@@ -2108,10 +2108,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             )
 
         processed_data.update(all_video_outputs)
-        processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,

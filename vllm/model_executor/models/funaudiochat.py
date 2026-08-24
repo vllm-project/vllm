@@ -623,9 +623,7 @@ class FunAudioChatMultiModalProcessor(
         )
 
         if not mm_data:
-            return self._postprocess_hf_mm_data(
-                mm_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
@@ -635,8 +633,9 @@ class FunAudioChatMultiModalProcessor(
         audios = mm_data.get("audio", [])
         if not audios:
             processed_data = BatchFeature({"input_ids": input_ids})
-            processed_data.update(passthrough_data)
-            return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
+            return self._finalize_hf_mm_data(
+                mm_data, hf_kwargs, passthrough_data, processed_data
+            )
         assert isinstance(audios, Sequence)
 
         feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
@@ -691,8 +690,9 @@ class FunAudioChatMultiModalProcessor(
         }
 
         processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
-        processed_data.update(passthrough_data)
-        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,

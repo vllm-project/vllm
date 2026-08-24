@@ -346,9 +346,7 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         )
 
         if not hf_data:
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
@@ -432,9 +430,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         processed_data.update(text_outputs)
         processed_data.update(image_outputs)
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
-
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,

@@ -32,6 +32,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoBackend,
@@ -309,19 +310,13 @@ class MiniMaxM3VLMultiModalProcessor(
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
-
-        if not hf_data:
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
 
         # With ``video_needs_metadata=True`` each video arrives as a
         # ``(frames, metadata)`` tuple. Split the frames back out and forward the
@@ -348,19 +343,23 @@ class MiniMaxM3VLMultiModalProcessor(
                 video_metadata.append(VideoMetadata(**meta))
             hf_data["videos"] = frames_only
 
-        # Override the video processor's default do_resize=False (set for a
-        # pre-resized pipeline) to True for vLLM's raw-frame inputs.
-        merged = dict(do_resize=True, **hf_kwargs)
-        data = hf_data
         if video_metadata is not None:
-            data["video_metadata"] = video_metadata
-        processed_data = self.info.ctx.call_hf_processor(
+            hf_data["video_metadata"] = video_metadata
+
+        return hf_inputs
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override the video processor's default for vLLM's raw-frame inputs.
+        merged = dict(do_resize=True, **hf_kwargs)
+        return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_kwargs),
-            data,
+            hf_data,
             merged,
         )
-        processed_data.update(passthrough_data)
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

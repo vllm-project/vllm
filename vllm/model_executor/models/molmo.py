@@ -1145,28 +1145,28 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             dict(tokens=tokens),
         )["input_ids"].tolist()
 
-    def _apply_hf_processor_main(
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
+        hf_data: Mapping[str, object],
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
-
-        if not hf_data:
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
-
         hf_processor = self.info.get_hf_processor(**hf_kwargs)
-
-        processed_data = self.info.ctx.call_hf_processor(
+        return self.info.ctx.call_hf_processor(
             hf_processor.process,
             hf_data,
             hf_kwargs,
         )
 
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = hf_processor.tokenizer
         image_patch_id = tokenizer.vocab[IMAGE_PATCH_TOKEN]
 
@@ -1198,9 +1198,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             processed_data["num_crops"] = num_crops
             processed_data["img_patch_id"] = image_patch_id
 
-        processed_data.update(passthrough_data)
-
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,

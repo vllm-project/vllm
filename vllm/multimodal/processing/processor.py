@@ -1222,6 +1222,34 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         return processed_data
 
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """Call the HF processor on the normalized multi-modal inputs."""
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_kwargs),
+            hf_data,
+            hf_kwargs,
+        )
+
+    def _finalize_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        passthrough_data: Mapping[str, object],
+        processed_data: BatchFeature | None = None,
+    ) -> BatchFeature:
+        """Merge passthrough fields and apply model-specific postprocessing."""
+        if processed_data is None:
+            from transformers.feature_extraction_utils import BatchFeature
+
+            processed_data = BatchFeature()
+
+        processed_data.update(passthrough_data)
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -1235,18 +1263,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         if hf_data:
-            processed_data = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_kwargs),
-                hf_data,
-                hf_kwargs,
-            )
-            processed_data.update(passthrough_data)
+            processed_data = self._call_hf_processor(hf_data, hf_kwargs)
         else:
-            from transformers.feature_extraction_utils import BatchFeature
+            processed_data = None
 
-            processed_data = BatchFeature(passthrough_data)
-
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         """

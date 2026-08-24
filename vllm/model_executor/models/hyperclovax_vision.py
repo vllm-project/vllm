@@ -5,7 +5,7 @@ import ast
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from itertools import accumulate
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import numpy as np
 import torch
@@ -32,6 +32,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -190,40 +191,53 @@ class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo
 
 
 class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+        if not hf_data:
+            return hf_inputs
 
-        if not mm_data:
-            return self._postprocess_hf_mm_data(
-                mm_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
-
-        for video_idx, video_arr in enumerate(mm_data.get("videos", [])):
+        videos = cast(list[np.ndarray] | None, hf_data.get("videos"))
+        for video_idx, video_arr in enumerate(videos or []):
             if video_arr.dtype != np.uint8:
-                mm_data["videos"][video_idx] = video_arr.astype(np.uint8)
+                assert videos is not None
+                videos[video_idx] = video_arr.astype(np.uint8)
 
-        images = mm_data.get("images")
-        videos = mm_data.get("videos")
+        images = hf_data.get("images")
+        hf_data["images"] = None if images is None else [images]
+        hf_data["videos"] = None if videos is None else [videos]
 
-        # batchify input as a single item
-        processed_data = self.info.ctx.call_hf_processor(
+        return hf_inputs
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        return self.info.ctx.call_hf_processor(
             hf_processor=self.info.get_hf_processor(**hf_kwargs),
-            data=dict(
-                images=None if images is None else [images],
-                videos=None if videos is None else [videos],
-            ),
+            data=hf_data,
         )
 
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         for k, v in processed_data.items():
             if isinstance(v, list) and len(v) > 0:
                 assert len(v) == 1
                 processed_data[k] = v[0]
+
+        image_batches = cast(list | None, hf_data.get("images"))
+        video_batches = cast(list | None, hf_data.get("videos"))
+        images = image_batches[0] if image_batches else None
+        videos = video_batches[0] if video_batches else None
 
         if images:
             processed_data["image_sizes_images"] = torch.tensor(
@@ -253,9 +267,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
                 for i in range(len(videos))
             ]
 
-        processed_data.update(passthrough_data)
-
-        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,

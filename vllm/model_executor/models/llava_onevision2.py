@@ -1561,9 +1561,7 @@ class LlavaOnevision2MultiModalProcessor(
         )
 
         if not hf_data:
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
@@ -1653,8 +1651,9 @@ class LlavaOnevision2MultiModalProcessor(
                     data, codec_video_paths, hf_processor
                 )
             )
-            processed_data.update(passthrough_data)
-            return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            )
 
         # ---- Frame backend (registered LlavaOnevision2VideoBackend) ------
         # Every non-codec video reaches here as a ``(frames_ndarray, metadata)``
@@ -1802,8 +1801,9 @@ class LlavaOnevision2MultiModalProcessor(
             )
 
             processed_data = BatchFeature(data)
-            processed_data.update(passthrough_data)
-            return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            )
 
         # ---- Image-only / text-only call --------------------------------
         # No videos present: delegate to ``ctx.call_hf_processor``, which
@@ -1814,8 +1814,9 @@ class LlavaOnevision2MultiModalProcessor(
             dict(text=prompt_text, **hf_data),
             hf_kwargs,
         )
-        processed_data.update(passthrough_data)
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _rename_codec_outputs_to_video(
         self,

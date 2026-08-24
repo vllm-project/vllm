@@ -824,9 +824,10 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     "so it can be fixed, and install `transformers<5.15.0` in the "
                     "meantime to locate placeholders in the expanded prompt instead."
                 )
-            hf_inputs.update(passthrough_data)
             hf_inputs.pop("input_ids", None)
-            return self._postprocess_hf_mm_data(hf_data, hf_kwargs, hf_inputs)
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, hf_inputs
+            )
 
         tokenizer = self.info.get_tokenizer()
         replacements = defaultdict[str, list[list[int]]](list)
@@ -853,10 +854,11 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
                 hf_inputs["num_audio_tokens"] = torch.tensor(counts)
 
-        hf_inputs.update(passthrough_data)
         hf_inputs.pop("input_ids")
 
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, hf_inputs)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, hf_inputs
+        )
 
 
 # From this version on, a processor reporting no offsets is an error rather than a

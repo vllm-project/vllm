@@ -476,9 +476,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         )
 
         if not hf_data or not hf_data.get("images", []):
-            return self._postprocess_hf_mm_data(
-                hf_data, hf_kwargs, BatchFeature(passthrough_data)
-            )
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
@@ -538,8 +536,9 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
             pixel_sizes=torch.tensor(pixel_sizes),
         )
         processed_data = BatchFeature(combined_outputs, tensor_type="pt")
-        processed_data.update(passthrough_data)
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_prompt_updates(
         self,
