@@ -841,7 +841,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         replacements = defaultdict[str, list[list[int]]](list)
         for entry in offsets[0]:
             replacements[entry["type"]].append(
-                tokenizer.encode(entry["replacement"], add_special_tokens=False)
+                cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
         for modality, seqs in replacements.items():
