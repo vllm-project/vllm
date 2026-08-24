@@ -3,7 +3,6 @@
 """Validate NVIDIA DSv4 attention JIT dispatch."""
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 import torch
@@ -36,6 +35,7 @@ from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
 )
 
 requires_cutedsl = pytest.mark.skipif(False, reason="CuTeDSL is not installed")
+
 
 @requires_cutedsl
 @pytest.mark.parametrize("has_gather_lens", [False, True])
