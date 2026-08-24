@@ -63,6 +63,7 @@ _E8M0_BACKEND_SUPPORT = [
     (BlockWiseTorchFP8ScaledMMLinearKernel, "cuda", False),
     (AiterFp8BlockScaledMMKernel, "rocm", True),
     (TritonFp8BlockScaledMMKernel, "rocm", True),
+    (BlockWiseTorchFP8ScaledMMLinearKernel, "rocm", False),
     (CPUFp8BlockScaledMMKernel, "cpu", False),
     (XPUFp8BlockScaledMMKernel, "xpu", False),
     (TritonFp8BlockScaledMMKernel, "xpu", True),
