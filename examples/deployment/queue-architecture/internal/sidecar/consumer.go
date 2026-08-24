@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -103,11 +104,21 @@ func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, 
 // Order matters for crash protection: write the result BEFORE acking -- so a crash
 // between those two steps causes at most wasted redundant work, never a lost answer.
 //
+// Before claiming each message, this gates on vLLM's real-time load (see
+// waitForCapacity in health.go): if vLLM already reports being at or above
+// maxConcurrent (running+waiting requests), the loop deliberately holds off
+// on reading the next message rather than claiming work it can't make
+// timely progress on. This makes the sidecar's concurrency ceiling
+// self-adjusting to vLLM's actual measured capacity instead of a blind
+// one-at-a-time assumption, and leaves un-claimed backlog visible to KEDA's
+// stream-lag scaling metric instead of hidden in a claimed-but-blocked
+// consumer.
+//
 // Error handling:
-// - Infrastructure errors (queue.Read failures) are fatal and return from the loop.
-// - Per-job errors (idempotency check, forwarding, marshaling, result write, ack) are
-//   logged with the job ID and the loop continues to process subsequent jobs. Failed
-//   jobs remain un-acked and stay in the Pending Entries List for later reclaim/retry.
+//   - Infrastructure errors (queue.Read failures) are fatal and return from the loop.
+//   - Per-job errors (idempotency check, forwarding, marshaling, result write, ack) are
+//     logged with the job ID and the loop continues to process subsequent jobs. Failed
+//     jobs remain un-acked and stay in the Pending Entries List for later reclaim/retry.
 //
 // Parameters:
 //   - ctx: context for cancellation
@@ -117,12 +128,20 @@ func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, 
 //   - consumerName: consumer name within the group
 //   - target: base URL of the vLLM instance (e.g., "http://localhost:8000")
 //   - resultExpiry: TTL for result keys in Redis
-func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry time.Duration) error {
+//   - httpClient: HTTP client used for the lightweight /health and /metrics probes
+//   - maxConcurrent: max vLLM running+waiting requests before pausing claims (<=0 disables the gate)
+//   - capacityPollInterval: how often to re-check vLLM's load while waiting for capacity
+func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Gate on vLLM's real-time load before claiming the next message.
+		if err := waitForCapacity(ctx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+			return err
 		}
 
 		// Read a job from the queue
@@ -148,6 +167,10 @@ func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName,
 // written the result before dying, the reclaiming sidecar will see the result exists
 // and just ack the job without re-executing it.
 //
+// Each claimed job is gated through the same waitForCapacity check as ConsumerLoop
+// (see health.go) before being forwarded -- reclaim traffic must respect vLLM's
+// real-time load just as much as fresh reads do.
+//
 // Parameters:
 //   - ctx: context for cancellation
 //   - rdb: Redis client
@@ -158,7 +181,10 @@ func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName,
 //   - resultExpiry: TTL for result keys in Redis
 //   - idleThreshold: minimum idle time before a job is eligible for reclaim
 //   - reclaimInterval: how often to run the reclaim check
-func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, idleThreshold, reclaimInterval time.Duration) error {
+//   - httpClient: HTTP client used for the lightweight /health and /metrics probes
+//   - maxConcurrent: max vLLM running+waiting requests before pausing claims (<=0 disables the gate)
+//   - capacityPollInterval: how often to re-check vLLM's load while waiting for capacity
+func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, idleThreshold, reclaimInterval time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
 	ticker := time.NewTicker(reclaimInterval)
 	defer ticker.Stop()
 
@@ -175,8 +201,11 @@ func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, 
 				continue
 			}
 
-			// Process each claimed job
+			// Process each claimed job, gating on vLLM's real-time capacity first
 			for _, claimedJob := range claimedJobs {
+				if err := waitForCapacity(ctx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+					return err
+				}
 				if err := processJob(ctx, rdb, claimedJob.Job, claimedJob.EntryID, streamName, groupName, target, resultExpiry); err != nil {
 					return err
 				}

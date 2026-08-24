@@ -117,10 +117,12 @@ keda:
     # -- Guaranteed replica count during the start-end window
     desiredReplicas: "1"
 
-  # -- Optional redis-streams trigger for scaling based on pending entries
-  # in a Redis stream consumer group. Useful for queue-based workloads where
-  # requests are enqueued in Redis and consumed by the vLLM deployment.
-  # Works with any Redis-protocol-compatible backend (Redis, Valkey, etc.).
+  # -- Optional redis-streams trigger for scaling based on true consumer-group
+  # lag (how far behind the group is from the tip of the stream), NOT raw
+  # pending-entries-count. Useful for queue-based workloads where requests
+  # are enqueued in Redis and consumed by the vLLM deployment.
+  # Works with any Redis-protocol-compatible backend (Redis, Valkey, etc.);
+  # lagCount requires Redis/Valkey 7+ (uses XINFO GROUPS lag).
   # When enabled, this trigger is added alongside the prometheus trigger
   # (if enabled) -- KEDA takes the max desired replica count across all
   # triggers for scale-up decisions.
@@ -133,9 +135,17 @@ keda:
     stream: ""
     # -- Consumer group name for the stream
     consumerGroup: ""
-    # -- Target threshold for pending entries count (unacknowledged messages
-    # in the consumer group). KEDA scales up when pending count exceeds this.
-    pendingEntriesCount: "5"
+    # -- Target threshold for consumer-group lag (messages in the stream not
+    # yet delivered to any consumer in this group). KEDA scales up when lag
+    # exceeds this. This is the correct backlog signal for a consumer that
+    # deliberately processes only a small number of messages concurrently --
+    # unlike pendingEntriesCount (PEL), lag reflects true undelivered
+    # backlog regardless of how conservatively the consumer claims work.
+    lagCount: "5"
+    # -- Minimum lag before the trigger is considered "active" at all (KEDA
+    # won't scale off zero-replica floor for lag below this). Kept low so a
+    # genuine backlog is still detected promptly.
+    activationLagCount: "1"
 
 # -- Additional annotations applied to the pod template. Commonly used for
 # Prometheus annotation-based scrape discovery, e.g.:

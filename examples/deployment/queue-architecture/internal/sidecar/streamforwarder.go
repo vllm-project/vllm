@@ -83,7 +83,7 @@ func ForwardStreaming(ctx context.Context, rdb *redis.Client, job queue.Job, tar
 
 		// Parse SSE framing: strip "data: " or "data:" prefix
 		payload := string(line)
-		
+
 		// Skip non-data SSE lines (event, id, retry, comments starting with :)
 		if len(payload) > 0 && payload[0] == ':' {
 			continue
@@ -97,7 +97,7 @@ func ForwardStreaming(ctx context.Context, rdb *redis.Client, job queue.Job, tar
 		if len(payload) >= 6 && payload[:6] == "retry:" {
 			continue
 		}
-		
+
 		// Strip "data: " or "data:" prefix
 		if len(payload) >= 6 && payload[:6] == "data: " {
 			payload = payload[6:]
@@ -107,10 +107,10 @@ func ForwardStreaming(ctx context.Context, rdb *redis.Client, job queue.Job, tar
 			// Not a data line, skip it
 			continue
 		}
-		
+
 		// Trim any leading whitespace after the prefix
 		payload = string(bytes.TrimLeft([]byte(payload), " \t"))
-		
+
 		// Handle the [DONE] sentinel: translate to __done JSON
 		if payload == "[DONE]" {
 			doneMessage := map[string]bool{"__done": true}
@@ -123,14 +123,14 @@ func ForwardStreaming(ctx context.Context, rdb *redis.Client, job queue.Job, tar
 			}
 			continue
 		}
-		
+
 		// Validate that the payload is valid JSON before publishing
 		var jsonPayload interface{}
 		if err := json.Unmarshal([]byte(payload), &jsonPayload); err != nil {
 			// Skip lines that aren't valid JSON
 			continue
 		}
-		
+
 		// Publish the bare JSON chunk to Redis
 		if err := rdb.Publish(ctx, channel, payload).Err(); err != nil {
 			return fmt.Errorf("failed to publish chunk: %w", err)

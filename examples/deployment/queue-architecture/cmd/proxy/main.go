@@ -39,9 +39,18 @@ func main() {
 		maxBodyBytes = parsed
 	}
 
-	// Read REQUEST_TIMEOUT with default of 30 seconds
+	// Read REQUEST_TIMEOUT with default of 1 hour.
+	//
+	// This is deliberately long, not a typical HTTP-request timeout: in a
+	// queue-based architecture, a client's request can legitimately sit
+	// behind several other slow (e.g. large-context) jobs before the
+	// sidecar even starts working on it. A short timeout (previously 30s)
+	// causes the client to see a false failure -- and the backend keeps
+	// processing and writes a result nobody is listening for anymore --
+	// even though the job itself was never actually lost. Real AI/agentic
+	// workloads can legitimately take minutes; give them the room.
 	requestTimeoutStr := os.Getenv("REQUEST_TIMEOUT")
-	requestTimeout := 30 * time.Second
+	requestTimeout := 1 * time.Hour
 	if requestTimeoutStr != "" {
 		parsed, err := time.ParseDuration(requestTimeoutStr)
 		if err != nil {
@@ -50,9 +59,10 @@ func main() {
 		requestTimeout = parsed
 	}
 
-	// Read STREAM_TIMEOUT with default of 5 minutes
+	// Read STREAM_TIMEOUT with default of 1 hour (see REQUEST_TIMEOUT above
+	// for why this is intentionally long rather than a short HTTP default).
 	streamTimeoutStr := os.Getenv("STREAM_TIMEOUT")
-	streamTimeout := 5 * time.Minute
+	streamTimeout := 1 * time.Hour
 	if streamTimeoutStr != "" {
 		parsed, err := time.ParseDuration(streamTimeoutStr)
 		if err != nil {

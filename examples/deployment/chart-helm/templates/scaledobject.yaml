@@ -58,7 +58,20 @@ spec:
         address: {{ required "Value 'keda.redisStreams.address' must be defined when keda.redisStreams.enabled=true !" .Values.keda.redisStreams.address | quote }}
         stream: {{ required "Value 'keda.redisStreams.stream' must be defined when keda.redisStreams.enabled=true !" .Values.keda.redisStreams.stream | quote }}
         consumerGroup: {{ required "Value 'keda.redisStreams.consumerGroup' must be defined when keda.redisStreams.enabled=true !" .Values.keda.redisStreams.consumerGroup | quote }}
-        pendingEntriesCount: {{ .Values.keda.redisStreams.pendingEntriesCount | quote }}
+        # lagCount (KEDA's true consumer-group-lag metric, via Redis 7+
+        # XINFO GROUPS) -- NOT pendingEntriesCount. pendingEntriesCount only
+        # counts messages already delivered-to-and-unacked-by a consumer
+        # (the PEL); a sidecar that deliberately holds only 1-2 in-flight
+        # messages at a time will never show meaningful PEL growth no
+        # matter how deep the real undelivered backlog gets, so KEDA would
+        # never see pressure to scale. lagCount instead reflects "how far
+        # behind is this consumer group from the tip of the stream" --
+        # i.e. the real backlog, regardless of how conservatively the
+        # sidecar chooses to consume it. Confirmed via KEDA's own scaler
+        # source (redis_streams_scaler.go): setting lagCount takes
+        # precedence over pendingEntriesCount for the same trigger.
+        lagCount: {{ .Values.keda.redisStreams.lagCount | quote }}
+        activationLagCount: {{ .Values.keda.redisStreams.activationLagCount | quote }}
     {{- end }}
     - type: prometheus
       metadata:

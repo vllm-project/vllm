@@ -19,51 +19,51 @@ func HandleStreaming(rdb *redis.Client, streamName string, timeout time.Duration
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-	// Generate a unique job ID
-	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
+		// Generate a unique job ID
+		jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
 
-	// Read request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
+		// Read request body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
 
-	// Build the Job with Stream=true
-	job := queue.Job{
-		JobID:   jobID,
-		Method:  r.Method,
-		Path:    r.RequestURI,
-		Headers: headerMapFromRequest(r),
-		Body:    body,
-		Stream:  true,
-	}
+		// Build the Job with Stream=true
+		job := queue.Job{
+			JobID:   jobID,
+			Method:  r.Method,
+			Path:    r.RequestURI,
+			Headers: headerMapFromRequest(r),
+			Body:    body,
+			Stream:  true,
+		}
 
-	// Subscribe to the job's Pub/Sub channel BEFORE enqueueing
-	channel := fmt.Sprintf("stream:%s", jobID)
-	subscription := rdb.Subscribe(ctx, channel)
-	defer subscription.Close()
+		// Subscribe to the job's Pub/Sub channel BEFORE enqueueing
+		channel := fmt.Sprintf("stream:%s", jobID)
+		subscription := rdb.Subscribe(ctx, channel)
+		defer subscription.Close()
 
-	// Receive confirmation that the subscription is established
-	// (go-redis sends SUBSCRIBE asynchronously; Receive blocks until confirmed)
-	_, err = subscription.Receive(ctx)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to subscribe: %v", err), http.StatusInternalServerError)
-		return
-	}
+		// Receive confirmation that the subscription is established
+		// (go-redis sends SUBSCRIBE asynchronously; Receive blocks until confirmed)
+		_, err = subscription.Receive(ctx)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to subscribe: %v", err), http.StatusInternalServerError)
+			return
+		}
 
-	// Set up SSE headers
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+		// Set up SSE headers
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
 
-	// Enqueue the job AFTER subscription is confirmed
-	_, err = queue.Enqueue(ctx, rdb, streamName, job)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to enqueue job: %v", err), http.StatusInternalServerError)
-		return
-	}
+		// Enqueue the job AFTER subscription is confirmed
+		_, err = queue.Enqueue(ctx, rdb, streamName, job)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to enqueue job: %v", err), http.StatusInternalServerError)
+			return
+		}
 
 		// Create a timeout context for the subscription
 		timeoutCtx, cancel := context.WithTimeout(ctx, timeout)

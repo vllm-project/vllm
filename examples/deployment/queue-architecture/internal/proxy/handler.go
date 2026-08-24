@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/oklog/ulid/v2"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
 )
@@ -98,11 +98,11 @@ func HandleNonStreaming(rdb *redis.Client, streamName string, timeout time.Durat
 		// Write status code
 		w.WriteHeader(result.Status)
 
-	// Write response body
-	_, err = w.Write([]byte(result.Body))
-	if err != nil {
-		// Log error but don't write to response (already started)
-		fmt.Printf("failed to write response body: %v\n", err)
-	}
+		// Write response body
+		_, err = w.Write([]byte(result.Body))
+		if err != nil {
+			// Log error but don't write to response (already started)
+			fmt.Printf("failed to write response body: %v\n", err)
+		}
 	}
 }
