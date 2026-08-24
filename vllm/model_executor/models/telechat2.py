@@ -46,8 +46,6 @@ class TeleChat2Model(LlamaModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         hf_config = vllm_config.model_config.hf_config
 
-        # `attribute_map` is a ClassVar on `PretrainedConfig`; shadowing it on the
-        # instance is intentional here so LlamaModel can read TeleChat2's fields.
         vllm_config.model_config.hf_config.attribute_map = {  # type: ignore[misc]
             "num_hidden_layers": "n_layer",
             "num_attention_heads": "n_head",
