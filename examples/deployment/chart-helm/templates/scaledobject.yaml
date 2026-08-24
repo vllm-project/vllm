@@ -52,6 +52,14 @@ spec:
         end: {{ required "Value 'keda.cron.end' must be defined when keda.cron.enabled=true !" .Values.keda.cron.end | quote }}
         desiredReplicas: {{ .Values.keda.cron.desiredReplicas | quote }}
     {{- end }}
+    {{- if .Values.keda.redisStreams.enabled }}
+    - type: redis-streams
+      metadata:
+        address: {{ required "Value 'keda.redisStreams.address' must be defined when keda.redisStreams.enabled=true !" .Values.keda.redisStreams.address | quote }}
+        stream: {{ required "Value 'keda.redisStreams.stream' must be defined when keda.redisStreams.enabled=true !" .Values.keda.redisStreams.stream | quote }}
+        consumerGroup: {{ required "Value 'keda.redisStreams.consumerGroup' must be defined when keda.redisStreams.enabled=true !" .Values.keda.redisStreams.consumerGroup | quote }}
+        pendingEntriesCount: {{ .Values.keda.redisStreams.pendingEntriesCount | quote }}
+    {{- end }}
     - type: prometheus
       metadata:
         serverAddress: {{ required "Value 'keda.prometheusServerAddress' must be defined when keda.enabled=true !" .Values.keda.prometheusServerAddress | quote }}

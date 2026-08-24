@@ -1,0 +1,31 @@
+# Multi-stage build for mockvllm binary
+# Stage 1: Builder
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+# Copy dependency files and vendored dependencies
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+
+# Copy source code
+COPY . .
+
+# Build the mockvllm binary with CGO disabled for portability
+# Use -mod=vendor to build from vendored dependencies (no network access needed)
+# Output to /app/bin/mockvllm to avoid collision with source directory mockvllm/
+RUN CGO_ENABLED=0 go build -mod=vendor -o /app/bin/mockvllm ./mockvllm
+
+# Stage 2: Runtime
+FROM gcr.io/distroless/base-debian12:nonroot
+
+# Copy the compiled binary from builder
+COPY --from=builder /app/bin/mockvllm /app/mockvllm
+
+# Set the entrypoint
+ENTRYPOINT ["/app/mockvllm"]
+
+# Healthcheck: use the binary's --healthcheck flag to probe /health endpoint
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+  CMD ["/app/mockvllm", "--healthcheck"]
+

@@ -105,7 +105,7 @@ keda:
   # Requires keda.minReplicaCount: 0 to actually reach zero outside the
   # window -- plain HPA can't scale to zero, but KEDA can.
   cron:
-    # -- Enable the cron trigger
+     # -- Enable the cron trigger
     enabled: false
     # -- IANA timezone name (handles DST automatically, e.g. EST/EDT) --
     # NOT a fixed UTC offset.
@@ -116,6 +116,26 @@ keda:
     end: "0 22 * * *"
     # -- Guaranteed replica count during the start-end window
     desiredReplicas: "1"
+
+  # -- Optional redis-streams trigger for scaling based on pending entries
+  # in a Redis stream consumer group. Useful for queue-based workloads where
+  # requests are enqueued in Redis and consumed by the vLLM deployment.
+  # Works with any Redis-protocol-compatible backend (Redis, Valkey, etc.).
+  # When enabled, this trigger is added alongside the prometheus trigger
+  # (if enabled) -- KEDA takes the max desired replica count across all
+  # triggers for scale-up decisions.
+  redisStreams:
+    # -- Enable the redis-streams trigger
+    enabled: false
+    # -- Redis server address (host:port), e.g. "redis:6379" or "valkey:6379"
+    address: ""
+    # -- Redis stream name to monitor
+    stream: ""
+    # -- Consumer group name for the stream
+    consumerGroup: ""
+    # -- Target threshold for pending entries count (unacknowledged messages
+    # in the consumer group). KEDA scales up when pending count exceeds this.
+    pendingEntriesCount: "5"
 
 # -- Additional annotations applied to the pod template. Commonly used for
 # Prometheus annotation-based scrape discovery, e.g.:
@@ -220,6 +240,77 @@ extraInit:
 
 # -- Additional containers configuration
 extraContainers: []
+
+# -- Sidecar container configuration (optional, disabled by default)
+sidecar:
+  # -- Enable the sidecar container
+  enabled: false
+  # -- Image configuration for the sidecar
+  image:
+    # -- Image repository
+    repository: "ghcr.io/rvo-redplatform/vllm-sidecar"
+    # -- Image tag
+    tag: "latest"
+  # -- Environment variables for the sidecar
+  env:
+    # -- Redis address (required)
+    - name: REDIS_ADDR
+      value: "redis:6379"
+    # -- Redis stream name (required)
+    - name: STREAM_NAME
+      value: "vllm-requests"
+    # -- Redis consumer group (required)
+    - name: CONSUMER_GROUP
+      value: "vllm-consumers"
+    # -- Consumer name for this sidecar instance (required)
+    - name: CONSUMER_NAME
+      value: "consumer-1"
+    # -- vLLM target address (required)
+    - name: VLLM_TARGET
+      value: "http://localhost:8000"
+    # -- Idle threshold before reclaiming pending requests (optional, default 10m)
+    - name: IDLE_THRESHOLD
+      value: "10m"
+     # -- Interval for reclaiming idle requests (optional, default 30s)
+    - name: RECLAIM_INTERVAL
+      value: "30s"
+
+# -- Standalone proxy Deployment+Service configuration (optional, disabled by default)
+proxy:
+  # -- Enable the standalone proxy Deployment and Service
+  enabled: false
+  # -- Number of proxy replicas
+  replicaCount: 1
+  # -- Image configuration for the proxy
+  image:
+    # -- Image repository
+    repository: ""
+    # -- Image tag
+    tag: ""
+  # -- Environment variables for the proxy
+  env:
+    # -- Redis address (required)
+    REDIS_ADDR: "redis:6379"
+    # -- Redis stream name (required)
+    STREAM_NAME: "vllm-requests"
+    # -- Proxy listen port (required)
+    LISTEN_PORT: "8080"
+    # -- Maximum request body size in bytes (optional, default 10 MiB)
+    MAX_BODY_BYTES: ""
+    # -- Request timeout duration (optional, default 30s)
+    REQUEST_TIMEOUT: ""
+    # -- Stream timeout duration (optional, default 5m)
+    STREAM_TIMEOUT: ""
+  # -- Service port for the proxy
+  servicePort: 8080
+  # -- Pod annotations for the proxy
+  podAnnotations: {}
+  # -- Resource requests and limits for the proxy
+  resources: {}
+  # -- Node selector for the proxy pod
+  nodeSelector: {}
+  # -- Tolerations for the proxy pod
+  tolerations: []
 
 # -- Readiness probe configuration
 readinessProbe:

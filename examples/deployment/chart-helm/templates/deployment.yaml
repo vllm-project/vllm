@@ -59,7 +59,7 @@ spec:
                 name: "{{ .Release.Name }}-secrets"
             {{- end }}
             {{- include "chart.externalConfigs" . | nindent 12 }}
-          {{- end }}          
+           {{- end }}
           ports:
             - name: {{ include "chart.container-port-name" . }}
               containerPort: {{ include "chart.container-port" . }}
@@ -71,6 +71,16 @@ spec:
             mountPath: /data
           - name: dshm
             mountPath: /dev/shm
+
+        {{- if .Values.sidecar.enabled }}
+        - name: "sidecar"
+          image: "{{ .Values.sidecar.image.repository }}:{{ .Values.sidecar.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          {{- if .Values.sidecar.env }}
+          env:
+            {{- toYaml .Values.sidecar.env | nindent 12 }}
+          {{- end }}
+        {{- end }}
 
         {{- with .Values.extraContainers }}
         {{ toYaml . | nindent 8 }}

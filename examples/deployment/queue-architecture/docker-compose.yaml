@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  valkey:
+    image: valkey/valkey:9.1.1-alpine3.24
+    container_name: valkey
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mockvllm:
+    build:
+      context: .
+      dockerfile: Dockerfile.mockvllm
+    container_name: mockvllm
+    ports:
+      - "18000:8000"
+    depends_on:
+      - valkey
+    healthcheck:
+      test: ["CMD", "/app/mockvllm", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile.sidecar
+    environment:
+      REDIS_ADDR: "valkey:6379"
+      STREAM_NAME: "vllm_requests"
+      CONSUMER_GROUP: "sidecar_group"
+      CONSUMER_NAME: "sidecar_consumer"
+      VLLM_TARGET: "http://mockvllm:8000"
+      IDLE_THRESHOLD: "15s"
+      RECLAIM_INTERVAL: "5s"
+    depends_on:
+      valkey:
+        condition: service_healthy
+      mockvllm:
+        condition: service_healthy
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    container_name: proxy
+    environment:
+      REDIS_ADDR: "valkey:6379"
+      STREAM_NAME: "vllm_requests"
+      LISTEN_PORT: "8001"
+    ports:
+      - "18001:8001"
+    depends_on:
+      valkey:
+        condition: service_healthy
+      mockvllm:
+        condition: service_healthy
