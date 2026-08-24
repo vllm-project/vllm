@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu import cp_utils
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 DEVICE = current_platform.device_type
@@ -51,3 +52,42 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     assert torch.equal(
         batch.query_start_loc.cpu(), torch.from_numpy(batch.query_start_loc_np)
     )
+
+
+def test_prepare_dcp_local_seq_lens_for_batch(monkeypatch: pytest.MonkeyPatch):
+    buffers = InputBuffers(max_num_reqs=4, max_num_tokens=4, device=torch.device("cpu"))
+    batch = InputBatch.make_dummy(2, 4, buffers)
+    batch.num_reqs_after_padding = 4
+
+    def prepare_dcp_local_seq_lens(
+        output: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_reqs: int,
+        dcp_size: int,
+        dcp_rank: int,
+        cp_interleave: int,
+    ) -> None:
+        assert output is buffers.dcp_local_seq_lens
+        assert seq_lens is batch.seq_lens
+        assert (num_reqs, dcp_size, dcp_rank, cp_interleave) == (2, 4, 1, 16)
+        output.copy_(torch.tensor([1, 2, 0, 0], dtype=output.dtype))
+
+    monkeypatch.setattr(
+        cp_utils, "prepare_dcp_local_seq_lens", prepare_dcp_local_seq_lens
+    )
+
+    cp_utils.prepare_dcp_local_seq_lens_for_batch(batch, buffers, 4, 1, 16)
+
+    assert batch.dcp_local_seq_lens is not None
+    assert batch.dcp_local_seq_lens.data_ptr() == buffers.dcp_local_seq_lens.data_ptr()
+    assert batch.dcp_local_seq_lens.tolist() == [1, 2, 0, 0]
+
+
+def test_prepare_dcp_local_seq_lens_for_batch_without_dcp():
+    buffers = InputBuffers(max_num_reqs=2, max_num_tokens=2, device=torch.device("cpu"))
+    batch = InputBatch.make_dummy(1, 1, buffers)
+    batch.dcp_local_seq_lens = buffers.dcp_local_seq_lens[:1]
+
+    cp_utils.prepare_dcp_local_seq_lens_for_batch(batch, buffers, 1, 0, 1)
+
+    assert batch.dcp_local_seq_lens is None
