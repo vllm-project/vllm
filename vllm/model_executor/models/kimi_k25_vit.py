@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
 
+from vllm import _custom_ops as ops
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
@@ -40,12 +42,12 @@ from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 
 logger = init_logger(__name__)
 
-
-def _apply_rope_input_validation(x, freqs_cis):
-    assert x.ndim == freqs_cis.ndim + 1, (x.shape, freqs_cis.shape)
-    assert x.shape[:-2] == freqs_cis.shape[:-1], (x.shape, freqs_cis.shape)
-    assert x.shape[-1] == 2 * freqs_cis.shape[-1], (x.shape, freqs_cis.shape)
-    assert freqs_cis.dtype == torch.complex64, freqs_cis.dtype
+try:
+    from vllm.triton_utils import triton
+    from vllm.vllm_flash_attn.ops.triton.rotary import rotary_kernel
+except ImportError:  # no triton / no vllm_flash_attn build
+    triton = None
+    rotary_kernel = None
 
 
 def get_rope_shape_decorate(func):
@@ -78,6 +80,11 @@ def get_rope_shape(org, interpolation_mode, shape):
         .permute((1, 2, 0))
         .flatten(end_dim=1)
     )
+
+
+# Cap on the interpolated position table kept resident by
+# Learnable2DInterpPosEmbDivided_fixed (16 Mi elements == 32 MiB in bf16).
+_POS_EMB_CACHE_MAX_NUMEL = 16 * 1024 * 1024
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -124,6 +131,7 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
         self.dim = dim
         self.interpolation_mode = interpolation_mode
         self.weight = nn.Parameter(torch.empty(height, width, dim))
+        self._pos_emb_cache: tuple[tuple[int, int], torch.Tensor] | None = None
         self.register_buffer(
             "time_weight",
             torch.from_numpy(get_1d_sincos_pos_embed(self.dim, self.num_frames))
@@ -137,19 +145,37 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     def reset_parameters(self):
         nn.init.normal_(self.weight)
 
+    def _pos_emb_2d(self, h: int, w: int) -> torch.Tensor:
+        """Interpolated position table for one (h, w), reusing the last one.
+
+        The table depends only on (h, w), yet it was interpolated afresh for
+        every image on every request: 0.4 ms for a 128x128 grid, 0.9 ms for
+        256x256. One slot is enough to cover the two cases that matter -- a
+        batch of equally sized images, and consecutive requests at the same
+        resolution -- without keeping more than one spare table resident.
+        """
+        if (h, w) == self.weight.shape[:-1]:
+            return self.weight.flatten(end_dim=1)
+        cached = self._pos_emb_cache
+        if cached is not None and cached[0] == (h, w):
+            return cached[1]
+        pos_emb_2d = get_rope_shape(
+            self.weight,
+            interpolation_mode=self.interpolation_mode,
+            shape=(h, w),
+        )
+        # Skip caching tables that would pin a lot of memory (a 256x256 grid at
+        # dim 1024 is 134 MiB in bf16); those are also the rarest.
+        if pos_emb_2d.numel() <= _POS_EMB_CACHE_MAX_NUMEL:
+            self._pos_emb_cache = ((h, w), pos_emb_2d)
+        return pos_emb_2d
+
     def get_pos_embeds(self, grid_thws: torch.Tensor | list[list[int]]) -> torch.Tensor:
         pos_embs = []
         grid_thw_list = grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
         for t, h, w in grid_thw_list:
             assert t <= self.num_frames, f"t:{t} > self.num_frames:{self.num_frames}"
-            if (h, w) == self.weight.shape[:-1]:
-                pos_emb_2d = self.weight.flatten(end_dim=1)
-            else:
-                pos_emb_2d = get_rope_shape(
-                    self.weight,
-                    interpolation_mode=self.interpolation_mode,
-                    shape=(h, w),
-                )
+            pos_emb_2d = self._pos_emb_2d(h, w)
 
             if t == 1:
                 pos_emb_3d = pos_emb_2d
@@ -202,6 +228,9 @@ class MoonVision3dPatchEmbed(nn.Module):
             bias=patch_embed_proj_bias,
         )
 
+        # ROCm keeps the aiter conv path (see _proj).
+        self._proj_as_matmul = current_platform.is_cuda()
+
         if pos_emb_type == "divided_fixed":
             self.pos_emb = Learnable2DInterpPosEmbDivided_fixed(
                 height=pos_emb_height,
@@ -220,7 +249,18 @@ class MoonVision3dPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self._proj(x).view(x.size(0), -1)
+        if self._proj_as_matmul:
+            # kernel_size == stride == patch_size, so the convolution is a plain
+            # GEMM over the flattened patch, and the position embedding can ride
+            # along as the GEMM's beta term instead of a second pass over the
+            # activations. Saves the two NCHW<->NHWC transposes cuDNN inserts.
+            x2d = x.reshape(x.size(0), -1)
+            weight = self.proj.weight.reshape(self.proj.weight.size(0), -1)
+            if pos_embeds is not None and self.proj.bias is None:
+                return torch.addmm(pos_embeds, x2d, weight.t())
+            x = F.linear(x2d, weight, self.proj.bias)
+        else:
+            x = self._proj(x).view(x.size(0), -1)
         if pos_embeds is not None:
             return x + pos_embeds
         assert grid_thws is not None
@@ -313,6 +353,77 @@ class Rope2DPosEmbRepeated(nn.Module):
         return freqs_cis
 
 
+def _fused_qk_rope_inplace(
+    xqkv: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+) -> bool:
+    """Rotate Q and K in place inside the packed QKV buffer.
+
+    ``xqkv`` is (seqlen, 3, nheads, headdim); Q and K occupy adjacent slices, so
+    they can be addressed as one (seqlen, 2 * nheads, headdim) strided view and
+    rotated by a single kernel.
+
+    The alternative (``ApplyRotaryEmb`` per tensor with
+    ``enable_fp32_compute``) costs six kernels and ~5x the memory traffic per
+    layer: an fp32 copy of Q and of K in, the rotation, and a bf16 copy out.
+    That fp32 round trip buys nothing -- the triton kernel already upcasts x,
+    cos and sin to fp32 internally and rounds once on store, so this path is
+    bitwise identical while reading and writing bf16 only. cos/sin stay fp32
+    (downcasting them would change results), which is why the kernel is
+    launched directly rather than through ``apply_rotary_emb``, whose wrapper
+    requires x and cos to share a dtype.
+
+    Returns False when the kernel is unavailable, leaving the caller on the
+    unfused path.
+    """
+    if rotary_kernel is None or not current_platform.is_cuda():
+        return False
+
+    seq_length, _, num_heads, head_dim = xqkv.shape
+    rotary_dim = rope_cos.shape[-1] * 2
+    if rotary_dim != head_dim:
+        return False
+    qk = xqkv.as_strided(
+        (seq_length, 2 * num_heads, head_dim),
+        (3 * num_heads * head_dim, head_dim, 1),
+    ).unsqueeze(0)
+
+    BLOCK_M = 4  # interleaved (GPT-J) rotation loads a swapped index per pair
+    BLOCK_K = triton.next_power_of_2(rotary_dim)
+
+    def grid(meta):
+        return (triton.cdiv(seq_length, meta["BLOCK_M"]), 2 * num_heads, 1)
+
+    rotary_kernel[grid](
+        qk,
+        qk,
+        rope_cos,
+        rope_sin,
+        None,
+        0,
+        seq_length,
+        rotary_dim,
+        rope_cos.shape[0],
+        qk.stride(0),
+        qk.stride(-3),
+        qk.stride(-2),
+        qk.stride(-1),
+        qk.stride(0),
+        qk.stride(-3),
+        qk.stride(-2),
+        qk.stride(-1),
+        BLOCK_K,
+        False,  # IS_SEQLEN_OFFSETS_TENSOR
+        False,  # IS_VARLEN: freqs are already gathered per packed token
+        True,  # INTERLEAVED
+        False,  # CONJUGATE
+        BLOCK_M,
+        num_warps=2 if rotary_dim <= 64 else 4,
+    )
+    return True
+
+
 class MLP2(nn.Module):
     """Two-layer MLP with tensor parallel support."""
 
@@ -345,12 +456,79 @@ class MLP2(nn.Module):
             disable_tp=self.use_data_parallel,
         )
         self.activation = activation
+        # cuBLASLt can apply tanh-GELU as the fc0 epilogue, saving a full pass
+        # over the (seqlen, mlp_dim) activations. Only valid for an unquantized
+        # linear, whose forward is exactly x @ w.T + bias.
+        self._gelu_epilogue_bias: torch.Tensor | None
+        fuse_gelu = (
+            current_platform.is_cuda()
+            and isinstance(activation, nn.GELU)
+            and activation.approximate == "tanh"
+            and isinstance(self.fc0.quant_method, UnquantizedLinearMethod)
+        )
+        if not fuse_gelu:
+            self._gelu_epilogue_bias = None
+        elif self.fc0.bias is not None:
+            self._gelu_epilogue_bias = self.fc0.bias
+        else:
+            self.register_buffer(
+                "_gelu_epilogue_bias",
+                torch.zeros(
+                    self.fc0.weight.shape[0],
+                    dtype=self.fc0.weight.dtype,
+                    device=self.fc0.weight.device,
+                ),
+                persistent=False,
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, _ = self.fc0(x)
-        x = self.activation(x)
+        if self._gelu_epilogue_bias is not None and x.dim() == 2:
+            x = torch._addmm_activation(
+                self._gelu_epilogue_bias, x, self.fc0.weight.t(), use_gelu=True
+            )
+        else:
+            x, _ = self.fc0(x)
+            x = self.activation(x)
         x, _ = self.fc1(x)
         return x
+
+
+def _fused_add_norm_eps(norm: nn.Module) -> float | None:
+    """eps for the fused add+RMSNorm kernel, or None if it does not apply.
+
+    Only RMSNorm has a fused kernel; ``nn.RMSNorm(dim)`` leaves ``eps`` unset
+    and torch then uses ``finfo(float32).eps`` (it normalizes in fp32), so pass
+    that through to keep the fused path numerically identical.
+    """
+    if not isinstance(norm, nn.RMSNorm) or not current_platform.is_cuda_alike():
+        return None
+    return norm.eps if norm.eps is not None else torch.finfo(torch.float32).eps
+
+
+def _add_and_norm(
+    norm: nn.Module,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    rms_eps: float | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``norm(hidden_states + residual)``, also returning the sum.
+
+    With the fused kernel this is one pass over the activations instead of an
+    elementwise add followed by a normalization; the residual is threaded
+    across layers so no separate add is left anywhere in the stack.
+    """
+    if residual is None:
+        return norm(hidden_states), hidden_states
+    if (
+        rms_eps is None
+        or hidden_states.dtype != norm.weight.dtype
+        or not hidden_states.is_contiguous()
+        or not residual.is_contiguous()
+    ):
+        residual = residual + hidden_states
+        return norm(residual), residual
+    ops.fused_add_rms_norm(hidden_states, residual, norm.weight, rms_eps)
+    return hidden_states, residual
 
 
 def _make_vision_norm(norm_type: str, hidden_dim: int) -> nn.Module:
@@ -429,6 +607,7 @@ class MoonViTEncoderLayer(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
+        self._rms_norm_eps = _fused_add_norm_eps(self.norm0)
         self.apply_rotary_emb = ApplyRotaryEmb(
             enforce_enable=True,
             is_neox_style=False,
@@ -439,7 +618,8 @@ class MoonViTEncoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rope_freqs_cis: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
@@ -448,6 +628,8 @@ class MoonViTEncoderLayer(nn.Module):
         Args:
             x (torch.Tensor): (seqlen, hidden_dim)
             cu_seqlens (torch.Tensor): cumulative sequence lengths
+            rope_cos, rope_sin: (seqlen, headdim // 2), split once per forward
+                by the encoder rather than per layer.
         """
         seq_length = x.size(0)
         xqkv, _ = self.wqkv(x)
@@ -459,14 +641,13 @@ class MoonViTEncoderLayer(nn.Module):
         )
         # xqkv: (seqlen, 3, nheads, headdim)
         xqkv = xqkv.view(*qkv_shape)
-        xq, xk, xv = torch.unbind(xqkv, dim=-3)
 
-        _apply_rope_input_validation(xq, rope_freqs_cis)
-        _apply_rope_input_validation(xk, rope_freqs_cis)
-        rope_cos = rope_freqs_cis.real.contiguous()
-        rope_sin = rope_freqs_cis.imag.contiguous()
-        xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
-        xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
+        # xq/xk alias xqkv, so the in-place rotation below is visible through
+        # them; only the fallback needs to rebind.
+        xq, xk, xv = torch.unbind(xqkv, dim=-3)
+        if not _fused_qk_rope_inplace(xqkv, rope_cos, rope_sin):
+            xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
+            xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
 
         if max_seqlen is None:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
@@ -489,29 +670,34 @@ class MoonViTEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
         cu_seqlens: torch.Tensor,
-        rope_freqs_cis: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
-    ):
-        residual = hidden_states
-        hidden_states = self.norm0(hidden_states)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (hidden_states, residual); the caller adds them at the end.
 
+        Carrying the residual instead of adding it here lets each norm absorb
+        the preceding add.
+        """
+        hidden_states, residual = _add_and_norm(
+            self.norm0, hidden_states, residual, self._rms_norm_eps
+        )
         hidden_states = self.attention_qkvpacked(
             hidden_states,
             cu_seqlens,
-            rope_freqs_cis,
+            rope_cos,
+            rope_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.norm1(hidden_states)
+        hidden_states, residual = _add_and_norm(
+            self.norm1, hidden_states, residual, self._rms_norm_eps
+        )
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+        return hidden_states, residual
 
 
 class MoonViT3dEncoder(nn.Module):
@@ -533,6 +719,10 @@ class MoonViT3dEncoder(nn.Module):
         )
         self.video_attn_type = video_attn_type
         qkv_hidden_size = block_cfg.get("qkv_hidden_size") or block_cfg["hidden_dim"]
+        # FlashInfer cu_seqlens are element offsets into the Q/K/V buffers, whose
+        # per-token stride is num_heads * head_size (qkv_hidden_size), not the
+        # residual-stream width. They differ on Kimi-K3 (1536 vs 1024).
+        self.qkv_hidden_size = qkv_hidden_size
         self.rope_2d = Rope2DPosEmbRepeated(
             qkv_hidden_size // block_cfg["num_heads"], 512, 512
         )
@@ -549,6 +739,7 @@ class MoonViT3dEncoder(nn.Module):
         self.final_layernorm = _make_vision_norm(
             block_cfg.get("norm_type", "layernorm"), hidden_dim
         )
+        self._rms_norm_eps = _fused_add_norm_eps(self.final_layernorm)
 
     def prepare_encoder_metadata(
         self,
@@ -595,7 +786,7 @@ class MoonViT3dEncoder(nn.Module):
         metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
             attn_backend,
             cu_seqlens,
-            self.blocks[0].hidden_dim,
+            self.qkv_hidden_size,
             self.blocks[0].tp_size,
             device,
         )
@@ -625,16 +816,26 @@ class MoonViT3dEncoder(nn.Module):
         assert cu_seqlens is not None
         assert max_seqlen is not None
 
+        # Every layer rotates with the same cos/sin: split the complex freqs
+        # once here instead of once per layer.
+        rope_cos = rope_freqs_cis.real.contiguous()
+        rope_sin = rope_freqs_cis.imag.contiguous()
+
+        residual: torch.Tensor | None = None
         for block in self.blocks:
-            hidden_states = block(
+            hidden_states, residual = block(
                 hidden_states,
+                residual,
                 cu_seqlens,
-                rope_freqs_cis=rope_freqs_cis,
+                rope_cos,
+                rope_sin,
                 max_seqlen=max_seqlen,
                 sequence_lengths=sequence_lengths,
             )
 
-        hidden_states = self.final_layernorm(hidden_states)
+        hidden_states, _ = _add_and_norm(
+            self.final_layernorm, hidden_states, residual, self._rms_norm_eps
+        )
 
         return hidden_states
 
