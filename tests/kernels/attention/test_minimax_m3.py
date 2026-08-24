@@ -971,6 +971,21 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
     assert value_cache.is_contiguous()
 
 
+def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
+    """Do not pair AITER's separated cache layout with the Triton fallback."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: True,
+    )
+
+    with pytest.raises(ValueError, match="num_kv_heads == 1"):
+        sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
+
+
 def test_indexer_cache_squeezes_to_contiguous_3d():
     """The indexer side cache is standardized 4D with H=1: under both layouts
     the allocator's logical view stays contiguous and squeezes (as
