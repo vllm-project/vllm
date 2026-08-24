@@ -32,6 +32,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
     ECConnectorWorkerMetadata,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
+    _get_encoder_cache_hidden_dim,
+)
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -2563,7 +2566,7 @@ class ECMooncakeConnector(ECConnectorBase):
         dtype = self._model_config.dtype
         assert isinstance(dtype, torch.dtype)
         dtype_name = str(dtype).split(".")[-1]
-        shape = (num_tokens, self._model_config.get_hidden_size())
+        shape = (num_tokens, _get_encoder_cache_hidden_dim(self._vllm_config))
         nbytes = math.prod(shape) * dtype.itemsize
         self._pushes_to_prepare[transfer_id] = ECMooncakePushSpec(
             mm_hash=mm_hash,

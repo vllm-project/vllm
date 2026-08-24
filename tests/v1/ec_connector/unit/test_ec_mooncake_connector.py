@@ -792,7 +792,8 @@ class TestECMooncakeSchedulerMetadata:
             "ec_items": [{"mm_hash": "img_hash_1", "transfer_id": "transfer-1"}],
         }
         mock_vllm_config_producer.model_config.dtype = torch.float32
-        mock_vllm_config_producer.model_config.get_hidden_size.return_value = 16
+        mock_vllm_config_producer.model_config.hf_config = None
+        mock_vllm_config_producer.model_config.get_inputs_embeds_size.return_value = 16
 
         with patch_ec_mooncake_deps():
             scheduler = ECMooncakeConnector(
@@ -815,6 +816,36 @@ class TestECMooncakeSchedulerMetadata:
                 request_id="test_req_123",
             )
         ]
+
+    def test_producer_uses_deepstack_encoder_cache_width(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
+        request = mock_request_with_3_mm
+        request.ec_transfer_params = {
+            "consumer_zmq": "tcp://decode:19019",
+            "ec_items": [{"mm_hash": "img_hash_1", "transfer_id": "transfer-1"}],
+        }
+        mock_vllm_config_producer.model_config.dtype = torch.bfloat16
+        mock_vllm_config_producer.model_config.hf_config = SimpleNamespace(
+            vision_config=SimpleNamespace(
+                out_hidden_size=2560,
+                deepstack_visual_indexes=[5, 11, 17],
+            )
+        )
+
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.SCHEDULER
+            )
+            scheduler.update_state_after_alloc(request, 0)
+            meta = scheduler.build_connector_meta(
+                Mock(spec=SchedulerOutput, free_encoder_mm_hashes=[])
+            )
+
+        num_tokens = request.get_num_encoder_embeds(0)
+        spec = meta.pushes[0]
+        assert spec.shape == (num_tokens, 10240)
+        assert spec.nbytes == num_tokens * 10240 * torch.bfloat16.itemsize
 
     def test_producer_reports_proxy_rewrite_metadata(self, mock_vllm_config_producer):
         feature = SimpleNamespace(
