@@ -67,6 +67,18 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         if self.quant_config.use_nvfp4_w4a4:
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        for name in (
+            "gemm1_alpha",
+            "gemm1_beta",
+            "gemm1_clamp_limit",
+            "fake_input_scale",
+        ):
+            if hasattr(self, name):
+                setattr(
+                    self,
+                    name,
+                    self._register_persistent_buffer(layer, name, getattr(self, name)),
+                )
 
     def __init__(
         self,

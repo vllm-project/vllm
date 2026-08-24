@@ -1301,6 +1301,23 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         self.group_size = group_size
         self._permute_scratch: MoEPermuteScratch | None = None
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        for name in (
+            "a_strides1",
+            "a_strides2",
+            "b_strides1",
+            "b_strides2",
+            "c_strides1",
+            "c_strides2",
+            "s_strides1",
+            "s_strides2",
+        ):
+            setattr(
+                self,
+                name,
+                self._register_persistent_buffer(layer, name, getattr(self, name)),
+            )
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
