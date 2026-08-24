@@ -222,7 +222,7 @@ class Worker(WorkerBase):
         self.sleep_mode_backend.suspend(level)
         if (
             self.sleep_mode_backend.requires_communicator_suspend()
-            and not envs.VLLM_DISABLE_NCCL_COMM_SUSPEND
+            and not self.vllm_config.model_config.disable_nccl_comm_suspend
         ):
             suspend_device_comms()
 
@@ -247,7 +247,7 @@ class Worker(WorkerBase):
         self.sleep_mode_backend.resume(tags)
         if (
             self.sleep_mode_backend.requires_communicator_suspend()
-            and not envs.VLLM_DISABLE_NCCL_COMM_SUSPEND
+            and not self.vllm_config.model_config.disable_nccl_comm_suspend
         ):
             resume_device_comms()
 
