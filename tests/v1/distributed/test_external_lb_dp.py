@@ -119,9 +119,9 @@ class ExternalLBServerManager:
             print(f"Error stopping servers: {e}")
 
 
-@pytest.fixture(scope="module")
-def default_server_args():
-    return [
+@pytest.fixture(scope="module", params=[False, True], ids=["no-ep", "ep"])
+def default_server_args(request):
+    server_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -131,6 +131,9 @@ def default_server_args():
         "128",
         "--enforce-eager",
     ]
+    if request.param:
+        server_args.append("--enable-expert-parallel")
+    return server_args
 
 
 @pytest.fixture(scope="module", params=[1, 4])
