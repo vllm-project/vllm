@@ -57,10 +57,15 @@ def cached_encode(
     tokenizer: TokenizerLike,
     text: str,
     *,
+    truncation: bool | None = None,
     add_special_tokens: bool = True,
 ) -> list[int]:
     """Encode text while caching repeated tokenizer calls."""
-    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(
+        text,
+        truncation=truncation,
+        add_special_tokens=add_special_tokens,
+    )
 
 
 class _GetMatchIndex(Protocol):
