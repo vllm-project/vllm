@@ -544,7 +544,7 @@ class CompletionRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if not isinstance(data, dict):
             return data
-        if data.get("stream_options") and not data.get("stream"):
+        if data.get("stream_options") is not None and not data.get("stream"):
             raise VLLMValidationError(
                 "Stream options can only be defined when `stream=True`.",
                 parameter="stream_options",

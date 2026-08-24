@@ -588,7 +588,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
 
         return ChatParams(
-            chat_template=self.chat_template or default_template,
+            chat_template=(
+                default_template if self.chat_template is None else self.chat_template
+            ),
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
@@ -787,7 +789,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if not isinstance(data, dict):
             return data
-        if data.get("stream_options") and not data.get("stream"):
+        if data.get("stream_options") is not None and not data.get("stream"):
             raise VLLMValidationError(
                 "Stream options can only be defined when `stream=True`.",
                 parameter="stream_options",

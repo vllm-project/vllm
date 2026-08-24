@@ -270,7 +270,7 @@ class TokenizeParams:
         )
 
         # https://huggingface.co/docs/transformers/en/pad_truncation
-        if padding := tokenization_kwargs.pop("padding", None):
+        if (padding := tokenization_kwargs.pop("padding", None)) is not None:
             if padding == "max_length":
                 pad_prompt_tokens = max_length
             elif padding in (False, "do_not_pad"):
@@ -279,7 +279,7 @@ class TokenizeParams:
                 # To emit the below warning
                 tokenization_kwargs["padding"] = padding
 
-        if truncation := tokenization_kwargs.pop("truncation", None):
+        if (truncation := tokenization_kwargs.pop("truncation", None)) is not None:
             if truncation in (True, "longest_first"):
                 truncate_prompt_tokens = max_length
             elif truncation in (False, "do_not_truncate"):

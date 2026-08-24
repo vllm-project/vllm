@@ -135,7 +135,9 @@ class TokenizeChatRequest(OpenAIBaseModel):
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
         return ChatParams(
-            chat_template=self.chat_template or default_template,
+            chat_template=(
+                default_template if self.chat_template is None else self.chat_template
+            ),
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
