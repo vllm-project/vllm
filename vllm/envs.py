@@ -987,9 +987,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_LOADING_THREAD_COUNT": lambda: int(
         os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")
     ),
-    # Maximum filesize in MB for a single audio file when processing
-    # speech-to-text requests. Files larger than this will be rejected.
-    # Default is 25 MB
+    # Maximum filesize in MB for a single audio file. Enforced on all
+    # audio inputs (multimodal chat, speech-to-text uploads, data: URLs,
+    # and local file:// paths). Files larger than this will be rejected
+    # before decoding. Default is 25 MB.
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
     ),
