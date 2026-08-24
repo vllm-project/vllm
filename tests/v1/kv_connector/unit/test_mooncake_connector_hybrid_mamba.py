@@ -523,6 +523,90 @@ def test_validate_region_lengths_allows_replicated_consumer_attention():
     )
 
 
+def test_transfer_plan_shards_mamba_when_only_attention_is_replicated():
+    # Falcon-H1 P TP4 -> D TP2: 2 attention KV heads replicate across the
+    # producer's 4 ranks, but the 24-head Mamba2 states still shard. A global
+    # producer-replication flag would make only producer ranks 0/2 send their
+    # mamba regions and silently drop half the mamba heads on the consumer.
+    #
+    # Attention region: replicated producer -> ranks 0 and 2 send whole
+    # copies, rank 1 stays silent.
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=1,
+        local_tp_size=4,
+        remote_tp_rank=0,
+        remote_tp_size=2,
+        local_kv_block_len=1000,
+        remote_kv_block_len=1000,
+        producer_cache_replicated=True,
+    ) == (False, 0, 0, 1000)
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=2,
+        local_tp_size=4,
+        remote_tp_rank=1,
+        remote_tp_size=2,
+        local_kv_block_len=1000,
+        remote_kv_block_len=1000,
+        producer_cache_replicated=True,
+    ) == (True, 0, 0, 1000)
+    # Mamba region: producer not replicated -> every rank pushes its shard
+    # into the paired consumer rank's region (rank 1 -> dst offset 1000).
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=1,
+        local_tp_size=4,
+        remote_tp_rank=0,
+        remote_tp_size=2,
+        local_kv_block_len=1000,
+        remote_kv_block_len=2000,
+        producer_cache_replicated=False,
+    ) == (True, 0, 1000, 1000)
+
+
+def test_validate_region_lengths_shards_mamba_when_producer_attn_replicated():
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
+    # P TP4 -> D TP2 (tp_ratio=2): the attention group is replicated on the
+    # producer (4 > 2 KV heads) so its regions copy whole and must match
+    # exactly; the mamba group still shards, so the consumer region must be
+    # tp_ratio times the producer region.
+    local_regions = [
+        TransferRegion("model.layers.0.self_attn", 0, 0x1000, 2000, 1000, 0),
+        TransferRegion("model.layers.1.linear_attn", 1, 0x5000, 2000, 1000, 1),
+    ]
+    remote_regions = [
+        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 1000, 0),
+        TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 2000, 1),
+    ]
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions,
+            remote_regions,
+            local_tp_size=4,
+            remote_tp_size=2,
+            producer_cache_replicated=True,
+            group_specs=kv_cache_config.kv_cache_groups,
+            total_num_kv_heads=2,
+        )
+        is None
+    )
+
+    # Before per-group replication, producer_cache_replicated=True skipped all
+    # validation; a mamba region violating the TP-ratio rule must still error.
+    bad_remote = [
+        remote_regions[0],
+        TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 1000, 1),
+    ]
+    err = _validate_asymmetric_region_lengths(
+        local_regions,
+        bad_remote,
+        local_tp_size=4,
+        remote_tp_size=2,
+        producer_cache_replicated=True,
+        group_specs=kv_cache_config.kv_cache_groups,
+        total_num_kv_heads=2,
+    )
+    assert err is not None and "TP ratio" in err
+
+
 @pytest.mark.cpu_test
 def test_register_kv_caches_splits_gdn_conv_sub_projections(monkeypatch):
     """DS conv layout: each GDN conv sub-projection is its own region.

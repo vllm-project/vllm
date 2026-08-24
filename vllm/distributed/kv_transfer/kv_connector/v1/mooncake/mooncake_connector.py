@@ -259,7 +259,7 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if producer_cache_replicated:
+    if producer_cache_replicated and group_specs is None:
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
@@ -267,22 +267,37 @@ def _validate_asymmetric_region_lengths(
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
-        if tp_ratio < 0 and consumer_kv_replicated:
-            # Consumer ranks replicate whole head groups instead of sharding
-            # the producer region; Mamba/GDN states still shard by head count.
-            is_mamba = group_specs is not None and isinstance(
-                group_specs[local_region.group_index].kv_cache_spec,
-                MambaSpec,
-            )
-            if not is_mamba:
-                if local_region.kv_block_len != remote_region.kv_block_len:
-                    return (
-                        "Mooncake KV region length mismatch for replicated "
-                        f"consumer KV at region {idx}: "
-                        f"local={local_region.kv_block_len}, "
-                        f"remote={remote_region.kv_block_len}."
-                    )
-                continue
+        # Replication is a per-group property: an attention group replicates
+        # when TP > KV-head count, while Mamba/GDN states always shard by
+        # head count. A global flag would wrongly apply attention replication
+        # to mamba regions (e.g. Falcon-H1 P TP4 -> D TP2 with 2 KV heads and
+        # 24 mamba heads silently scrambles the mamba state).
+        is_mamba = group_specs is not None and isinstance(
+            group_specs[local_region.group_index].kv_cache_spec,
+            MambaSpec,
+        )
+        if producer_cache_replicated and not is_mamba:
+            # Producer ranks hold whole replicated attention regions; each
+            # sending rank copies its region whole, so lengths must match.
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake KV region length mismatch for replicated "
+                    f"producer KV at region {idx}: "
+                    f"local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
+        # Consumer ranks replicate whole head groups instead of sharding
+        # the producer region; Mamba/GDN states still shard by head count.
+        if tp_ratio < 0 and consumer_kv_replicated and not is_mamba:
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake KV region length mismatch for replicated "
+                    f"consumer KV at region {idx}: "
+                    f"local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -1557,6 +1572,13 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    producer_kv_replicated=(
+                        not isinstance(
+                            group_specs[local_region.group_index].kv_cache_spec,
+                            MambaSpec,
+                        )
+                        and self._producer_cache_is_replicated()
+                    ),
                     consumer_kv_replicated=(
                         not isinstance(
                             group_specs[local_region.group_index].kv_cache_spec,
@@ -2128,6 +2150,7 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        producer_kv_replicated: bool = False,
         consumer_kv_replicated: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
@@ -2137,7 +2160,7 @@ class MooncakeConnectorWorker:
             remote_tp_size=remote_tp_size,
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
+            producer_cache_replicated=producer_kv_replicated,
             consumer_kv_replicated=consumer_kv_replicated,
         )
 
