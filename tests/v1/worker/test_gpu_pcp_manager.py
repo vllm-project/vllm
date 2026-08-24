@@ -51,6 +51,33 @@ def test_replicated_decode_piecewise_graph_padding(monkeypatch):
     )
 
 
+def test_local_is_padding_reuses_global_batch_buffer():
+    global_is_padding = torch.zeros(8, dtype=torch.bool)
+    global_batch = SimpleNamespace(is_padding=global_is_padding)
+
+    local_is_padding = PCPManager._get_local_is_padding(global_batch, 4)
+
+    assert local_is_padding.data_ptr() == global_is_padding.data_ptr()
+    local_is_padding[3] = True
+    assert global_is_padding.tolist() == [
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+
+
+def test_local_is_padding_rejects_short_global_batch_buffer():
+    global_batch = SimpleNamespace(is_padding=torch.zeros(3, dtype=torch.bool))
+
+    with pytest.raises(RuntimeError, match="3 < 4"):
+        PCPManager._get_local_is_padding(global_batch, 4)
+
+
 def test_global_cudagraph_padding_is_disabled_for_none():
     input_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4)
 

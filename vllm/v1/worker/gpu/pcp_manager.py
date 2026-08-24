@@ -327,6 +327,18 @@ class PCPManager:
             return None
         return input_batch.num_tokens_after_padding
 
+    @staticmethod
+    def _get_local_is_padding(
+        global_batch: InputBatch, num_local_tokens_padded: int
+    ) -> torch.Tensor:
+        if global_batch.is_padding.numel() < num_local_tokens_padded:
+            raise RuntimeError(
+                "Global is_padding buffer is smaller than the PCP-local padded "
+                f"token count: {global_batch.is_padding.numel()} < "
+                f"{num_local_tokens_padded}."
+            )
+        return global_batch.is_padding[:num_local_tokens_padded]
+
     def partition_batch(
         self,
         input_batch: InputBatch,
@@ -470,7 +482,7 @@ class PCPManager:
             input_buffers.seq_lens[:num_local_reqs],
         )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
-        is_padding = input_buffers.is_padding[:num_local_tokens_padded]
+        is_padding = self._get_local_is_padding(global_batch, num_local_tokens_padded)
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
         if num_local_tokens_padded > num_local_tokens:
