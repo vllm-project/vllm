@@ -289,25 +289,20 @@ class CudaGraphManager:
             self._capture_descs[mode] = descs
 
         for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+            mode_descs = tuple(reversed(descs_by_mode.get(mode, [])))
             for num_active_loras in self.lora_capture_cases:
+                descs = filter(
+                    lambda d: d.num_active_loras == num_active_loras,
+                    mode_descs,
+                )
                 current_range_start = 0
-                # Descriptors are sorted by num_tokens. Under dynamic speculative
-                # decoding several decode graphs share a num_tokens (one per query
-                # length), so offer the whole group for the range: advancing the
-                # range once per descriptor would leave every descriptor after the
-                # first with an empty range and no candidate list at all.
-                for num_tokens, group in groupby(
-                    reversed(descs_by_mode.get(mode, [])),
-                    key=lambda d: d.num_tokens,
-                ):
-                    matching = [
-                        d for d in group if d.num_active_loras == num_active_loras
-                    ]
-                    if not matching:
-                        continue
+                # Dynamic speculative decoding can produce multiple graphs with the same
+                # num_tokens. Group them so each graph covers the same candidate range.
+                for num_tokens, group in groupby(descs, lambda d: d.num_tokens):
+                    group = list(group)
                     for i in range(current_range_start, num_tokens + 1):
                         key = (i, num_active_loras)
-                        self._candidates.setdefault(key, []).extend(matching)
+                        self._candidates.setdefault(key, []).extend(group)
                     current_range_start = num_tokens + 1
 
     def needs_capture(self) -> bool:
