@@ -652,32 +652,100 @@ FLASHINFER_MM_SLIDING_WINDOW = 32
 and clamp-off window formulas produce different outputs on this batch."""
 
 
-def test_flashinfer_mm_prefix_combination_rejections():
+def test_flashinfer_mm_prefix_combination_rejections(monkeypatch):
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import flashinfer as fi
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
+    probed: list[tuple] = []
+
+    def fake_probe(dtype_q, dtype_kv, dtype_o, head_dim):
+        probed.append((dtype_q, dtype_kv, dtype_o, head_dim))
+        return True
+
+    monkeypatch.setattr(fi, "_mm_prefix_jit_available", fake_probe)
+
     common = dict(
-        head_size=128,
         dtype=torch.bfloat16,
-        block_size=16,
         use_mla=False,
         use_sparse=False,
         device_capability=DeviceCapability(8, 0),
     )
     assert "NVFP4" in FlashInferBackend.supports_combination(
-        kv_cache_dtype="nvfp4", has_sink=False, use_mm_prefix=True, **common
+        head_size=128,
+        block_size=16,
+        kv_cache_dtype="nvfp4",
+        has_sink=False,
+        use_mm_prefix=True,
+        **common,
     )
     assert "FP8" in FlashInferBackend.supports_combination(
-        kv_cache_dtype="fp8", has_sink=False, use_mm_prefix=True, **common
+        head_size=128,
+        block_size=16,
+        kv_cache_dtype="fp8",
+        has_sink=False,
+        use_mm_prefix=True,
+        **common,
     )
     assert "sink" in FlashInferBackend.supports_combination(
-        kv_cache_dtype=None, has_sink=True, use_mm_prefix=True, **common
+        head_size=128,
+        block_size=16,
+        kv_cache_dtype=None,
+        has_sink=True,
+        use_mm_prefix=True,
+        **common,
+    )
+    # trtllm-only kernel page sizes must be rejected at selection time, not
+    # at the first mm batch's build().
+    assert "page size 128" in FlashInferBackend.supports_combination(
+        head_size=128,
+        block_size=128,
+        kv_cache_dtype=None,
+        has_sink=False,
+        use_mm_prefix=True,
+        **common,
     )
     assert (
         FlashInferBackend.supports_combination(
-            kv_cache_dtype=None, has_sink=False, use_mm_prefix=True, **common
+            head_size=128,
+            block_size=64,
+            kv_cache_dtype=None,
+            has_sink=False,
+            use_mm_prefix=True,
+            **common,
         )
         is None
+    )
+
+    # Hybrid models select per group: the probe must see each group's own
+    # head size and resolved KV dtype, not one global value.
+    probed.clear()
+    for head_size in (256, 512):
+        assert (
+            FlashInferBackend.supports_combination(
+                head_size=head_size,
+                block_size=16,
+                kv_cache_dtype="float16",
+                has_sink=False,
+                use_mm_prefix=True,
+                **common,
+            )
+            is None
+        )
+    assert probed == [
+        (torch.bfloat16, torch.float16, torch.bfloat16, 256),
+        (torch.bfloat16, torch.float16, torch.bfloat16, 512),
+    ]
+
+    # An unbuildable variant demotes the backend with a clear reason.
+    monkeypatch.setattr(fi, "_mm_prefix_jit_available", lambda *a: False)
+    assert "JIT variant" in FlashInferBackend.supports_combination(
+        head_size=128,
+        block_size=16,
+        kv_cache_dtype=None,
+        has_sink=False,
+        use_mm_prefix=True,
+        **common,
     )
 
 

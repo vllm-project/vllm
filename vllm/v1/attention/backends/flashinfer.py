@@ -111,6 +111,11 @@ logger = init_logger(__name__)
 # ``MaskMode::kCustom`` through ``variant_owns_mask`` so the FA2 kernel
 # evaluates this hook on every KV tile; under kNone interior tiles would
 # skip it entirely.
+_KV_CACHE_TORCH_DTYPES: dict = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
 MM_PREFIX_VARIANT_NAME = "VllmMMPrefixAttention"
 # Bump when the declaration changes: the URI keyed off this version is
 # FlashInfer's JIT cache key, and a stale cached module would otherwise be
@@ -569,6 +574,9 @@ class FlashInferBackend(AttentionBackend):
                 and num_qo_heads // num_kv_heads > 1
                 and current_platform.is_device_capability_family(100)
                 and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+                # Page sizes >= 128 only run on trtllm-gen, which cannot
+                # serve the fa2 mm-prefix JIT variant.
+                and not mc.is_mm_prefix_lm
             )
         if not use_large_pages:
             return [16, 32, 64]
@@ -691,6 +699,23 @@ class FlashInferBackend(AttentionBackend):
                 )
             if has_sink:
                 return "mm_prefix is not supported with sinks"
+            if block_size is not None and block_size >= 128:
+                return (
+                    f"mm_prefix requires the fa2 prefill path, but kernel "
+                    f"page size {block_size} only runs on trtllm-gen"
+                )
+            # Probe the JIT variant with this layer group's actual head size
+            # and dtypes: hybrid models select their backend per group, and a
+            # variant that only compiled for the global head size would first
+            # be built (and possibly fail) at runtime otherwise.
+            kv_torch_dtype = _KV_CACHE_TORCH_DTYPES.get(kv_cache_dtype, dtype)
+            if not _mm_prefix_jit_available(dtype, kv_torch_dtype, dtype, head_size):
+                return (
+                    "mm_prefix requires the FlashInfer mm-prefix JIT variant, "
+                    f"which is unavailable for head_size={head_size}, "
+                    f"dtype={dtype} (disabled JIT, missing toolchain, or a "
+                    "FlashInfer build without variant_owns_mask)"
+                )
         return None
 
     @staticmethod
@@ -1151,6 +1176,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "FlashInfer mm-prefix requires the fa2 JIT-variant prefill "
                     "path; it cannot run with explicitly forced trtllm-gen "
                     "attention."
+                )
+            if not _mm_prefix_jit_available(
+                self.q_data_type_prefill,
+                self.kv_cache_dtype,
+                self.model_config.dtype,
+                self.head_dim,
+            ):
+                raise RuntimeError(
+                    "FlashInfer mm-prefix JIT variant cannot be built for "
+                    f"this KV-cache group (head_dim={self.head_dim}, "
+                    f"q_dtype={self.q_data_type_prefill}, "
+                    f"kv_dtype={self.kv_cache_dtype}). Failing at engine "
+                    "start instead of at the first multimodal batch."
                 )
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"

@@ -164,6 +164,51 @@ def test_make_metadata_with_slice_preserves_mm_prefix_fields(
     assert result.is_prefilling is None
 
 
+def test_split_request_keeps_mm_ranges_consistent_for_fill():
+    """A request split across ubatches must fill the same absolute bounds.
+
+    The re-keyed ranges plus each side's own query_start_loc/seq_lens must
+    make fill_mm_prefix_query_ranges assign every scheduled token of the
+    split request the bounds of its containing range, on both sides.
+    """
+    import numpy as np
+
+    from vllm.v1.attention.backends.utils import fill_mm_prefix_query_ranges
+
+    # One request: 8 scheduled tokens at absolute positions 12..19 (context
+    # 12, seq 20), fully inside range (4, 18) up to position 18 inclusive.
+    batch_spec = BatchSpec(seq_lens=[20], query_lens=[8], name="split_one")
+    meta = create_common_attn_metadata(batch_spec, block_size=16, device="cpu")
+    meta.mm_req_doc_ranges = {0: [(4, 18)]}
+    meta.is_prefilling = torch.tensor([True])
+
+    def fill_rows(m):
+        out = np.empty((m.num_actual_tokens, 2), dtype=np.int32)
+        n = fill_mm_prefix_query_ranges(
+            out,
+            m.mm_req_doc_ranges,
+            m.query_start_loc_cpu,
+            m.seq_lens_cpu,
+        )
+        assert n == m.num_actual_tokens
+        return out[:n].tolist()
+
+    whole = fill_rows(meta)
+
+    first = _make_metadata_with_slice(UBatchSlice(slice(0, 1), slice(0, 4)), meta)
+    second = _make_metadata_with_slice(UBatchSlice(slice(0, 1), slice(4, 8)), meta)
+    assert first.mm_req_doc_ranges == {0: [(4, 18)]}
+    assert second.mm_req_doc_ranges == {0: [(4, 18)]}
+    assert torch.equal(first.is_prefilling, torch.tensor([True]))
+
+    # Concatenated per-side fills must equal the unsplit fill: same absolute
+    # bounds per token, with the range's inclusive end (18) covered and the
+    # final token (19) outside it.
+    assert fill_rows(first) + fill_rows(second) == whole
+    assert whole[:7] == [[4, 18]] * 7
+    assert whole[7] == [-1, -1]
+
+
 def test_split_attn_metadata_decode_batch(large_decode_metadata):
     """Test splitting decode batch into two equal parts"""
     num_tokens = large_decode_metadata.num_reqs
