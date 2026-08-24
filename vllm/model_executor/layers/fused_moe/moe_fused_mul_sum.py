@@ -1,135 +1,237 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
-def moe_fused_mul_sum_kernel(
-    inputs_ptr,
-    topk_weights_ptr,
-    outputs_ptr,
-    top_ids_ptr,
-    expert_map_ptr,
-    num_tokens,
-    stride_m,
-    has_expert_map: tl.constexpr,
-    top_k: tl.constexpr,
-    size: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    pid_k = tl.program_id(0)
-    pid_m = tl.program_id(1)
+class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        has_expert_map: bool
+        top_k: int
+        size: int
+        block_m: int
+        block_k: int
+        num_warps: int
+        num_stages: int
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    @staticmethod
+    @triton.jit(do_not_specialize=["num_tokens"])
+    def kernel(
+        inputs_ptr,
+        topk_weights_ptr,
+        outputs_ptr,
+        top_ids_ptr,
+        expert_map_ptr,
+        num_tokens,
+        stride_m,
+        has_expert_map: tl.constexpr,
+        top_k: tl.constexpr,
+        size: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        pid_k = tl.program_id(0)
+        pid_m = tl.program_id(1)
 
-    m_mask = offs_m < num_tokens
-    k_mask = offs_k < size
-    mask = m_mask[:, None] & k_mask[None, :]
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
 
-    a_base = inputs_ptr + (offs_m * stride_m)[:, None] + offs_k[None, :]
-    b_base = topk_weights_ptr + offs_m * top_k
+        m_mask = offs_m < num_tokens
+        k_mask = offs_k < size
+        mask = m_mask[:, None] & k_mask[None, :]
 
-    acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        a_base = inputs_ptr + (offs_m * stride_m)[:, None] + offs_k[None, :]
+        b_base = topk_weights_ptr + offs_m * top_k
 
-    for n in tl.static_range(top_k):
-        b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
-        if has_expert_map:
-            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
-            expert_mask = tl.load(expert_map_ptr + id_val) >= 0
-            a_vec = tl.load(
-                a_base + n * size,
-                mask=mask & expert_mask[:, None],
-                other=0.0,
-            ).to(tl.float32)
-        else:
-            a_vec = tl.load(
-                a_base + n * size,
-                mask=mask,
-                other=0.0,
-            ).to(tl.float32)
-        acc += a_vec * b_val[:, None]
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
 
-    out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
-    tl.store(
-        out_ptrs,
-        acc.to(outputs_ptr.dtype.element_ty),
-        mask=mask,
-    )
-
-
-def _heuristic_config(
-    num_tokens: int,
-    top_k: int,
-    size: int,
-    element_size: int,
-):
-    is_fp32 = element_size > 2
-    is_sm90_plus = current_platform.has_device_capability(90)
-    is_sm80_before = not current_platform.has_device_capability(80)
-
-    if current_platform.has_device_capability(90):
-        # SM90/SM100+: prefer small tiles + many CTAs.
-        if is_fp32:
-            BLOCK_M = 1 if num_tokens <= 4 else 2
-        else:
-            if num_tokens <= 4:
-                BLOCK_M = 1
-            elif num_tokens <= 128:
-                BLOCK_M = 2
+        for n in tl.static_range(top_k):
+            b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
+            if has_expert_map:
+                id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
+                expert_mask = tl.load(expert_map_ptr + id_val) >= 0
+                a_vec = tl.load(
+                    a_base + n * size,
+                    mask=mask & expert_mask[:, None],
+                    other=0.0,
+                ).to(tl.float32)
             else:
-                BLOCK_M = 4
-    elif is_fp32:
-        if num_tokens <= 4:
-            BLOCK_M = 1
-        elif num_tokens <= 32:
-            BLOCK_M = 2
-        elif num_tokens <= 128:
-            BLOCK_M = 4
-        else:
-            BLOCK_M = 4
-    else:
-        if num_tokens <= 4:
-            BLOCK_M = 1
-        elif num_tokens <= 32:
-            BLOCK_M = 2
-        elif num_tokens <= 128:
-            BLOCK_M = 4
-        elif num_tokens <= 1024:
-            BLOCK_M = 16
-        else:
-            BLOCK_M = 8
+                a_vec = tl.load(
+                    a_base + n * size,
+                    mask=mask,
+                    other=0.0,
+                ).to(tl.float32)
+            acc += a_vec * b_val[:, None]
 
-    if is_fp32:
-        max_block_k = 256
-    elif is_sm80_before or is_sm90_plus:
-        max_block_k = 512
-    else:
-        max_block_k = 1024
-    BLOCK_K = min(triton.next_power_of_2(size), max_block_k)
-    BLOCK_K = max(BLOCK_K, 256)
+        out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
+        tl.store(
+            out_ptrs,
+            acc.to(outputs_ptr.dtype.element_ty),
+            mask=mask,
+        )
 
-    total = BLOCK_M * BLOCK_K
-    if is_fp32:
-        num_warps = max(8, min(16, total // 64))
-    else:
-        num_warps = max(4, min(16, total // 256))
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_tokens: int,
+        top_k: int,
+        size: int,
+        element_size: int,
+        dtype: torch.dtype,
+        has_expert_map: bool,
+    ) -> CompileKey:
+        is_fp32 = element_size > 2
+        is_sm90_plus = current_platform.has_device_capability(90)
+        is_sm80_before = not current_platform.has_device_capability(80)
 
-    if is_sm80_before:
-        num_warps = min(num_warps, 8)
-        num_stages = 2
-    elif is_sm90_plus:
-        num_warps = min(num_warps, 8)
-        num_stages = 4 if total <= 2048 else 2
-    else:
-        num_stages = 4 if total <= 2048 else 2
+        # SM90/SM100+: prefer small tiles + many CTAs.
+        sm90_block_m = (
+            (1 if num_tokens <= 4 else 2)
+            if is_fp32
+            else 1
+            if num_tokens <= 4
+            else 2
+            if num_tokens <= 128
+            else 4
+        )
+        fp32_block_m = 1 if num_tokens <= 4 else 2 if num_tokens <= 32 else 4
+        default_block_m = (
+            1
+            if num_tokens <= 4
+            else 2
+            if num_tokens <= 32
+            else 4
+            if num_tokens <= 128
+            else 16
+            if num_tokens <= 1024
+            else 8
+        )
+        block_m = (
+            sm90_block_m
+            if is_sm90_plus
+            else fp32_block_m
+            if is_fp32
+            else default_block_m
+        )
 
-    return BLOCK_M, BLOCK_K, num_warps, num_stages
+        max_block_k = (
+            256 if is_fp32 else 512 if is_sm80_before or is_sm90_plus else 1024
+        )
+        block_k = max(min(triton.next_power_of_2(size), max_block_k), 256)
+
+        total = block_m * block_k
+        base_num_warps = (
+            max(8, min(16, total // 64)) if is_fp32 else max(4, min(16, total // 256))
+        )
+        num_warps = (
+            min(base_num_warps, 8) if is_sm80_before or is_sm90_plus else base_num_warps
+        )
+        num_stages = 2 if is_sm80_before else 4 if total <= 2048 else 2
+
+        return self.CompileKey(
+            dtype=dtype,
+            has_expert_map=has_expert_map,
+            top_k=top_k,
+            size=size,
+            block_m=block_m,
+            block_k=block_k,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        size = vllm_config.model_config.hf_config.hidden_size
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if size <= 0 or top_k <= 0 or max_tokens <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=WarmupIntRange(1, min(max_tokens, 1024) + 1),
+            top_k=top_k,
+            size=size,
+            element_size=(2, 4),
+            dtype=(torch.bfloat16, torch.float32),
+            has_expert_map=(False, True),
+            _when=lambda *, dtype, element_size: (
+                (dtype == torch.float32 and element_size == 4)
+                or (dtype != torch.float32 and element_size == 2)
+            ),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        data_ptr = TritonWarmupTensor(compile_key.dtype)
+        weight_ptr = TritonWarmupTensor(torch.float32)
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            data_ptr,
+            weight_ptr,
+            data_ptr,
+            int32_ptr,
+            int32_ptr,
+            1,  # do not specialize num_tokens
+            compile_key.top_k * compile_key.size,
+            compile_key.has_expert_map,
+            compile_key.top_k,
+            compile_key.size,
+            compile_key.block_m,
+            compile_key.block_k,
+            grid=(1, 1),
+            num_warps=compile_key.num_warps,
+            num_stages=compile_key.num_stages,
+        )
+
+    def __call__(
+        self,
+        inputs: torch.Tensor,
+        topk_weights: torch.Tensor,
+        outputs: torch.Tensor,
+        topk_ids: torch.Tensor | None,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        num_tokens, top_k, size = inputs.shape
+        compile_key = self.dispatch(
+            num_tokens=num_tokens,
+            top_k=top_k,
+            size=size,
+            element_size=inputs.element_size(),
+            dtype=inputs.dtype,
+            has_expert_map=expert_map is not None,
+        )
+        grid = (
+            triton.cdiv(size, compile_key.block_k),
+            triton.cdiv(num_tokens, compile_key.block_m),
+        )
+        self.kernel[grid](
+            inputs,
+            topk_weights,
+            outputs,
+            topk_ids,
+            expert_map,
+            num_tokens,
+            top_k * size,
+            expert_map is not None,
+            top_k,
+            size,
+            compile_key.block_m,
+            compile_key.block_k,
+            num_warps=compile_key.num_warps,
+            num_stages=compile_key.num_stages,
+        )
 
 
 def moe_fused_mul_sum(
@@ -175,28 +277,15 @@ def moe_fused_mul_sum(
     assert topk_weights.shape == (num_tokens, top_k)
 
     if not isinstance(inputs, FakeTensor):
-        BLOCK_M, BLOCK_K, num_warps, num_stages = _heuristic_config(
-            num_tokens,
-            top_k,
-            size,
-            inputs.element_size(),
-        )
-        grid = (triton.cdiv(size, BLOCK_K), triton.cdiv(num_tokens, BLOCK_M))
-        moe_fused_mul_sum_kernel[grid](
+        _MOE_FUSED_MUL_SUM_KERNEL(
             inputs,
             topk_weights,
             outputs,
             topk_ids,
             expert_map,
-            num_tokens,
-            top_k * size,
-            expert_map is not None,
-            top_k,
-            size,
-            BLOCK_M,
-            BLOCK_K,
-            num_warps=num_warps,
-            num_stages=num_stages,
         )
 
     return outputs
+
+
+_MOE_FUSED_MUL_SUM_KERNEL = MoeFusedMulSumKernel()
