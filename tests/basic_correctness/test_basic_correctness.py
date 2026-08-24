@@ -19,8 +19,8 @@ from vllm import LLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine
 
-from ..conftest import HfRunner, VllmRunner
-from ..models.utils import check_outputs_equal
+from ..conftest import VllmRunner
+from ..models.utils import check_logprobs_close
 from ..utils import multi_gpu_test
 
 ATTN_BACKEND = ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
@@ -98,25 +98,6 @@ def test_vllm_gc_ed():
     assert weak_llm() is None
 
 
-def _fix_prompt_embed_outputs(
-    vllm_outputs: list[tuple[list[int], str]],
-    hf_model: HfRunner,
-    example_prompts: list[str],
-) -> list[tuple[list[int], str]]:
-    fixed_vllm_outputs = []
-    for vllm_output, hf_input, prompt in zip(
-        vllm_outputs, hf_model.get_inputs(example_prompts), example_prompts
-    ):
-        hf_input_ids = hf_input["input_ids"].tolist()[0]
-        fixed_vllm_outputs.append(
-            (
-                hf_input_ids + vllm_output[0][len(hf_input_ids) :],
-                prompt + vllm_output[1],
-            )
-        )
-    return fixed_vllm_outputs
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ATTN_BACKEND)
 @pytest.mark.parametrize("max_tokens", [5])
@@ -143,9 +124,12 @@ def test_models(
         + " are:"
     )
     example_prompts = [prompt]
+    num_logprobs = 5
 
     with hf_runner(model) as hf_model:
-        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs
+        )
         if enable_prompt_embeds:
             with torch.no_grad():
                 prompt_embeds = hf_model.get_prompt_embeddings(example_prompts)
@@ -170,14 +154,17 @@ def test_models(
         attention_config={"backend": backend},
     ) as vllm_model:
         if enable_prompt_embeds:
-            vllm_outputs = vllm_model.generate_greedy(prompt_embeds, max_tokens)
-            vllm_outputs = _fix_prompt_embed_outputs(
-                vllm_outputs, hf_model, example_prompts
+            # Both HF (`generate_greedy_logprobs_limit`) and vLLM
+            # (`generate_greedy_logprobs`) return generated-only tokens.
+            vllm_outputs = vllm_model.generate_greedy_logprobs(
+                prompt_embeds, max_tokens, num_logprobs
             )
         else:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+            vllm_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs
+            )
 
-    check_outputs_equal(
+    check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
@@ -241,6 +228,7 @@ def test_models_distributed(
 
         dtype = "half"
         max_tokens = 5
+        num_logprobs = 5
 
         # NOTE: take care of the order. run vLLM first, and then run HF.
         # vLLM needs a fresh new process without cuda initialization.
@@ -261,17 +249,25 @@ def test_models_distributed(
                 with hf_runner(model, dtype=dtype) as hf_model:
                     with torch.no_grad():
                         prompt_embeds = hf_model.get_prompt_embeddings(example_prompts)
-                    vllm_outputs = vllm_model.generate_greedy(prompt_embeds, max_tokens)
-                    vllm_outputs = _fix_prompt_embed_outputs(
-                        vllm_outputs, hf_model, example_prompts
+                    # Both HF (`generate_greedy_logprobs_limit`) and vLLM
+                    # (`generate_greedy_logprobs`) return generated-only
+                    # tokens.
+                    vllm_outputs = vllm_model.generate_greedy_logprobs(
+                        prompt_embeds, max_tokens, num_logprobs
                     )
-                    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+                    hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                        example_prompts, max_tokens, num_logprobs
+                    )
             else:
-                vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+                vllm_outputs = vllm_model.generate_greedy_logprobs(
+                    example_prompts, max_tokens, num_logprobs
+                )
                 with hf_runner(model, dtype=dtype) as hf_model:
-                    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+                    hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                        example_prompts, max_tokens, num_logprobs
+                    )
 
-    check_outputs_equal(
+    check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
