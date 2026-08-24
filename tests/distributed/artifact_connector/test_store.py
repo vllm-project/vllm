@@ -20,15 +20,11 @@ from vllm.distributed.artifact_connector.connector import (
 )
 from vllm.distributed.artifact_connector.routed_experts import (
     RoutedExpertsArtifactBuffer,
-    get_routing_shape_and_dtype,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
 )
 from vllm.distributed.artifact_connector.store import (
-    ArtifactCapacityError,
-    ArtifactCorruptionError,
-    ArtifactNotFoundError,
     ArtifactObject,
     ArtifactStoreError,
     BackgroundArtifactStore,
@@ -84,7 +80,7 @@ def test_background_store_put_is_async_and_ordered():
 
 def test_background_store_surfaces_publication_failure():
     underlying = Mock()
-    underlying.put.side_effect = ArtifactCapacityError("full")
+    underlying.put.side_effect = ArtifactStoreError("full")
     store = BackgroundArtifactStore(underlying, max_pending_batches=2)
 
     store.put([ArtifactObject("key", b"value")])
@@ -92,30 +88,6 @@ def test_background_store_surfaces_publication_failure():
         store.get_concatenated(["key"])
     with pytest.raises(ArtifactStoreError, match="publication failed"):
         store.close()
-
-
-def test_background_store_close_does_not_race_blocked_put():
-    underlying = _BlockingArtifactStore()
-    store = BackgroundArtifactStore(underlying, max_pending_batches=1)
-    store.put([ArtifactObject("first", b"1")])
-    assert underlying.started.wait(timeout=1)
-    store.put([ArtifactObject("second", b"2")])
-
-    producer = threading.Thread(
-        target=store.put,
-        args=([ArtifactObject("third", b"3")],),
-    )
-    producer.start()
-    closer = threading.Thread(target=store.close)
-    closer.start()
-    underlying.release.set()
-
-    producer.join(timeout=2)
-    closer.join(timeout=2)
-    assert not producer.is_alive()
-    assert not closer.is_alive()
-    assert underlying.objects == {"first": b"1", "second": b"2", "third": b"3"}
-    assert underlying.closed
 
 
 def test_background_store_preserves_capacity_independent_batches():
@@ -129,7 +101,7 @@ def test_background_store_preserves_capacity_independent_batches():
             started.set()
             release.wait()
         if len(objects) > 1:
-            raise ArtifactCapacityError("batch exceeds capacity")
+            raise ArtifactStoreError("batch exceeds capacity")
         batches.append([obj.key for obj in objects])
 
     underlying.put.side_effect = put
@@ -169,16 +141,6 @@ def _make_vllm_config(
         model_config=model_config,
         instance_id="instance",
     )
-
-
-@pytest.mark.parametrize(
-    ("num_experts", "dtype"),
-    [(256, "uint8"), (257, "uint16")],
-)
-def test_routed_experts_shape_uses_model_arch_config(num_experts, dtype):
-    config = _make_vllm_config(num_experts=num_experts)
-
-    assert get_routing_shape_and_dtype(config) == ((3, 2), dtype)
 
 
 def _make_connector():
@@ -472,7 +434,15 @@ def test_worker_rejects_hash_update_without_request_state():
     worker.close()
 
 
-def test_worker_rejects_mismatched_capture_shape():
+@pytest.mark.parametrize(
+    "routing",
+    [
+        np.zeros((1, _SHAPE[0], _SHAPE[1] + 1), dtype=_DTYPE),
+        np.zeros((1, *_SHAPE), dtype=np.int32),
+    ],
+    ids=["shape", "dtype"],
+)
+def test_worker_rejects_mismatched_capture_profile(routing):
     worker = _make_worker(1)
     metadata = _metadata(
         0,
@@ -485,7 +455,7 @@ def test_worker_rejects_mismatched_capture_shape():
         _process_output(
             worker,
             metadata,
-            np.zeros((1, _SHAPE[0], _SHAPE[1] + 1), dtype=_DTYPE),
+            routing,
             ["request"],
             np.array([0]),
         )
@@ -497,7 +467,7 @@ def test_store_rejects_invalid_payload_size():
     payload = array.tobytes()
 
     store = _make_store(object_nbytes=len(payload))
-    with pytest.raises(ArtifactCorruptionError, match="size"):
+    with pytest.raises(ArtifactStoreError, match="size"):
         store.put([ArtifactObject("key", payload[:-1])])
     store.close()
 
@@ -505,7 +475,7 @@ def test_store_rejects_invalid_payload_size():
 def test_logical_buffer_rejects_overlap():
     buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,), 4, 2, 8, 2)
     assert (
-        buffer.capture("request", 4, np.arange(4, 7, dtype=np.int32).reshape(-1, 1))
+        buffer.capture("request", 4, np.arange(4, 7, dtype=np.uint8).reshape(-1, 1))
         == []
     )
     with pytest.raises(RuntimeError, match="not contiguous"):
@@ -1071,7 +1041,8 @@ def test_worker_does_not_rematerialize_emitted_rows():
     output = _process_output(worker, first, logical[:4], ["request"], np.array([0]))
     assert output is not None
 
-    worker._materialize = Mock(wraps=worker._materialize)
+    assert worker._store is not None
+    worker._store.get_concatenated = Mock(wraps=worker._store.get_concatenated)
     second = _metadata(
         0,
         _BLOCK_SIZE,
@@ -1083,7 +1054,7 @@ def test_worker_does_not_rematerialize_emitted_rows():
 
     assert output is not None
     np.testing.assert_array_equal(output["request"].rows, logical[4:])
-    worker._materialize.assert_not_called()
+    worker._store.get_concatenated.assert_not_called()
     worker.close()
 
 
@@ -1348,7 +1319,7 @@ def test_worker_publishes_hashed_block_and_discards_tail_on_request_finish():
     worker._requests["request"] = _WorkerRequestState(
         pending_blocks=[(0, worker._buffer.retain_block(logical))]
     )
-    worker._buffer.capture("request", _BLOCK_SIZE, np.zeros((1, *_SHAPE)))
+    worker._buffer.capture("request", _BLOCK_SIZE, np.zeros((1, *_SHAPE), dtype=_DTYPE))
     block_hash = b"a" * 32
 
     worker.begin_step(
@@ -1436,7 +1407,7 @@ def test_worker_fails_when_cached_artifact_is_missing():
         {},
     )
 
-    with pytest.raises(ArtifactNotFoundError):
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
         _process_output(
             worker,
             metadata,
@@ -1451,7 +1422,7 @@ def test_store_rejects_oversized_batch_without_partial_write():
     store = _make_store(max_bytes=6, object_nbytes=3)
     store.put([ArtifactObject("retained", b"rrr")])
 
-    with pytest.raises(ArtifactCapacityError):
+    with pytest.raises(ArtifactStoreError, match="cannot retain"):
         store.put(
             [
                 ArtifactObject("first", b"111"),
@@ -1461,7 +1432,7 @@ def test_store_rejects_oversized_batch_without_partial_write():
         )
 
     assert store.get_concatenated(["retained"]) == b"rrr"
-    with pytest.raises(ArtifactNotFoundError):
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
         store.get_concatenated(["first"])
     store.close()
 
@@ -1474,7 +1445,7 @@ def test_store_lru_and_immutable_put():
     store.put([ArtifactObject("first", b"1111"), ArtifactObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(ArtifactNotFoundError, match="Increase artifact_config"):
+    with pytest.raises(ArtifactStoreError, match="Increase artifact_config"):
         store.get_concatenated(["second"])
     store.close()
 

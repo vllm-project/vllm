@@ -220,6 +220,34 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     assert capturer.device_buffer[3, 0, 0].item() == -1
 
 
+@pytest.mark.parametrize(
+    ("num_experts", "dtype_name", "torch_dtype"),
+    [(256, "uint8", torch.uint8), (257, "uint16", torch.uint16)],
+)
+def test_routed_experts_capturer_exposes_output_profile(
+    monkeypatch, num_experts, dtype_name, torch_dtype
+):
+    import vllm.model_executor.layers.fused_moe.routed_experts_capturer as module
+
+    monkeypatch.setattr(module, "current_platform", SimpleNamespace(device_type="cpu"))
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            get_total_num_hidden_layers=lambda: 3,
+            get_num_experts=lambda: num_experts,
+            get_num_experts_per_tok=lambda: 2,
+            hf_text_config=SimpleNamespace(model_type="test"),
+        ),
+        parallel_config=SimpleNamespace(data_parallel_rank=0, tensor_parallel_size=1),
+    )
+
+    capturer = RoutedExpertsCapturer(8, config)
+
+    assert capturer.shape_per_token == (3, 2)
+    assert capturer.output_dtype_name == dtype_name
+    assert capturer.output_dtype == torch_dtype
+    assert capturer.device_buffer.shape == (8, 3, 2)
+
+
 @pytest.mark.parametrize("output_dtype", [torch.uint8, torch.uint16])
 def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     capturer = _capturer_with_buffer(dtype=torch.int32)
@@ -393,14 +421,12 @@ def test_artifact_worker_connector_shm_capacity(monkeypatch):
 
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
     store_constructor = Mock()
+    capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(artifact_worker, "get_tp_group", lambda: tp_group)
-    monkeypatch.setattr(artifact_worker, "RoutedExpertsCapturer", Mock())
-    monkeypatch.setattr(artifact_worker, "bind_routed_experts_capturer", Mock())
     monkeypatch.setattr(
-        artifact_worker,
-        "get_routing_shape_and_dtype",
-        lambda _: ((2,), np.int32),
+        artifact_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
+    monkeypatch.setattr(artifact_worker, "bind_routed_experts_capturer", Mock())
     monkeypatch.setattr(
         artifact_worker,
         "resolve_kv_cache_block_sizes",

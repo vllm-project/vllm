@@ -61,15 +61,10 @@ class ArtifactSchedulerConnector:
         for request_id in scheduler_output.num_scheduled_tokens:
             num_sent = self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
-            num_hashes = len(request.block_hashes)
-            if num_sent > num_hashes:
-                raise RuntimeError("KV block-hash history shrank")
-            new_hashes = request.block_hashes[num_sent:num_hashes]
-            if new_hashes:
-                block_hashes_by_request[request_id] = self._pack_block_hashes(
-                    new_hashes
-                )
-            self._sent_hash_counts[request_id] = num_hashes
+            packed = self._pack_new_hashes(request.block_hashes, num_sent)
+            if packed is not None:
+                block_hashes_by_request[request_id] = packed
+            self._sent_hash_counts[request_id] = len(request.block_hashes)
             scheduled_requests[request_id] = (
                 0 if request.num_output_tokens == 0 else request.num_tokens - 1
             )
@@ -80,14 +75,11 @@ class ArtifactSchedulerConnector:
                 if request_id in scheduled_requests:
                     continue
                 request = requests[request_id]
-                num_hashes = len(request.block_hashes)
-                if num_hashes <= num_sent:
+                packed = self._pack_new_hashes(request.block_hashes, num_sent)
+                if packed is None:
                     continue
-                new_hashes = request.block_hashes[num_sent:num_hashes]
-                block_hashes_by_request[request_id] = self._pack_block_hashes(
-                    new_hashes
-                )
-                self._sent_hash_counts[request_id] = num_hashes
+                block_hashes_by_request[request_id] = packed
+                self._sent_hash_counts[request_id] = len(request.block_hashes)
         # Sending transfers ownership of these one-shot events.
         finished_requests = set(self._finished_requests)
         block_hashes_by_request.update(
@@ -139,13 +131,19 @@ class ArtifactSchedulerConnector:
         if num_sent is None:
             return
         # The next metadata delivers this terminal event to the worker.
-        new_hashes = request.block_hashes[num_sent:]
-        self._finished_requests[request.request_id] = (
-            self._pack_block_hashes(new_hashes) if new_hashes else None
+        self._finished_requests[request_id] = self._pack_new_hashes(
+            request.block_hashes, num_sent
         )
 
     @staticmethod
-    def _pack_block_hashes(new_hashes: Sequence[bytes]) -> PackedBlockHashes:
+    def _pack_new_hashes(
+        block_hashes: Sequence[bytes], num_sent: int
+    ) -> PackedBlockHashes | None:
+        if num_sent > len(block_hashes):
+            raise RuntimeError("KV block-hash history shrank")
+        new_hashes = block_hashes[num_sent:]
+        if not new_hashes:
+            return None
         return PackedBlockHashes(b"".join(new_hashes), len(new_hashes[0]))
 
     def reset(self) -> None:
