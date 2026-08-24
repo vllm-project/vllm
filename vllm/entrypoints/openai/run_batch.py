@@ -10,7 +10,7 @@ from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import BytesIO, StringIO
-from typing import Any, TypeAlias
+from typing import Any, NoReturn, TypeAlias
 from urllib.parse import urlparse
 
 import aiohttp
@@ -28,7 +28,7 @@ from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.config import config
-from vllm.connections import global_http_connection
+from vllm.connections import HTTPResponseSizeExceededError, global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launchers.api_server.entry import init_app_state
@@ -68,9 +68,22 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def _get_audio_download_limit_bytes() -> int:
+    return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
+
+
+def _raise_audio_filesize_limit(size_bytes: int) -> NoReturn:
+    raise VLLMValidationError(
+        "Maximum file size exceeded",
+        parameter="audio_filesize_mb",
+        value=size_bytes / MiB_bytes,
+    )
 
 
 class BatchTranscriptionRequest(TranscriptionRequest):
@@ -380,20 +393,23 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                     with open(data_or_file, "rb") as file:
                         async with session.put(output_url, data=file) as response:
                             if response.status != 200:
+                                error_text = await response.text()
                                 raise Exception(
                                     f"Failed to upload file.\n"
                                     f"Status: {response.status}\n"
-                                    f"Response: {response.text()}"
+                                    f"Response: {error_text}"
                                 )
                 else:
                     async with session.put(output_url, data=data_or_file) as response:
                         if response.status != 200:
+                            error_text = await response.text()
                             raise Exception(
                                 f"Failed to upload data.\n"
                                 f"Status: {response.status}\n"
-                                f"Response: {response.text()}"
+                                f"Response: {error_text}"
                             )
-
+            # Upload succeeded; do not retry.
+            return
         except Exception as e:
             if attempt < max_retries:
                 logger.error(
@@ -474,34 +490,52 @@ async def download_bytes_from_url(
         if "," in url:
             header, data = url.split(",", 1)
             if "base64" in header:
+                decoded_size_bytes = len(data.rstrip("=")) * 3 // 4
+                if decoded_size_bytes > _get_audio_download_limit_bytes():
+                    _raise_audio_filesize_limit(decoded_size_bytes)
                 return base64.b64decode(data)
             else:
-                raise ValueError(f"Unsupported data URL encoding: {header}")
+                raise VLLMValidationError(
+                    f"Unsupported data URL encoding: {header}",
+                    parameter="url",
+                )
         else:
-            raise ValueError(f"Invalid data URL format: {url}")
+            raise VLLMValidationError(
+                f"Invalid data URL format: {url}",
+                parameter="url",
+            )
 
     # Handle HTTP/HTTPS URLs
     elif parsed.scheme in ("http", "https"):
         if allowed_media_domains is not None:
             url_spec = parse_url(url)
             if url_spec.hostname not in allowed_media_domains:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The URL must be from one of the allowed domains: "
                     f"{allowed_media_domains}. Input URL domain: "
-                    f"{url_spec.hostname}"
+                    f"{url_spec.hostname}",
+                    parameter="url",
+                    value=url_spec.hostname,
                 )
             # Use the normalized URL to prevent parsing discrepancies
             # between urllib3 and aiohttp (e.g. backslash-@ attacks).
             url = url_spec.url
 
-        return await global_http_connection.async_get_bytes(
-            url, allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS
-        )
+        try:
+            return await global_http_connection.async_get_bytes(
+                url,
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                max_bytes=_get_audio_download_limit_bytes(),
+            )
+        except HTTPResponseSizeExceededError as exc:
+            _raise_audio_filesize_limit(exc.received_bytes)
 
     else:
-        raise ValueError(
+        raise VLLMValidationError(
             f"Unsupported URL scheme: {parsed.scheme}. "
-            "Supported schemes: http, https, data"
+            "Supported schemes: http, https, data",
+            parameter="url",
+            value=parsed.scheme,
         )
 
 
