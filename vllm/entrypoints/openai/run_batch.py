@@ -10,7 +10,7 @@ from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import BytesIO, StringIO
-from typing import Any, TypeAlias
+from typing import Any, NoReturn, TypeAlias
 from urllib.parse import urlparse
 
 import aiohttp
@@ -28,7 +28,7 @@ from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.config import config
-from vllm.connections import global_http_connection
+from vllm.connections import HTTPResponseSizeExceededError, global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launchers.api_server.entry import init_app_state
@@ -68,9 +68,22 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def _get_audio_download_limit_bytes() -> int:
+    return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
+
+
+def _raise_audio_filesize_limit(size_bytes: int) -> NoReturn:
+    raise VLLMValidationError(
+        "Maximum file size exceeded",
+        parameter="audio_filesize_mb",
+        value=size_bytes / MiB_bytes,
+    )
 
 
 class BatchTranscriptionRequest(TranscriptionRequest):
@@ -474,6 +487,9 @@ async def download_bytes_from_url(
         if "," in url:
             header, data = url.split(",", 1)
             if "base64" in header:
+                decoded_size_bytes = len(data.rstrip("=")) * 3 // 4
+                if decoded_size_bytes > _get_audio_download_limit_bytes():
+                    _raise_audio_filesize_limit(decoded_size_bytes)
                 return base64.b64decode(data)
             else:
                 raise VLLMValidationError(
@@ -502,9 +518,14 @@ async def download_bytes_from_url(
             # between urllib3 and aiohttp (e.g. backslash-@ attacks).
             url = url_spec.url
 
-        return await global_http_connection.async_get_bytes(
-            url, allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS
-        )
+        try:
+            return await global_http_connection.async_get_bytes(
+                url,
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                max_bytes=_get_audio_download_limit_bytes(),
+            )
+        except HTTPResponseSizeExceededError as exc:
+            _raise_audio_filesize_limit(exc.received_bytes)
 
     else:
         raise VLLMValidationError(
