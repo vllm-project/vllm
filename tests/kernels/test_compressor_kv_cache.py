@@ -812,7 +812,22 @@ def _reference_kv_compress_norm_rope(
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.parametrize("kv_block_size", [16, 32])
-@pytest.mark.parametrize("use_fp4", [False, True])
+@pytest.mark.parametrize(
+    "use_fp4",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                ),
+                reason="MXFP4 indexer cache requires an SM100-family GPU",
+            ),
+        ),
+    ],
+)
 def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: bool):
     """Fused K compress+norm+rope+quant+insert for the indexer KV cache."""
     HEAD_DIM = 128
