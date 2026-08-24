@@ -919,7 +919,7 @@ async def test_download_bytes_allows_permitted_domain():
     mock_session = _make_aiohttp_mocks(expected)
 
     with patch(
-        "vllm.entrypoints.openai.launchers.aiohttp.ClientSession",
+        "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
         return_value=mock_session,
     ):
         result = await download_bytes_from_url(
@@ -936,7 +936,7 @@ async def test_download_bytes_no_allowlist_permits_any_domain():
     mock_session = _make_aiohttp_mocks(expected)
 
     with patch(
-        "vllm.entrypoints.openai.launchers.aiohttp.ClientSession",
+        "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
         return_value=mock_session,
     ):
         result = await download_bytes_from_url(url, allowed_media_domains=None)
