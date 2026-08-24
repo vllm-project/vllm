@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Scheduler metadata sizes a scratchpad from the query head count, so it must
-come from the builder's own group: the model-wide ``get_num_attention_heads()``
-is wrong for models that vary it per layer (e.g. Laguna), and too small a
-scratchpad is indexed past its end.
-"""
+"""Attention metadata geometry must come from the builder's own group."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -17,8 +13,9 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
 
-pytestmark = pytest.mark.skipif(
+requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
 )
 
@@ -69,6 +66,7 @@ def _build(layer_num_heads: list[int]) -> CPUAttentionMetadataBuilder:
         )
 
 
+@requires_cpu
 @pytest.mark.parametrize("group_num_heads", [MODEL_WIDE_NUM_HEADS, 64, 16])
 def test_num_heads_comes_from_the_group(group_num_heads):
     """The group's own count wins, even when it is not the model-wide one."""
@@ -76,7 +74,56 @@ def test_num_heads_comes_from_the_group(group_num_heads):
     assert builder.num_heads == group_num_heads
 
 
+@requires_cpu
 def test_mixed_head_counts_in_one_group_are_rejected():
     """Grouping guarantees uniformity; a mixed group means that broke."""
     with pytest.raises(AssertionError, match="share num_heads"):
         _build([MODEL_WIDE_NUM_HEADS, 64])
+
+
+def test_flash_attention_geometry_comes_from_the_group():
+    """FA3 must use group geometry for layers without an ``impl`` wrapper."""
+    layers = {f"layer_{i}": SimpleNamespace(num_heads=16) for i in range(2)}
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
+    vllm_config.model_config.get_num_kv_heads.return_value = NUM_KV_HEADS
+    vllm_config.model_config.get_head_size.return_value = 128
+    vllm_config.model_config.rswa_window = None
+    vllm_config.model_config.is_mm_prefix_lm = False
+    vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+    vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs.return_value = (
+        False
+    )
+    vllm_config.compilation_config.max_cudagraph_capture_size = None
+    kv_cache_spec = SimpleNamespace(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+
+    with (
+        patch(
+            "vllm.v1.attention.backends.utils.get_layers_from_vllm_config",
+            return_value=layers,
+        ),
+        patch(
+            "vllm.distributed.parallel_state.get_dcp_group",
+            side_effect=AssertionError,
+        ),
+        patch(
+            "vllm.v1.attention.backends.flash_attn.get_flash_attn_version",
+            return_value=3,
+        ),
+    ):
+        builder = FlashAttentionMetadataBuilder(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=list(layers),
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
+
+    assert builder.aot_schedule
+    assert builder.num_heads_q == 16
+    assert builder.num_heads_kv == 2
+    assert builder.headdim == 64
