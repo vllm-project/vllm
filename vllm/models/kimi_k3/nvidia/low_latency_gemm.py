@@ -30,12 +30,19 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8PbWoLinearMethod,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import supports_block_size_multiple_of
 
 Backend = Literal["cute", "dsv3_fused_a"]
 # A resolved per-token-count call: the backend plus its CuTe config (None for
@@ -485,6 +492,16 @@ KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
     ),
 }
 
+# SM103 layout tuning for Kimi-K3 FP8_PB_WO projection GEMMs. Each value
+# is passed to DeepGEMM's set_block_size_multiple_of to constrain candidate
+# (block_m, block_n) tile sizes during kernel selection.
+KIMI_K3_FP8_PB_WO_BLOCK_SIZE_PLANS_SM103: dict[
+    tuple[int, int], dict[int, tuple[int, int]]
+] = {
+    (12288, 128): {m: (256, 1) for m in range(17, 257)},
+    (7168, 12288): {m: (256, 1) for m in range(17, 257)},
+}
+
 
 def _backend_for(
     spec: ProjectionSpec, num_tokens: int, has_residual: bool
@@ -697,6 +714,24 @@ def enable_kimi_k3_low_latency_gemm(
     warmup_configs: set[SkinnyGemmConfig] = set()
     residual_warmup_configs: set[SkinnyGemmConfig] = set()
     for child in module.modules():
+        if (
+            _is_sm103()
+            and not envs.VLLM_BATCH_INVARIANT
+            and isinstance(child, LinearBase)
+            and isinstance(child.quant_method, ModelOptFp8PbWoLinearMethod)
+        ):
+            kernel = child.quant_method.w8a8_block_fp8_linear
+            plan = KIMI_K3_FP8_PB_WO_BLOCK_SIZE_PLANS_SM103.get(
+                tuple(child.weight.shape)
+            )
+            if (
+                plan is not None
+                and isinstance(kernel, DeepGemmFp8BlockScaledMMKernel)
+                and supports_block_size_multiple_of()
+            ):
+                kernel.set_block_size_multiple_plan(plan)
+            continue
+
         is_linear = (
             isinstance(child, LinearBase)
             and type(child.quant_method) is UnquantizedLinearMethod
