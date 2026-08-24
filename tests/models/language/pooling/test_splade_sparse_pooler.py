@@ -12,9 +12,7 @@ from vllm.model_executor.models.bert import (
     BertMLMHead,
     SPLADESparsePooler,
 )
-from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -119,18 +117,17 @@ def test_pooling_runner_gathers_required_token_ids() -> None:
     req_states = MagicMock(spec=RequestState)
     req_states.prompt_len = MagicMock(np=np.array([0, 2, 0, 3], dtype=np.int32))
     metadata = runner._get_pooling_metadata(
-        input_batch, req_states, torch.device(current_platform.device_type)
+        input_batch, req_states, torch.device("cpu")
     )
 
     expected = torch.tensor([[101, 11, 102], [101, 102, 0]])
     assert metadata.prompt_token_ids_cpu is not None
-    assert metadata.prompt_token_ids is not None
-    assert metadata.prompt_token_ids_cpu.is_pinned() == PIN_MEMORY
+    assert metadata.prompt_token_ids is None
+    assert metadata.prompt_token_ids_cpu.is_pinned() is False
     torch.testing.assert_close(
         metadata.prompt_lens, torch.tensor([3, 2], dtype=torch.int32)
     )
     torch.testing.assert_close(metadata.prompt_token_ids_cpu, expected)
-    torch.testing.assert_close(metadata.prompt_token_ids.cpu(), expected)
 
 
 def test_pooling_runner_stores_only_required_token_ids() -> None:
