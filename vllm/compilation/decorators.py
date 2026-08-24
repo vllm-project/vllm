@@ -106,8 +106,10 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
-    mark_unbacked_dims: dict[str, int | list[int]] | None,
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
+    mark_unbacked_dims: dict[str, int | list[int]] | None = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
+    is_encoder: bool = False,
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
@@ -559,8 +561,7 @@ def _support_torch_compile(
 
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
-            dev = torch.accelerator.current_device_index()
-            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}_dev{dev}")
+            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             if not envs.VLLM_DISABLE_COMPILE_CACHE:
                 loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)

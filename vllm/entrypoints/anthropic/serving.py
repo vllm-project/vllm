@@ -489,6 +489,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
+            vllm_xargs=anthropic_request.vllm_xargs,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 

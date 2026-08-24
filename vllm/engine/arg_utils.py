@@ -764,7 +764,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda", "fused"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1720,10 +1720,9 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda", "fused"],
+            choices=["auto", "triton", "flashkda"],
             default=None,
-            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
-            "'fused' is ROCm-only; 'auto' picks a supported backend.",
+            help="Select KDA prefill backend.",
         )
         return parser
 
@@ -2524,17 +2523,6 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
-            if (
-                self.kda_prefill_backend == "flashkda"
-                and not current_platform.is_cuda()
-            ):
-                raise ValueError(
-                    "--kda-prefill-backend=flashkda is only available on CUDA."
-                )
-            if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
-                raise ValueError(
-                    "--kda-prefill-backend=fused is only available on ROCm."
-                )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
 
         config = VllmConfig(
