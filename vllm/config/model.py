@@ -343,11 +343,11 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
-    disable_nccl_comm_suspend: bool = False
+    disable_nccl_comm_suspend: bool = True
     """Disable releasing NCCL communicator memory during sleep mode
-    (``ncclCommSuspend``/``ncclCommResume``). Escape hatch for this
-    experimental path; sleep still releases weights/KV-cache memory as
-    before."""
+    (``ncclCommSuspend``/``ncclCommResume``). This is experimental and
+    defaults to disabled; sleep still releases weights/KV-cache memory as
+    before. Pass ``--no-disable-nccl-comm-suspend`` to opt in."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
