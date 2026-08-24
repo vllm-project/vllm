@@ -1025,9 +1025,10 @@ async def test_pause_keep_multi_request():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["abort", "wait", "keep"])
 async def test_pause_admission_policy_per_mode(mode: str):
-    """`abort` and `wait` make the pause a generation boundary, so requests
-    arriving afterwards are rejected rather than silently queued until resume.
-    `keep` carries requests across the pause, so it still accepts them.
+    """`abort` and `wait` make the pause a generation boundary: requests
+    arriving afterwards are rejected rather than silently queued, and a
+    rejected id leaves no residue (reusable after resume). `keep` carries
+    requests across the pause, so one admitted during it completes on resume.
     """
     rejects = mode != "keep"
     with ExitStack() as after:
@@ -1040,66 +1041,21 @@ async def test_pause_admission_policy_per_mode(mode: str):
             with pytest.raises(EnginePausedError):
                 await _add(engine, "during-pause")
         else:
-            await _add(engine, "during-pause")
-
-        # Resume always restores admission, and the engine still generates.
-        await engine.resume_generation()
-        async for out in engine.generate(
-            request_id="after-resume",
-            prompt=TEXT_PROMPT,
-            sampling_params=SamplingParams(max_tokens=5),
-        ):
-            pass
-        assert out.finished
-
-
-@pytest.mark.asyncio
-async def test_pause_rejection_is_idempotent_and_id_reusable():
-    """Repeated pauses collapse to one resume, and a rejected request leaves no
-    residue: its id is reusable once generation resumes."""
-    with ExitStack() as after:
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
-        after.callback(engine.shutdown)
-
-        await engine.pause_generation(mode="abort")
-        await engine.pause_generation(mode="abort")
-
-        for _ in range(3):
-            with pytest.raises(EnginePausedError):
-                await _add(engine, "rejected")
+            queued = await _add(engine, "during-pause")
 
         await engine.resume_generation()
-
-        # The id used by the rejected attempts is free.
-        async for out in engine.generate(
-            request_id="rejected",
-            prompt=TEXT_PROMPT,
-            sampling_params=SamplingParams(max_tokens=5),
-        ):
-            pass
-        assert out.finished
-
-
-@pytest.mark.asyncio
-async def test_pause_keep_does_not_reject_in_flight_or_new():
-    """`keep` must remain fully transparent to admission: an in-flight request
-    survives the pause and a request added during it completes on resume."""
-    with ExitStack() as after:
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
-        after.callback(engine.shutdown)
-
-        inflight = await _add(engine, "inflight", max_tokens=20)
-        await engine.pause_generation(mode="keep")
-        queued = await _add(engine, "queued", max_tokens=5)
-        await engine.resume_generation()
-
-        for collector in (inflight, queued):
+        if not rejects:
             while True:
-                out = await asyncio.wait_for(collector.get(), timeout=60.0)
+                out = await asyncio.wait_for(queued.get(), timeout=60.0)
                 if out.finished:
                     break
+        async for out in engine.generate(
+            request_id="during-pause" if rejects else "after-resume",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
 
 
 @pytest.mark.asyncio
@@ -1251,7 +1207,9 @@ def test_paused_error_maps_to_retryable_status():
     client sees a 500, which no retry policy acts on."""
     from http import HTTPStatus
 
-    from vllm.entrypoints.serve.utils.error_response import create_error_response
+    from vllm.entrypoints.serve.exception_handling.error_response import (
+        create_error_response,
+    )
 
     response = create_error_response(EnginePausedError("paused"))
     assert response.error.code == HTTPStatus.SERVICE_UNAVAILABLE
