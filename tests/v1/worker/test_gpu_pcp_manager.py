@@ -7,11 +7,14 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+requires_cuda = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Requires CUDA"
+)
 
 
 def _make_batch(
@@ -97,6 +100,7 @@ def _make_manager(device: torch.device, req_states: SimpleNamespace) -> PCPManag
     )
 
 
+@requires_cuda
 def test_pcp_partitions_mtp_decode_batch():
     device = torch.device("cuda")
     req_states, global_batch = _make_batch(
@@ -119,6 +123,7 @@ def test_pcp_partitions_mtp_decode_batch():
     assert local_batch.expanded_local_pos.tolist() == [0, 1, 2, 3, 0, 1]
 
 
+@requires_cuda
 def test_pcp_partitions_mixed_prefill_and_mtp_decode_batch():
     device = torch.device("cuda")
     req_states, global_batch = _make_batch(
@@ -149,3 +154,46 @@ def test_pcp_partitions_mixed_prefill_and_mtp_decode_batch():
     assert local_batch.logits_indices.tolist() == [0, 1, 2, 3, 5, 7]
     assert local_batch.expanded_idx_mapping.tolist() == [0, 0, 0, 0, 1, 1]
     assert local_batch.expanded_local_pos.tolist() == [0, 1, 2, 3, 0, 0]
+
+
+def _make_validation_config(
+    *, multi_module_mtp: bool, cudagraph_mode: CUDAGraphMode
+) -> SimpleNamespace:
+    speculative_config = SimpleNamespace(
+        method="mtp",
+        use_multi_module_mtp=lambda: multi_module_mtp,
+    )
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(
+            use_mla=True,
+            is_encoder_decoder=False,
+            hf_text_config=SimpleNamespace(),
+        ),
+        lora_config=None,
+        speculative_config=speculative_config,
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+
+
+def test_pcp_rejects_multi_module_mtp():
+    config = _make_validation_config(
+        multi_module_mtp=True,
+        cudagraph_mode=CUDAGraphMode.NONE,
+    )
+
+    with pytest.raises(NotImplementedError, match="single-module MTP"):
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+def test_pcp_mtp_rejects_cuda_graphs():
+    config = _make_validation_config(
+        multi_module_mtp=False,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+    )
+
+    with pytest.raises(NotImplementedError, match="does not support CUDA graphs"):
+        PCPManager.validate_config(config, supports_mm_inputs=False)

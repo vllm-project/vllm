@@ -284,6 +284,21 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     assert actual_feedback_hidden is hidden
 
 
+def test_pcp_input_buffers_allow_two_segments_per_request():
+    speculator = object.__new__(_TestSpeculator)
+    speculator.max_num_reqs = 6
+    speculator.max_num_tokens = 32
+    speculator.device = torch.device("cpu")
+
+    manager = Mock()
+    speculator.set_pcp_manager(manager)
+
+    assert speculator.pcp_manager is manager
+    assert speculator.input_buffers.max_num_reqs == 12
+    assert speculator.input_buffers.query_start_loc.shape == (13,)
+    assert speculator.input_buffers.seq_lens.shape == (12,)
+
+
 def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     speculator = object.__new__(_TestSpeculator)
     local_logits = torch.tensor([[1.0], [2.0]])
