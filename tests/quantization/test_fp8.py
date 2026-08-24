@@ -11,12 +11,20 @@ import pytest
 import regex as re
 import torch
 
-from tests.quantization.utils import is_quant_method_supported
+from tests.quantization.utils import (
+    is_quant_method_supported,
+    load_model_without_vllm_runner,
+)
 from vllm import _custom_ops as ops
+from vllm.config import set_current_vllm_config
+from vllm.config.cache import CacheConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
@@ -35,6 +43,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -72,21 +82,33 @@ def test_static_fp8_moe_input_scales_remain_scalar() -> None:
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_model_load_and_run(
-    vllm_runner, model_id: str, force_marlin: bool, use_rocm_aiter: bool, monkeypatch
+    model_id: str,
+    force_marlin: bool,
+    use_rocm_aiter: bool,
+    monkeypatch,
+    dist_init,
+    workspace_init,
 ) -> None:
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    kwargs = {}
-    if force_marlin:
-        kwargs["linear_backend"] = "marlin"
-        kwargs["moe_backend"] = "marlin"
-
-    with vllm_runner(model_id, enforce_eager=True, **kwargs) as llm:
-        # note: this does not test accuracy, just that we can run through
-        # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])
+    kernel_config = KernelConfig(
+        linear_backend="marlin" if force_marlin else "auto",
+        moe_backend="marlin" if force_marlin else "auto",
+    )
+    model, vllm_config = load_model_without_vllm_runner(
+        model_id,
+        LlamaForCausalLM,
+        vllm_config_kwargs={"kernel_config": kernel_config},
+    )
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        model(input_ids, positions, None)
 
 
 @pytest.mark.skipif(
@@ -481,20 +503,19 @@ def test_kv_cache_scale_sync_to_host_copies():
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_kv_cache_dtype_skip_layers(vllm_runner, monkeypatch):
+def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     """Test that kv_cache_dtype_skip_layers skips quantization for specified layers."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    with vllm_runner(
+    model, _ = load_model_without_vllm_runner(
         "facebook/opt-125m",
-        kv_cache_dtype="fp8",
-        kv_cache_dtype_skip_layers=["0", "2"],
-        enforce_eager=True,
-    ) as llm:
-
-        def check_layers(model):
-            for i, layer in enumerate(model.model.decoder.layers):
-                expected = "auto" if str(i) in ["0", "2"] else "fp8"
-                assert layer.self_attn.attn.kv_cache_dtype == expected
-
-        llm.apply_model(check_layers)
+        OPTForCausalLM,
+        vllm_config_kwargs={
+            "cache_config": CacheConfig(
+                cache_dtype="fp8", kv_cache_dtype_skip_layers=["0", "2"]
+            )
+        },
+    )
+    for i, layer in enumerate(model.model.decoder.layers):
+        expected = "auto" if str(i) in ["0", "2"] else "fp8"
+        assert layer.self_attn.attn.kv_cache_dtype == expected

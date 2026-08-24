@@ -27,6 +27,8 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
+    Fp8PtpcOnlineLinearMethod,
+    Fp8PtpcOnlineMoEMethod,
     _fp8_channel_scale,
     _fp8_quant_per_channel,
     _fp8_scale,
@@ -48,7 +50,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from vllm.model_executor.models.granitemoe import GraniteMoeModel
+from vllm.model_executor.models.granitemoe import (
+    GraniteMoeForCausalLM,
+    GraniteMoeModel,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -134,6 +139,12 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
         ),
+        (
+            "fp8_per_channel",
+            None,
+            Fp8PtpcOnlineLinearMethod,
+            Fp8PtpcOnlineMoEMethod,
+        ),
         # quantization='online' with per-layer-kind overrides
         (
             "online",
@@ -198,7 +209,7 @@ def test_online_quantization(
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
     model, vllm_config = load_model_without_vllm_runner(
         model_name,
-        GraniteMoeModel,
+        GraniteMoeForCausalLM,
         dtype="bfloat16",
         quantization=quant_scheme,
         model_config_kwargs={
@@ -235,6 +246,11 @@ def test_online_quantization(
         assert o_proj.weight.dtype == current_platform.fp8_dtype()
     else:
         pytest.skip("Only runs on CUDA and ROCm.")
+
+    if quant_scheme == "fp8_per_channel":
+        assert o_proj.weight_scale.ndim == 2
+        assert o_proj.weight_scale.shape[-1] == 1
+        assert o_proj.input_scale is None
 
     if isinstance(online_quant_args, dict) and "ignore" in online_quant_args:
         for layer_idx in range(len(model.model.layers)):

@@ -20,6 +20,7 @@ from compressed_tensors.quantization import (
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.config import set_current_vllm_config
+from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
@@ -57,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -104,7 +106,7 @@ def enable_pickle(monkeypatch):
         ),
     ],
 )
-def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
+def test_compressed_tensors_w8a8_static_setup(model_args, dist_init, workspace_init):
     model_path, strategy, quant_type, shape_0, is_symmetric = model_args
 
     if (
@@ -113,55 +115,45 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
     ):
         pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
-    with vllm_runner(model_path, enforce_eager=True) as llm:
+    model, _ = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+    layer = model.model.layers[0]
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    qkv_proj = layer.self_attn.qkv_proj
+    o_proj = layer.self_attn.o_proj
+    gate_up_proj = layer.mlp.gate_up_proj
+    down_proj = layer.mlp.down_proj
 
-            qkv_proj = layer.self_attn.qkv_proj
-            o_proj = layer.self_attn.o_proj
-            gate_up_proj = layer.mlp.gate_up_proj
-            down_proj = layer.mlp.down_proj
+    def zp_valid(zp: torch.Tensor | None):
+        if is_symmetric:
+            return zp is None
 
-            # assert zp for symmetric and asymmetric cases
-            def zp_valid(zp: torch.Tensor | None):
-                if is_symmetric:
-                    return zp is None
+        return zp is not None and zp.dtype is torch.int32
 
-                return zp is not None and zp.dtype is torch.int32
+    assert zp_valid(qkv_proj.input_zero_point)
+    assert zp_valid(o_proj.input_zero_point)
+    assert zp_valid(gate_up_proj.input_zero_point)
+    assert zp_valid(down_proj.input_zero_point)
 
-            assert zp_valid(qkv_proj.input_zero_point)
-            assert zp_valid(o_proj.input_zero_point)
-            assert zp_valid(gate_up_proj.input_zero_point)
-            assert zp_valid(down_proj.input_zero_point)
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(gate_up_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
 
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(gate_up_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
+    assert qkv_proj.scheme.strategy == strategy
+    assert qkv_proj.scheme.is_static_input_scheme
+    expected_type = torch.int8
 
-            assert qkv_proj.scheme.strategy == strategy
-            assert qkv_proj.scheme.is_static_input_scheme
-            expected_type = torch.int8
+    assert qkv_proj.weight.dtype is expected_type
+    assert o_proj.weight.dtype is expected_type
+    assert gate_up_proj.weight.dtype is expected_type
 
-            assert qkv_proj.weight.dtype is expected_type
-            assert o_proj.weight.dtype is expected_type
-            assert gate_up_proj.weight.dtype is expected_type
-
-            if qkv_proj.scheme.strategy == "tensor":
-                # Make sure it is a channelwise buffer
-                # After running process_weights_after_loading
-                assert len(qkv_proj.weight_scale.shape) == 2
-                assert qkv_proj.weight_scale.shape[0] == shape_0
-                assert qkv_proj.weight_scale.shape[1] == 1
-            assert qkv_proj.weight_scale.dtype is torch.float32
-            assert qkv_proj.input_scale.dtype is torch.float32
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        assert output
+    if qkv_proj.scheme.strategy == "tensor":
+        assert len(qkv_proj.weight_scale.shape) == 2
+        assert qkv_proj.weight_scale.shape[0] == shape_0
+        assert qkv_proj.weight_scale.shape[1] == 1
+    assert qkv_proj.weight_scale.dtype is torch.float32
+    assert qkv_proj.input_scale.dtype is torch.float32
 
 
 @pytest.mark.parametrize(
@@ -248,10 +240,7 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
     "use_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_compressed_tensors_w8a8_dynamic_per_token(
-    vllm_runner,
-    model_args,
-    use_aiter,
-    monkeypatch,
+    model_args, use_aiter, monkeypatch, dist_init, workspace_init
 ):
     model_path, strategy = model_args
 
@@ -267,23 +256,15 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
         # this will enable VLLM_ROCM_USE_AITER_LINEAR
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    with vllm_runner(model_path, enforce_eager=True, dtype=torch.float16) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
-            assert not qkv_proj.scheme.is_static_input_scheme
-            assert qkv_proj.scheme.strategy == strategy
-            assert qkv_proj.weight.dtype is torch.int8
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        assert output
+    model, _ = load_model_without_vllm_runner(
+        model_path, LlamaForCausalLM, dtype=torch.float16
+    )
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
+    assert not qkv_proj.scheme.is_static_input_scheme
+    assert qkv_proj.scheme.strategy == strategy
+    assert qkv_proj.weight.dtype is torch.int8
 
 
 @pytest.mark.parametrize(
@@ -449,26 +430,16 @@ def _nvfp4_marlin_error_context(model, capfd):
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
-def test_compressed_tensors_nvfp4(vllm_runner, args, capfd):
-    model, use_a16 = args
-    with (
-        _nvfp4_marlin_error_context(model, capfd),
-        vllm_runner(model, enforce_eager=True) as llm,
-    ):
+def test_compressed_tensors_nvfp4(args, capfd, dist_init, workspace_init):
+    model_path, use_a16 = args
+    with _nvfp4_marlin_error_context(model_path, capfd):
+        model, _ = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
 
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
-            assert qkv_proj.scheme.use_a16 == use_a16
-            assert qkv_proj.scheme.group_size == 16
-
-        llm.apply_model(check_model)
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(output)
-        assert output
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
+    assert qkv_proj.scheme.use_a16 == use_a16
+    assert qkv_proj.scheme.group_size == 16
 
 
 @pytest.mark.skipif(
@@ -541,47 +512,42 @@ def test_compressed_tensors_transforms_perplexity(
 @pytest.mark.parametrize(
     "linear_backend", ["auto", "marlin"] if current_platform.is_cuda() else ["auto"]
 )
-def test_compressed_tensors_fp8_block_enabled(vllm_runner, linear_backend):
+def test_compressed_tensors_fp8_block_enabled(
+    linear_backend, dist_init, workspace_init
+):
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
-    with vllm_runner(
-        model_path, enforce_eager=True, linear_backend=linear_backend
-    ) as llm:
-        fp8_dtype = current_platform.fp8_dtype()
+    model, _ = load_model_without_vllm_runner(
+        model_path,
+        Qwen3ForCausalLM,
+        vllm_config_kwargs={
+            "kernel_config": KernelConfig(linear_backend=linear_backend)
+        },
+    )
+    fp8_dtype = current_platform.fp8_dtype()
+    layer = model.model.layers[0]
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    qkv_proj = layer.self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
+    if linear_backend == "marlin":
+        assert isinstance(qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        assert qkv_proj.weight.dtype is torch.int32
+        assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
+    else:
+        assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
+        assert qkv_proj.weight.dtype is fp8_dtype
+        assert qkv_proj.weight_scale.dtype is torch.float32
+    assert len(qkv_proj.weight.shape) == 2
+    assert len(qkv_proj.weight_scale.shape) == 2
 
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            if linear_backend == "marlin":
-                assert isinstance(
-                    qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel
-                )
-                assert qkv_proj.weight.dtype is torch.int32
-                assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
-            else:
-                assert isinstance(
-                    qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel
-                )
-                assert qkv_proj.weight.dtype is fp8_dtype
-                assert qkv_proj.weight_scale.dtype is torch.float32
-            assert len(qkv_proj.weight.shape) == 2
-            assert len(qkv_proj.weight_scale.shape) == 2
-
-            if linear_backend == "auto":
-                input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
-                assert isinstance(input_quant_op, QuantFP8)
-                assert input_quant_op._forward_method in (
-                    input_quant_op.forward_cuda,
-                    input_quant_op.forward_hip,
-                    input_quant_op.forward_xpu,
-                )
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+    if linear_backend == "auto":
+        input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
+        assert isinstance(input_quant_op, QuantFP8)
+        assert input_quant_op._forward_method in (
+            input_quant_op.forward_cuda,
+            input_quant_op.forward_hip,
+            input_quant_op.forward_xpu,
+        )
 
 
 @pytest.mark.skipif(
