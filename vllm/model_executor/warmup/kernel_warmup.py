@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 def _warmup_kimi_k3_gemm_rs_ar() -> None:
     # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
     # enabled and initializes its singleton before kernel_warmup runs. Avoid
