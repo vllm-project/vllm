@@ -17,6 +17,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     kernel_launcher,
     triton_scalar_specialization_rep,
 )
+from vllm.models.deepseek_v4.sparse_mla import dsv4_supported_kernel_block_sizes
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -294,7 +295,7 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
+        return dsv4_supported_kernel_block_sizes()
 
 
 @dataclass
