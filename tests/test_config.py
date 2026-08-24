@@ -2363,34 +2363,6 @@ def test_block_drafters_default_tokens_from_block_size(method, config_kwargs, ex
     assert actual == expected
 
 
-@pytest.mark.parametrize(
-    ("method", "config_kwargs", "tokens"),
-    [
-        pytest.param("dflash", {"block_size": 16}, 16, id="dflash"),
-        pytest.param("dspark", {"block_size": 7}, 8, id="dspark-anchor"),
-        pytest.param(
-            "dspark",
-            {"block_size": 7, "sample_from_anchor": False},
-            7,
-            id="dspark-bonus-anchor",
-        ),
-    ],
-)
-def test_block_drafters_reject_tokens_beyond_checkpoint_limit(
-    method, config_kwargs, tokens
-):
-    hf_config = PretrainedConfig(**config_kwargs)
-
-    with pytest.raises(ValueError, match="checkpoint proposal limit"):
-        SpeculativeConfig._validate_block_drafter_tokens(method, hf_config, tokens)
-
-
-def test_block_drafters_allow_smaller_explicit_token_count():
-    hf_config = PretrainedConfig(block_size=16)
-
-    SpeculativeConfig._validate_block_drafter_tokens("dflash", hf_config, 7)
-
-
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
         method="ngram",

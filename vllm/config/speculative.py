@@ -1051,23 +1051,6 @@ class SpeculativeConfig:
         return (tokens, reason) if tokens > 0 else None
 
     @staticmethod
-    def _validate_block_drafter_tokens(
-        method: SpeculativeMethod,
-        hf_config: PretrainedConfig,
-        num_speculative_tokens: int,
-    ) -> None:
-        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
-        if block_tokens is None:
-            return
-        max_tokens, reason = block_tokens
-        if num_speculative_tokens > max_tokens:
-            raise ValueError(
-                f"num_speculative_tokens={num_speculative_tokens} exceeds the "
-                f"{method} checkpoint proposal limit of {max_tokens} "
-                f"derived from {reason}."
-            )
-
-    @staticmethod
     def _apply_composed_hf_override(
         draft_hf_override: Callable[[PretrainedConfig], PretrainedConfig],
         target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
@@ -1384,15 +1367,6 @@ class SpeculativeConfig:
                         self.num_speculative_tokens = n_predict
                         default_source = f"draft checkpoint n_predict={n_predict}"
                     elif (
-                        self.method in ("dflash", "dspark")
-                        and self.num_speculative_tokens > n_predict
-                    ):
-                        raise ValueError(
-                            f"num_speculative_tokens={self.num_speculative_tokens} "
-                            f"exceeds the {self.method} checkpoint n_predict="
-                            f"{n_predict}."
-                        )
-                    elif (
                         self.num_speculative_tokens > n_predict
                         and self.num_speculative_tokens % n_predict != 0
                     ):
@@ -1414,12 +1388,6 @@ class SpeculativeConfig:
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
                     )
-
-                self._validate_block_drafter_tokens(
-                    self.method,
-                    self.draft_model_config.hf_config,
-                    self.num_speculative_tokens,
-                )
 
                 if default_source is not None:
                     logger.info_once(
