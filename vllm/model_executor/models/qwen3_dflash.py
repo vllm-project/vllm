@@ -56,10 +56,13 @@ _SLIDING_ATTENTION = "sliding_attention"
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
-    """``dflash_config.causal`` overrides all layers; else only SWA layers causal."""
+    """Resolve explicit causality before falling back to legacy layer defaults."""
+    is_causal = getattr(config, "is_causal", None)
+    if is_causal is not None:
+        return bool(is_causal)
     override = (getattr(config, "dflash_config", None) or {}).get("causal")
     if override is not None:
-        return override
+        return bool(override)
     layer_types = getattr(config, "layer_types", None)
     return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
 
@@ -407,10 +410,10 @@ class DFlashQwen3Model(nn.Module):
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
 
-        if drafter_config is not None and "use_aux_hidden_state" in drafter_config:
-            self.use_aux_hidden_state = drafter_config["use_aux_hidden_state"]
-        else:
-            self.use_aux_hidden_state = True
+        self.use_aux_hidden_state = drafter_config.get(
+            "use_aux_hidden_state",
+            getattr(self.config, "use_aux_hidden_state", True),
+        )
 
         current_vllm_config = get_current_vllm_config()
 
@@ -425,7 +428,9 @@ class DFlashQwen3Model(nn.Module):
         # at that slot id. Some checkpoints (XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash) ship
         # with a separate mask embedding tensor to use instead. When present, we load it
         # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
-        self.mask_token_id = drafter_config.get("mask_token_id")
+        self.mask_token_id = drafter_config.get(
+            "mask_token_id", getattr(self.config, "mask_token_id", None)
+        )
         self.mask_embedding = nn.Parameter(
             torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
             requires_grad=False,
@@ -699,6 +704,8 @@ class DFlashQwen3Model(nn.Module):
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+    model_cls = DFlashQwen3Model
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
@@ -708,7 +715,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        self.model = DFlashQwen3Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,

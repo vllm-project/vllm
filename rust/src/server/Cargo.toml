@@ -53,6 +53,7 @@ vllm-metrics.workspace = true
 vllm-text.workspace = true
 
 [build-dependencies]
+protox.workspace = true
 tonic-prost-build.workspace = true
 
 [dev-dependencies]
