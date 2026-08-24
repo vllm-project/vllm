@@ -54,6 +54,8 @@ def _make_pooling_cursor(
         prompt_lens_cpu=prompt_lens_cpu,
         seq_lens_cpu=seq_lens_cpu,
         num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+        partial_prefill=not torch.equal(prompt_lens_cpu, num_scheduled_tokens_cpu),
+        finished_mask=torch.eq(prompt_lens_cpu, seq_lens_cpu).tolist(),
     )
 
 

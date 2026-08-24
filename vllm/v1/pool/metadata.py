@@ -17,34 +17,32 @@ class PoolingCursor:
     prompt_lens_cpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
-    partial_prefill: bool | None = None
-    finished_mask: list[bool] | None = None
+    partial_prefill: bool
+    finished_mask: list[bool]
 
     def __getitem__(self, indices: slice) -> "PoolingCursor":
+        prompt_lens_cpu = self.prompt_lens_cpu[indices]
+        seq_lens_cpu = self.seq_lens_cpu[indices]
+        num_scheduled_tokens_cpu = self.num_scheduled_tokens_cpu[indices]
+
         return PoolingCursor(
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
-            prompt_lens_cpu=self.prompt_lens_cpu[indices],
-            seq_lens_cpu=self.seq_lens_cpu[indices],
-            num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
-            partial_prefill=False if self.partial_prefill is False else None,
-            finished_mask=None
-            if self.finished_mask is None
-            else self.finished_mask[indices],
+            prompt_lens_cpu=prompt_lens_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            partial_prefill=not torch.equal(prompt_lens_cpu, num_scheduled_tokens_cpu),
+            finished_mask=torch.eq(prompt_lens_cpu, seq_lens_cpu).tolist(),
         )
 
     def is_partial_prefill(self) -> bool:
-        if self.partial_prefill is not None:
-            return self.partial_prefill
-        return not torch.equal(self.prompt_lens_cpu, self.num_scheduled_tokens_cpu)
+        return self.partial_prefill
 
     def is_finished(self) -> torch.Tensor:
         return self.prompt_lens_cpu == self.seq_lens_cpu
 
     def get_finished_mask(self) -> list[bool]:
-        if self.finished_mask is not None:
-            return self.finished_mask
-        return self.is_finished().tolist()
+        return self.finished_mask
 
 
 class PoolingStates:
