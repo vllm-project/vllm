@@ -988,12 +988,9 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
-  [[maybe_unused]] static constexpr int THREADS = 256;
   static constexpr int BLOCKS_PER_SM = 8;  // matches kernel __launch_bounds__
   static constexpr int SM_COUNT = 132;     // H200 (GH100, 132 SMs)
   static constexpr int GRID_DIM = SM_COUNT * BLOCKS_PER_SM;
-  [[maybe_unused]] static constexpr int SITU_D =
-      3072;  // fixed Kimi-K3 hidden dim (fused w2 in)
 
   STD_TORCH_CHECK(group_size == 128,
                   "situ_and_mul_quant: only group_size 128 (block-FP8) "
@@ -1016,6 +1013,8 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                 // The pipelined kernel's float2-per-lane geometry assumes a
                 // 32-lane warp (GROUP_SIZE == 4 * WARP_SIZE); on HIP (64-lane)
                 // fall back to the WARP_SIZE-generic scalar kernel.
+                constexpr int THREADS = 256;
+                constexpr int SITU_D = 3072;  // Kimi-K3 fused w2 input dim
                 if constexpr (sizeof(scalar_t) == 2) {
                   if (d == SITU_D && (float)beta == vllm::SITU_BETA &&
                       (float)linear_beta == vllm::SITU_LINEAR_BETA) {
