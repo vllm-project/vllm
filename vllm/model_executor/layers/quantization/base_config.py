@@ -196,14 +196,6 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def set_online_quantization(self, online_args: Any) -> None:
-        """Enable online quantization for checkpoint-unquantized layers."""
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
-
-        self.online_quantization_config = OnlineQuantizationConfig(online_args)
-
     def get_effective_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
@@ -220,6 +212,8 @@ class QuantizationConfig(ABC):
         base_quant_method = self.get_quant_method(layer, prefix)
         if self.online_quantization_config is None:
             return base_quant_method
+        # Online quantization currently supports only LinearBase and RoutedExperts.
+        # Embeddings and ParallelLMHead retain their checkpoint quantization method.
         if not isinstance(layer, (LinearBase, RoutedExperts)):
             return base_quant_method
 

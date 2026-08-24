@@ -69,6 +69,7 @@ from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
+    kMxfp8Dynamic,
     weight_amax,
 )
 from vllm.model_executor.model_loader import weight_utils
@@ -200,7 +201,9 @@ def test_online_prequantized_compatibility(
     default_vllm_config.model_config = ModelConfig()
     checkpoint_config = checkpoint_config_factory()
 
-    checkpoint_config.set_online_quantization(QuantizationConfigArgs(linear="mxfp8"))
+    checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear="mxfp8")
+    )
     config = checkpoint_config
 
     layer_kwargs = {
@@ -226,7 +229,7 @@ def test_online_ignore_keeps_checkpoint_quantization(default_vllm_config, dist_i
     default_vllm_config.model_config = ModelConfig()
     quant_config = _fully_quantized_quark_config()
     prefix = "model.layers.0.self_attn.o_proj"
-    quant_config.set_online_quantization(
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(linear="mxfp8", ignore=[prefix])
     )
 
@@ -250,7 +253,7 @@ def test_online_ignored_moe_skips_method_construction(
     default_vllm_config.model_config = ModelConfig()
     prefix = "model.layers.0.mlp.experts"
     quant_config = _fully_quantized_quark_config()
-    quant_config.set_online_quantization(
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(linear="mxfp4", ignore=[prefix])
     )
     assert quant_config.online_quantization_config is not None
@@ -273,8 +276,10 @@ def test_online_ignored_moe_skips_method_construction(
     assert not isinstance(layer.quant_method, UnquantizedFusedMoEMethod)
 
 
-def test_activation_only_override_keeps_checkpoint_config(monkeypatch) -> None:
-    """Activation-only overrides do not attach an online quantization overlay."""
+def test_activation_only_override_applies_to_checkpoint_method(
+    monkeypatch, default_vllm_config
+) -> None:
+    """Activation-only overrides remain available to the checkpoint method."""
     checkpoint_config = _moe_only_compressed_tensors_config()
     quant_cls = SimpleNamespace(from_config=lambda _: checkpoint_config)
     model_config = cast(
@@ -296,17 +301,43 @@ def test_activation_only_override_keeps_checkpoint_config(monkeypatch) -> None:
     )
 
     assert result is checkpoint_config
-    assert result.online_quantization_config is None
+    assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
+
+    default_vllm_config.model_config = model_config
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        _resolve_activation_key,
+    )
+
+    assert _resolve_activation_key(None) == kMxfp8Dynamic
+
+
+def test_online_overlay_requires_normalized_quantization_config(monkeypatch) -> None:
+    """The loader rejects a raw config dict instead of silently ignoring it."""
+    checkpoint_config = _moe_only_compressed_tensors_config()
+    quant_cls = SimpleNamespace(from_config=lambda _: checkpoint_config)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            quantization="compressed-tensors",
+            quantization_config={"linear": "mxfp8"},
+            hf_config=SimpleNamespace(
+                quantization_config={"quant_method": "compressed-tensors"},
+                text_config=None,
+            ),
+            hf_overrides={},
+        ),
+    )
+    monkeypatch.setattr(weight_utils, "get_quantization_config", lambda _: quant_cls)
+
+    with pytest.raises(AssertionError):
+        weight_utils.get_quant_config(
+            model_config, cast(LoadConfig, SimpleNamespace(download_dir=None))
+        )
 
 
 def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -> None:
     """An online overlay must not bypass checkpoint sidecar config loading."""
     checkpoint_config = SimpleNamespace(online_quantization_config=None)
-
-    def set_online_quantization(args) -> None:
-        checkpoint_config.online_quantization_config = args
-
-    checkpoint_config.set_online_quantization = set_online_quantization
     loaded_configs: list[dict] = []
 
     class SidecarQuantizationConfig:
@@ -347,7 +378,8 @@ def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -
 
     assert result is checkpoint_config
     assert loaded_configs == [{}]
-    assert result.online_quantization_config is model_config.quantization_config
+    assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
+    assert result.online_quantization_config.args is model_config.quantization_config
 
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:

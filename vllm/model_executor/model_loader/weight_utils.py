@@ -248,25 +248,17 @@ def get_quant_config(
         checkpoint_config: QuantizationConfig,
     ) -> QuantizationConfig:
         from vllm.config.quantization import QuantizationConfigArgs
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
 
         args = model_config.quantization_config
 
-        # No quantization_config provided.
-        if not isinstance(args, QuantizationConfigArgs):
+        if args is None:
             return checkpoint_config
+        assert isinstance(args, QuantizationConfigArgs)
 
-        # Activation-only overrides remain owned by the original quant_method,
-        # e.g. `--quantization-config.moe.activation` applies to the original
-        # quant_method, while e.g. `--quantization-config {"moe": "mxfp8"}` enables
-        # online-quantization composition when the original method leaves the MoE
-        # unquantized.
-        if not any(
-            spec is not None and spec.weight is not None
-            for spec in (args.linear, args.moe)
-        ):
-            return checkpoint_config
-
-        checkpoint_config.set_online_quantization(args)
+        checkpoint_config.online_quantization_config = OnlineQuantizationConfig(args)
         return checkpoint_config
 
     # Read the quantization config from the HF model config, if available.
