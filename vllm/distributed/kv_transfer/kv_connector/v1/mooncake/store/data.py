@@ -301,11 +301,11 @@ class ChunkedTokenDatabase:
 
 
 @dataclass(frozen=True)
-class PartialHitBoundary:
-    """Key override for the block containing a group's converged hit boundary.
+class TailKeyBoundary:
+    """Hash boundary used to key a group's tail block in the store.
 
     Attributes:
-        group_id: KV-cache group whose boundary-block key needs an override.
+        group_id: KV-cache group containing the tail block.
         num_tokens: Token boundary whose prefix hash identifies the matched
             stored block. The loader uses
             ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
@@ -324,15 +324,13 @@ class MooncakeLookupResult:
     Attributes:
         hit_length: Longest prefix that every KV-cache group can reuse after
             their individual cache hits converge.
-        partial_hit_boundaries: Per-group key overrides for blocks containing
-            the converged hit boundary. Fine-grained prefix matching can make
-            ``hit_length`` end inside a physical block whose stored key uses a
-            later hash boundary. These entries preserve the matched keys; empty
-            when every load key can be derived from ``hit_length``.
+        tail_key_boundaries: Hash boundary used to store each cache group's
+            tail block when ``hit_length`` does not identify its store key.
+            There is one entry per group for every nonzero hit.
     """
 
     hit_length: int
-    partial_hit_boundaries: tuple[PartialHitBoundary, ...] = ()
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass
@@ -343,7 +341,7 @@ class LoadSpec:
     kvpool_cached_tokens: int
     can_load: bool
     token_len: int = 0
-    partial_hit_boundaries: tuple[PartialHitBoundary, ...] = ()
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass

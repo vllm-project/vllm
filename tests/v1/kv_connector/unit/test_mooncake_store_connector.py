@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
-    PartialHitBoundary,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -506,13 +506,13 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
 
     # Lookup ready with a hit -> report need_to_allocate + async-load flag.
     hit = 3 * block_size
-    boundary = PartialHitBoundary(group_id=0, num_tokens=4 * block_size)
+    boundary = TailKeyBoundary(group_id=0, num_tokens=4 * block_size)
     mock_client.lookup.return_value = MooncakeLookupResult(hit, (boundary,))
     need, load_async = sched.get_num_new_matched_tokens(request, 0)
     assert need == hit
     assert load_async == sched.load_async
     assert sched.load_specs["r1"].kvpool_cached_tokens == hit
-    assert sched.load_specs["r1"].partial_hit_boundaries == (boundary,)
+    assert sched.load_specs["r1"].tail_key_boundaries == (boundary,)
 
 
 def test_protocol_tags_are_distinct_and_non_empty():
@@ -523,6 +523,20 @@ def test_protocol_tags_are_distinct_and_non_empty():
         assert isinstance(tag, bytes)
         assert len(tag) > 0
     assert protocol.RESP_OK != protocol.RESP_ERR
+
+
+def test_lookup_response_round_trip_preserves_tail_keys():
+    result = MooncakeLookupResult(
+        hit_length=20,
+        tail_key_boundaries=(
+            TailKeyBoundary(group_id=0, num_tokens=24),
+            TailKeyBoundary(group_id=1, num_tokens=20),
+        ),
+    )
+
+    assert protocol.decode_lookup_response(protocol.encode_lookup_response(result)) == (
+        result
+    )
 
 
 def test_scheduler_reset_connector_cache_invokes_connector_reset():

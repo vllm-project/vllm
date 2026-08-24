@@ -31,9 +31,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
-    PartialHitBoundary,
+    MooncakeLookupResult,
     PoolKey,
     ReqMeta,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -151,7 +152,7 @@ def _make_load_req(
     *,
     token_len: int,
     vllm_cached_tokens: int = 0,
-    partial_hit_boundaries: tuple[PartialHitBoundary, ...] = (),
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = (),
 ) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
@@ -163,7 +164,7 @@ def _make_load_req(
             kvpool_cached_tokens=token_len,
             can_load=True,
             token_len=token_len,
-            partial_hit_boundaries=partial_hit_boundaries,
+            tail_key_boundaries=tail_key_boundaries,
         ),
     )
 
@@ -1448,7 +1449,7 @@ def test_recv_thread_keys_chunk_by_lookup_selected_boundary():
         "req-a",
         [b"a0", b"a1", b"a2"],
         token_len=32,
-        partial_hit_boundaries=(PartialHitBoundary(group_id=0, num_tokens=48),),
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=48),),
     )
 
     thread._handle_request(req)
@@ -2771,7 +2772,10 @@ def test_lookup_full_hit_reuses_existing_boundary():
     worker = _make_bare_worker(block_size=16)
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    assert worker.lookup(32, [b"h0", b"h1"]).hit_length == 16
+    assert worker.lookup(32, [b"h0", b"h1"]) == MooncakeLookupResult(
+        hit_length=16,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=16),),
+    )
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2860,8 +2864,9 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
     # truncation is the one keyed at the 24-token boundary (hashes[5]), which
     # the load path cannot derive from hit_length.
     assert result.hit_length == 20
-    assert result.partial_hit_boundaries == (
-        PartialHitBoundary(group_id=0, num_tokens=24),
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=24),
+        TailKeyBoundary(group_id=1, num_tokens=20),
     )
 
 
@@ -2923,8 +2928,9 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
     result = worker.lookup(49, hashes)
 
     assert result.hit_length == 20
-    assert result.partial_hit_boundaries == (
-        PartialHitBoundary(group_id=0, num_tokens=32),
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=32),
+        TailKeyBoundary(group_id=1, num_tokens=20),
     )
 
 
