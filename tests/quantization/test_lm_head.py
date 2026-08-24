@@ -41,7 +41,10 @@ def test_lm_head(
         model_id,
         model_class,
         dtype=torch.float16,
-        model_config_kwargs={"max_model_len": 2048},
+        model_config_kwargs={
+            "max_model_len": 2048,
+            "hf_overrides": {"num_hidden_layers": 3},
+        },
     )
     lm_head_layer = model.lm_head
     if lm_head_quantized:

@@ -99,6 +99,7 @@ def test_model_load_and_run(
     model, vllm_config = load_model_without_vllm_runner(
         model_id,
         LlamaForCausalLM,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
         vllm_config_kwargs={"kernel_config": kernel_config},
     )
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())

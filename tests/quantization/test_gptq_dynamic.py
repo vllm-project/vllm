@@ -40,7 +40,10 @@ def test_gptq_with_dynamic(model_id: str, monkeypatch, dist_init, workspace_init
         model_id,
         Qwen2ForCausalLM,
         dtype=torch.float16,
-        model_config_kwargs={"max_model_len": 2048},
+        model_config_kwargs={
+            "max_model_len": 2048,
+            "hf_overrides": {"num_hidden_layers": 3},
+        },
     )
 
     for name, submodule in model.named_modules():

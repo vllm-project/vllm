@@ -21,6 +21,30 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 
+def _limit_num_hidden_layers(
+    model: torch.nn.Module, num_hidden_layers: int | None
+) -> None:
+    if num_hidden_layers is None:
+        return
+
+    original_load_weights = model.load_weights
+
+    def should_load_weight(name: str) -> bool:
+        for prefix in ("model.layers.", "layers."):
+            if name.startswith(prefix):
+                layer_idx = int(name.removeprefix(prefix).split(".", 1)[0])
+                return layer_idx < num_hidden_layers
+        return True
+
+    def load_weights(weights):
+        weights = (
+            (name, weight) for name, weight in weights if should_load_weight(name)
+        )
+        return original_load_weights(weights)
+
+    model.load_weights = load_weights
+
+
 def load_model_without_vllm_runner(
     model_path: str,
     model_class: type[torch.nn.Module],
@@ -42,11 +66,14 @@ def load_model_without_vllm_runner(
     vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
     vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
     target_device = torch.device(current_platform.device_type)
+    hf_overrides = (model_config_kwargs or {}).get("hf_overrides") or {}
+    num_hidden_layers = hf_overrides.get("num_hidden_layers")
 
     with set_current_vllm_config(vllm_config):
         with set_default_torch_dtype(model_config.dtype), target_device:
             model = model_class(vllm_config=vllm_config)
 
+        _limit_num_hidden_layers(model, num_hidden_layers)
         model_loader = model_loader_cls(vllm_config.load_config)
         model_loader.load_weights(model, model_config)
         if any(

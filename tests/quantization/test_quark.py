@@ -186,7 +186,11 @@ def test_quark_w8a8_fp8_per_block_requires_block_size():
 
 def test_quark_fp8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_init):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
-    model, vllm_config = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+    model, vllm_config = load_model_without_vllm_runner(
+        model_path,
+        LlamaForCausalLM,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+    )
 
     qkv_proj = model.model.layers[0].self_attn.qkv_proj
     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
@@ -209,7 +213,11 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_i
 
 def test_quark_fp8_w_per_channel_a_per_token(monkeypatch, dist_init, workspace_init):
     model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
-    model, vllm_config = load_model_without_vllm_runner(model_path, Qwen2ForCausalLM)
+    model, vllm_config = load_model_without_vllm_runner(
+        model_path,
+        Qwen2ForCausalLM,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+    )
 
     qkv_proj = model.model.layers[0].self_attn.qkv_proj
     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
@@ -232,7 +240,11 @@ def test_quark_fp8_w_per_channel_a_per_token(monkeypatch, dist_init, workspace_i
 
 def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_init):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
-    model, vllm_config = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+    model, vllm_config = load_model_without_vllm_runner(
+        model_path,
+        LlamaForCausalLM,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+    )
     with set_current_vllm_config(vllm_config):
         qkv_proj = model.model.layers[0].self_attn.qkv_proj
         assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
@@ -250,7 +262,11 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
 def test_quark_int8_w8a8_moe(monkeypatch, dist_init, workspace_init):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
     model_path = "amd/tiny-qwen3-moe-w8a8-int8"
-    model, vllm_config = load_model_without_vllm_runner(model_path, Qwen3MoeForCausalLM)
+    model, vllm_config = load_model_without_vllm_runner(
+        model_path,
+        Qwen3MoeForCausalLM,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+    )
 
     layer = model.model.layers[0]
     moe = layer.mlp.experts
@@ -286,7 +302,11 @@ def test_quark_w4a8_fp8_moe(monkeypatch, dist_init, workspace_init):
     rocm_aiter_ops.refresh_env_variables()
 
     model_path = "amd/tiny-qwen3-moe-w4a8"
-    model, vllm_config = load_model_without_vllm_runner(model_path, Qwen3MoeForCausalLM)
+    model, vllm_config = load_model_without_vllm_runner(
+        model_path,
+        Qwen3MoeForCausalLM,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+    )
     with set_current_vllm_config(vllm_config):
         moe = model.model.layers[0].mlp.experts
         assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
