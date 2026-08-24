@@ -16,6 +16,18 @@ from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import try_get_generation_config
+from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
+
+
+def test_glm5_next_accepts_deepseek_sparse_attention_layers():
+    layer_types = ["linear_attention", "deepseek_sparse_attention"]
+
+    config = Glm5NextTextConfig(
+        num_hidden_layers=len(layer_types), layer_types=layer_types
+    )
+
+    assert config.layer_types == layer_types
+    assert config.layers_block_type == ["linear_attention", "attention"]
 
 
 def test_get_llama3_eos_token():
