@@ -46,7 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import make_nixl_push_scheduler
+from .utils import create_request, make_nixl_push_scheduler
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -117,6 +117,24 @@ def _stub_sw_clipping(scheduler) -> None:
 
 
 class TestPushScheduler:
+    def test_p_side_mamba_truncates_before_cache_lookup(self):
+        """Push mode normalizes P-side Mamba requests before cache lookup."""
+        sched = make_nixl_push_scheduler(has_mamba=True)
+        request = create_request(num_tokens=10, do_remote_decode=True)
+        original_len = len(request.prompt_token_ids)
+
+        sched.on_new_request(request)
+
+        assert len(request.prompt_token_ids) == original_len - 1
+        assert request.kv_transfer_params["_p_side_truncated"] is True
+
+        with patch.object(
+            sched,
+            "_truncate_mamba_request_for_prefill",
+            side_effect=AssertionError("must not truncate after cache lookup"),
+        ):
+            assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
     def test_d_side_update_state_after_alloc_stages_registration(self):
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
