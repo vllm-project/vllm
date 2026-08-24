@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -67,6 +68,15 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+_GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
+    "w13_weight": "gpt_oss_w13",
+    "w2_weight": "gpt_oss_w2",
+    "w13_bias": "gpt_oss_w13",
+    "w2_bias": "gpt_oss_w2",
+    "w13_weight_scale": "gpt_oss_w13",
+    "w2_weight_scale": "gpt_oss_w2",
+}
 
 
 class OAIAttention(nn.Module):
@@ -179,6 +189,132 @@ class OAIAttention(nn.Module):
         return output
 
 
+class GptOssRoutedExperts(RoutedExperts):
+    """Load one GPT-OSS expert at a time without assembling the global stack."""
+
+    @staticmethod
+    def _narrow_for_rank(
+        loaded_weight: torch.Tensor,
+        dim: int,
+        rank: int,
+        size: int,
+    ) -> torch.Tensor:
+        start = rank * size
+        available = loaded_weight.shape[dim] - start
+        return loaded_weight.narrow(dim, start, min(size, max(available, 0)))
+
+    @staticmethod
+    def _copy_to_expert(expert_data: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        if expert_data.numel() == loaded_weight.numel() == 1:
+            expert_data.copy_(loaded_weight.reshape(()))
+            return
+        while loaded_weight.ndim > expert_data.ndim and loaded_weight.shape[-1] == 1:
+            loaded_weight = loaded_weight.squeeze(-1)
+        slices = tuple(slice(0, size) for size in loaded_weight.shape)
+        expert_data[slices].copy_(loaded_weight)
+
+    def _load_expert_bias(
+        self,
+        expert_data: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+    ) -> None:
+        tp_rank = self.moe_config.moe_parallel_config.tp_rank
+        if shard_id == "gpt_oss_w13":
+            loaded_weight = self._narrow_for_rank(
+                loaded_weight, 0, tp_rank, expert_data.shape[0]
+            )
+        elif tp_rank != 0:
+            loaded_weight = torch.zeros_like(loaded_weight)
+        self._copy_to_expert(expert_data, loaded_weight)
+
+    def _load_unquantized_expert(
+        self,
+        expert_data: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+    ) -> None:
+        tp_rank = self.moe_config.moe_parallel_config.tp_rank
+        if shard_id == "gpt_oss_w13":
+            loaded_weight = self._narrow_for_rank(
+                loaded_weight, 1, tp_rank, expert_data.shape[0]
+            )
+            loaded_weight = loaded_weight.t().contiguous()
+        else:
+            loaded_weight = self._narrow_for_rank(
+                loaded_weight, 0, tp_rank, expert_data.shape[1]
+            )
+            loaded_weight = loaded_weight.t().contiguous()
+        self._copy_to_expert(expert_data, loaded_weight)
+
+    def _load_packed_expert(
+        self,
+        expert_data: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+    ) -> None:
+        tp_rank = self.moe_config.moe_parallel_config.tp_rank
+        is_w13 = shard_id == "gpt_oss_w13"
+        is_weight = weight_name.endswith("_weight")
+        is_partitioned_scale = weight_name.endswith("_weight_scale")
+
+        if is_weight:
+            loaded_weight = loaded_weight.reshape(loaded_weight.shape[0], -1)
+
+        if is_w13 and (is_weight or is_partitioned_scale):
+            loaded_weight = self._narrow_for_rank(
+                loaded_weight, 0, tp_rank, expert_data.shape[0]
+            )
+        elif not is_w13 and (is_weight or is_partitioned_scale):
+            loaded_weight = self._narrow_for_rank(
+                loaded_weight, -1, tp_rank, expert_data.shape[-1]
+            )
+
+        self._copy_to_expert(expert_data, loaded_weight)
+
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: bool = False,
+    ) -> bool | None:
+        if shard_id not in ("gpt_oss_w13", "gpt_oss_w2"):
+            return super().weight_loader(
+                param,
+                loaded_weight,
+                weight_name,
+                shard_id,
+                expert_id,
+                return_success,
+            )
+
+        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
+        if expert_id == -1:
+            return False if return_success else None
+
+        expert_data = param.data[expert_id]
+        weight_dtype = getattr(self.quant_method, "weight_dtype", "")
+        quant_method_name = self.quant_method.__class__.__name__
+
+        if weight_name.endswith("_bias"):
+            self._load_expert_bias(expert_data, loaded_weight, shard_id)
+        elif weight_dtype in (
+            "gpt_oss_mxfp4",
+            "mxfp4",
+        ) or quant_method_name in (
+            "CompressedTensorsW4A4Nvfp4MoEMethod",
+            "Nvfp4OnlineMoEMethod",
+        ):
+            self._load_packed_expert(expert_data, loaded_weight, weight_name, shard_id)
+        else:
+            self._load_unquantized_expert(expert_data, loaded_weight, shard_id)
+        return True if return_success else None
+
+
 class MLPBlock(torch.nn.Module):
     def __init__(
         self,
@@ -223,6 +359,7 @@ class MLPBlock(torch.nn.Module):
             has_bias=True,
             activation="swigluoai",
             is_sequence_parallel=self.is_sequence_parallel,
+            routed_experts_cls=GptOssRoutedExperts,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -414,6 +551,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
         for name, weight in remap_moe_expert_weights(weights, params_dict):
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
+                continue
+
+            if self._try_load_streamed_expert(name, weight, params_dict, loaded_params):
                 continue
 
             if ".w13_weight_scale" in name:
@@ -634,6 +774,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_start = tp_rank * per_rank_intermediate_size
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
+        # Streamed per-expert reload is intentionally unsupported for Quark.
         for name, loaded_weight in weights:
             if is_pp_missing_parameter(name, self):
                 continue
@@ -1018,6 +1159,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
+            if self._try_load_streamed_expert(name, weight, params_dict, loaded_params):
+                continue
+
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -1095,6 +1239,59 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 weight_loader(param, weight)
             loaded_params.add(name)
         return loaded_params
+
+    @staticmethod
+    def _get_streamed_expert_info(
+        name: str,
+        params_dict: dict[str, torch.nn.Parameter],
+    ) -> tuple[int, str, str] | None:
+        """Parse ``...experts.<expert_id>.<fused_param>`` checkpoint keys."""
+        if ".mlp.experts." not in name:
+            return None
+        suffix = name.rsplit(".", 1)[-1]
+        shard_id = _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD.get(suffix)
+        if shard_id is None:
+            return None
+
+        prefix, expert_suffix = name.split(".mlp.experts.", maxsplit=1)
+        expert_id_str, separator, param_suffix = expert_suffix.partition(".")
+        if not separator or not expert_id_str.isdigit():
+            return None
+        expert_id = int(expert_id_str)
+        for base_layer_prefix in ("", "base_layer."):
+            fused_name = (
+                f"{prefix}.mlp.experts.{base_layer_prefix}routed_experts.{param_suffix}"
+            )
+            if fused_name in params_dict:
+                return expert_id, fused_name, shard_id
+        return None
+
+    @classmethod
+    def _try_load_streamed_expert(
+        cls,
+        name: str,
+        loaded_weight: torch.Tensor,
+        params_dict: dict[str, torch.nn.Parameter],
+        loaded_params: set[str],
+    ) -> bool:
+        expert_info = cls._get_streamed_expert_info(name, params_dict)
+        if expert_info is None:
+            return False
+
+        expert_id, fused_name, shard_id = expert_info
+        param = params_dict[fused_name]
+        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+        success = weight_loader(
+            param,
+            loaded_weight,
+            weight_name=fused_name,
+            shard_id=shard_id,
+            expert_id=expert_id,
+            return_success=True,
+        )
+        if success:
+            loaded_params.add(fused_name)
+        return True
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
