@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -62,6 +62,7 @@ def _pa_gluon_supports(num_heads_q: int, num_heads_kv: int, head_size: int) -> b
         and num_heads_q // num_heads_kv in _PA_GLUON_QUERY_GROUP_SIZES
         and head_size == _PA_GLUON_HEAD_SIZE
     )
+
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
@@ -162,15 +163,17 @@ if current_platform.is_rocm():
             # for kv cache layout as
             # K: [num_blocks, num_head, head_dim // x, page_size, x]
             # V: [num_blocks, num_head, page_size // x, head_dim, x]
+            # The sides only sit a dense page apart when they are separate
+            # planes (H outermost), so take the block stride from the tensor.
             key_cache_ptr_offset = (
                 key_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
+                + block_id * k_cache_stride0
                 + head_id * head_size * PAGE_SIZE
                 + slot_id * x
             )
             value_cache_ptr_offset = (
                 value_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
+                + block_id * v_cache_stride0
                 + head_id * head_size * PAGE_SIZE
                 + (slot_id // x) * head_size * x
                 + slot_id % x
@@ -842,13 +845,33 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        """Validate the block size the ROCm gather kernels require."""
+        """Validate the block size the ROCm gather kernels require, and under
+        the shuffle layout publish K and V as two head slots.
+
+        The shuffle read/write kernels rearrange a whole ``head_size x
+        block_size`` tile per side, so each side needs its own contiguous run
+        in the page. Packed into the content dim they interleave per token
+        instead, which no layout can undo.
+        """
         # block_size == 1 is the per-token page-size probe (see
         # Platform.get_page_size_bytes); real blocks must be gatherable in
         # 16-token units by the ROCm kernel.
         if spec.block_size != 1 and spec.block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return spec
+        if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            return spec
+        if spec.state_content_bytes is not None:
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head slots require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -1470,6 +1493,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             ps=True,
                         )
                     else:
+                        # Unlike gluon, this kernel derives block addresses
+                        # arithmetically, so it only reads the right bytes when
+                        # each side is a dense plane of pages.
+                        assert new_key_cache.stride(0) == (
+                            num_kv_heads * head_size * block_size
+                        ), (
+                            "paged_attention_common needs the K/V sides as "
+                            "dense planes; the resolved KV cache layout "
+                            "interleaves them within a block."
+                        )
                         num_seqs = attn_metadata.seq_lens.shape[0]
                         max_num_partitions = (
                             attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
@@ -1569,9 +1602,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-            # (B, 2, N, H, hs) -> two contiguous (B, N, H, hs), which is what
-            # the shuffle read/write kernels reinterpret in place.
-            key_cache, value_cache = kv_cache.unbind(1)
+            # (B, 2, N, H*hs) -> one (B, N, H, hs) per side, which is what the
+            # shuffle read/write kernels reinterpret in place. The heads are
+            # folded into the content dim by customize_spec.
+            key_cache, value_cache = kv_cache.unflatten(
+                -1, (self.num_kv_heads, self.head_size)
+            ).unbind(1)
             return key_cache, value_cache
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
