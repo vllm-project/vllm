@@ -63,6 +63,7 @@ class TestGetMLAPrefillBackend:
 
         with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.get_device_capability.return_value = None
+            mock_platform.is_cpu.return_value = False
 
             backend = get_mla_prefill_backend(vllm_config)
             assert backend.get_name() == "FLASH_ATTN"

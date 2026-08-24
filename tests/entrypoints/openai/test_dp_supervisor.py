@@ -86,6 +86,9 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "pipeline_parallel_size": 1,
         "uvicorn_log_level": "info",
         "shutdown_timeout": 5.0,
+        "disable_uvicorn_access_log": False,
+        "disable_access_log_for_endpoints": None,
+        "log_config_file": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -121,6 +124,9 @@ def _make_args(**overrides) -> argparse.Namespace:
         pipeline_parallel_size=1,
         uvicorn_log_level="warning",
         shutdown_timeout=0.0,
+        disable_uvicorn_access_log=False,
+        disable_access_log_for_endpoints=None,
+        log_config_file=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -243,6 +249,40 @@ def test_handles_shutdown_event():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_children_uses_engine_process_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
+    supervisor._processes = [
+        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
+    ]
+    calls = []
+    timeout_calls = []
+
+    def get_process_timeout(request_timeout, manager_timeout):
+        timeout_calls.append((request_timeout, manager_timeout))
+        return 15.0
+
+    monkeypatch.setattr(
+        dp_sup,
+        "get_engine_process_shutdown_timeout",
+        get_process_timeout,
+    )
+    monkeypatch.setattr(
+        dp_sup,
+        "_join_processes_with_timeout",
+        lambda processes, timeout: calls.append((processes, timeout)),
+    )
+
+    await supervisor._shutdown_children()
+
+    assert timeout_calls == [(0.0, 0.0)]
+    assert calls == [
+        (supervisor._processes, 15.0 + CHILD_EXIT_GRACE_S),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -321,6 +361,100 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
 
     with pytest.raises(ValueError, match="supervisor boom"):
         await supervisor.run()
+
+
+# ---------------------------------------------------------------------------
+# Access-log filtering unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_server_applies_access_log_filter(monkeypatch):
+    """get_uvicorn_log_config result is forwarded to uvicorn.Config."""
+    sentinel_config = {"version": 1, "loggers": {}}
+    captured_config: list[uvicorn.Config] = []
+
+    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: sentinel_config)
+
+    class FakeServer:
+        def __init__(self, config):
+            captured_config.append(config)
+            self.started = True
+            self.should_exit = False
+
+        async def serve(self):
+            pass
+
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
+
+    args = _make_unit_args(
+        host="127.0.0.1",
+        disable_access_log_for_endpoints="/health,/readyz",
+    )
+    supervisor = DPSupervisor(args)
+    await supervisor._start_server()
+
+    assert len(captured_config) == 1
+    config = captured_config[0]
+    assert config.log_config is sentinel_config
+    assert config.access_log is True
+
+
+@pytest.mark.asyncio
+async def test_start_server_disables_access_log(monkeypatch):
+    """disable_uvicorn_access_log=True sets access_log=False."""
+    captured_config: list[uvicorn.Config] = []
+
+    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: None)
+
+    class FakeServer:
+        def __init__(self, config):
+            captured_config.append(config)
+            self.started = True
+            self.should_exit = False
+
+        async def serve(self):
+            pass
+
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
+
+    args = _make_unit_args(
+        host="127.0.0.1",
+        disable_uvicorn_access_log=True,
+    )
+    supervisor = DPSupervisor(args)
+    await supervisor._start_server()
+
+    assert len(captured_config) == 1
+    assert captured_config[0].access_log is False
+
+
+@pytest.mark.asyncio
+async def test_start_server_no_log_config_when_no_filter(monkeypatch):
+    """Without filtering options, default uvicorn log_config is used."""
+    captured_config: list[uvicorn.Config] = []
+
+    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: None)
+
+    class FakeServer:
+        def __init__(self, config):
+            captured_config.append(config)
+            self.started = True
+            self.should_exit = False
+
+        async def serve(self):
+            pass
+
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
+
+    args = _make_unit_args(host="127.0.0.1")
+    supervisor = DPSupervisor(args)
+    await supervisor._start_server()
+
+    assert len(captured_config) == 1
+    config = captured_config[0]
+    assert config.log_config == uvicorn.Config(app=None).log_config
+    assert config.access_log is True
 
 
 # ---------------------------------------------------------------------------

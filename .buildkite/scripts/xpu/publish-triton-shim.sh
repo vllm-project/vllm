@@ -11,16 +11,24 @@ readonly WHEEL_SHA256="3c822f73e9870512f59a6ecf5dc305a4bcab11fa623f9ce91011f6043
 readonly WHEEL_FILENAME="${WHEEL_URL##*/}"
 readonly ENCODED_WHEEL_FILENAME="${WHEEL_FILENAME/+/%2B}"
 readonly S3_PREFIX="s3://${BUCKET}/${PREFIX}/"
+readonly COMMIT="${BUILDKITE_COMMIT:-}"
 readonly DRY_RUN="${DRY_RUN:-0}"
 
 if [[ "$DRY_RUN" != "0" && "$DRY_RUN" != "1" ]]; then
     echo "DRY_RUN must be 0 or 1" >&2
     exit 2
 fi
+if [[ "$DRY_RUN" == "0" && ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "BUILDKITE_COMMIT must be a full lowercase commit hash" >&2
+    exit 2
+fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 
-work_dir=$(mktemp -d)
+# Keep temporary files under the repository so the Docker Python fallback,
+# which mounts the repository at /app, can access them.
+work_dir=$(mktemp -d "$PWD/.xpu-triton-index.XXXXXX")
+work_dir=${work_dir#"$PWD"/}
 trap 'rm -rf "$work_dir"' EXIT
 
 wheel_path="$work_dir/$WHEEL_FILENAME"
@@ -67,9 +75,9 @@ sed 's/import regex as re/import re/' \
 # shellcheck disable=SC2086
 $PYTHON "$index_generator" \
     --version "$PREFIX" \
-    --wheel-dir "$PREFIX" \
+    --wheel-dir "$work_dir/$PREFIX" \
     --current-objects "$objects_path" \
-    --output-dir "$index_output_dir" \
+    --output-dir "$work_dir" \
     --comment "XPU Triton shim"
 
 grep -Fq 'href="triton/"' "$index_output_dir/index.html"
@@ -84,4 +92,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
 else
     aws s3 cp --recursive "$index_output_dir/" "$S3_PREFIX"
     echo "Published XPU Triton shim index to https://wheels.vllm.ai/$PREFIX/"
+    aws s3 cp "$S3_PREFIX$WHEEL_FILENAME" \
+        "s3://$BUCKET/$COMMIT/$WHEEL_FILENAME"
+    echo "Staged XPU Triton shim for https://wheels.vllm.ai/$COMMIT/xpu/"
 fi
