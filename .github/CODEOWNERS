@@ -11,7 +11,7 @@
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
-/vllm/model_executor/layers/batch_invariant.py @yewentao256
+/vllm/model_executor/determinism/ @yewentao256
 /vllm/model_executor/custom_op.py @shen-shanshan
 /vllm/ir @ProExpertProg
 /vllm/kernels/ @ProExpertProg @tjtanaa
