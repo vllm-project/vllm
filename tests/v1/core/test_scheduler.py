@@ -1975,6 +1975,52 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     return initial_ecos
 
 
+@pytest.mark.parametrize(
+    ("config_async_load", "load_modes", "expected"),
+    [
+        (True, (True,), True),
+        (True, (False,), False),
+        (True, (True, False), False),
+        (False, (True,), False),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_async_load_decision(
+    config_async_load: bool,
+    load_modes: tuple[bool, ...],
+    expected: bool,
+    tmp_path,
+):
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    block_size = 16
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        use_kv_connector=mock_kv(matched_tokens=block_size, is_async=False),
+        block_size=block_size,
+    )
+    kv_transfer_config = scheduler.vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
+    kv_transfer_config.async_load = config_async_load
+    requests = create_requests(
+        num_requests=len(load_modes),
+        num_tokens=block_size * 2,
+        block_size=block_size,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        side_effect=[(block_size, is_async) for is_async in load_modes]
+    )
+
+    output = scheduler.schedule()
+
+    assert output.async_load is expected
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """
