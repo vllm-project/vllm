@@ -15,6 +15,7 @@ import torch
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import get_group_id
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -39,15 +40,18 @@ MAMBA_GROUP_ID = 1
 
 def _make_hybrid_kv_cache_manager(
     num_prefill_checkpoint_blocks: int = 0,
+    retention_interval: int | None = None,
+    attn_block_size: int = ATTN_BLOCK_SIZE,
 ) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=10000,
         kv_cache_tensors=[],
+        prefix_cache_retention_interval=retention_interval,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["full_layer"],
                 FullAttentionSpec(
-                    block_size=ATTN_BLOCK_SIZE,
+                    block_size=attn_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -70,7 +74,7 @@ def _make_hybrid_kv_cache_manager(
         config,
         max_model_len=262144,
         scheduler_block_size=MAMBA_BLOCK_SIZE,
-        hash_block_size=ATTN_BLOCK_SIZE,
+        hash_block_size=attn_block_size,
         enable_caching=True,
         use_eagle=True,
     )
@@ -82,11 +86,15 @@ def _split(
     use_eagle: bool = True,
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
+    retention_interval: int | None = None,
+    eagle_reach_margin: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle=use_eagle,
+        mamba_retention_interval=retention_interval,
+        mamba_eagle_reach_margin=eagle_reach_margin,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -353,3 +361,134 @@ def test_quiet_prefill_caches_state_at_every_boundary() -> None:
     # lookup-side policy (eagle lookahead defers hashing); every hashed slot
     # must still be consistent with the state it holds.
     assert _count_cached_boundary_states(manager, request, state_at) >= 1
+
+
+def _chunk_ends(prompt_len: int, **split_kwargs) -> list[int]:
+    """Chunk ends of an unbudgeted prefill through the real split."""
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    ends = []
+    while request.num_computed_tokens < prompt_len:
+        num_new = _split(
+            request, prompt_len - request.num_computed_tokens, **split_kwargs
+        )
+        assert num_new > 0
+        request.num_computed_tokens += num_new
+        ends.append(request.num_computed_tokens)
+    return ends
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "expected"),
+    [
+        # Unaligned: the eagle-reachable boundary, the replay boundary, the tail.
+        (
+            4 * MAMBA_BLOCK_SIZE + 892,
+            [3 * MAMBA_BLOCK_SIZE, 4 * MAMBA_BLOCK_SIZE, 4 * MAMBA_BLOCK_SIZE + 892],
+        ),
+        # Aligned: the replay boundary is one block below the prompt end.
+        (
+            4 * MAMBA_BLOCK_SIZE,
+            [2 * MAMBA_BLOCK_SIZE, 3 * MAMBA_BLOCK_SIZE, 4 * MAMBA_BLOCK_SIZE],
+        ),
+    ],
+)
+def test_split_default_retention_stops_only_where_states_are_kept(
+    prompt_len: int, expected: list[int]
+) -> None:
+    """`prefix_cache_retention_interval=0` (the default) hashes only the
+    replay boundary and shared-prefix junctions, so a boundary stop anywhere
+    else splits the prefill for a state that is discarded. Under EAGLE/MTP the
+    attention lookup drops one block, so the state a replay can reach is one
+    block below the replay boundary: the split materializes both, and nothing
+    else (#53479)."""
+    ends = _chunk_ends(
+        prompt_len,
+        use_eagle=True,
+        retention_interval=0,
+        eagle_reach_margin=MAMBA_BLOCK_SIZE,
+    )
+    assert ends == expected
+
+
+def test_split_segment_retention_stops_at_segment_boundaries() -> None:
+    """A positive interval keeps one state per interval-sized segment plus
+    the replay boundary, so those are the only mandatory chunk ends."""
+    prompt_len = 5 * MAMBA_BLOCK_SIZE + 100
+    ends = _chunk_ends(
+        prompt_len, use_eagle=False, retention_interval=2 * MAMBA_BLOCK_SIZE
+    )
+    assert ends == [
+        2 * MAMBA_BLOCK_SIZE,
+        4 * MAMBA_BLOCK_SIZE,
+        5 * MAMBA_BLOCK_SIZE,
+        prompt_len,
+    ]
+
+
+def test_split_dense_retention_keeps_every_boundary_stop() -> None:
+    """`None`, or an interval at/below the block size, hashes every boundary
+    state, so every boundary stays a chunk end."""
+    prompt_len = 3 * MAMBA_BLOCK_SIZE + 500
+    dense = [MAMBA_BLOCK_SIZE, 2 * MAMBA_BLOCK_SIZE, 3 * MAMBA_BLOCK_SIZE, prompt_len]
+    assert (
+        _chunk_ends(
+            prompt_len,
+            use_eagle=True,
+            retention_interval=None,
+            eagle_reach_margin=MAMBA_BLOCK_SIZE,
+        )
+        == dense
+    )
+    assert (
+        _chunk_ends(prompt_len, use_eagle=False, retention_interval=MAMBA_BLOCK_SIZE)
+        == dense
+    )
+
+
+def _cached_mamba_states(manager: KVCacheManager) -> set[int]:
+    """Token offsets of every hash-cached mamba state in the pool (align mode
+    relocates the running state and frees earlier slots into the pool, where a
+    hashed one stays findable)."""
+    cache = manager.block_pool.cached_block_hash_to_block._cache
+    return {
+        block.block_hash_num_tokens
+        for key, value in cache.items()
+        if get_group_id(key) == MAMBA_GROUP_ID
+        for block in (value.values() if isinstance(value, dict) else [value])
+    }
+
+
+@pytest.mark.parametrize("keep_eagle_reach", [True, False])
+def test_default_retention_keeps_the_eagle_reachable_state(
+    keep_eagle_reach: bool,
+) -> None:
+    """End to end through the manager, in "align" geometry (attention and
+    mamba blocks equal, as the engine forces): with the default interval and
+    EAGLE/MTP, sparse retention kept only the replay boundary's state (block 3
+    for a 4-block-plus-tail prompt) while the pruned lookup reaches one block
+    less, so an identical prompt only hit once a junction formed — on its
+    third send. The state one block below must be kept too, so the second
+    send hits (#53479). `keep_eagle_reach=False` reproduces the old behaviour
+    by zeroing the margin, proving the test discriminates."""
+    block = MAMBA_BLOCK_SIZE
+    manager = _make_hybrid_kv_cache_manager(retention_interval=0, attn_block_size=block)
+    assert manager.coordinator.eagle_reach_margin == block
+    if not keep_eagle_reach:
+        for single_type_manager in manager.coordinator.single_type_managers:
+            single_type_manager.eagle_reach_margin = 0
+    prompt_len = 4 * block + 892
+    (request,) = create_requests(
+        1, num_tokens=prompt_len, block_size=block, same_prompt=True, req_ids=["p0"]
+    )
+    _run_chunked_prefill(manager, request, budgets=[prompt_len])
+    (repeat,) = create_requests(
+        1, num_tokens=prompt_len, block_size=block, same_prompt=True, req_ids=["p1"]
+    )
+    # The lookup drops the last matched attention block (4 -> 3 blocks) and
+    # needs the mamba state exactly there. Sparse retention keeps nothing else.
+    if keep_eagle_reach:
+        assert _cached_mamba_states(manager) == {3 * block, 4 * block}
+        assert manager.get_computed_blocks(repeat)[1] == 3 * block
+    else:
+        assert _cached_mamba_states(manager) == {4 * block}
+        assert manager.get_computed_blocks(repeat)[1] == 0

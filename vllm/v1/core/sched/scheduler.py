@@ -342,6 +342,16 @@ class Scheduler(SchedulerInterface):
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
+        # Sparse Mamba retention (`prefix_cache_retention_interval`) hashes only
+        # some boundary states, so the split only stops where one will be
+        # kept. `eagle_reach_margin`: how far below the replay boundary an
+        # EAGLE/MTP lookup can reach (`MambaManager._reachable_boundaries`).
+        self.mamba_retention_interval = kv_cache_config.prefix_cache_retention_interval
+        self.mamba_eagle_reach_margin = (
+            self.kv_cache_manager.coordinator.eagle_reach_margin
+            if self.need_mamba_block_aligned_split
+            else 0
+        )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -440,14 +450,38 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        # Without internal checkpoints, states exist only at chunk ends, so a
+        # chunk stops at every boundary whose state retention will hash: every
+        # boundary under dense retention (`None`, or an interval at/below the
+        # block size), the next segment boundary under a positive interval,
+        # none under 0. Stopping elsewhere splits the prefill for a state that
+        # is discarded. With checkpoints, mid-block states are recoverable and
+        # deep chunks need no boundary stops.
+        retention = self.mamba_retention_interval
+        if use_internal_checkpoint or retention == 0:
+            boundary_stop = 0
+        elif retention is None or retention <= block_size:
+            boundary_stop = next_block_boundary
+        else:
+            boundary_stop = (start // retention + 1) * retention
+        # Sparse retention keeps the replay boundary's state and, under
+        # EAGLE/MTP, the deepest one a pruned lookup can reach; a chunk must
+        # end there for that state to exist at all.
+        replay_boundary = eagle_reach = 0
+        if retention is not None and not use_internal_checkpoint:
+            replay_end = request.num_prompt_tokens - 1
+            replay_boundary = replay_end // block_size * block_size
+            if self.mamba_eagle_reach_margin > 0:
+                eagle_reach = max(
+                    (replay_end - self.mamba_eagle_reach_margin)
+                    // block_size
+                    * block_size,
+                    0,
+                )
         stops = (
-            # Without internal checkpoints, states exist only at chunk
-            # ends, so every chunk stops at its next block boundary to
-            # materialize a reusable state at every crossed boundary; the
-            # prompt's final sub-block tail may still end unaligned. With
-            # checkpoints, mid-block states are recoverable and deep chunks
-            # need no boundary stops.
-            next_block_boundary if not use_internal_checkpoint else 0,
+            boundary_stop,
+            replay_boundary,
+            eagle_reach,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be
