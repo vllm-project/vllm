@@ -1834,7 +1834,7 @@ def test_host_stager_read_failure_reaches_terminal_state():
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
 
-    assert stager.advance() == (set(), {"request"})
+    assert stager.get_finished() == (set(), {"request"})
     assert "request" not in stager.active_req_ids
     assert pool.free_slots == [slot]
 
@@ -1851,9 +1851,9 @@ def test_host_stager_abort_drains_read_before_reusing_slot():
     stager.nixl_wrapper.check_xfer_state.side_effect = ["PROC", "DONE"]
 
     stager.abort("request")
-    assert stager.advance() == (set(), set())
+    assert stager.get_finished() == (set(), set())
     assert pool.free_slots == []
-    assert stager.advance() == (set(), set())
+    assert stager.get_finished() == (set(), set())
     assert pool.free_slots == [slot]
     assert not stager.active_req_ids
 
@@ -1872,9 +1872,9 @@ def test_host_stager_copy_failure_waits_for_recorded_event():
     stager.nixl_wrapper.check_xfer_state.return_value = "DONE"
     stager._start_copy = MagicMock(side_effect=RuntimeError("copy failed"))
 
-    assert stager.advance() == (set(), set())
+    assert stager.get_finished() == (set(), set())
     assert pool.free_slots == []
-    assert stager.advance() == (set(), {"request"})
+    assert stager.get_finished() == (set(), {"request"})
     assert pool.free_slots == [slot]
 
 

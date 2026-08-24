@@ -2625,7 +2625,7 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers, is_recv=True)
-        done_recving.update(self._advance_host_staging())
+        done_recving.update(self._get_finished_host_staging())
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2845,11 +2845,11 @@ class NixlBaseConnectorWorker:
             self._host_stager = None
         return self._host_stager
 
-    def _advance_host_staging(self) -> set[str]:
-        """Drive the staging pipeline; return req_ids whose KV is fully landed."""
+    def _get_finished_host_staging(self) -> set[str]:
+        """Return req_ids whose staged KV is fully landed in host memory."""
         if self._host_stager is None:
             return set()
-        done, failed = self._host_stager.advance()
+        done, failed = self._host_stager.get_finished()
         for req_id in done:
             self._send_pending_recv_notifs(req_id)
         for req_id in failed:
@@ -3380,7 +3380,7 @@ class NixlBaseConnectorWorker:
 
     def __del__(self):
         with contextlib.suppress(Exception):
-            self.shutdown(drain_timeout=0)
+            self.shutdown()
 
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
@@ -3414,18 +3414,16 @@ class NixlBaseConnectorWorker:
             self.device_kv_caches = {}
             self.host_xfer_buffers = {}
 
-    def shutdown(self, drain_timeout: float | None = None) -> None:
-        """Stop new work and bound the wait for host-staged reads."""
+    def shutdown(self) -> None:
+        """Shutdown the connector worker."""
         if not hasattr(self, "_handshake_initiation_executor"):
             return
-        self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
+        self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
-        if self._host_stager is not None and not self._host_stager.shutdown(
-            drain_timeout=drain_timeout,
-            on_complete=self._finish_shutdown,
-        ):
-            return
+        if self._host_stager is not None:
+            self._host_stager.shutdown()
+            self._host_stager = None
         self._finish_shutdown()
