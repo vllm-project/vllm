@@ -439,21 +439,8 @@ def test_create_next_worker_view_worker_isolation(iid):
 
 
 # ---------------------------------------------------------------------------
-# Constructor — creator vs joiner semantics
+# Constructor — initialization and joiner semantics
 # ---------------------------------------------------------------------------
-
-
-def test_creator_role_is_not_persisted(iid):
-    """Winning O_EXCL must not create lifecycle ownership state."""
-    with _region(iid) as r:
-        assert not hasattr(r, "_creator")
-
-
-def test_joiner_does_not_reintroduce_creator_state(iid):
-    """Joining an existing region must not create lifecycle creator state."""
-    with _multi_region(iid, num_workers=2) as (r0, r1):
-        assert not hasattr(r0, "_creator")
-        assert not hasattr(r1, "_creator")
 
 
 def test_file_exists_after_construction(iid):
@@ -606,15 +593,13 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_multi_worker_race_does_not_persist_creator(iid):
-    """Concurrent initialization must not retain a creator ownership flag."""
+def test_multi_worker_race_constructs_one_shared_region(iid):
+    """Concurrent initialization must construct one usable shared region."""
     num_workers = 8
     regions, errors = _race_construct(iid, num_workers=num_workers)
     try:
         assert not errors, f"Workers raised: {errors}"
         assert len(regions) == num_workers, "Some workers failed to construct"
-
-        assert all(not hasattr(r, "_creator") for r in regions)
 
         for r in regions:
             assert not r.mmap_obj.closed
@@ -745,8 +730,8 @@ def test_cleanup_non_owner_leaves_file(iid, monkeypatch):
         _cleanup_file(path)
 
 
-def test_creator_exit_does_not_change_singleton_owner(iid, monkeypatch):
-    """A joiner chosen as owner must unlink even if another worker created."""
+def test_joiner_owner_cleans_up_after_initializer_exits(iid, monkeypatch):
+    """A joiner owner must unlink after the initializer releases its resources."""
     from vllm.v1.kv_offload.cpu import shared_offload_region as sor
 
     monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
@@ -775,11 +760,53 @@ def test_layout_rank_does_not_determine_singleton_owner(iid, monkeypatch):
         assert region._is_singleton_owner is False
 
 
-def test_cleanup_idempotent(iid):
-    """Calling cleanup() twice must not raise any exception."""
-    r = _make_region(iid)
-    r.cleanup()
-    r.cleanup()  # must be a no-op
+def test_scheduler_region_is_not_singleton_owner(iid, monkeypatch):
+    """The unranked scheduler mapping must not own the worker path."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    with _region(iid, rank=None) as region:
+        assert region._is_singleton_owner is False
+
+
+def test_worker_and_scheduler_regions_have_one_owner_per_path(iid, monkeypatch):
+    """Only worker local rank 0 may own a path shared with the scheduler."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    local_rank_0 = _make_region(iid, num_workers=2, rank=0)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    local_rank_1 = _make_region(iid, num_workers=2, rank=1)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    scheduler_region = _make_region(iid, num_workers=2, rank=None)
+    regions = [local_rank_0, local_rank_1, scheduler_region]
+    try:
+        assert sum(region._is_singleton_owner for region in regions) == 1
+        assert local_rank_0._is_singleton_owner is True
+        assert scheduler_region._is_singleton_owner is False
+    finally:
+        for region in regions:
+            region.cleanup()
+        _cleanup_file(local_rank_0.mmap_path)
+
+
+def test_cleanup_disarms_singleton_owner(iid, monkeypatch):
+    """A cleanup owner must not try to unlink the path on a second cleanup."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    unlink = MagicMock(wraps=os.unlink)
+    monkeypatch.setattr(sor.os, "unlink", unlink)
+    region = _make_region(iid)
+    path = region.mmap_path
+    try:
+        region.cleanup()
+        region.cleanup()
+
+        assert unlink.call_count == 1
+        assert region._is_singleton_owner is False
+    finally:
+        _cleanup_file(path)
 
 
 def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
@@ -879,8 +906,8 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
 
 
-def test_ftruncate_failure_cleans_up_creator(monkeypatch):
-    """A failed creator ftruncate must close and unlink before re-raising."""
+def test_ftruncate_failure_removes_newly_created_file(monkeypatch):
+    """A failed initialization must close and unlink its newly created file."""
     import vllm.v1.kv_offload.cpu.shared_offload_region as region
 
     engine_id = str(uuid.uuid4())
