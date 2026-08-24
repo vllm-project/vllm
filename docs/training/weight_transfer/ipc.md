@@ -113,8 +113,8 @@ handled inside `send_weights()`.
 ## Rank-Local Updates
 
 For different parameter subsets per worker, `update_info` may be a list indexed
-by worker rank; `None` skips that update on the corresponding worker. This form
-is IPC-only because collective backends require every worker to participate.
+by worker rank. This form is IPC-only because collective backends require every
+worker to participate.
 
 ## Examples
 

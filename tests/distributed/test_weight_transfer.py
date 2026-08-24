@@ -1359,9 +1359,9 @@ class TestTrainerClients:
             {"gpu": ("args",)}
         ]
 
-        client.update_weights([{"ipc_handles": {"gpu": ("args",)}}, None])
+        client.update_weights([{"ipc_handles": {"gpu": ("args",)}}, {"names": []}])
         sent = captured["json"]["update_info"]
-        assert sent[1] is None
+        assert sent[1] == {"names": []}
         assert pickle.loads(base64.b64decode(sent[0]["ipc_handles_pickled"])) == {
             "gpu": ("args",)
         }

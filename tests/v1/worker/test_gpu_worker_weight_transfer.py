@@ -120,7 +120,7 @@ def test_start_update_finish_delegates_to_engine():
 
 @pytest.mark.parametrize(
     ("rank", "expected"),
-    [(1, {"names": ["rank-1"]}), (2, None)],
+    [(1, {"names": ["rank-1"]}), (2, {"names": []})],
 )
 def test_rank_local_update_selects_worker_payload(rank, expected):
     engine = _RecordingEngine()
@@ -128,9 +128,11 @@ def test_rank_local_update_selects_worker_payload(rank, expected):
     worker.rank = rank
     Worker.start_weight_update(worker)
 
-    Worker.update_weights(worker, [{"names": ["rank-0"]}, {"names": ["rank-1"]}, None])
+    Worker.update_weights(
+        worker, [{"names": ["rank-0"]}, {"names": ["rank-1"]}, {"names": []}]
+    )
 
-    assert engine.update_calls == ([] if expected is None else [expected])
+    assert engine.update_calls == [expected]
     assert worker._weight_update_active is True
 
 
