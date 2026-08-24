@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import VllmRunner
+from tests.models.utils import TokensTextLogprobs, check_logprobs_close
 from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams, TokensPrompt
 from vllm.config import CUDAGraphMode
@@ -54,7 +54,7 @@ def _make_tiny_overrides() -> dict:
 
 def _run_tiny_model(
     vllm_runner: type[VllmRunner], dcp_size: int
-) -> list[tuple[list[int], list[float]]]:
+) -> list[TokensTextLogprobs]:
     with vllm_runner(
         model_name=MODEL,
         skip_tokenizer_init=True,
@@ -100,11 +100,7 @@ def _run_tiny_model(
         completion = request_output.outputs[0]
         token_ids = list(completion.token_ids)
         assert completion.logprobs is not None
-        selected_logprobs = [
-            step_logprobs[token_id].logprob
-            for token_id, step_logprobs in zip(token_ids, completion.logprobs)
-        ]
-        results.append((token_ids, selected_logprobs))
+        results.append((token_ids, completion.text, completion.logprobs))
     return results
 
 
@@ -120,15 +116,12 @@ def test_kimi_linear_dcp_tiny(
     baseline = _run_tiny_model(vllm_runner, dcp_size=1)
     dcp = _run_tiny_model(vllm_runner, dcp_size=2)
 
-    assert [tokens for tokens, _ in dcp] == [tokens for tokens, _ in baseline]
-    logprob_drifts = []
-    for (_, baseline_logprobs), (_, dcp_logprobs) in zip(baseline, dcp):
-        for baseline_logprob, dcp_logprob in zip(baseline_logprobs, dcp_logprobs):
-            assert math.isfinite(baseline_logprob)
-            assert math.isfinite(dcp_logprob)
-            logprob_drifts.append(abs(baseline_logprob - dcp_logprob))
-
-    assert max(logprob_drifts) <= 1e-2
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=dcp,
+        name_0="dcp1",
+        name_1="dcp2",
+    )
 
 
 def _make_tiny_k3_config(model_dir: Path) -> str:
@@ -149,7 +142,7 @@ def _make_tiny_k3_config(model_dir: Path) -> str:
 
 def _run_k3_partial_prefix_reuse(
     vllm_runner: type[VllmRunner], model_name: str, dcp_size: int
-) -> tuple[list[int], list[float], int]:
+) -> tuple[TokensTextLogprobs, int]:
     block_size = 256
     common_prefix = [3 + (token_idx % 251) for token_idx in range(block_size)]
     prime_prompt = TokensPrompt(prompt_token_ids=common_prefix + [17])
@@ -202,11 +195,10 @@ def _run_k3_partial_prefix_reuse(
     assert len(token_ids) == sampling_params.max_tokens
     assert completion.logprobs is not None
     assert len(completion.logprobs) == sampling_params.max_tokens
-    selected_logprobs = [
-        step_logprobs[token_id].logprob
-        for token_id, step_logprobs in zip(token_ids, completion.logprobs)
-    ]
-    return token_ids, selected_logprobs, replay_output.num_cached_tokens
+    return (
+        (token_ids, completion.text, completion.logprobs),
+        replay_output.num_cached_tokens,
+    )
 
 
 @create_new_process_for_each_test()
@@ -220,20 +212,18 @@ def test_kimi_k3_dcp_partial_prefix_reuse(
         pytest.skip("Need at least 2 GPUs")
 
     model_name = _make_tiny_k3_config(tmp_path / "tiny-kimi-k3")
-    baseline_tokens, baseline_logprobs, baseline_cached = _run_k3_partial_prefix_reuse(
+    baseline_output, baseline_cached = _run_k3_partial_prefix_reuse(
         vllm_runner, model_name, dcp_size=1
     )
-    dcp_tokens, dcp_logprobs, dcp_cached = _run_k3_partial_prefix_reuse(
+    dcp_output, dcp_cached = _run_k3_partial_prefix_reuse(
         vllm_runner, model_name, dcp_size=2
     )
 
     assert baseline_cached == 256
     assert dcp_cached == 256
-    assert dcp_tokens == baseline_tokens
-    assert len(dcp_logprobs) == len(baseline_logprobs) == 8
-    logprob_drifts = []
-    for baseline_logprob, dcp_logprob in zip(baseline_logprobs, dcp_logprobs):
-        assert math.isfinite(baseline_logprob)
-        assert math.isfinite(dcp_logprob)
-        logprob_drifts.append(abs(baseline_logprob - dcp_logprob))
-    assert max(logprob_drifts) <= 1e-2
+    check_logprobs_close(
+        outputs_0_lst=[baseline_output],
+        outputs_1_lst=[dcp_output],
+        name_0="dcp1",
+        name_1="dcp2",
+    )
