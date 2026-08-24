@@ -6,6 +6,7 @@ import weakref
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
@@ -167,7 +168,7 @@ class TestFullCUDAGraph:
         # Use purely greedy decoding to avoid top-p truncation sensitivity
         # that can amplify tiny numeric differences across runtimes.
         sampling_params = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens, top_p=1.0
+            temperature=0.0, max_tokens=max_tokens, top_p=1.0, logprobs=5
         )
 
         responses = []
@@ -182,10 +183,17 @@ class TestFullCUDAGraph:
             responses.append(llm.wait_for_completion(output_type=RequestOutput))
         piecewise_responses, full_responses = responses
 
-        # Check that all responses are the same
         assert len(piecewise_responses) == len(full_responses) == batch_size
-        for piecewise_res, full_res in zip(piecewise_responses, full_responses):
-            assert (
-                piecewise_res.outputs[0].text.lower()
-                == full_res.outputs[0].text.lower()
-            )
+
+        def _to_tokens_text_logprobs(res):
+            out = res.outputs[0]
+            return (list(out.token_ids), out.text, out.logprobs)
+
+        check_logprobs_close(
+            outputs_0_lst=[
+                _to_tokens_text_logprobs(res) for res in piecewise_responses
+            ],
+            outputs_1_lst=[_to_tokens_text_logprobs(res) for res in full_responses],
+            name_0="piecewise",
+            name_1="full_cudagraph",
+        )
