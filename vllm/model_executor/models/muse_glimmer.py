@@ -272,6 +272,9 @@ class MuseGlimmerMultiModalProcessor(
             mm_items, hf_kwargs
         )
 
+        if not mm_data:
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
+
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         processor = self.info.get_hf_processor(**hf_kwargs)

@@ -1434,12 +1434,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         caching the results and reusing cached results.
         """
         cache = self.cache
+        has_passthrough_data = any(
+            len(items.get_passthrough_data()) > 0
+            for items in inputs.mm_data_items.values()
+        )
 
-        passthrough_data = self._get_hf_mm_inputs(
-            inputs.mm_data_items,
-            inputs.hf_processor_mm_kwargs,
-        ).passthrough_data
-        if cache is None or passthrough_data:
+        if cache is None or has_passthrough_data:
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
