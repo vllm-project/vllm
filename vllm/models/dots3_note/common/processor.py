@@ -637,17 +637,24 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
         hf_kwargs: Mapping[str, object],
     ) -> HFMultiModalInputs:
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
-        if "video" not in mm_items:
-            return hf_inputs
 
-        videos = mm_items.get_items("video", VideoProcessorItems)
-        raw_videos: list[object] = []
-        for index, item in enumerate(videos.data):
-            if isinstance(item, MediaWithBytes):
-                raw_videos.append(item.original_bytes)
-            else:
-                raw_videos.append(videos.get(index))
-        hf_inputs.hf_data["videos"] = raw_videos
+        # The Dots3Note processor accepts "audios" instead of "audio"
+        hf_data = hf_inputs.hf_data
+        if "audio" in hf_data:
+            hf_data["audios"] = hf_data.pop("audio")
+
+        if "video" in mm_items:
+            videos = mm_items.get_items("video", VideoProcessorItems)
+
+            raw_videos: list[object] = []
+            for index, item in enumerate(videos.data):
+                if isinstance(item, MediaWithBytes):
+                    raw_videos.append(item.original_bytes)
+                else:
+                    raw_videos.append(videos.get(index))
+
+            hf_data["videos"] = raw_videos
+
         return hf_inputs
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
