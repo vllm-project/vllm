@@ -28,11 +28,9 @@ def test_cumem_capability_flags():
     # /health introspect to decide reinit / persistence behavior.
     assert CuMemBackend.is_supported() is True
     assert CuMemBackend.preserves_communicators() is True
-    assert CuMemBackend.requires_communicator_suspend() is True
     assert CuMemBackend.preserves_compiled_artifacts() is False
     assert CuMemBackend.preserves_graphs_with_communicators() is False
     assert CuMemBackend.supports_durable_storage() is False
-    assert SleepModeBackend.requires_communicator_suspend() is False
 
 
 def test_new_backend_starts_in_running_state():
@@ -40,9 +38,11 @@ def test_new_backend_starts_in_running_state():
     assert CuMemBackend().state() == "RUNNING"
 
 
-@pytest.mark.parametrize("requires_suspend", [True, False])
-def test_worker_drives_communicator_suspension(monkeypatch, requires_suspend):
-    """Comm walkers run around sleep/wake iff the backend requires them."""
+@pytest.mark.parametrize("disable_nccl_comm_suspend", [False, True])
+def test_worker_drives_communicator_suspension(monkeypatch, disable_nccl_comm_suspend):
+    """Comm walkers run around sleep/wake unless explicitly disabled."""
+    from types import SimpleNamespace
+
     from vllm.v1.worker.gpu_worker import Worker
 
     calls: list[tuple[str, object]] = []
@@ -54,14 +54,15 @@ def test_worker_drives_communicator_suspension(monkeypatch, requires_suspend):
         def resume(self, tags: list[str] | None = None) -> None:
             calls.append(("backend.resume", tuple(tags) if tags else None))
 
-        @classmethod
-        def requires_communicator_suspend(cls) -> bool:
-            return requires_suspend
-
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            disable_nccl_comm_suspend=disable_nccl_comm_suspend
+        )
+    )
 
     monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
     monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
@@ -83,7 +84,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, requires_suspend):
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
     ]
-    if not requires_suspend:
+    if disable_nccl_comm_suspend:
         expected = [c for c in expected if not c[0].startswith("comms.")]
     assert calls == expected
 

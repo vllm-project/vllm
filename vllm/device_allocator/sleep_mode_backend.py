@@ -87,11 +87,6 @@ class SleepModeBackend(ABC):
         return False
 
     @classmethod
-    def requires_communicator_suspend(cls) -> bool:
-        """Whether the worker must suspend/resume device comms around sleep."""
-        return False
-
-    @classmethod
     def preserves_compiled_artifacts(cls) -> bool:
         """If True, torch.compile / JIT kernels survive suspend/resume and need
         not be recompiled on resume."""
@@ -140,11 +135,6 @@ class CuMemBackend(SleepModeBackend):
     @classmethod
     def preserves_communicators(cls) -> bool:
         # Comm identity/topology survive memory suspension; no reinit needed.
-        return True
-
-    @classmethod
-    def requires_communicator_suspend(cls) -> bool:
-        # NCCL buffers live outside the allocator pool.
         return True
 
 
