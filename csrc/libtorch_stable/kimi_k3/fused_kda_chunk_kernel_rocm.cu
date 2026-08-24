@@ -781,7 +781,7 @@ __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
         *reinterpret_cast<f32x4*>(s1 + vt * st_vt + kt * st_kt) = S[kt][vt];
 #else
   kda_unsupported_arch("kda_chunk_fused");
-#endif // ifdef ROCM_USE_FUSED_PREFILL_KDA
+#endif  // ifdef ROCM_USE_FUSED_PREFILL_KDA
 }
 
 // Compose the group operators exactly:
@@ -886,7 +886,7 @@ __global__ __launch_bounds__(kScanThreads) void kda_group_scan(
   }
 #else
   kda_unsupported_arch("kda_group_scan");
-#endif // ifdef ROCM_USE_FUSED_PREFILL_KDA
+#endif  // ifdef ROCM_USE_FUSED_PREFILL_KDA
 }
 
 constexpr int kBC = 16;  // widest span over which exp2(+/-g) stays finite
@@ -1314,14 +1314,14 @@ __global__ __launch_bounds__(NTHREAD,
       const float* Lb = s_akk + lblk(wave, wave);
 
       const f32x4 l2 = mm16f(Lb, 16, Lb, 16, lrow, lgrp);
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int r = 4 * lgrp + e;
         iv[r * 16 + lrow] =
             (r == lrow ? 1.f : 0.f) - Lb[r * 16 + lrow];  // I - L
         pw[r * 16 + lrow] = l2[e];                        // L^2
       }
-#pragma unroll
+  #pragma unroll
       for (int step = 0; step < 3; ++step) {
         const f32x4 t = mm16f(iv, 16, pw, 16, lrow, lgrp);
         const f32x4 p2 = step < 2 ? mm16f(pw, 16, pw, 16, lrow, lgrp)
@@ -1330,7 +1330,7 @@ __global__ __launch_bounds__(NTHREAD,
         // race the loads above and the update can be in place. The wave
         // barrier only stops the compiler from reordering them.
         __builtin_amdgcn_wave_barrier();
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e) {
           const int r = 4 * lgrp + e;
           iv[r * 16 + lrow] += t[e];
@@ -1338,7 +1338,7 @@ __global__ __launch_bounds__(NTHREAD,
         }
         __builtin_amdgcn_wave_barrier();
       }
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int r = 4 * lgrp + e;
         s_ainv[(d0 + r) * kS2 + d0 + lrow] = iv[r * 16 + lrow];
@@ -1359,18 +1359,18 @@ __global__ __launch_bounds__(NTHREAD,
         f32x4 acc{0.f, 0.f, 0.f, 0.f};
         for (int m = j; m < i; ++m) {
           const float* Ab = s_ainv + m * 16 * kS2 + j * 16;
-#pragma unroll
+  #pragma unroll
           for (int kk = 0; kk < 16; kk += 4)
             acc = __builtin_amdgcn_mfma_f32_16x16x4f32(
                 Lrow[lblk(i, m) + kk + lgrp], Ab[(kk + lgrp) * kS2 + lrow], acc,
                 0, 0, 0);
         }
         float* mt = s_mtm + wave * 256;
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e) mt[(4 * lgrp + e) * 16 + lrow] = acc[e];
         const f32x4 r =
             mm16f(s_ainv + i * 16 * kS2 + i * 16, kS2, mt, 16, lrow, lgrp);
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e)
           s_ainv[(i * 16 + 4 * lgrp + e) * kS2 + j * 16 + lrow] = -r[e];
       }
@@ -1466,7 +1466,7 @@ __global__ __launch_bounds__(NTHREAD,
           // Read every tap before writing any: at T < kConvW - 1 the new cache
           // still overlaps the old one.
           bf16_t nxt[kConvW - 1];
-#pragma unroll
+  #pragma unroll
           for (int w = 0; w < kConvW - 1; ++w) {
             const int ti = T - (kConvW - 1) + w;
             bf16_t val = static_cast<bf16_t>(0.f);
@@ -1477,7 +1477,7 @@ __global__ __launch_bounds__(NTHREAD,
             nxt[w] = val;
           }
           bf16_t* dst = const_cast<bf16_t*>(c.cs);
-#pragma unroll
+  #pragma unroll
           for (int w = 0; w < kConvW - 1; ++w) dst[w * c.cs_tap + idx] = nxt[w];
         }
       };
@@ -1488,7 +1488,7 @@ __global__ __launch_bounds__(NTHREAD,
   }
 #else
   kda_unsupported_arch("kda_chunk_prologue");
-#endif // ifdef ROCM_USE_FUSED_PREFILL_KDA
+#endif  // ifdef ROCM_USE_FUSED_PREFILL_KDA
 }
 
 }  // namespace
