@@ -370,13 +370,6 @@ def select_fp8_moe_backend(
                 backend, config, weight_key, activation_key, activation_format
             )
 
-    # Handle explicit MARLIN FP8 configuration.
-    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
-        backend = Fp8MoeBackend.MARLIN
-        return _return_or_raise(
-            backend, config, weight_key, activation_key, activation_format
-        )
-
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         skip_aiter_moe = (
@@ -619,7 +612,12 @@ def make_fp8_moe_quant_config(
         )
 
         assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
 
     # Flashinfer CUTLASS or HPC per-tensor uses single dq scale
     # (alpha = w_scale * a_scale) and inverse a2 scale.
@@ -694,7 +692,6 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -708,11 +705,6 @@ def make_fp8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
-    if fp8_backend == Fp8MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs = {"layer": layer}
-
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -722,13 +714,11 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

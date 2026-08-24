@@ -12,7 +12,13 @@ from torch_abi_audit.report import ExtensionReport, PackageReport
 
 # Temporary allowlist of extensions not yet on the stable ABI.
 # Shrink and remove over time.
-ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = ("third_party/deep_gemm/_C*.so",)
+ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = (
+    # ROCm-only legacy extensions. Most ROCm ops have moved to
+    # _C_stable_libtorch, but these two modules still bind libtorch directly.
+    "_C.abi3.so",
+    "_rocm_C.abi3.so",
+    "third_party/deep_gemm/_C*.so",
+)
 
 
 def _relative_path(lib: ExtensionReport, package_root: Path) -> str:

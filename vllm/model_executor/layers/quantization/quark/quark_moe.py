@@ -804,7 +804,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1027,7 +1026,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
             moe_config=layer.moe_config,
-            expert_map=layer.expert_map,
+            expert_mask=layer.expert_mask,
         )
 
 
@@ -1335,6 +1334,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -1646,7 +1646,6 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(

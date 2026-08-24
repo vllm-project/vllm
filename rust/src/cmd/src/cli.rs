@@ -22,8 +22,8 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
-use vllm_chat::ReasoningParserFactory;
 use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -39,7 +39,8 @@ use crate::cli::unsupported::UnsupportedArgs;
 #[derive(Debug, Parser)]
 #[command(
     name = "vllm-rs",
-    about = "Rust frontend and managed-engine CLI for vLLM."
+    about = "Rust frontend and managed-engine CLI for vLLM.",
+    version = vllm_build_info::VERSION
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -184,6 +185,12 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// The source of generation-config sampling defaults. `"auto"` loads the
+    /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub generation_config: GenerationConfigMode,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -457,6 +464,7 @@ impl SharedRuntimeArgs {
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
+        data_parallel_size: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
@@ -472,6 +480,7 @@ impl SharedRuntimeArgs {
                 output_address,
                 engine_start_index,
                 engine_count,
+                data_parallel_size,
                 ready_timeout,
             },
             coordinator_mode: match coordinator_address {
@@ -479,6 +488,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
@@ -532,6 +542,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,
@@ -661,6 +672,9 @@ pub struct FrontendArgs {
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
+    /// Deployment-wide configured data-parallel size. Defaults to engine count.
+    #[arg(long)]
+    pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
     #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
@@ -670,6 +684,7 @@ pub struct FrontendArgs {
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
     pub fn into_config(self) -> Config {
+        let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.input_address,
@@ -677,6 +692,7 @@ impl FrontendArgs {
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,
+            data_parallel_size,
         )
     }
 }
