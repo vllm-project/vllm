@@ -32,6 +32,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 try:
@@ -228,6 +229,7 @@ def create_whisper_attention_backend_with_block_pooling(
             FlashAttentionBackend,
             RocmAttentionBackend,
             TritonAttentionBackend,
+            CPUAttentionBackend,
         )
         if b is not None
     )
