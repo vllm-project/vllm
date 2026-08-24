@@ -1011,6 +1011,10 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
         input.scalar_type(), "situ_and_mul_quant_group_kernel", [&] {
           VLLM_STABLE_DISPATCH_FP8_TYPES(
               out.scalar_type(), "situ_and_mul_quant_group_kernel_fp8", [&] {
+#ifndef USE_ROCM
+                // The pipelined kernel's float2-per-lane geometry assumes a
+                // 32-lane warp (GROUP_SIZE == 4 * WARP_SIZE); on HIP (64-lane)
+                // fall back to the WARP_SIZE-generic scalar kernel.
                 if constexpr (sizeof(scalar_t) == 2) {
                   if (d == SITU_D && (float)beta == vllm::SITU_BETA &&
                       (float)linear_beta == vllm::SITU_LINEAR_BETA) {
@@ -1031,6 +1035,7 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                     return;
                   }
                 }
+#endif
                 const int num_warps = std::min(num_groups, 32);
                 dim3 block(num_warps * 32);
                 vllm::situ_and_mul_quant_group_scalar_kernel<scalar_t, fp8_t,
