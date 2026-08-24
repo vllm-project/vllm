@@ -805,14 +805,14 @@ def test_aiter_mha_decode_single_token(dtype):
 def test_aiter_mha_varlen_fp8_kv(dtype):
     """AITER flash attention with FP8 KV cache matches reference on BF16-cast KV.
 
-    cp_mha_gather_cache is called with dequant=True to dequantize FP8 to dtype
-    before passing to flash_attn_varlen_func.  We compare to ref_paged_attn on
-    the dtype-cast KV cache with FP8 quantization tolerance.
-
-    Exercises: VLLM_ROCM_USE_AITER, VLLM_ROCM_USE_AITER_MHA, FP8 KV path.
+    The reference dequantizes the same FP8 KV tensors the kernel reads, so
+    e4m3 rounding cancels on both sides; the residual is bf16/fp16 kernel
+    rounding (~few millidecimals), not fp8-scale quantization error.
     """
-    atol = 0.15
-    rtol = 0.05
+    if dtype == torch.bfloat16:
+        atol, rtol = 6e-3, 1e-2
+    else:
+        atol, rtol = 7e-4, 1e-3
     _assert_aiter_supported()
     if not current_platform.supports_fp8():
         pytest.skip("FP8 not supported on this hardware")
@@ -900,7 +900,8 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         scale=scale,
     )
 
-    # FP8 quantization + dequantization introduces noise
+    # FP8 quantization + dequantization cancels on the reference side; compare
+    # kernel rounding at the working precision.
     _print_close_stats(
         f"varlen_fp8_kv dtype={dtype} query_len={query_len} kv_len={kv_len}",
         output,
