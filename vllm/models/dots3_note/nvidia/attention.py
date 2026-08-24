@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
 )
+from vllm.v1.kv_cache_interface import KVCacheLayout
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -676,6 +677,13 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
 
 class Dots3NotePaddedSparseBackend(FlashAttnMLASparseBackend):
     """NOTE DSA backend for cache rows padded to the SWA latent width."""
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # NOTE packs the smaller DSA index pages beside the padded MLA/SWA pages.
+        # Keep the layer dimension inside the block dimension so mixed page sizes
+        # remain representable by the shared KV-cache allocation.
+        return (KVCacheLayout.BLHNC,)
 
     @staticmethod
     def get_name() -> str:
