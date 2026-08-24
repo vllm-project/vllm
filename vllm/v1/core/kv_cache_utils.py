@@ -2405,30 +2405,7 @@ def partial_hash_hits_enabled(
     *,
     dcp_world_size: int = 1,
 ) -> bool:
-    """Whether fine-grained (partial) prefix-cache hits may be enabled.
-
-    Two conditions. The feature exists for mamba "align" groups whose block
-    size exceeds the hash granularity, so at least one must be present. And
-    every group must be *able* to be looked up at that granularity: a manager
-    without fine-grained lookup indexes the block-hash list in units of its own
-    block size, so including one at a finer alignment would key its lookups off
-    the wrong hashes.
-
-    The single copy on purpose. The core coordinator, the Mooncake store
-    coordinator and the scheduler all need this answer, and when they computed
-    it separately they disagreed -- the scheduler kept emitting a sub-block
-    prefill stop for a partial tail entry the coordinator would no longer
-    accept.
-
-    Under DCP the attention managers scale their effective block size by the
-    world size, so the mamba "align" trigger accepts equality with the hash
-    granularity and the compatibility check compares against the scaled size.
-
-    Args:
-        kv_cache_groups: One entry per KV cache group.
-        hash_block_size: The granularity ``Request.block_hashes`` is computed at.
-        dcp_world_size: The decode-context-parallel world size.
-    """
+    """Return whether fine-grained prefix-cache hits are supported."""
     specs = [
         next(iter(g.kv_cache_spec.kv_cache_specs.values()))
         if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -2482,22 +2459,7 @@ def truncate_downward_closed_groups(
     hit_length_by_group: list[int],
     block_size_of: Callable[[int], int],
 ) -> None:
-    """Trim every downward-closed group's block list to ``hit_length``.
-
-    A downward-closed manager is looked up once against the initial candidate
-    length and skipped on later fixed-point passes, so a reduction afterwards
-    leaves its list too long. Untrimmed, the extra blocks reach
-    ``add_local_computed_blocks``, which extends the request's block table with
-    blocks past the reconciled boundary -- an assertion in the best case and
-    shared blocks the request does not own in the worst.
-
-    There can be more than one such group, at different block sizes, so each
-    trims at its own: a DFlash drafter booking its sliding-window layers as
-    full attention keeps the smaller sliding-window block size, giving a model
-    two full-attention groups. Callers pass ``block_size_of`` because the
-    coordinator's manager block size is DCP-scaled while a spec-level caller's
-    is not.
-    """
+    """Trim each downward-closed group's blocks to ``hit_length``."""
     for spec, group_ids in groups:
         manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
         if manager_cls is None or not manager_cls.is_downward_closed:

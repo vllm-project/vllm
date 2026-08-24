@@ -42,15 +42,7 @@ class SingleTypeKVCacheManager(ABC):
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
     is_downward_closed: ClassVar[bool] = False
-    """Whether a hit at length N implies a hit at every shorter length.
-
-    A downward-closed manager is looked up once against the coordinator's
-    initial candidate length and then skipped on later fixed-point passes, so
-    whatever reduced the reconciled length afterwards leaves its block list too
-    long. Callers that reconcile across groups must trim every such group at
-    the end. Declared here rather than tested with ``isinstance`` at each site,
-    because the same omission has been fixed three times in different files.
-    """
+    """Whether a hit at length N implies hits at shorter lengths."""
 
     def __init__(
         self,
@@ -455,12 +447,7 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
-            extra_block_mask: Optional mask aligned with
-                ``blocks[num_cached_blocks:num_full_blocks]``, intersected with this
-                manager's own ``reachable_block_mask``. A manager whose blocks
-                only sometimes hold the content the hash they would be keyed
-                under describes uses this to withhold the ones that do not. It
-                can only remove admissions, never add them.
+            extra_block_mask: Optional admission mask for the uncached blocks.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -957,15 +944,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # The scan below indexes `block_hashes` in whole blocks, so a finer
-        # alignment would read the wrong entries. The coordinator keeps this
-        # unreachable by disabling partial hash hits for models containing a
-        # group that only supports block-aligned lookup.
-        # TODO: supporting them here would let a mamba-"align" + sliding-window
-        # model keep its partial hits instead of falling back. It needs a
-        # block-size view for the scan, a partial-tail cache entry, a
-        # sub-block-aligned `reachable_block_mask`, and a contiguous-block
-        # requirement derived from the tail length rather than the window.
+        # Whole-block hash lookup cannot serve finer alignments.
+        # TODO: Add a block-size view before enabling partial hits here.
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )
@@ -1759,9 +1739,7 @@ class MambaManager(SingleTypeKVCacheManager):
             end_block=num_tokens // self.block_size,
         )
         if extra_block_mask is not None:
-            # A `None` boundary mask means non-align mode, where this manager
-            # imposes no per-block constraint, so the caller's mask stands on
-            # its own rather than being intersected with anything.
+            # Non-align mode has no internal boundary constraint.
             boundary_mask = (
                 extra_block_mask
                 if boundary_mask is None

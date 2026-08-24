@@ -1752,8 +1752,7 @@ def test_hybrid_sliding_window_group_keeps_block_aligned_hits():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
     assert not manager.coordinator.enable_partial_hash_hits
     assert num_computed == 8
-    # Out-of-window positions come back null, but every matched block must sit
-    # at the position it was cached at, not at that of its trailing hash unit.
+    # Out-of-window positions are null; matched blocks keep their cached slots.
     swa_hit = computed_blocks.blocks[0]
     null_block = manager.block_pool.null_block
     assert len(swa_hit) * block_size == num_computed
@@ -1803,20 +1802,7 @@ def test_hybrid_without_block_aligned_group_keeps_fine_grained_hits():
 
 
 def test_hybrid_partial_hash_truncates_every_full_attention_group():
-    """Every full-attention-typed group is trimmed to the reconciled hit, not
-    just ``attention_groups[0]``.
-
-    Full attention is downward-closed, so the fixed-point loop looks each such
-    group up once and skips it on later passes. Only the final truncation
-    brings the block lists back to the reconciled length, and it used to visit
-    the first group alone. A second full-attention group therefore kept the
-    longer list from its own earlier lookup, and ``add_local_computed_blocks``
-    would extend the request's block table with blocks past the reconciled
-    boundary -- blocks it does not own.
-
-    One full-attention group cannot expose this, since sorting guarantees it is
-    the one the truncation visits.
-    """
+    """Trim every full-attention group to the reconciled hit."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1832,11 +1818,7 @@ def test_hybrid_partial_hash_truncates_every_full_attention_group():
                     dtype=torch.float32,
                 ),
             ),
-            # A *different* full-attention spec, so this does not merge into
-            # the group above. Two groups sharing one spec collapse into a
-            # single attention group whose `group_ids` the old truncation
-            # already iterated, which is why identical specs cannot expose
-            # this.
+            # Use a distinct spec so the groups remain separate.
             KVCacheGroupSpec(
                 ["full_b"],
                 FullAttentionSpec(
@@ -1864,9 +1846,7 @@ def test_hybrid_partial_hash_truncates_every_full_attention_group():
         hash_block_size=hash_block_size,
     )
     pool = manager.block_pool
-    # 24 tokens, so the wider group holds three whole blocks. With a shorter
-    # request it holds one, which is indistinguishable from the correctly
-    # trimmed answer and the assertion below cannot discriminate.
+    # The wider group holds three blocks and must be trimmed for a shorter hit.
     req = make_request(
         "0",
         [i // 2 for i in range(24)],
@@ -1874,8 +1854,7 @@ def test_hybrid_partial_hash_truncates_every_full_attention_group():
         sha256,
     )
 
-    # Both full-attention groups cache their whole prefix; the mamba group
-    # caches far less, so it is what drives the reconciled hit down.
+    # The Mamba group is shorter and drives reconciliation.
     for group_id in (0, 1):
         group_bs = block_size * (1 + group_id)
         num_full = 24 // group_bs
@@ -1889,8 +1868,7 @@ def test_hybrid_partial_hash_truncates_every_full_attention_group():
             kv_cache_group_id=group_id,
         )
 
-    # Genuinely partial: ``cache_partial_block`` asserts the entry does not
-    # land on a block boundary.
+    # Store a genuinely partial Mamba hit.
     mamba_block = pool.get_new_blocks(1)[0]
     pool.cache_partial_block(
         request=req,
@@ -1902,8 +1880,7 @@ def test_hybrid_partial_hash_truncates_every_full_attention_group():
 
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
 
-    # The invariant, asserted per group rather than against hand-computed
-    # counts: no group may report blocks covering more than the reconciled hit.
+    # No group may report blocks beyond the reconciled hit.
     for group_id, blocks in enumerate(computed_blocks.blocks):
         group_block_size = manager.coordinator.single_type_managers[group_id].block_size
         assert len(blocks) <= -(-max(num_computed, 0) // group_block_size), (
@@ -1916,8 +1893,7 @@ def test_hybrid_partial_hash_truncates_every_full_attention_group():
 def _two_dense_groups_plus_mamba_config(
     hash_block_size: int, block_size: int, coarse_block_size: int
 ) -> KVCacheConfig:
-    """Two full-attention groups at different block sizes plus a mamba
-    "align" group -- the DFlash-drafter-as-full-attention shape."""
+    """Build two dense groups and one Mamba align group."""
     return KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
@@ -1954,14 +1930,7 @@ def _two_dense_groups_plus_mamba_config(
 
 
 def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
-    """Two full-attention groups at different block sizes, no sparse group
-    lagging: the finer group (e.g. a DFlash drafter booking its
-    sliding-window layers as full attention) legitimately completes more of
-    its own small blocks than the coarser (target) group for the same real
-    progress, purely from block-size granularity. That gap must not be read
-    as an uncached shared prefix -- nothing failed to cache anything; the
-    coarser group simply has not finished its next, bigger block yet.
-    """
+    """Do not treat dense block-size granularity as an uncached prefix."""
     hash_block_size = 2
     block_size = 2 * hash_block_size  # fine group + mamba: 4
     coarse_block_size = 2 * block_size  # 8
@@ -1977,7 +1946,7 @@ def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
     pool = manager.block_pool
     req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
 
-    # Fine group: three whole 4-token blocks, genuinely caught up to 12.
+    # Fine group: three whole 4-token blocks, reaching 12 tokens.
     fine_blocks = pool.get_new_blocks(3)
     pool.cache_full_blocks(
         request=req,
@@ -1987,9 +1956,7 @@ def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
         block_size=block_size,
         kv_cache_group_id=0,
     )
-    # Coarse group: one whole 8-token block. 12 is not a multiple of its own
-    # (larger) block size, so it has nothing more to report -- not eviction,
-    # just granularity.
+    # Coarse group has one whole 8-token block; the gap is granularity.
     coarse_blocks = pool.get_new_blocks(1)
     pool.cache_full_blocks(
         request=req,
@@ -1999,8 +1966,7 @@ def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
         block_size=coarse_block_size,
         kv_cache_group_id=1,
     )
-    # Mamba matches the fine group exactly: no sparse-retention group is
-    # lagging behind anything here.
+    # Mamba matches the fine group, so no sparse group lags.
     mamba_blocks = pool.get_new_blocks(3)
     pool.cache_full_blocks(
         request=req,
@@ -2024,12 +1990,7 @@ def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
 
 
 def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
-    """Control for the case above: when the two full-attention groups
-    genuinely agree on a longer prefix (the coarse group has its own partial
-    entry at the shared boundary, exactly as a request ending there would
-    produce) and only mamba lags, the gap must still be reported so
-    cross-request reuse is not lost.
-    """
+    """Detect a sparse lag when both dense groups agree."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     coarse_block_size = 2 * block_size
@@ -2054,8 +2015,7 @@ def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
         block_size=block_size,
         kv_cache_group_id=0,
     )
-    # Coarse group genuinely reaches the same 12-token boundary via its own
-    # partial entry -- both dense groups agree here.
+    # The partial entry brings the coarse group to the 12-token boundary.
     coarse_blocks = pool.get_new_blocks(2)
     pool.cache_full_blocks(
         request=req,
@@ -2072,7 +2032,7 @@ def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
         kv_cache_group_id=1,
         block_size=coarse_block_size,
     )
-    # Mamba genuinely lags: only two whole blocks (8 tokens).
+    # Mamba lags at 8 tokens.
     mamba_blocks = pool.get_new_blocks(2)
     pool.cache_full_blocks(
         request=req,
@@ -2097,21 +2057,7 @@ def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
 
 @pytest.mark.parametrize("mamba_num_blocks", [3, 2])
 def test_connector_fast_path_trims_the_deeper_dense_group(mamba_num_blocks):
-    """The connector fast path must trim its block lists, not just lower the
-    length it reports.
-
-    ``get_computed_blocks_for_connector`` looks each group up independently
-    and then reports ``min`` over the full-attention groups, because that is
-    the only length every dense group's blocks actually cover. The blocks
-    themselves still come back at each group's own, possibly deeper, hit.
-    Scheduler hands the pair to ``add_local_computed_blocks`` unchanged, so an
-    untrimmed deeper group extends the request's block table past the reported
-    boundary with blocks it does not own -- the same defect the reconciling
-    path's truncation exists to prevent.
-
-    Needs two dense groups at different block sizes: with one, ``min`` is that
-    group's own hit and its list is trimmed by construction.
-    """
+    """Trim dense connector hits to the shortest full-attention prefix."""
     hash_block_size = 2
     block_size = 2 * hash_block_size  # fine dense group + mamba: 4
     coarse_block_size = 2 * block_size  # 8
@@ -2127,9 +2073,7 @@ def test_connector_fast_path_trims_the_deeper_dense_group(mamba_num_blocks):
     pool = manager.block_pool
     req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
 
-    # Fine dense group reaches 12 tokens; coarse reaches 8. The reported hit
-    # is therefore 8, and the fine group's three blocks cover 12 -- one more
-    # block than the report admits to.
+    # Fine reaches 12 tokens; coarse reaches 8, so the reported hit is 8.
     fine_blocks = pool.get_new_blocks(3)
     pool.cache_full_blocks(
         request=req,
@@ -2180,15 +2124,7 @@ def test_connector_fast_path_trims_the_deeper_dense_group(mamba_num_blocks):
         return
 
     assert _diverged is False
-    # Asserted over the full-attention groups only. A block count is the right
-    # invariant for them because their lists are dense and downward-closed, so
-    # a prefix of the list is exactly what a shorter lookup returns. It is the
-    # wrong invariant for a mamba group, whose list is null-padded with only
-    # the tail carrying the state: looked up at 12 it returns
-    # [null, null, state@12] and at 8 it returns [null, state@8], so dropping
-    # the tail entry would discard the state rather than shorten the hit.
-    # That is why the shared truncation skips groups that are not
-    # downward-closed, and why widening it here would be a bug.
+    # Dense groups are safe to trim because they are downward-closed.
     for group_id in manager.coordinator.full_attention_group_ids:
         group_blocks = blocks.blocks[group_id]
         group_block_size = manager.coordinator.single_type_managers[group_id].block_size

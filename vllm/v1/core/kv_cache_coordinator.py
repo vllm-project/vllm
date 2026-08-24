@@ -687,10 +687,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.full_attention_group_id: int | None = (
             first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
-        # Every full-attention group, not just the first: a model can carry
-        # more than one at different block sizes (see
-        # truncate_downward_closed_groups). Taking the first alone as the
-        # dense reference reads a granularity difference as eviction.
+        # Keep every full-attention group as a dense reference.
         self.full_attention_group_ids: list[int] = [
             group_id
             for group in self.attention_groups
@@ -860,19 +857,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 break
 
         if len(self.full_attention_group_ids) > 1:
-            # Dense groups can disagree purely on block-size granularity: a
-            # finer group completes its next block sooner than a coarser one
-            # for identical progress. That is not a sparse group falling
-            # behind, so the reference is where every dense group agrees.
-            # Must precede the truncation below, which overwrites these.
+            # Dense groups may differ only because of block-size granularity.
             longest_hit_length = min(
                 hit_length_by_group[gid] for gid in self.full_attention_group_ids
             )
 
-        # Each group was looked up once against a candidate length that later
-        # iterations may have reduced. Leaving one untrimmed hands
-        # `add_local_computed_blocks` more blocks than the hit covers, which
-        # lands as a copy-on-write assertion on the first partial hit.
+        # Trim lists looked up before the fixed-point hit was reduced.
         truncate_downward_closed_groups(
             ((g.spec, g.group_ids) for g in self.attention_groups),
             hit_length,
