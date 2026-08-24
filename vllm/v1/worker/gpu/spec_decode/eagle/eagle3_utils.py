@@ -43,24 +43,18 @@ def _inner_decoder(model: nn.Module) -> nn.Module | None:
     return getattr(parent_ref, "model", None)
 
 
-def supports_aux_hidden_states_over_pp(model: nn.Module) -> bool:
-    """Whether `model` carries its aux hidden states across pipeline stages.
-
-    EAGLE3-style drafting runs on the last PP rank but taps layers that may sit
-    on earlier stages, so the target has to get those tensors to that rank.
-    Models that do opt in via
-    `EagleModelMixin.supports_aux_hidden_states_over_pp`.
-    """
+def verify_supports_aux_hidden_states_over_pp(model: nn.Module, method: str) -> None:
     inner = _inner_decoder(model)
-    return bool(getattr(inner, "supports_aux_hidden_states_over_pp", False))
+    if not getattr(inner, "supports_aux_hidden_states_over_pp", False):
+        raise ValueError(
+            f"{method} with pipeline parallel is not supported by "
+            f"{type(model).__name__}: it does not forward auxiliary hidden states "
+            "across pipeline stages."
+        )
 
 
-def aux_pp_relay_keys(model: nn.Module) -> tuple[str, ...]:
-    """Keys of upstream aux taps this rank passes on toward the last.
-
-    Slots are numbered globally, so upstream taps are exactly
-    ``[0, _aux_slot_base(rank))``. The last rank consumes them instead.
-    """
+def aux_hidden_state_relay_keys(model: nn.Module) -> tuple[str, ...]:
+    """Auxiliary hidden-state keys this stage forwards."""
     from vllm.distributed.parallel_state import get_pp_group
 
     pp = get_pp_group()
@@ -90,9 +84,8 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
     if inner is None or not getattr(inner, "supports_aux_hidden_states_over_pp", False):
         return
 
-    # Taps produced by every stage upstream of this one.
-    num_taps = inner._aux_slot_base(pp.rank_in_group, pp.world_size)
-    if num_taps == 0:
+    num_aux_states = inner._aux_slot_base(pp.rank_in_group, pp.world_size)
+    if num_aux_states == 0:
         return
 
     key = inner.AUX_HIDDEN_STATE_KEY
@@ -101,7 +94,7 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
 
     def make_empty_with_aux(batch_size, dtype, device):
         tensors = make_empty(batch_size, dtype, device)
-        for i in range(num_taps):
+        for i in range(num_aux_states):
             tensors[f"{key}{i}"] = torch.zeros(
                 (batch_size, hidden_size), dtype=dtype, device=device
             )
@@ -109,9 +102,8 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
 
     model.make_empty_intermediate_tensors = make_empty_with_aux
     logger.info(
-        "Reserved %d aux hidden-state slot(s) in the PP handoff for taps "
-        "produced by stages 0..%d.",
-        num_taps,
+        "Reserved %d auxiliary hidden-state slot(s) from PP stages 0..%d.",
+        num_aux_states,
         pp.rank_in_group - 1,
     )
 

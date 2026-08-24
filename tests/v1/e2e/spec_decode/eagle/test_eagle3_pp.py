@@ -23,7 +23,7 @@ PROMPTS = [
     "Q: If a train travels 60 miles in 1.5 hours, what is its average speed?\nA:",
 ]
 
-# Acceptance held within 2% across PP=1..4; a dropped tap cost ~11%.
+# Acceptance held within 2% across PP=1..4; a dropped state cost ~11%.
 ACCEPTANCE_TOLERANCE = 0.95
 
 
@@ -134,9 +134,8 @@ def test_eagle3_pipeline_parallel_acceptance(
     """Aux hidden states must survive the pipeline handoff.
 
     Compares acceptance length at PP=2 against PP=1 on the same model. This
-    feature fails quietly: a stale, out-of-order or dropped tap still yields
-    well-formed proposals, so the engine boots and answers -- the proposals just
-    get rejected more often. Acceptance is what detects that.
+    feature fails quietly: stale, out-of-order, or missing states still yield
+    well-formed proposals but lower acceptance.
 
     Greedy text parity deliberately is not asserted. bf16 argmax ties break
     differently once the batch shape changes, so even two runs with spec decode
@@ -156,12 +155,11 @@ def test_eagle3_pipeline_parallel_acceptance(
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("model,draft", [(MODEL, DRAFT)])
 def test_eagle3_pipeline_parallel_far_stage_acceptance(model: str, draft: str):
-    """Cover the stages that do not hand off to the rank consuming their taps.
+    """Cover auxiliary states produced more than one stage before the drafter.
 
     PP=2 exercises none of this: its only producer is the stage right before the
-    last one, whose taps ride the handoff it already sends. PP=4 is the smallest
-    size with two such producers, and it is where a tap first has to reach a rank
-    that is not its neighbour.
+    last one. PP=4 is the smallest size where an auxiliary state must be relayed
+    through a middle stage.
 
     Full cudagraph is the mode to run this in. The layout is resolved at setup
     precisely so the forward stays capturable, and 16 layers over 4 stages splits

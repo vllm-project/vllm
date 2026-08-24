@@ -1123,7 +1123,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     }
 
-    # Local aux taps are sent directly to the last PP rank for EAGLE3 drafting.
+    # Auxiliary hidden states are forwarded to the last PP stage.
     supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1234,14 +1234,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         super()._set_aux_hidden_state_layers(layers)
         if self.use_attn_res:
-            # Emitted once, at configuration time. Which layers are tapped and
-            # which convention is in force are the two things you need to
-            # confirm from a running process, and neither is recoverable from
-            # the served output.
             logger.info_once(
                 "Kimi-K3 aux hidden capture: layers=%s mode=%s "
                 "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
-                layers,
+                self.aux_hidden_state_layers,
                 "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
                 int(self._aux_attn_res_stream),
             )
@@ -1257,7 +1253,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         pending_mlp_out: torch.Tensor | None,
         block_residual: torch.Tensor,
     ) -> torch.Tensor:
-        """Auxiliary feature tapped after ``layer_idx`` under AttnRes.
+        """Auxiliary hidden state after ``layer_idx`` under AttnRes.
 
         The wire between layers only carries the current block's running prefix;
         the committed blocks live in the bank. The value the next consumer
@@ -1293,7 +1289,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             # Last layer of a non-final pipeline stage: the consumer lives on
             # the next rank and the output-side aggregation only exists on the
             # last one, so there is nothing here to mix against. Falling back
-            # to the running prefix keeps the tap defined rather than reaching
+            # to the running prefix keeps the state defined rather than reaching
             # for weights this rank does not construct.
             return prefix
 
@@ -1343,10 +1339,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
-        # Earlier stages' taps arrive only on the last rank.
         remote_aux: list[torch.Tensor] = []
         if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
-            remote_aux = self.recv_remote_aux_from_producers(intermediate_tensors)
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1408,7 +1403,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             tensors = {
                 "hidden_states": hidden_states,
                 "residual": residual,
-                **self.pack_local_aux_for_last(aux_hidden_states),
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
             }
             return IntermediateTensors(tensors)
 

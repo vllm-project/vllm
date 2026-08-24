@@ -137,9 +137,8 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-    aux_pp_relay_keys,
     set_eagle3_aux_hidden_state_layers,
-    supports_aux_hidden_states_over_pp,
+    verify_supports_aux_hidden_states_over_pp,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
@@ -245,8 +244,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
-        # Upstream aux taps this stage passes on; filled in load_model.
-        self.aux_pp_relay_keys: tuple[str, ...] = ()
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -378,14 +375,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
-                if self.use_pp and not supports_aux_hidden_states_over_pp(self.model):
-                    raise ValueError(
-                        f"{self.speculative_config.method} with pipeline parallel "
-                        f"is not supported by {type(self.model).__name__}: it does "
-                        "not forward auxiliary hidden states across pipeline stages."
-                    )
                 if self.use_pp:
-                    self.aux_pp_relay_keys = aux_pp_relay_keys(self.model)
+                    verify_supports_aux_hidden_states_over_pp(
+                        self.model, self.speculative_config.method
+                    )
+                    assert self.pp_handler is not None
+                    self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
@@ -954,14 +949,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For non-last PP ranks, update decode requests with sampler output from
         # the prior step in which they were scheduled (pp_size steps ago).
         if self.pp_handler is not None:
-            outputs = self.pp_handler.get_prev_sampled_outputs()
+            outputs = self.pp_handler.get_prev_sampled_outputs(
+                self.req_states.draft_tokens
+            )
             if outputs is not None:
-                # Land with the matching sampled tokens so _prepare_inputs
-                # splices real draft ids instead of placeholders.
-                draft_update = outputs.pop("draft_update", None)
-                if draft_update is not None:
-                    draft_tokens, draft_idx_mapping = draft_update
-                    self.req_states.draft_tokens[draft_idx_mapping] = draft_tokens
                 self.postprocess_sampled(**outputs)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
@@ -1705,15 +1696,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
-            if self.aux_pp_relay_keys:
-                # The forward packs only local taps; pass the upstream ones on.
-                received = model_inputs["intermediate_tensors"]
-                assert output_intermediate_tensors is not None
-                output_intermediate_tensors = IntermediateTensors(
-                    output_intermediate_tensors.tensors
-                    | {k: received[k] for k in self.aux_pp_relay_keys}
-                )
-            return output_intermediate_tensors
+            assert output_intermediate_tensors is not None
+            assert self.pp_handler is not None
+            return self.pp_handler.relay_aux_hidden_states(
+                model_inputs["intermediate_tensors"], output_intermediate_tensors
+            )
         return None
 
     @torch.inference_mode()
@@ -1741,9 +1728,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # sampled tokens broadcast from the last rank and update local state.
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(input_batch)
-            # Pair the last rank's post-propose draft send.
-            if self.num_speculative_steps > 0:
-                self.pp_handler.receive_drafts(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
@@ -1873,8 +1857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # they must feed the target on the next step.
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
-                    self.req_states.draft_tokens[input_batch.idx_mapping],
-                    input_batch,
+                    self.req_states.draft_tokens, input_batch
                 )
 
         # Post-step KV connector related operations.

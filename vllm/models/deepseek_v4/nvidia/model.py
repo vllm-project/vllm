@@ -1371,7 +1371,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         residual, post_mix, res_mix = None, None, None
         remote_aux: list[torch.Tensor] = []
         if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
-            remote_aux = self.recv_remote_aux_from_producers(intermediate_tensors)
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
         for idx, layer in enumerate(
@@ -1410,7 +1410,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             # rejects a forward whose bytecode names `update`.
             tensors = {
                 "hidden_states": hidden_states,
-                **self.pack_local_aux_for_last(aux_hidden_states),
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
             }
             return IntermediateTensors(tensors)
 

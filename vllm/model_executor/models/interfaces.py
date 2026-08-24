@@ -1504,8 +1504,7 @@ class LocalArgmaxMixin:
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
-    # Set by models that pack local aux taps into their forward output for the
-    # runner to carry along the PP handoff.
+    # Set by models that forward auxiliary hidden states between PP stages.
     supports_aux_hidden_states_over_pp: ClassVar[bool] = False
 
     AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
@@ -1516,7 +1515,7 @@ class EagleModelMixin:
     _aux_upstream_total_cached: int = 0
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.aux_hidden_state_layers = layers
+        self.aux_hidden_state_layers = tuple(sorted(layers))
         self._cache_aux_pp_layout()
 
     def _cache_aux_pp_layout(self) -> None:
@@ -1553,13 +1552,13 @@ class EagleModelMixin:
         return aux_hidden_states
 
     @staticmethod
-    def local_aux_tap_ids(
+    def local_aux_layer_ids(
         start_layer: int,
         end_layer: int,
         aux_ids: tuple[int, ...],
         is_first_rank: bool,
     ) -> tuple[int, ...]:
-        """Tap ids this stage produces (not inherited from upstream)."""
+        """Auxiliary layer outputs produced by this stage."""
         out: list[int] = []
         if is_first_rank and start_layer in aux_ids:
             out.append(start_layer)
@@ -1576,34 +1575,24 @@ class EagleModelMixin:
             )
         return num_layers
 
-    def _num_local_taps_on_rank(self, rank: int, pp_world_size: int) -> int:
-        """How many taps stage ``rank`` produces itself, without loading it."""
+    def _num_local_aux_layers(self, rank: int, pp_world_size: int) -> int:
         from vllm.distributed.utils import get_pp_indices
 
         start, end = get_pp_indices(self._total_num_layers(), rank, pp_world_size)
         return len(
-            self.local_aux_tap_ids(
+            self.local_aux_layer_ids(
                 start, end, tuple(self.aux_hidden_state_layers), rank == 0
             )
         )
 
     def _aux_slot_base(self, rank: int, pp_world_size: int) -> int:
-        """Global slot index of ``rank``'s first tap.
+        """Global slot index of ``rank``'s first auxiliary hidden state."""
+        return sum(self._num_local_aux_layers(r, pp_world_size) for r in range(rank))
 
-        One slot per tap, ordered by producer rank; every stage derives the same
-        numbering from the layer split, so slots need no negotiation.
-        """
-        return sum(self._num_local_taps_on_rank(r, pp_world_size) for r in range(rank))
-
-    def pack_local_aux_for_last(
+    def pack_local_aux_hidden_states(
         self, aux_hidden_states: list[torch.Tensor]
     ) -> dict[str, torch.Tensor]:
-        """Expose this stage's own aux taps to the runner, keyed by global slot.
-
-        Pure packing, so the forward stays capturable by full CUDA graphs; the
-        taps then ride the ``IntermediateTensors`` handoff. Callers reach this
-        only off the last rank, which implies a PP world size above one.
-        """
+        """Add this stage's auxiliary hidden states to the PP handoff."""
         if not aux_hidden_states:
             return {}
         base = self._aux_slot_base_cached
@@ -1612,16 +1601,10 @@ class EagleModelMixin:
             for i, t in enumerate(aux_hidden_states)
         }
 
-    def recv_remote_aux_from_producers(
+    def collect_remote_aux_hidden_states(
         self, intermediate_tensors: "IntermediateTensors | None"
     ) -> list[torch.Tensor]:
-        """Collect earlier stages' aux taps on the last rank, in tap order.
-
-        The handoff has already landed them in the persistent buffer, so reading
-        fixed slots keeps the forward capturable by full CUDA graphs. Callers
-        gate on the last rank; the count is zero unless a split left taps
-        upstream, which cannot happen at a PP world size of one.
-        """
+        """Read earlier stages' auxiliary hidden states in layer order."""
         total = self._aux_upstream_total_cached
         if total == 0:
             return []
