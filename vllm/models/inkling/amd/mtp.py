@@ -311,12 +311,21 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
         w = self.lm_head.weight
         if self._logits_zero is None:
             self._logits_zero = w.new_zeros(1)
+        inv_mup = 1.0 / mup
+        head_dtype = self.logits_processor.head_dtype
+        if head_dtype is not None and head_dtype != hidden_states.dtype:
+            logits = self.logits_processor._get_logits(
+                hidden_states, self.lm_head, None
+            )
+            if logits is not None:
+                logits = logits * inv_mup
+            return logits
         logits = torch.addmm(
             self._logits_zero,
             hidden_states,
             w.t(),
             beta=0.0,
-            alpha=1.0 / mup,
+            alpha=inv_mup,
         )
         logits = self.logits_processor._gather_logits(logits)
         if logits is not None:
