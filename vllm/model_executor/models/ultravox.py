@@ -39,10 +39,12 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -189,48 +191,84 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
 
 
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not mm_data.get("audios", []):
-            prompt_ids = self.info.get_tokenizer().encode(
-                prompt, add_special_tokens=False
-            )
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+    def _preprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        audios = mm_data.get("audios", [])
         assert isinstance(audios, list)
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
             include_audio_num_chunks=True,
         )
 
-        item_processor_data = dict(**mm_data, audios=audios)
+        return mm_data, hf_processor_mm_kwargs
 
-        # some tokenizer kwargs are incompatible with UltravoxProcessor
-        tok_kwargs.pop("add_special_tokens", None)
-        tok_kwargs.pop("padding", None)
-        tok_kwargs.pop("truncation", None)
-
-        output = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=item_processor_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
-        output["audio_features"] = output.pop("audio_values")
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        return output
+        if processor_data:
+            processor_data, hf_processor_mm_kwargs = self._preprocess_hf_mm_data(
+                processor_data,
+                hf_processor_mm_kwargs,
+            )
+
+            prompt_text = self._get_hf_processor_text(mm_items.get_all_counts())
+            if prompt_text is not None:
+                processor_data = dict(text=prompt_text, **processor_data)
+
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+            def patched_call(**kwargs) -> BatchFeature:
+                # The remote UltravoxProcessor does not support the
+                # `truncation` kwarg injected by `call_hf_processor`: it
+                # passes `truncation` to its audio processor by itself while
+                # also forwarding `**kwargs` there, causing a duplicate
+                # keyword argument error. Its hardcoded `truncation=False`
+                # already matches vLLM's intended behavior.
+                kwargs.pop("truncation", None)
+
+                return hf_processor(**kwargs)
+
+            processed_data = self.info.ctx.call_hf_processor(
+                patched_call,
+                processor_data,
+                hf_processor_mm_kwargs,
+            )
+            processed_data.update(passthrough_data)
+        else:
+            processed_data = BatchFeature(dict(passthrough_data))
+
+        return self._postprocess_hf_mm_data(
+            processor_data,
+            hf_processor_mm_kwargs,
+            processed_data,
+        )
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "audio_values" in processed_data:
+            processed_data["audio_features"] = processed_data.pop("audio_values")
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -244,9 +282,13 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             # higher than the number of audio samples
             audio_features=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
             audio_token_len=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
-            audio_lens=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
+            # Only ever used to derive the encoder attention metadata on the
+            # host, so keep it there.
+            audio_lens=MultiModalFieldConfig.flat_from_sizes(
+                "audio", num_chunks, keep_on_cpu=True
+            ),
             # num_chunks can convert audio_chunked to audio batch dimension
-            audio_num_chunks=MultiModalFieldConfig.batched("audio"),
+            audio_num_chunks=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
@@ -257,6 +299,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
 
         replacement_id = hf_processor.audio_replacement_token_id  # type: ignore
 
@@ -281,7 +324,15 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         return [
             PromptReplacement(
                 modality="audio",
-                target="<|audio|>",
+                # `<|audio|>` is paired with `replacement_id` in
+                # `UltravoxProcessingInfo.get_hf_processor`, but it is not
+                # guaranteed to be a single vocab entry, so match the encoded
+                # placeholder text instead of `replacement_id`
+                target=cached_encode(
+                    tokenizer,
+                    hf_processor.audio_token_replacement,  # type: ignore
+                    add_special_tokens=False,
+                ),
                 replacement=get_replacement_ultravox,
             )
         ]
@@ -612,6 +663,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         }
     )
 
+    supports_tower_connector_lora = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -837,15 +890,19 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             embeddings.shape[0], -1
         )
         mask = indices < audio_token_len[:, None]
-        # Apply mask and flatten
-        flattened_embeddings = embeddings[mask]
 
-        # Return one tensor per input audio
-        embed_lens = [
-            chunk_lens.sum().item()
-            for chunk_lens in audio_token_len.split(audio_input["num_chunks"].tolist())
-        ]
-        return flattened_embeddings.split(embed_lens)
+        with gpu_sync_allowed():
+            # Apply mask and flatten
+            flattened_embeddings = embeddings[mask]
+
+            # Return one tensor per input audio
+            embed_lens = [
+                chunk_lens.sum().item()
+                for chunk_lens in audio_token_len.split(
+                    audio_input["num_chunks"].tolist()
+                )
+            ]
+            return flattened_embeddings.split(embed_lens)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
