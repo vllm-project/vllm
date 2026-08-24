@@ -132,6 +132,57 @@ def test_config_interface():
     )
 
 
+def test_lmcache_group_edits_accept_full_and_swa_config():
+    """Exercise the external LMCache registration compatibility boundary."""
+    import torch
+
+    kv_cache_group_edits = pytest.importorskip(
+        "lmcache.integration.vllm.kv_cache_group_edits"
+    )
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full.0"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=2,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa.0"],
+                SlidingWindowSpec(
+                    block_size=16,
+                    num_kv_heads=2,
+                    head_size=64,
+                    dtype=torch.float16,
+                    sliding_window=128,
+                ),
+            ),
+        ],
+    )
+    kv_caches = {
+        "full.0": torch.empty(0),
+        "swa.0": torch.empty(0),
+    }
+
+    edited = kv_cache_group_edits.apply_kv_cache_group_edits(kv_cache_config, kv_caches)
+
+    assert edited.keys() == kv_caches.keys()
+    assert edited["full.0"] is kv_caches["full.0"]
+    assert edited["swa.0"] is kv_caches["swa.0"]
+
+
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
 )

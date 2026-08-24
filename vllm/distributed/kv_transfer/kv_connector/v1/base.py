@@ -150,6 +150,17 @@ class KVConnectorBase_V1(ABC):
     """
 
     @property
+    def requires_hma_multi_group_recovery(self) -> bool:
+        """Whether scheduler-side loads require per-group block recovery.
+
+        Most connectors retain vLLM's established single block-table load
+        completion and failure recovery behavior. A connector that restores
+        distinct full-attention and sliding-window tables must opt in
+        explicitly.
+        """
+        return False
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         """
         Indicates whether this connector prefers KV blocks that hold KV data for all

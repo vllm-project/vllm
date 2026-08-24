@@ -3,6 +3,7 @@
 
 import copy
 from dataclasses import dataclass, fields, replace
+from enum import Enum
 from math import prod
 
 import torch
@@ -14,6 +15,19 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
+
+
+class KVCacheSpecKind(str, Enum):
+    FULL_ATTENTION = "full_attention"
+    MLA_ATTENTION = "mla_attention"
+    SLIDING_WINDOW = "sliding_window"
+    SLIDING_WINDOW_MLA = "sliding_window_mla"
+    MAMBA = "mamba"
+    CHUNKED_LOCAL_ATTENTION = "chunked_local_attention"
+    SINK_FULL_ATTENTION = "sink_full_attention"
+    ENCODER_ONLY_ATTENTION = "encoder_only_attention"
+    CROSS_ATTENTION = "cross_attention"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -448,6 +462,34 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             return None
 
 
+def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        inner_kinds = {
+            get_kv_cache_spec_kind(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        if len(inner_kinds) == 1:
+            return next(iter(inner_kinds))
+        return KVCacheSpecKind.UNKNOWN
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        return KVCacheSpecKind.MLA_ATTENTION
+    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
+        return KVCacheSpecKind.SINK_FULL_ATTENTION
+    if isinstance(kv_cache_spec, FullAttentionSpec):
+        return KVCacheSpecKind.FULL_ATTENTION
+    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return KVCacheSpecKind.SLIDING_WINDOW
+    if isinstance(kv_cache_spec, MambaSpec):
+        return KVCacheSpecKind.MAMBA
+    if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        return KVCacheSpecKind.CROSS_ATTENTION
+    return KVCacheSpecKind.UNKNOWN
+
+
 @dataclass
 class KVCacheTensor:
     """
@@ -489,3 +531,10 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+
+    @property
+    def has_mamba_layers(self) -> bool:
+        return any(
+            get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA
+            for group in self.kv_cache_groups
+        )

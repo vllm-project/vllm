@@ -642,9 +642,55 @@ class VllmConfig:
                 "lmcache.local_cpu": True,
                 "lmcache.max_local_cpu_size": kv_gb_per_rank,
             }
+        elif kv_offloading_backend == "lmcache_mp":
+            extra_config = self.kv_transfer_config.kv_connector_extra_config
+            deployment = extra_config.get("lmcache.mp.deployment")
+            if deployment is not None:
+                normalized_deployment = (
+                    deployment.strip().lower()
+                    if isinstance(deployment, str)
+                    else deployment
+                )
+                if normalized_deployment != "local":
+                    raise ValueError(
+                        "--kv-offloading-backend lmcache_mp selects the in-process "
+                        "LMCache deployment, but kv_connector_extra_config sets "
+                        f"lmcache.mp.deployment={deployment!r}. Use an explicit "
+                        "--kv-transfer-config with deployment='external' for a "
+                        "standalone or cross-machine MP server."
+                    )
+            self.kv_transfer_config.kv_connector = "LMCacheMPConnector"
+            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
+            extra_config.update(
+                {
+                    "lmcache.mp.deployment": "local",
+                    "lmcache.mp.local_cpu_size_gb": kv_gb_per_rank,
+                }
+            )
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
+
+    def _validate_lmcache_mp_deployment(self) -> None:
+        """Validate topology constraints for the embedded LMCache path.
+
+        Each local worker owns an embedded cache shard. The scheduler reaches
+        those shards through automatically managed local IPC endpoints, so the
+        path supports vLLM's ``uni`` and single-node ``mp`` executors without a
+        standalone LMCache service. Keep this check in config validation so an
+        invalid launch fails before model initialization.
+        """
+        config = self.kv_transfer_config
+        if config is None:
+            return
+        from vllm.distributed.kv_transfer.kv_connector.lmcache_mp_utils import (
+            get_lmcache_mp_deployment,
+            validate_lmcache_mp_local_topology,
+        )
+
+        if get_lmcache_mp_deployment(config) != "local":
+            return
+        validate_lmcache_mp_local_topology(self.parallel_config)
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
@@ -1143,6 +1189,17 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        # Only the new MP shortcut needs early resolution so the HMA check
+        # sees the connector that will actually run. Preserve the historical
+        # initialization order for native offloading and LMCache V1.
+        resolve_lmcache_mp_early = (
+            self.cache_config.kv_offloading_size is not None
+            and self.cache_config.kv_offloading_backend == "lmcache_mp"
+        )
+        if resolve_lmcache_mp_early:
+            self._post_init_kv_transfer_config()
+        self._validate_lmcache_mp_deployment()
+
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
@@ -1181,20 +1238,25 @@ class VllmConfig:
                 need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to disable HMA, but only if the user didn't express a preference.
+            # Preserve the historical connector default (HMA disabled), except
+            # for the embedded LMCache MP path that implements HMA recovery.
             if self.kv_transfer_config is not None:
-                # NOTE(Kuntai): turn HMA off for connector unless specifically enabled.
-                need_disable_hybrid_kv_cache_manager = True
-                logger.warning(
-                    "Turning off hybrid kv cache manager because "
-                    "`--kv-transfer-config` is set. This will reduce the "
-                    "performance of vLLM on LLMs with sliding window attention "
-                    "or Mamba attention. If you are a developer of kv connector"
-                    ", please consider supporting hybrid kv cache manager for "
-                    "your connector by making sure your connector is a subclass"
-                    " of `SupportsHMA` defined in kv_connector/v1/base.py and"
-                    " use --no-disable-hybrid-kv-cache-manager to start vLLM."
+                from vllm.distributed.kv_transfer.kv_connector.lmcache_mp_utils import (
+                    get_lmcache_mp_deployment,
                 )
+
+                if get_lmcache_mp_deployment(self.kv_transfer_config) != "local":
+                    need_disable_hybrid_kv_cache_manager = True
+                    logger.warning(
+                        "Turning off hybrid kv cache manager because "
+                        "`--kv-transfer-config` is set. This will reduce the "
+                        "performance of vLLM on LLMs with sliding window attention "
+                        "or Mamba attention. If you are a developer of kv connector"
+                        ", please consider supporting hybrid kv cache manager for "
+                        "your connector by making sure your connector is a subclass"
+                        " of `SupportsHMA` defined in kv_connector/v1/base.py and"
+                        " use --no-disable-hybrid-kv-cache-manager to start vLLM."
+                    )
             self.scheduler_config.disable_hybrid_kv_cache_manager = (
                 need_disable_hybrid_kv_cache_manager
             )
@@ -1264,8 +1326,9 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
-        # Handle the KV connector configs
-        self._post_init_kv_transfer_config()
+        # Handle existing KV offloading shortcuts at their historical point.
+        if not resolve_lmcache_mp_early:
+            self._post_init_kv_transfer_config()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when

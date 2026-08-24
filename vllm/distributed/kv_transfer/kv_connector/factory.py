@@ -9,6 +9,11 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
 )
+from vllm.distributed.kv_transfer.kv_connector.lmcache_mp_utils import (
+    get_lmcache_mp_deployment,
+    validate_lmcache_mp_hma_block_sizes,
+    validate_lmcache_mp_local_topology,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     supports_hma,
@@ -26,6 +31,25 @@ logger = init_logger(__name__)
 
 class KVConnectorFactory:
     _registry: dict[str, Callable[[], type[KVConnectorBase]]] = {}
+
+    @staticmethod
+    def _get_lmcache_mp_deployment(
+        kv_transfer_config: "KVTransferConfig",
+    ) -> str | None:
+        return get_lmcache_mp_deployment(kv_transfer_config)
+
+    @classmethod
+    def _get_effective_connector_name(
+        cls,
+        kv_transfer_config: "KVTransferConfig",
+    ) -> str | None:
+        connector_name = kv_transfer_config.kv_connector
+        if (
+            cls._get_lmcache_mp_deployment(kv_transfer_config) == "local"
+            and connector_name == "LMCacheMPConnector"
+        ):
+            return "LMCacheMPLocalConnector"
+        return connector_name
 
     @classmethod
     def register_connector(cls, name: str, module_path: str, class_name: str) -> None:
@@ -53,13 +77,26 @@ class KVConnectorFactory:
             kv_transfer_config
         )
 
+        effective_connector_name = cls._get_effective_connector_name(kv_transfer_config)
+        if effective_connector_name == "LMCacheMPLocalConnector":
+            validate_lmcache_mp_local_topology(config.parallel_config)
+
         # check if the connector supports HMA
         hma_enabled = not config.scheduler_config.disable_hybrid_kv_cache_manager
-        if hma_enabled and not supports_hma(connector_cls):
+        if hma_enabled and not cls.supports_hma_config(kv_transfer_config):
             raise ValueError(
                 f"Connector {connector_cls.__name__} does not support HMA but "
                 f"HMA is enabled. Please set `--disable-hybrid-kv-cache-manager`."
             )
+        lmcache_mp_hma = hma_enabled and (
+            effective_connector_name == "LMCacheMPLocalConnector"
+            or (
+                effective_connector_name == "LMCacheMPConnector"
+                and supports_hma(connector_cls)
+            )
+        )
+        if lmcache_mp_hma:
+            validate_lmcache_mp_hma_block_sizes(kv_cache_config)
 
         logger.info(
             "Creating v1 connector with name: %s and engine_id: %s",
@@ -103,7 +140,7 @@ class KVConnectorFactory:
     def _get_connector_class_with_compat(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> tuple[type[KVConnectorBaseType], bool]:
-        connector_name = kv_transfer_config.kv_connector
+        connector_name = cls._get_effective_connector_name(kv_transfer_config)
         if connector_name is None:
             raise ValueError("Connector name is not set in KVTransferConfig")
         compat_sig = False
@@ -138,6 +175,19 @@ class KVConnectorFactory:
         connector_cls, _ = cls._get_connector_class_with_compat(kv_transfer_config)
         return connector_cls
 
+    @classmethod
+    def supports_hma_config(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Return whether the configured connector supports HMA."""
+        # A KVTransferConfig may be present before a connector is selected
+        # (for example, when callers construct the default config explicitly).
+        # Preserve the historical behavior for that state: it is not an HMA
+        # capable connector configuration, but it must not fail during config
+        # validation by trying to resolve a missing connector name.
+        if kv_transfer_config.kv_connector is None:
+            return False
+        connector_cls, _ = cls._get_connector_class_with_compat(kv_transfer_config)
+        return supports_hma(connector_cls)
+
 
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to
@@ -165,6 +215,12 @@ KVConnectorFactory.register_connector(
     "LMCacheMPConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector",
     "LMCacheMPConnector",
+)
+
+KVConnectorFactory.register_connector(
+    "LMCacheMPLocalConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_local_connector",
+    "LMCacheMPLocalConnector",
 )
 
 KVConnectorFactory.register_connector(

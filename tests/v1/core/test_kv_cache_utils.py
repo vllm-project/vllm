@@ -42,15 +42,85 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheSpecKind,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected_kind"),
+    [
+        (
+            FullAttentionSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float16,
+            ),
+            KVCacheSpecKind.FULL_ATTENTION,
+        ),
+        (
+            SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float16,
+                sliding_window=128,
+            ),
+            KVCacheSpecKind.SLIDING_WINDOW,
+        ),
+        (
+            MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float16,
+            ),
+            KVCacheSpecKind.MLA_ATTENTION,
+        ),
+        (
+            SinkFullAttentionSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float16,
+                sink_len=4,
+            ),
+            KVCacheSpecKind.SINK_FULL_ATTENTION,
+        ),
+    ],
+)
+def test_get_kv_cache_spec_kind(spec, expected_kind):
+    assert get_kv_cache_spec_kind(spec) == expected_kind
+
+
+def test_kv_cache_config_detects_wrapped_mamba_spec():
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+    )
+    wrapped_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer.mamba": mamba_spec},
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.mamba"], wrapped_spec)],
+    )
+
+    assert config.has_mamba_layers
 
 
 @pytest.fixture(autouse=True)
@@ -1818,6 +1888,32 @@ def test_generate_scheduler_kv_cache_config():
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())],
     )
+
+
+def test_generate_scheduler_kv_cache_config_unwraps_mamba_spec():
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+    )
+    wrapped_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer.mamba": mamba_spec},
+    )
+    worker_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.mamba"], wrapped_spec)],
+    )
+
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+
+    assert isinstance(
+        worker_config.kv_cache_groups[0].kv_cache_spec,
+        UniformTypeKVCacheSpecs,
+    )
+    assert scheduler_config.kv_cache_groups[0].kv_cache_spec == mamba_spec
+    assert scheduler_config.has_mamba_layers
 
 
 def new_mla_spec(cache_dtype_str=None):

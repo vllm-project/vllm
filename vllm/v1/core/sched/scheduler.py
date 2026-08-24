@@ -2071,9 +2071,21 @@ class Scheduler(SchedulerInterface):
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
-            # Now that the blocks are ready, actually cache them.
-            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
-            num_computed_tokens = len(block_ids) * self.block_size
+            # Now that the blocks are ready, actually cache them. Connectors
+            # that restore separate HMA group tables opt in explicitly; all
+            # other connectors retain the original single-table behavior.
+            block_ids_by_group = self.kv_cache_manager.get_block_ids(request.request_id)
+            if (
+                getattr(self.connector, "requires_hma_multi_group_recovery", False)
+                is True
+            ):
+                num_computed_tokens = (
+                    max(len(block_ids) for block_ids in block_ids_by_group)
+                    * self.block_size
+                )
+            else:
+                (block_ids,) = block_ids_by_group
+                num_computed_tokens = len(block_ids) * self.block_size
             # Handle the case where num request tokens less than one block.
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
@@ -2157,8 +2169,17 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
+            if (
+                self.connector is not None
+                and getattr(self.connector, "requires_hma_multi_group_recovery", False)
+                is True
+            ):
+                # The HMA connector loads one table per group; the longest
+                # table is the full prefix to recompute from on a failure.
+                req_block_ids = max(block_ids_by_group, key=len, default=[])
+            else:
+                (req_block_ids,) = block_ids_by_group
             # We iterate only over blocks that may contain externally computed
             # tokens
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:

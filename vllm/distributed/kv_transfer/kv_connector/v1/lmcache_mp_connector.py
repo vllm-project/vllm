@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -380,7 +381,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         return self.__str__()
 
 
-class LMCacheMPConnector(KVConnectorBase_V1):
+class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     """
     The connector for LMCache multi-process mode.
 
@@ -953,3 +954,28 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+
+def _resolve_lmcache_mp_connector() -> type[KVConnectorBase_V1]:
+    use_upstream = os.environ.get("LMCACHE_USE_UPSTREAM_MP", "").strip().lower()
+    if use_upstream in {"1", "true", "yes", "on"}:
+        logger.info("Forcing use of vLLM's built-in LMCacheMPConnector.")
+        return LMCacheMPConnectorUpstream
+
+    try:
+        from lmcache.integration.vllm.lmcache_mp_connector import (
+            LMCacheMPConnector as ExternalLMCacheMPConnector,
+        )
+
+        logger.info("Using LMCacheMPConnector provided by the lmcache package.")
+        return ExternalLMCacheMPConnector
+    except ImportError as error:
+        logger.info(
+            "External LMCacheMPConnector is unavailable (%s); using vLLM's "
+            "built-in implementation.",
+            error,
+        )
+        return LMCacheMPConnectorUpstream
+
+
+LMCacheMPConnector = _resolve_lmcache_mp_connector()

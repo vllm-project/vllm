@@ -32,7 +32,7 @@ CacheDType = Literal[
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
-KVOffloadingBackend = Literal["native", "lmcache"]
+KVOffloadingBackend = Literal["native", "lmcache", "lmcache_mp"]
 
 
 @config
@@ -174,7 +174,8 @@ class CacheConfig:
 
     kv_offloading_backend: KVOffloadingBackend = "native"
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache'.
+    'native' (vLLM native CPU offloading), 'lmcache' (LMCache V1), and
+    'lmcache_mp' (LMCache's in-process MP runtime).
     KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:

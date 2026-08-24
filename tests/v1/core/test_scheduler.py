@@ -1226,6 +1226,25 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     return initial_ecos
 
 
+def test_finished_remote_kv_with_hybrid_cache_groups():
+    scheduler = create_scheduler()
+    scheduler.connector = Mock()
+    scheduler.connector.requires_hma_multi_group_recovery = True
+    request = create_requests(num_requests=1, num_tokens=100)[0]
+    scheduler.add_request(request)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.finished_recving_kv_req_ids.add(request.request_id)
+
+    scheduler.kv_cache_manager.get_block_ids = Mock(return_value=([1, 2, 3, 4], [5, 6]))
+    scheduler.kv_cache_manager.cache_blocks = Mock()
+
+    assert scheduler._update_waiting_for_remote_kv(request)
+    assert request.num_computed_tokens == 4 * scheduler.block_size
+    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(
+        request, request.num_computed_tokens
+    )
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """
