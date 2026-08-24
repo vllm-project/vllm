@@ -17,7 +17,10 @@ from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v4.nvidia.mtp import DeepSeekV4MTP
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+    _PREPARE_MEGAMOE_INPUTS_KERNEL,
+    prepare_megamoe_inputs,
+)
 from vllm.models.deepseek_v4_1.common.mm_preprocess import (
     IMAGE_PAD_ID,
     IMAGE_SENTINEL_BASE_ID,
