@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.fa_utils import (
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
+    get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
@@ -397,12 +398,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.compilation_config = vllm_config.compilation_config
         self.attention_config = vllm_config.attention_config
 
-        self.num_heads_q = self.model_config.get_num_attention_heads(
-            self.parallel_config
-        )
-        self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
+        self.num_heads_q = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or self.model_config.get_num_attention_heads(self.parallel_config)
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
         self.kv_cache_dtype = kv_cache_spec.dtype
-        self.headdim = self.model_config.get_head_size()
+        self.headdim = kv_cache_spec.head_size
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
