@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -6201,3 +6202,35 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_zero_retention_is_announced_on_sparse_models(caplog):
+    """The default retains only semantic checkpoints, which is silent otherwise.
+
+    A sparse group files a state at every boundary it crosses and only the
+    semantic ones are hashed, so the rest can never serve a hit -- while the
+    prefix-cache hit-rate metric still reports non-zero. Nothing in the log said
+    so, and the neighbouring derived default (`mamba_cache_mode='align'`) is
+    announced, so this pins the missing half of that pair.
+    """
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 32, ["full", "mamba_align"])
+
+    def log_for(retention_interval, enable_caching=True):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="vllm.v1.core.kv_cache_coordinator"):
+            make_kv_cache_manager(
+                config,
+                max_model_len=8192,
+                enable_caching=enable_caching,
+                hash_block_size=block_size,
+                retention_interval=retention_interval,
+            )
+        return "retain only semantic checkpoints" in caplog.text
+
+    # The default, on a model that actually has a sparse group.
+    assert log_for(0)
+    # Not noise: a periodic interval retains those states, and with caching off
+    # retention cannot affect anything.
+    assert not log_for(block_size)
+    assert not log_for(0, enable_caching=False)
