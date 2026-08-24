@@ -148,6 +148,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        routed_experts_prompt_start: int = 0,
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
@@ -184,6 +185,7 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
+        self.routed_experts_prompt_start = routed_experts_prompt_start
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
 
         # Stream Interval
@@ -243,6 +245,7 @@ class RequestState:
                 request=request,
             )
             max_tokens_param = sampling_params.max_tokens
+            routed_experts_prompt_start = sampling_params.routed_experts_prompt_start
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
@@ -250,6 +253,7 @@ class RequestState:
             logprobs_processor = None
             detokenizer = None
             max_tokens_param = None
+            routed_experts_prompt_start = 0
             top_p = None
             n = None
             temperature = None
@@ -270,6 +274,7 @@ class RequestState:
             logprobs_processor=logprobs_processor,
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
+            routed_experts_prompt_start=routed_experts_prompt_start,
             top_p=top_p,
             n=n,
             temperature=temperature,
@@ -424,9 +429,13 @@ class RequestState:
             )
 
         # Concatenate routed experts on finish
+        # Trim the omitted prompt prefix before concatenating R3 chunks.
         routed_experts = None
         if finished and self.routed_experts_chunks:
-            routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
+            chunks = self.routed_experts_chunks
+            routed_experts = np.concatenate(
+                [chunks[0][self.routed_experts_prompt_start :], *chunks[1:]], axis=0
+            )
 
         return CompletionOutput(
             index=self.request_index,
