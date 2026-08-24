@@ -85,6 +85,7 @@ def test_incremental_detokenization(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
+        prompts_list=dummy_test_vectors.prompt_tokens,
         request_ids=[req.request_id for req in requests],
     )
 
@@ -507,6 +508,7 @@ def test_logprobs_processor(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
+        prompts_list=dummy_test_vectors.prompt_tokens,
         generated_logprobs_raw=None
         if num_sample_logprobs is None
         else dummy_test_vectors.generation_logprobs,
@@ -692,6 +694,7 @@ def test_stop_token(
 
     engine_core = MockEngineCore(
         tokens_list=[generation_tokens],
+        prompts_list=dummy_test_vectors.prompt_tokens,
         generated_logprobs_raw=[generation_logprobs] if do_logprobs else None,
         prompt_logprobs_raw=None,
         eos_token_id=sampling_params.eos_token_id,
@@ -795,6 +798,7 @@ def test_stop_string(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
+        prompts_list=dummy_test_vectors.prompt_tokens,
         generated_logprobs_raw=dummy_test_vectors.generation_logprobs
         if num_sample_logprobs
         else None,
@@ -918,6 +922,7 @@ def test_iteration_stats(dummy_test_vectors):
 
     engine_core = MockEngineCore(
         dummy_test_vectors.generation_tokens,
+        dummy_test_vectors.prompt_tokens,
         request_ids=[req.request_id for req in requests],
     )
 
@@ -928,7 +933,7 @@ def test_iteration_stats(dummy_test_vectors):
     inactive_request = requests[num_active]
 
     # First iteration has 2 prefills.
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
     total_prompt_tokens = sum(
@@ -942,7 +947,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Just decodes in this step.
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
 
@@ -952,7 +957,7 @@ def test_iteration_stats(dummy_test_vectors):
     # Add a new request - prefill and 2 decodes in this step.
     output_processor.add_request(inactive_request, None)
     num_active += 1
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
     total_prompt_tokens = len(dummy_test_vectors.prompt_tokens[num_active - 1])
@@ -961,7 +966,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Just decodes in this step.
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
 
@@ -1038,6 +1043,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
     engine_core = MockEngineCore(
         dummy_test_vectors.generation_tokens,
+        dummy_test_vectors.prompt_tokens,
         request_ids=[req.request_id for req in requests],
     )
 

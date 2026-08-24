@@ -635,7 +635,6 @@ class Scheduler(SchedulerInterface):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
-                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = (
@@ -647,6 +646,16 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
+                    assert num_computed_tokens <= request.num_tokens
+
+                    # Track first scheduled prefill, not post-preemption repeat prefills
+                    if request.prefill_stats is not None:
+                        assert num_computed_tokens <= request.num_prompt_tokens
+                        request.prefill_stats.set(
+                            num_prompt_tokens=request.num_prompt_tokens,
+                            num_local_cached_tokens=num_new_local_computed_tokens,
+                            num_external_cached_tokens=num_external_computed_tokens,
+                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -806,9 +815,6 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 self._cancel_waiting_timer(request)
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -991,7 +997,6 @@ class Scheduler(SchedulerInterface):
                         finish_reason=FinishReason.TIMEOUT,
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                        num_cached_tokens=max(request.num_cached_tokens, 0),
                     ),
                 )
             )
@@ -1369,7 +1374,7 @@ class Scheduler(SchedulerInterface):
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
             failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids
+                kv_connector_output.invalid_block_ids, num_scheduled_tokens
             )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
@@ -1500,10 +1505,9 @@ class Scheduler(SchedulerInterface):
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
+                        prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                        num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
@@ -1530,7 +1534,6 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
                     )
                 )
 
@@ -2133,6 +2136,7 @@ class Scheduler(SchedulerInterface):
         self,
         requests: Iterable[Request],
         invalid_block_ids: set[int],
+        num_scheduled_tokens: dict[str, int],
         evict_blocks: bool = True,
     ) -> tuple[set[str], int, set[int]]:
         """
@@ -2146,6 +2150,7 @@ class Scheduler(SchedulerInterface):
         Args:
             requests: The set of requests to scan for invalid blocks.
             invalid_block_ids: IDs of invalid blocks.
+            num_scheduled_tokens: req_id -> number of scheduled tokens.
             evict_blocks: Whether to collect blocks for eviction (False for
                 async requests which aren't cached yet).
 
@@ -2182,17 +2187,10 @@ class Scheduler(SchedulerInterface):
                 (req_block_ids,) = block_ids_by_group
             # We iterate only over blocks that may contain externally computed
             # tokens
-            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                # Async loading. If num_computed_tokens is set it implies we
-                # already processed some block failures for it in a prior step
-                req_num_computed_tokens = (
-                    request.num_computed_tokens
-                    if req_id in self.failed_recving_kv_req_ids
-                    else len(req_block_ids) * self.block_size
-                )
-            else:
-                # Sync loading. num_computed_tokens includes new tokens
-                req_num_computed_tokens = request.num_cached_tokens
+            # num_computed_tokens includes tokens scheduled in this iteration.
+            req_num_computed_tokens = (
+                request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
+            )
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
@@ -2226,7 +2224,7 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
@@ -2239,15 +2237,17 @@ class Scheduler(SchedulerInterface):
                     # Currently this only applies to sync loading; Async
                     # loading does not yet support block sharing
                     total_affected_tokens += (
-                        request.num_computed_tokens - request.num_cached_tokens
+                        request.num_computed_tokens - req_num_computed_tokens
                     )
-                    request.num_computed_tokens = request.num_cached_tokens
+                    request.num_computed_tokens = req_num_computed_tokens
 
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
-    def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
+    def _handle_invalid_blocks(
+        self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
+    ) -> set[str]:
         """
         Handle requests affected by invalid KV cache blocks.
 
@@ -2264,7 +2264,10 @@ class Scheduler(SchedulerInterface):
         )
         async_failed_req_ids, num_failed_tokens, _ = (
             self._update_requests_with_invalid_blocks(
-                async_load_reqs, invalid_block_ids, evict_blocks=False
+                async_load_reqs,
+                invalid_block_ids,
+                num_scheduled_tokens,
+                evict_blocks=False,
             )
         )
 
@@ -2274,7 +2277,7 @@ class Scheduler(SchedulerInterface):
         # handle sync loads (may be cached, collect blocks for eviction)
         sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
             self._update_requests_with_invalid_blocks(
-                self.running, invalid_block_ids, evict_blocks=True
+                self.running, invalid_block_ids, num_scheduled_tokens, evict_blocks=True
             )
         )
 
