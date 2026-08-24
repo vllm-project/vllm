@@ -214,6 +214,15 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+def test_enable_prometheus_iteration_metrics_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--enable-prometheus-iteration-metrics"])
+
+    assert args.enable_prometheus_iteration_metrics
+    engine_args = EngineArgs(model="test", enable_prometheus_iteration_metrics=True)
+    assert engine_args.create_observability_config().enable_prometheus_iteration_metrics
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

@@ -10,6 +10,17 @@ You can start the server using Python, or using [Docker](../deployment/docker.md
 vllm serve unsloth/Llama-3.2-1B-Instruct
 ```
 
+Use `--enable-prometheus-iteration-metrics` to additionally record the
+distribution of request and scheduled-token counts in every model-executing
+engine iteration, split by `phase="prefill"` and `phase="decode"`. These
+cumulative `vllm:iteration_requests` and
+`vllm:iteration_tokens_by_phase` histograms are intended for workload
+characterization and capacity planning. Their zero bucket distinguishes
+iterations without work in a phase. The histograms do not preserve correlations
+between fields from the same iteration; use a per-iteration event stream when
+that correlation is required. Do not combine this option with
+`--disable-log-stats`.
+
 Then query the endpoint to get the latest metrics from the server:
 
 ??? console "Output"
