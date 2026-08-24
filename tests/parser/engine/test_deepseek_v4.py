@@ -1095,6 +1095,16 @@ class TestLongStringParameterStreaming:
         tail = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
         chunks = [header] + [body[i : i + 32] for i in range(0, len(body), 32)] + [tail]
 
+        converter_calls = 0
+        orig_convert = parser._convert_args
+
+        def counting_convert(raw_args, partial=True):
+            nonlocal converter_calls
+            converter_calls += 1
+            return orig_convert(raw_args, partial)
+
+        parser._convert_args = counting_convert
+
         t0 = time.perf_counter()
         previous = ""
         argument_deltas = []
@@ -1117,8 +1127,12 @@ class TestLongStringParameterStreaming:
 
         elapsed = time.perf_counter() - t0
         # 4096 chunks of 32 chars should finish in well under 2.0 seconds with fast path
-        assert elapsed < 2.0, (
-            f"Streaming 128 KiB string took {elapsed:.2f}s, expected < 2.0s."
+        assert elapsed < 5.0, (
+            f"Streaming 128 KiB string took {elapsed:.2f}s, expected < 5.0s."
+        )
+        # Verify linear fast path: _convert_args called only at boundaries, not per chunk
+        assert converter_calls <= 10, (
+            f"Expected <= 10 converter calls with linear fast path, got {converter_calls}"
         )
 
         reconstructed = "".join(argument_deltas)
@@ -1143,6 +1157,16 @@ class TestLongStringParameterStreaming:
         }
         parser = DeepSeekV4Parser(mock_tokenizer, tools=[tool])
         request = _test_request(tools=[tool])
+
+        converter_calls = 0
+        orig_convert = parser._convert_args
+
+        def counting_convert(raw_args, partial=True):
+            nonlocal converter_calls
+            converter_calls += 1
+            return orig_convert(raw_args, partial)
+
+        parser._convert_args = counting_convert
 
         header = (
             "<｜DSML｜tool_calls>\n"
@@ -1175,8 +1199,11 @@ class TestLongStringParameterStreaming:
                         argument_deltas.append(tool_call.function.arguments)
 
         elapsed = time.perf_counter() - t0
-        assert elapsed < 2.0, (
-            f"Streaming ~100 KiB multiline string took {elapsed:.2f}s, expected < 2.0s."
+        assert elapsed < 5.0, (
+            f"Streaming ~100 KiB multiline string took {elapsed:.2f}s, expected < 5.0s."
+        )
+        assert converter_calls <= 10, (
+            f"Expected <= 10 converter calls with linear fast path, got {converter_calls}"
         )
 
         reconstructed = "".join(argument_deltas)

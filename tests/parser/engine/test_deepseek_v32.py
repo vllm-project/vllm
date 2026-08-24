@@ -337,6 +337,16 @@ class TestLongStringParameterStreaming:
         tail = f"</｜DSML｜parameter>\n{DSML_INVOKE_END}\n{DSML_FUNC_END}"
         chunks = [header] + [body[i : i + 32] for i in range(0, len(body), 32)] + [tail]
 
+        converter_calls = 0
+        orig_convert = parser._convert_args
+
+        def counting_convert(raw_args, partial=True):
+            nonlocal converter_calls
+            converter_calls += 1
+            return orig_convert(raw_args, partial)
+
+        parser._convert_args = counting_convert
+
         t0 = time.perf_counter()
         previous = ""
         argument_deltas = []
@@ -358,8 +368,11 @@ class TestLongStringParameterStreaming:
                         argument_deltas.append(tool_call.function.arguments)
 
         elapsed = time.perf_counter() - t0
-        assert elapsed < 2.0, (
-            f"Streaming 128 KiB string took {elapsed:.2f}s, expected < 2.0s."
+        assert elapsed < 5.0, (
+            f"Streaming 128 KiB string took {elapsed:.2f}s, expected < 5.0s."
+        )
+        assert converter_calls <= 10, (
+            f"Expected <= 10 converter calls with linear fast path, got {converter_calls}"
         )
 
         reconstructed = "".join(argument_deltas)
@@ -376,6 +389,16 @@ class TestLongStringParameterStreaming:
         tool = _make_tool("emit_code", {"code": {"type": "string"}})
         mock_request.tools = [tool]
         parser = DeepSeekV32Parser(mock_tokenizer, tools=[tool])
+
+        converter_calls = 0
+        orig_convert = parser._convert_args
+
+        def counting_convert(raw_args, partial=True):
+            nonlocal converter_calls
+            converter_calls += 1
+            return orig_convert(raw_args, partial)
+
+        parser._convert_args = counting_convert
 
         header = (
             f"{DSML_FUNC_START}\n"
@@ -408,8 +431,11 @@ class TestLongStringParameterStreaming:
                         argument_deltas.append(tool_call.function.arguments)
 
         elapsed = time.perf_counter() - t0
-        assert elapsed < 2.0, (
-            f"Streaming ~100 KiB multiline string took {elapsed:.2f}s, expected < 2.0s."
+        assert elapsed < 5.0, (
+            f"Streaming ~100 KiB multiline string took {elapsed:.2f}s, expected < 5.0s."
+        )
+        assert converter_calls <= 10, (
+            f"Expected <= 10 converter calls with linear fast path, got {converter_calls}"
         )
 
         reconstructed = "".join(argument_deltas)
