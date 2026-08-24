@@ -15,6 +15,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 )
 from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
+# This batch has 42 non-draft rows, so index 43 prices its first draft.
+ZERO_BUDGET_VERIFY_COSTS = np.concatenate((np.ones(43), np.full(4, 100.0)))
+
 
 def make_manager(
     confidences: np.ndarray, verify_cost_ms: np.ndarray
@@ -169,46 +172,7 @@ def test_compact_batch_preserves_totals_and_bounds():
     assert compacted[2] == 40
 
 
-def test_zero_budget_rebuilds_cpu_cu_num_logits():
-    # When the first draft is too expensive, every capacity is zeroed on device,
-    # so the CPU can name the compacted layout exactly.
-    #
-    # The third request is a chunked prefill (no drafts, still mid-prompt). The
-    # runner gives *every* request num_bonus_tokens logits rows regardless
-    # (num_logits = num_draft_tokens_per_req + num_bonus_tokens), so the rebuilt
-    # offsets stay uniform rather than skipping non-verification rows.
-    manager = make_manager(
-        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
-        # Index 43 is the first cost that includes a draft token for this batch.
-        np.concatenate((np.ones(43), np.full(21, 100.0))),
-    )
-    manager.req_states.req_id_to_index["prefill"] = 2
-    manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
-    manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
-    manager.get_num_tokens(
-        {"low": 3, "high": 3, "prefill": 40},
-        {"low": [1, 2], "high": [3, 4]},
-    )
-    _, _, draft_budget = manager._batch_budget
-    assert draft_budget == 0
-
-    scheduled = np.array([3, 3, 40], dtype=np.int32)
-    drafts = np.array([2, 2, 0], dtype=np.int32)
-    scheduled_cu_num_logits = np.array([0, 3, 6, 7], dtype=np.int32)
-    compacted, cu_num_logits_np = manager.compact_batch(
-        drafts, scheduled, scheduled_cu_num_logits
-    )
-
-    # One bonus row per request, matching cumsum(capacities + num_bonus_tokens)
-    # with every capacity zeroed -- the prefill row included.
-    expected = np.arange(4, dtype=np.int32) * manager.num_bonus_tokens
-    assert np.array_equal(cu_num_logits_np, expected)
-    assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
-    # The prefill keeps its scheduled tokens; only drafts are dropped.
-    assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
-
-
-def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
+def test_zero_budget_keeps_grammar_metadata_aligned():
     # The scheduler sizes the grammar bitmask from the *scheduled* drafts
     # (len(drafts) + 1 rows per request), but a zero budget rewrites
     # cu_num_logits_np to bonus-only. Deriving the bitmask -> logits mapping
@@ -216,8 +180,7 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
     # `num_masks == len(mapping)` assert in apply_grammar_bitmask.
     manager = make_manager(
         np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
-        # Index 43 is the first cost that includes a draft token for this batch.
-        np.concatenate((np.ones(43), np.full(21, 100.0))),
+        ZERO_BUDGET_VERIFY_COSTS,
     )
     manager.req_states.req_id_to_index["prefill"] = 2
     manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
@@ -230,11 +193,14 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
 
     req_ids = ["low", "high", "prefill"]
     num_draft_tokens_per_req = np.array([2, 2, 0], dtype=np.int32)
-    _, cu_num_logits_np = manager.compact_batch(
+    compacted, cu_num_logits_np = manager.compact_batch(
         num_draft_tokens_per_req,
         np.array([3, 3, 40], dtype=np.int32),
         np.array([0, 3, 6, 7], dtype=np.int32),
     )
+    assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+    assert np.array_equal(cu_num_logits_np, np.arange(4, dtype=np.int32))
+    assert cu_num_logits_np.dtype == np.int32
 
     mask_stride = manager.num_speculative_steps + manager.num_bonus_tokens
     mapping = _build_grammar_mapping(

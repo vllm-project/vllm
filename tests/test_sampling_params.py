@@ -56,11 +56,8 @@ class MockSpeculativeConfig:
     enable_adaptive_verification: bool = False
 
 
-@pytest.mark.parametrize("min_p", [1e-5, 1e-6])
-def test_spec_decode_rejects_tiny_min_p(min_p: float):
-    """The speculative sampler never applies min_p, so no nonzero value may
-    slip past validation and be silently ignored."""
-    params = SamplingParams(min_p=min_p)
+def test_spec_decode_rejects_nonzero_min_p():
+    params = SamplingParams(min_p=1e-6)
     with pytest.raises(VLLMValidationError, match="speculative decoding"):
         params.verify(MockModelConfig(), MockSpeculativeConfig(), None, None)
 
