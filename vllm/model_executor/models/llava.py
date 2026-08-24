@@ -321,30 +321,30 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
 
 class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        pixel_values = processed_outputs.get("pixel_values")
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None:
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
-            image_sizes = processed_outputs["image_sizes"]
+            image_sizes = processed_data["image_sizes"]
             assert len(pixel_values) == len(image_sizes)
 
-            processed_outputs["pixel_values"] = [
+            processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
