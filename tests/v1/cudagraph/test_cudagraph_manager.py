@@ -229,6 +229,38 @@ def test_mixed_batch_never_selects_a_uniform_decode_graph(monkeypatch):
     assert desc.num_tokens == 16
 
 
+def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
+    """A mixed batch must not fall to eager where only decode graphs are staged.
+
+    ``round_up(size, decode_query_len)`` lands FULL decode graphs on token counts
+    the PIECEWISE ladder never uses -- with capture sizes [1, 2, 4, 8, 16, 24]
+    and query length 3, FULL covers 3, 6, 9 and 18 while PIECEWISE has only
+    1, 2, 4, 8, 16, 24. Building each mode's candidate ranges independently keeps
+    a PIECEWISE graph reachable there. Deriving the ranges from the staged sizes
+    instead offers a mixed batch nothing but decode descriptors, whose
+    ``uniform_token_count`` it can never match, so it runs fully eager.
+    """
+    manager = _make_spec_decode_manager(monkeypatch)
+
+    decode_only_token_counts = sorted(
+        {desc.num_tokens for desc in manager._capture_descs[CUDAGraphMode.FULL]}
+        - {desc.num_tokens for desc in manager._capture_descs[CUDAGraphMode.PIECEWISE]}
+    )
+    # Guard the premise: with no such token counts this test would cover nothing.
+    assert decode_only_token_counts
+
+    for num_tokens in decode_only_token_counts:
+        desc = manager.dispatch(
+            num_reqs=1,
+            num_tokens=num_tokens,
+            uniform_token_count=None,
+            num_active_loras=0,
+        )
+        assert desc.cg_mode == CUDAGraphMode.PIECEWISE, num_tokens
+        assert desc.uniform_token_count is None, num_tokens
+        assert desc.num_tokens >= num_tokens, num_tokens
+
+
 def test_uniform_decode_beyond_capture_ladder_falls_back(monkeypatch):
     manager = _make_spec_decode_manager(monkeypatch)
 
