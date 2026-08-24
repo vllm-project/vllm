@@ -935,7 +935,7 @@ def test_flashinfer_mm_prefix_kv_cache_path():
     common.mm_req_doc_ranges = PAGED_MM_RANGES
 
     qs, new_ks, new_vs, k_fulls, v_fulls, k_ctxs, v_ctxs = [], [], [], [], [], [], []
-    for q_len, s_len in zip(PAGED_QUERY_LENS, PAGED_SEQ_LENS):
+    for q_len, s_len in zip(PAGED_QUERY_LENS, PAGED_SEQ_LENS, strict=True):
         ctx = s_len - q_len
         shape = (num_kv_heads, HEAD_SIZE)
         qs.append(torch.randn(q_len, num_heads, HEAD_SIZE, dtype=DTYPE, device=device))
