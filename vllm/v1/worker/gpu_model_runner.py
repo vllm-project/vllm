@@ -3550,10 +3550,7 @@ class GPUModelRunner(
             hidden_states=hidden_states, pooling_metadata=pooling_metadata
         )
 
-        finished_mask = [
-            seq_len == prompt_len
-            for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
-        ]
+        finished_mask = pooling_metadata.get_pooling_cursor().get_finished_mask()
         raw_pooler_output = self.late_interaction_runner.postprocess_pooler_output(
             raw_pooler_output=raw_pooler_output,
             pooling_params=pooling_metadata.pooling_params,
