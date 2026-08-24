@@ -147,7 +147,7 @@ class PoolingMetadata:
             cumsum = torch.zeros(
                 n_seq + 1,
                 dtype=torch.int64,
-                pin_memory=PIN_MEMORY and device.type != "cpu",
+                pin_memory=PIN_MEMORY,
                 device="cpu",
             )
             torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
