@@ -513,12 +513,8 @@ class DeepseekV32Attention(MLAAttention):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
             mqa_q_arg = get_tp_group().all_gather(mqa_q_arg, dim=1)
         elif not self.use_pcp and self.impl.dcp_world_size > 1:
-            # Pure DCP: all-gather the query heads across the DCP group so
-            # every rank attends to its local KV shard with the full head
-            # set; the LSE merge below reduce-scatters the heads back.
-            # Plain all-gather rather than dcp_manager.query_gather: the
-            # sparse mixed batch also gathers prefill rows, which can exceed
-            # the decode-sized direct symmetric-memory workspace.
+            # TODO: Use dcp_manager.query_gather after #52377 adds an
+            # oversized-input fallback for sparse mixed batches.
             assert self.dcp_manager is not None
             if isinstance(mqa_q_arg, tuple):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
@@ -544,12 +540,8 @@ class DeepseekV32Attention(MLAAttention):
                     : attn_metadata.num_decodes + 1
                 ]
             else:
-                # Sparse mixed batch: every row (decode and prefill) is a
-                # DCP-partial result, and the impl already neutralizes rows
-                # whose local shard holds none of the selected tokens with
-                # the (0, -inf) merge identity, so no seq_len-based
-                # empty-shard masking is needed (FlashMLASparseMetadata has
-                # no `decode` view to source it from either).
+                # The backend emits (0, -inf) for empty local shards, so no
+                # PCP-only empty-shard metadata is needed.
                 seq_lens = None
                 query_start_loc = None
             attn_out = self.dcp_manager.combine(
