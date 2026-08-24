@@ -1232,3 +1232,38 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+
+class TestMakeRequestWithHarmony:
+    """Tests for tool_choice handling on the Harmony request path."""
+
+    @pytest.fixture
+    def serving_responses_instance(self):
+        """Create a real OpenAIServingResponses instance for testing"""
+        engine_client = MagicMock()
+
+        model_config = MagicMock()
+        model_config.max_model_len = 100
+        model_config.hf_config.model_type = "test"
+        model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.input_processor = MagicMock()
+        engine_client.renderer = MagicMock()
+
+        return OpenAIServingResponses(
+            engine_client=engine_client,
+            models=MagicMock(),
+            online_renderer=MagicMock(),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            tool_server=MagicMock(spec=ToolServer),
+        )
+
+    def test_unsupported_tool_choice_raises_value_error(
+        self, serving_responses_instance
+    ):
+        request = ResponsesRequest(input="hi", tool_choice="required")
+        with pytest.raises(ValueError, match="tool_choice"):
+            serving_responses_instance._make_request_with_harmony(request, None)

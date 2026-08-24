@@ -744,7 +744,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         prev_response: ResponsesResponse | None,
     ):
         if request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
+            raise ValueError(
                 "Only 'auto' or 'none' tool_choice is supported "
                 "in response API with Harmony"
             )
