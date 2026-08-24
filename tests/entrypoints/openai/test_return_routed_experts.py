@@ -17,7 +17,7 @@ NUM_EXPERTS_PER_TOK = 2
 NUM_HIDDEN_LAYERS = 2
 
 
-def assert_valid_routed_experts(encoded: str | None) -> None:
+def decode_routed_experts(encoded: str | None) -> np.ndarray:
     assert encoded is not None
     routed_experts = np.load(io.BytesIO(base64.b64decode(encoded)))
     assert routed_experts.ndim == 3
@@ -27,6 +27,7 @@ def assert_valid_routed_experts(encoded: str | None) -> None:
     assert topk == NUM_EXPERTS_PER_TOK
     assert (routed_experts >= 0).all()
     assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+    return routed_experts
 
 
 @pytest.fixture(scope="module")
@@ -62,4 +63,8 @@ async def test_routed_experts(server):
         choice = result.model_dump()["choices"][0]
 
         assert choice["token_ids"] is not None
-        assert_valid_routed_experts(choice["routed_experts"])
+        assert result.usage is not None
+        routed_experts = decode_routed_experts(choice["routed_experts"])
+        assert len(routed_experts) == (
+            result.usage.prompt_tokens + len(choice["token_ids"]) - 1
+        )

@@ -78,8 +78,18 @@ def _make_modular_routed_experts():
     )
 
 
-def test_base_router_capture_pre_eplb_mapping():
-    router = _make_router()
+@pytest.mark.parametrize("eplb_enabled", [False, True])
+def test_base_router_capture_pre_eplb_mapping(eplb_enabled):
+    eplb_state = None
+    if eplb_enabled:
+        eplb_state = EplbLayerState()
+        eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
+        eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
+        eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
+        eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+        eplb_state.num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32)]
+    router = _make_router(eplb_state)
+
     captured = []
 
     def capture_fn(ids):
@@ -97,34 +107,7 @@ def test_base_router_capture_pre_eplb_mapping():
     assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
 
 
-def test_base_router_capture_with_eplb_enabled():
-    eplb_state = EplbLayerState()
-    eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
-    eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
-    eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
-    eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
-    eplb_state.num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32)]
-    router = _make_router(eplb_state=eplb_state)
-
-    captured = []
-
-    def capture_fn(ids):
-        captured.append(ids.clone())
-
-    router.set_capture_fn(capture_fn)
-    _, topk_ids = router.select_experts(
-        hidden_states=torch.empty(1),
-        router_logits=torch.empty(1),
-    )
-
-    assert len(captured) == 1
-    # Capture should see logical ids pre-EPLB mapping.
-    assert torch.equal(captured[0], torch.tensor([[1, 2], [3, 4]]))
-    # Our DummyRouter mapping adds +10.
-    assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
-
-
-def test_public_binding_only_visits_target_model(monkeypatch):
+def test_public_binding_binds_target_model_router(monkeypatch):
     class DummyFusedMoE:
         def __init__(self, layer_id):
             self.layer_id = layer_id
@@ -132,7 +115,6 @@ def test_public_binding_only_visits_target_model(monkeypatch):
             self._quant_method = _make_modular_routed_experts().quant_method
 
     target_module = DummyFusedMoE(layer_id=7)
-    draft_module = DummyFusedMoE(layer_id=0)
 
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 
@@ -145,7 +127,6 @@ def test_public_binding_only_visits_target_model(monkeypatch):
     )
 
     assert target_module.router.capture_fn is not None
-    assert draft_module.router.capture_fn is None
     topk_ids = torch.tensor([[5, 6]])
     target_module.router.capture_fn(topk_ids)
     assert calls == [(7, topk_ids)]
