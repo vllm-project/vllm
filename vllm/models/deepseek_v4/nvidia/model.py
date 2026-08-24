@@ -1461,7 +1461,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
-            if layer.hc_attn_fn_broadcast is None:
+            if (
+                layer.hc_attn_fn_broadcast is None
+                or layer.hc_attn_fn_broadcast.is_meta
+            ):
                 layer.hc_attn_fn_broadcast = broadcast
             else:
                 layer.hc_attn_fn_broadcast.copy_(broadcast)
