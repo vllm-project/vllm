@@ -6,20 +6,15 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
 from vllm.distributed.artifact_connector.store import (
     ArtifactObject,
-    ArtifactStore,
+    BackgroundArtifactStore,
+    InProcessArtifactStore,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    get_routed_experts_dtype_name,
-)
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -77,9 +72,8 @@ class RoutedExpertsArtifactBuffer:
     ) -> list[tuple[int, np.ndarray]]:
         """Stage rows and return completed blocks without retaining them."""
         rows = np.asarray(rows)
-        if rows.shape[1:] != self.shape_per_token:
+        if rows.shape[1:] != self.shape_per_token or rows.dtype != self.dtype:
             raise RuntimeError("routed-experts capture profile changed")
-        rows = rows.astype(self.dtype, copy=False)
         if token_start < 0:
             raise ValueError("artifact token start must be non-negative")
 
@@ -168,20 +162,6 @@ class RoutedExpertsArtifactBuffer:
         self._free_slots[:] = range(len(self._rows) - 1, -1, -1)
 
 
-def get_routing_shape_and_dtype(
-    vllm_config: VllmConfig,
-) -> tuple[tuple[int, int], str]:
-    model_config = vllm_config.model_config
-    num_experts = model_config.get_num_experts()
-    return (
-        (
-            model_config.get_total_num_hidden_layers(),
-            model_config.get_num_experts_per_tok(),
-        ),
-        get_routed_experts_dtype_name(num_experts),
-    )
-
-
 def routed_experts_keys(
     block_hashes: Iterable[bytes], artifact_namespace: str
 ) -> list[str]:
@@ -190,7 +170,7 @@ def routed_experts_keys(
 
 
 def materialize_routed_experts(
-    store: ArtifactStore,
+    store: BackgroundArtifactStore | InProcessArtifactStore,
     artifact_keys: list[str],
     *,
     shape_per_token: tuple[int, ...],
@@ -203,9 +183,9 @@ def materialize_routed_experts(
 
 
 def publish_routed_experts(
-    store: ArtifactStore,
+    store: BackgroundArtifactStore | InProcessArtifactStore,
     *,
-    batches: list[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
+    batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
     block_size: int,
 ) -> None:
     """Publish immutable full R3 blocks."""

@@ -9,7 +9,6 @@ import queue
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -21,35 +20,15 @@ class ArtifactObject:
 
 
 class ArtifactStoreError(RuntimeError):
-    """Base class for artifact-store failures."""
-
-
-class ArtifactCapacityError(ArtifactStoreError):
-    """The artifact store cannot retain another object."""
-
-
-class ArtifactCorruptionError(ArtifactStoreError):
-    """An artifact object failed validation."""
-
-
-class ArtifactNotFoundError(ArtifactStoreError):
-    """A requested artifact object is not present."""
-
-
-class ArtifactStore(Protocol):
-    """Store for immutable artifact objects."""
-
-    def put(self, objects: list[ArtifactObject]) -> None: ...
-
-    def get_concatenated(self, keys: list[str]) -> bytes: ...
-
-    def close(self) -> None: ...
+    """Artifact storage or retrieval failed."""
 
 
 class BackgroundArtifactStore:
     """Publish objects in a background thread while preserving read order."""
 
-    def __init__(self, store: ArtifactStore, *, max_pending_batches: int) -> None:
+    def __init__(
+        self, store: InProcessArtifactStore, *, max_pending_batches: int
+    ) -> None:
         if max_pending_batches <= 0:
             raise ValueError("max_pending_batches must be positive")
         self._store = store
@@ -58,7 +37,6 @@ class BackgroundArtifactStore:
         )
         self._error: BaseException | None = None
         self._closed = False
-        self._state_lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -86,28 +64,25 @@ class BackgroundArtifactStore:
     def put(self, objects: list[ArtifactObject]) -> None:
         if not objects:
             return
-        with self._state_lock:
-            if self._closed:
-                raise RuntimeError("artifact store is closed")
-            self._raise_if_failed()
-            self._queue.put(objects)
-            self._raise_if_failed()
+        if self._closed:
+            raise RuntimeError("artifact store is closed")
+        self._raise_if_failed()
+        self._queue.put(objects)
+        self._raise_if_failed()
 
     def get_concatenated(self, keys: list[str]) -> bytes:
-        with self._state_lock:
-            if self._closed:
-                raise RuntimeError("artifact store is closed")
-            self._queue.join()
-            self._raise_if_failed()
-            return self._store.get_concatenated(keys)
+        if self._closed:
+            raise RuntimeError("artifact store is closed")
+        self._queue.join()
+        self._raise_if_failed()
+        return self._store.get_concatenated(keys)
 
     def close(self) -> None:
-        with self._state_lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._queue.join()
-            self._queue.put(None)
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.join()
+        self._queue.put(None)
         self._thread.join()
         try:
             self._raise_if_failed()
@@ -142,7 +117,7 @@ class InProcessArtifactStore:
             return
         protected_slots = sum(key in self._lru for key in protected)
         if protected_slots + additional_slots > self.num_slots:
-            raise ArtifactCapacityError(
+            raise ArtifactStoreError(
                 "artifact store cannot retain the requested batch: "
                 f"retained={protected_slots}, requested={additional_slots}, "
                 f"limit={self.num_slots} objects"
@@ -171,10 +146,8 @@ class InProcessArtifactStore:
                 return
             unique: dict[str, ArtifactObject] = {}
             for obj in objects:
-                if not isinstance(obj.key, str) or not obj.key or "\x00" in obj.key:
-                    raise ValueError("artifact object key must be a non-empty string")
                 if len(obj.payload) != self.object_nbytes:
-                    raise ArtifactCorruptionError("artifact object has an invalid size")
+                    raise ArtifactStoreError("artifact object has an invalid size")
                 unique.setdefault(obj.key, obj)
             protected = set(unique)
             additional_slots = sum(object_id not in self._lru for object_id in unique)
@@ -210,7 +183,7 @@ class InProcessArtifactStore:
         try:
             return [self._lru[key] for key in keys]
         except KeyError as error:
-            raise ArtifactNotFoundError(
+            raise ArtifactStoreError(
                 "artifact object does not exist; the object may have been "
                 f"evicted (used={len(self._lru)}, "
                 f"limit={self.num_slots} objects). Increase "

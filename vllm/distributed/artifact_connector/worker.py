@@ -4,9 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -18,7 +17,6 @@ from vllm.distributed.artifact_connector.connector import (
 )
 from vllm.distributed.artifact_connector.routed_experts import (
     RoutedExpertsArtifactBuffer,
-    get_routing_shape_and_dtype,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
@@ -74,8 +72,8 @@ class ArtifactWorkerConnector:
         if not get_tp_group().is_first_rank:
             return
 
-        shape_per_token, dtype_name = get_routing_shape_and_dtype(vllm_config)
-        dtype = np.dtype(dtype_name)
+        shape_per_token = self._capturer.shape_per_token
+        dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -111,6 +109,8 @@ class ArtifactWorkerConnector:
         buffer = self._buffer
         if buffer is None or self._step_metadata is None:
             return None
+        store = self._store
+        assert store is not None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
         # Freeze the packed batch before splitting it into request ranges.
@@ -120,9 +120,7 @@ class ArtifactWorkerConnector:
 
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
-        block_batches: list[
-            tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
-        ] = []
+        block_batches = []
         outputs: dict[str, ArtifactRequestOutput] = {}
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
@@ -187,7 +185,15 @@ class ArtifactWorkerConnector:
                 min(token_end // block_size, len(state.artifact_keys)) * block_size
             )
             if emit_start < stored_end:
-                rows = self._materialize(emit_start, stored_end, state.artifact_keys)
+                first_block = emit_start // block_size
+                stored = materialize_routed_experts(
+                    store,
+                    state.artifact_keys[first_block : stored_end // block_size],
+                    shape_per_token=buffer.shape_per_token,
+                    dtype=buffer.dtype,
+                )
+                local_start = emit_start % block_size
+                rows = stored[local_start : local_start + stored_end - emit_start]
                 if stored_end < token_end:
                     rows = np.concatenate(
                         (rows, buffer.read(request_id, stored_end, token_end))
@@ -205,7 +211,7 @@ class ArtifactWorkerConnector:
         store = self._store
         buffer = self._buffer
         assert store is not None and buffer is not None
-        ready_batches: list[tuple[Sequence[str], list[tuple[int, np.ndarray]]]] = []
+        ready_batches = []
         for state, completed in batches:
             blocks = state.pending_blocks + completed
             keyed_end = len(state.artifact_keys) * buffer.block_size
@@ -258,25 +264,6 @@ class ArtifactWorkerConnector:
             for _, rows in self._requests.pop(request_id).pending_blocks:
                 self._buffer.release_block(rows)
             self._buffer.discard(request_id)
-
-    def _materialize(
-        self,
-        token_start: int,
-        token_end: int,
-        artifact_keys: list[str],
-    ) -> np.ndarray:
-        assert self._store is not None and self._buffer is not None
-        block_size = self._buffer.block_size
-        first_block = token_start // block_size
-        last_block = (token_end + block_size - 1) // block_size
-        stored = materialize_routed_experts(
-            self._store,
-            artifact_keys[first_block:last_block],
-            shape_per_token=self._buffer.shape_per_token,
-            dtype=self._buffer.dtype,
-        )
-        local_start = token_start % block_size
-        return stored[local_start : local_start + token_end - token_start]
 
     def close(self) -> None:
         if self._store is not None:
