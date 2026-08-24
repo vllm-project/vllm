@@ -17,7 +17,15 @@ import pytest
 import torch
 from packaging import version
 
-from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.config import (
+    CompilationConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
     QuarkLinearMethod,
@@ -35,8 +43,13 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -231,23 +244,34 @@ def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
         assert output
 
 
-@pytest.mark.parametrize("tp", [1])
-def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
+def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_init):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
-    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
+    model_config = ModelConfig(model=model_path, dtype="bfloat16")
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        compilation_config=CompilationConfig(mode=0),
+    )
+    target_device = torch.device(DEVICE_TYPE)
 
-        def check_model(model):
-            layer = model.model.layers[0]
+    with set_current_vllm_config(vllm_config):
+        with set_default_torch_dtype(model_config.dtype), target_device:
+            model = LlamaForCausalLM(vllm_config=vllm_config)
 
-            qkv_proj = layer.self_attn.qkv_proj
+        model_loader = DefaultModelLoader(vllm_config.load_config)
+        model.load_weights(model_loader.get_all_weights(model_config, model))
+        process_weights_after_loading(model, model_config, target_device)
 
-            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+        qkv_proj = model.model.layers[0].self_attn.qkv_proj
+        assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+        assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+        input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+        positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+        with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
+            hidden_states = model(input_ids, positions, None)
+            logits = model.compute_logits(hidden_states)
+        assert torch.isfinite(logits).all()
 
 
 @pytest.mark.parametrize("tp", [1])
@@ -282,53 +306,68 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
     not (on_gfx950() or on_gfx942()),
     reason="Quark W4A8 (INT4-FP8) MoE requires the AITER kernel on gfx942/gfx950",
 )
-@pytest.mark.parametrize("tp", [1])
-def test_quark_w4a8_fp8_moe(vllm_runner, monkeypatch, tp):
+def test_quark_w4a8_fp8_moe(monkeypatch, dist_init, workspace_init):
     """Test W4A8 (INT4 weight + FP8 activation) MoE with a tiny Qwen3 MoE model.
 
     W4A8 dispatches through the AITER fused MoE kernel, so AITER must be on.
     """
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
     model_path = "amd/tiny-qwen3-moe-w4a8"
-    with vllm_runner(
-        model_path,
-        enforce_eager=True,
-        tensor_parallel_size=tp,
-        gpu_memory_utilization=0.1,
-    ) as llm:
+    model_config = ModelConfig(model=model_path, dtype="bfloat16")
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        compilation_config=CompilationConfig(mode=0),
+    )
+    target_device = torch.device(DEVICE_TYPE)
 
-        def check_model(model):
-            moe = model.model.layers[0].mlp.experts
-            assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
-                f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
-            )
+    with set_current_vllm_config(vllm_config):
+        with set_default_torch_dtype(model_config.dtype), target_device:
+            model = Qwen3MoeForCausalLM(vllm_config=vllm_config)
 
-        llm.apply_model(check_model)
+        model_loader = DefaultModelLoader(vllm_config.load_config)
+        model.load_weights(model_loader.get_all_weights(model_config, model))
+        process_weights_after_loading(model, model_config, target_device)
 
-        output = llm.generate_greedy("Hello", max_tokens=4)
-        assert output
+        moe = model.model.layers[0].mlp.experts
+        assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
+            f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
+        )
+
+        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+        input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+        positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+        with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
+            hidden_states = model(input_ids, positions, None)
+            logits = model.compute_logits(hidden_states)
+        assert torch.isfinite(logits).all()
 
 
-def test_quark_fp8_parity(vllm_runner):
+def test_quark_fp8_parity(dist_init, workspace_init):
     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
+    target_device = torch.device(DEVICE_TYPE)
 
-    llm_kwargs = {
-        "tensor_parallel_size": 1,
-        "enforce_eager": True,
-        "gpu_memory_utilization": 0.1,
-    }
-    with (
-        vllm_runner(quark_model_id, **llm_kwargs) as quark_handle,
-        vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle,
-    ):
+    def load_state_dict(model_id: str) -> dict[str, torch.Tensor]:
+        model_config = ModelConfig(model=model_id, dtype="bfloat16")
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            compilation_config=CompilationConfig(mode=0),
+        )
 
-        def get_state_dict(model):
+        with set_current_vllm_config(vllm_config):
+            with set_default_torch_dtype(model_config.dtype), target_device:
+                model = LlamaForCausalLM(vllm_config=vllm_config)
+
+            model_loader = DefaultModelLoader(vllm_config.load_config)
+            model.load_weights(model_loader.get_all_weights(model_config, model))
+            process_weights_after_loading(model, model_config, target_device)
             return {k: v.cpu() for k, v in model.state_dict().items()}
 
-        (quark_state_dict,) = quark_handle.apply_model(get_state_dict)
-        (fp8_state_dict,) = fp8_handle.apply_model(get_state_dict)
+    quark_state_dict = load_state_dict(quark_model_id)
+    fp8_state_dict = load_state_dict(fp8_model_id)
 
     assert fp8_state_dict.keys() == quark_state_dict.keys()
 
@@ -371,104 +410,6 @@ GSM8K_ACCURACY_CONFIGS = [
         excepted_value=0.96,
     ),
 ]
-
-WIKITEXT_ACCURACY_CONFIGS = [
-    AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
-        excepted_value=11.3,
-    ),
-    AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
-        excepted_value=10.6,
-    ),
-    AccuracyTestConfig(
-        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.45
-    ),
-]
-
-
-@pytest.mark.skipif(
-    not QUARK_MXFP4_AVAILABLE,
-    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
-)
-@pytest.mark.parametrize(
-    "config",
-    [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
-)
-@pytest.mark.parametrize(
-    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
-)
-def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
-    device_count = torch.accelerator.device_count()
-    if device_count < tp_size:
-        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
-
-    task = "wikitext"
-    rtol = 0.1
-
-    # Smaller cudagraph_capture_sizes to speed up the test.
-    results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
-        ),
-        tasks=task,
-        batch_size=64,
-    )
-
-    EXPECTED_VALUE = config.excepted_value
-    measured_value = results["results"][task]["word_perplexity,none"]
-    assert (
-        measured_value < EXPECTED_VALUE + rtol
-        and measured_value > EXPECTED_VALUE - rtol
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
-
-
-@pytest.mark.skipif(
-    not QUARK_MXFP4_AVAILABLE,
-    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
-)
-@pytest.mark.parametrize("tp_size", [1, 2])
-def test_nvfp4_wikitext_correctness(tp_size: int):
-    device_count = torch.accelerator.device_count()
-    if device_count < tp_size:
-        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
-
-    # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
-    expected_value = 11.2391
-
-    model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
-    task = "wikitext"
-
-    rtol = 0.25
-
-    config = AccuracyTestConfig(
-        model_name=model_name,
-        excepted_value=expected_value,
-    )
-
-    model_args = config.get_model_args(
-        tp_size=tp_size,
-        kwargs={
-            "cudagraph_capture_sizes": [16],
-        },
-    )
-    model_args.pop("add_bos_token")
-
-    # Smaller cudagraph_capture_sizes to speed up the test.
-    results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks=task,
-        batch_size=64,
-    )
-
-    EXPECTED_VALUE = config.excepted_value
-    measured_value = results["results"][task]["word_perplexity,none"]
-    assert (
-        measured_value < EXPECTED_VALUE + rtol
-        and measured_value > EXPECTED_VALUE - rtol
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)

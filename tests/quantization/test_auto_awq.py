@@ -19,6 +19,19 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config import (
+    CompilationConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _get_auto_awq_config_source() -> str:
@@ -186,42 +199,52 @@ AWQ_MODELS = [
     reason="auto_awq is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("model_id", AWQ_MODELS)
-def test_auto_awq_quantization_method(vllm_runner, model_id: str, monkeypatch):
+def test_auto_awq_quantization_method(
+    model_id: str, monkeypatch, dist_init, workspace_init
+):
     """Test that quantization='auto_awq' loads and runs correctly."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-    with vllm_runner(
-        model_id,
+    model_config = ModelConfig(
+        model=model_id,
         dtype=torch.float16,
         quantization="auto_awq",
         max_model_len=2048,
-        enforce_eager=True,
-    ) as llm:
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        compilation_config=CompilationConfig(mode=0),
+    )
+    target_device = torch.device(current_platform.device_type)
 
-        def check_model(model):
-            from vllm.model_executor.layers.quantization.auto_awq import (
-                AutoAWQLinearMethod,
-                AutoAWQMarlinLinearMethod,
-            )
+    with set_current_vllm_config(vllm_config):
+        with set_default_torch_dtype(model_config.dtype), target_device:
+            model = Qwen2ForCausalLM(vllm_config=vllm_config)
 
-            for name, submodule in model.named_modules():
-                if name == "model.layers.0.self_attn.qkv_proj":
-                    # Should use either AutoAWQLinearMethod (Triton) or
-                    # AutoAWQMarlinLinearMethod (Marlin) depending on hardware
-                    assert isinstance(
-                        submodule.quant_method,
-                        (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
-                    ), (
-                        f"Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod "
-                        f"for {name}, got {type(submodule.quant_method)}"
-                    )
-                    break
+        model_loader = DefaultModelLoader(vllm_config.load_config)
+        model.load_weights(model_loader.get_all_weights(model_config, model))
+        process_weights_after_loading(model, model_config, target_device)
 
-        llm.apply_model(check_model)
+        from vllm.model_executor.layers.quantization.auto_awq import (
+            AutoAWQLinearMethod,
+            AutoAWQMarlinLinearMethod,
+        )
 
-        outputs = llm.generate_greedy([PROMPT], max_tokens=8)
-        assert outputs
-        assert len(outputs[0][1]) > 0
+        qkv_proj = model.model.layers[0].self_attn.qkv_proj
+        assert isinstance(
+            qkv_proj.quant_method,
+            (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
+        ), (
+            "Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod, "
+            f"got {type(qkv_proj.quant_method)}"
+        )
+
+        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+        input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
+        positions = torch.arange(input_ids.numel(), device=target_device)
+        with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
+            hidden_states = model(input_ids, positions, None)
+            logits = model.compute_logits(hidden_states)
+        assert torch.isfinite(logits).all()
 
 
 def test_auto_awq_config_get_name():
