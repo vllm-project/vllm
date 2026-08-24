@@ -230,13 +230,27 @@ __global__ void fusedQKNormRopeKernel(
     // Compute RMS normalization factor
     float rms_rcp = rsqrtf(sumOfSquares / static_cast<float>(head_dim) + eps);
 
-    // Normalize elements
+    // Normalize elements, matching the unfused RMSNorm numerics exactly. The
+    // unfused path computes bf16(bf16(x * rsqrt(var + eps)) * weight): it
+    // rounds the normalized value to the input dtype BEFORE the weight
+    // multiply, and rounds the weighted result to the input dtype afterwards.
+    // Carrying fp32 through the weight multiply here diverges from the unfused
+    // path by a few ULPs per element; models with many attention layers and
+    // attention logit softcapping (e.g. Gemma4, 50 sliding-attention layers)
+    // accumulate that divergence into degenerate/garbage output.
 #pragma unroll
-    for (int i = 0; i < numElemsPerThread; i++) {
-      int dim = laneId * numElemsPerThread + i;
-      float weight = isQ ? Converter::convert(q_weight[dim])
-                         : Converter::convert(k_weight[dim]);
-      elements[i] *= rms_rcp * weight;
+    for (int i = 0; i < numElemsPerThread / 2; i++) {
+      float2 normed = Converter::convert(Converter::convert(make_float2(
+          elements[2 * i] * rms_rcp, elements[2 * i + 1] * rms_rcp)));
+      int const dim0 = laneId * numElemsPerThread + 2 * i;
+      float const w0 = isQ ? Converter::convert(q_weight[dim0])
+                           : Converter::convert(k_weight[dim0]);
+      float const w1 = isQ ? Converter::convert(q_weight[dim0 + 1])
+                           : Converter::convert(k_weight[dim0 + 1]);
+      float2 weighted = Converter::convert(
+          Converter::convert(make_float2(normed.x * w0, normed.y * w1)));
+      elements[2 * i] = weighted.x;
+      elements[2 * i + 1] = weighted.y;
     }
 
     // Apply RoPE to normalized elements
