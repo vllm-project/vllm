@@ -707,6 +707,8 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(
                 self.sampler, self.speculative_config, self.device
             )
+        elif self.speculative_config:
+            self.drafter = None
 
         self.num_spec_tokens = 0
         self.prev_num_spec_tokens = 0
@@ -2645,7 +2647,11 @@ class GPUModelRunner(
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
+            if (
+                self.speculative_config
+                and self.drafter is not None
+                and spec_decode_common_attn_metadata is None
+            ):
                 if isinstance(
                     self.drafter,
                     (
@@ -2660,11 +2666,19 @@ class GPUModelRunner(
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            if (
+                self.speculative_config
+                and self.drafter is not None
+                and isinstance(self.drafter, Step3p5MTPProposer)
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
-            elif self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+            elif (
+                self.speculative_config
+                and self.drafter is not None
+                and isinstance(self.drafter, Gemma4Proposer)
+            ):
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
