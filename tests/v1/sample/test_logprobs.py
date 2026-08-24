@@ -1163,6 +1163,7 @@ def test_spec_decode_logprobs(
         penalty_sampling_params,
         active_sampling_params,
     ]
+    # TODO: Include ngram after Model Runner V2 support lands (#40704).
     if method == "eagle":
         requests.append(custom_sampling_params)
     prompts = [prompt] * len(requests)
