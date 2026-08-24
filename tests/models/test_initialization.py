@@ -14,9 +14,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+)
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
 )
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
@@ -122,6 +124,8 @@ def can_initialize(
         use_original_num_layers=getattr(model_info, "use_original_num_layers", False),
     )
 
+    _default_builder = DefaultKVCacheConfigBuilder()
+
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
@@ -131,7 +135,7 @@ def can_initialize(
             [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
         )
         self.model_executor.set_kv_cache_layout(layout.name)
-        kv_cache_configs = get_kv_cache_configs(
+        kv_cache_configs = _default_builder.get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],

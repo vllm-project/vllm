@@ -878,6 +878,7 @@ class _ModelInfo:
     supports_transcription_only: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    kv_cache_config_builder_cls: str | None
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -913,6 +914,9 @@ class _ModelInfo:
             ),
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
+            ),
+            kv_cache_config_builder_cls=getattr(
+                model, "kv_cache_config_builder_cls", None
             ),
         )
 
