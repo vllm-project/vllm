@@ -7,7 +7,10 @@ import inspect
 import uvloop
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
+from vllm.entrypoints.launchers.render.entry import (
+    run_launch_fastapi,
+    run_launch_grpc,
+)
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -59,9 +62,23 @@ class RenderSubcommand(LaunchSubcommandBase):
     name = "render"
     help = "Launch a GPU-less rendering server (preprocessing and postprocessing only)."
 
+    @classmethod
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
+        super().add_cli_args(parser)
+        parser.add_argument(
+            "--server",
+            choices=["http", "grpc"],
+            default="http",
+            help="Server protocol to use (default: http).",
+        )
+
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        uvloop.run(run_launch_fastapi(args))
+        server = getattr(args, "server", "http")
+        if server == "http":
+            uvloop.run(run_launch_fastapi(args))
+        else:
+            uvloop.run(run_launch_grpc(args))
 
 
 class LaunchSubcommand(CLISubcommand):
