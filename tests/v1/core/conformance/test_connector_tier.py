@@ -87,6 +87,9 @@ class ExampleConnectorHarness(ConnectorHarness):
         )
 
     def store(self, request: Request) -> None:
+        # The scheduler always reports the allocation before building the
+        # step's metadata, and connectors may key on it.
+        self.connector.update_state_after_alloc(request, None, num_external_tokens=0)
         new_req = NewRequestData(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
