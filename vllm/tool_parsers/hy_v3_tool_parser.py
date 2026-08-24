@@ -382,6 +382,11 @@ class HYV3ToolParser(ToolParser):
             try:
                 tool_calls = self._extract_tool_calls(model_output, request)
 
+                if not tool_calls:
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
+
                 s_index = model_output.find(self.tool_calls_start_token)
                 content = model_output[:s_index] if s_index != -1 else model_output
                 return ExtractedToolCallInformation(
