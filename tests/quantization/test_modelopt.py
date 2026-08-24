@@ -13,14 +13,22 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import ModelConfig
+from vllm.model_executor.kernels.linear import (
+    HummingNvFp4LinearKernel,
+    MarlinNvFp4LinearKernel,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
+    ModelOptFp8LinearMethod,
+    ModelOptFp8PbWoLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4W4A16LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -108,6 +116,86 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert isinstance(method, ModelOptNvFp4LinearMethod)
 
 
+def test_modelopt_fp8_updates_weight_dims_after_transpose():
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(torch.empty(3, 2), requires_grad=False)
+    )
+    layer.register_parameter(
+        "weight_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+    layer.register_parameter(
+        "input_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+
+    method = ModelOptFp8LinearMethod.__new__(ModelOptFp8LinearMethod)
+    method.fp8_linear = Mock()
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.shape == (2, 3)
+    assert layer.weight.input_dim == 0
+    assert layer.weight.output_dim == 1
+    method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
+
+
+def test_modelopt_fp8_pb_wo_hides_output_padding(default_vllm_config):
+    config = ModelOptFp8Config(
+        quant_method="FP8_PB_WO",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    default_vllm_config.model_config = Mock(dtype=torch.bfloat16)
+    kernel = Mock()
+
+    with (
+        set_current_vllm_config(default_vllm_config),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.init_fp8_linear_kernel",
+            return_value=kernel,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+    ):
+        method = ModelOptFp8PbWoLinearMethod(config)
+        layer = torch.nn.Module()
+        method.create_weights(
+            layer,
+            input_size_per_partition=128,
+            output_partition_sizes=[128, 65],
+            input_size=128,
+            output_size=193,
+            params_dtype=torch.bfloat16,
+        )
+
+    assert layer.weight.shape == (193, 128)
+    assert layer.weight_scale.shape == (2, 1, 1, 1)
+
+    layer.weight.data.fill_(1)
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.shape == (256, 128)
+    assert torch.count_nonzero(layer.weight[193:].float()) == 0
+    kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+    physical_output = torch.randn(2, 256, dtype=torch.bfloat16)
+    kernel.apply_weights.return_value = physical_output
+    bias = torch.randn(193, dtype=torch.bfloat16)
+    output = method.apply(layer, torch.randn(2, 128), bias)
+
+    torch.testing.assert_close(output, physical_output[:, :193] + bias)
+    assert output.shape == (2, 193)
+    assert output.is_contiguous()
+    kernel.apply_weights.assert_called_once()
+    assert kernel.apply_weights.call_args.args[2] is None
+
+
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
     config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
@@ -185,9 +273,9 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
 
     config.apply_vllm_mapper(
-        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_unstacked_mapper()
+        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_rename_mapper()
     )
-    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_unstacked_mapper())
+    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
     expected_prefix = "language_model.model.layers.0.moe.experts"
     assert set(config.quantized_layers) == {
@@ -420,10 +508,11 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PbWoLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PbWoLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            fp8_dtype = current_platform.fp8_dtype()
+            assert qkv_proj.weight.dtype == fp8_dtype
+            assert o_proj.weight.dtype == fp8_dtype
+            assert gate_up_proj.weight.dtype == fp8_dtype
+            assert down_proj.weight.dtype == fp8_dtype
 
             # Block scales; should be materialized as a 2D [out_blk, in_blk] tensor.
             assert hasattr(qkv_proj, "weight_scale")
@@ -468,15 +557,13 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
-    """``quant_method="W4A16_NVFP4"`` routes to the new
+    """``quant_method="W4A16_NVFP4"`` routes to
     ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
 
     Mirrors the FP8 dispatch precedent (``ModelOptFp8Config`` selects
     one of three FP8 LinearMethods on ``quant_method``); a regression
     here would mean a W4A16 NVFP4 checkpoint silently loaded under the
-    W4A4 method, which would try to register an ``input_scale`` runtime
-    parameter and (more importantly) call the cutlass W4A4 NVFP4 GEMM
-    instead of FP4 Marlin.
+    W4A4 activation-quantization path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
@@ -493,6 +580,21 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
     assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
     assert config.quant_method == "W4A16_NVFP4"
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "kernel_cls"),
+    [("auto", MarlinNvFp4LinearKernel), ("humming", HummingNvFp4LinearKernel)],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
+    vllm_config = VllmConfig()
+    vllm_config.kernel_config.linear_backend = linear_backend
+    with set_current_vllm_config(vllm_config):
+        method = ModelOptNvFp4W4A16LinearMethod(
+            ModelOptNvFp4Config(quant_method="W4A16_NVFP4")
+        )
+    assert isinstance(method.kernel, kernel_cls)
 
 
 @pytest.mark.parametrize(

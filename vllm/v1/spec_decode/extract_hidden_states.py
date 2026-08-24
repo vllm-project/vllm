@@ -13,7 +13,6 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.utils import CpuGpuBuffer
@@ -59,11 +58,7 @@ class ExtractHiddenStatesProposer:
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(
-            max_batch_size,
-            dtype=torch.int32,
-            pin_memory=PIN_MEMORY,
-            device=device,
-            with_numpy=True,
+            max_batch_size, dtype=torch.int32, device=device
         )
 
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config

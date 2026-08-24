@@ -29,11 +29,13 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 
 logger = init_logger(__name__)
@@ -60,7 +62,11 @@ def get_rope_shape_decorate(func):
 
 
 @get_rope_shape_decorate
-@torch.compile(dynamic=True)
+@torch.compile(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    disable=current_platform.simple_compile_backend == "tpu",
+)
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
@@ -72,29 +78,6 @@ def get_rope_shape(org, interpolation_mode, shape):
         .permute((1, 2, 0))
         .flatten(end_dim=1)
     )
-
-
-def apply_rope(
-    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Args: (The leading dimensions of all inputs should be the same)
-        xq: query, tensor of shape (..., num_heads, head_dim)
-        xk: key, tensor of shape (..., num_heads, head_dim)
-        freqs_cis: tensor of shape (..., head_dim/2), dtype=torch.complex64.
-    Returns:
-        xq_out, xk_out: tensors of shape (..., num_heads, head_dim)
-    """
-    _apply_rope_input_validation(xq, freqs_cis)
-    _apply_rope_input_validation(xk, freqs_cis)
-
-    freqs_cis = freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2
-    # ..., num_heads, head_dim/2
-    xq_ = torch.view_as_complex(xq.float().view(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().view(*xq.shape[:-1], -1, 2))
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(-2)  # ..., num_heads, head_dim
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(-2)  # ..., num_heads, head_dim
-    return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -154,9 +137,7 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     def reset_parameters(self):
         nn.init.normal_(self.weight)
 
-    def forward(
-        self, x: torch.Tensor, grid_thws: torch.Tensor | list[list[int]]
-    ) -> torch.Tensor:
+    def get_pos_embeds(self, grid_thws: torch.Tensor | list[list[int]]) -> torch.Tensor:
         pos_embs = []
         grid_thw_list = grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
         for t, h, w in grid_thw_list:
@@ -179,8 +160,12 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
 
             pos_embs.append(pos_emb_3d.reshape(-1, pos_emb_3d.shape[-1]))
 
-        out = x + torch.cat(pos_embs)
-        return out
+        return torch.cat(pos_embs)
+
+    def forward(
+        self, x: torch.Tensor, grid_thws: torch.Tensor | list[list[int]]
+    ) -> torch.Tensor:
+        return x + self.get_pos_embeds(grid_thws)
 
 
 class MoonVision3dPatchEmbed(nn.Module):
@@ -195,6 +180,8 @@ class MoonVision3dPatchEmbed(nn.Module):
         pos_emb_width: int = 14,
         pos_emb_time: int = 4,
         pos_emb_type: str = "divided_fixed",
+        patch_embed_proj_bias: bool = True,
+        pos_emb_interpolation_mode: str = "bicubic",
     ):
         super().__init__()
         assert isinstance(patch_size, int | Sequence), (
@@ -208,7 +195,11 @@ class MoonVision3dPatchEmbed(nn.Module):
         self.patch_size = patch_size
 
         self.proj = nn.Conv2d(
-            in_dim, out_dim, kernel_size=patch_size, stride=patch_size
+            in_dim,
+            out_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=patch_embed_proj_bias,
         )
 
         if pos_emb_type == "divided_fixed":
@@ -217,17 +208,37 @@ class MoonVision3dPatchEmbed(nn.Module):
                 width=pos_emb_width,
                 num_frames=pos_emb_time,
                 dim=out_dim,
+                interpolation_mode=pos_emb_interpolation_mode,
             )
         else:
             raise NotImplementedError(f"Not support pos_emb_type: {pos_emb_type}")
 
     def forward(
-        self, x: torch.Tensor, grid_thws: torch.Tensor | list[list[int]]
+        self,
+        x: torch.Tensor,
+        grid_thws: torch.Tensor | list[list[int]] | None,
+        *,
+        pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.proj(x).view(x.size(0), -1)
-        # apply positional embedding
-        x = self.pos_emb(x, grid_thws)
-        return x
+        x = self._proj(x).view(x.size(0), -1)
+        if pos_embeds is not None:
+            return x + pos_embeds
+        assert grid_thws is not None
+        return self.pos_emb(x, grid_thws)
+
+    def _proj(self, x: torch.Tensor) -> torch.Tensor:
+        # MIOpen conv2d intermittently fails under load on ROCm; use aiter Triton.
+        if current_platform.is_rocm() and x.dtype in (torch.float16, torch.bfloat16):
+            from aiter.ops.triton.conv.conv2d import conv2d
+
+            return conv2d(
+                x,
+                self.proj.weight,
+                self.proj.bias,
+                stride=self.patch_size,
+                layout="nchw",
+            )
+        return self.proj(x)
 
 
 class Rope2DPosEmbRepeated(nn.Module):
@@ -342,6 +353,14 @@ class MLP2(nn.Module):
         return x
 
 
+def _make_vision_norm(norm_type: str, hidden_dim: int) -> nn.Module:
+    if norm_type == "layernorm":
+        return nn.LayerNorm(hidden_dim)
+    if norm_type == "rmsnorm":
+        return nn.RMSNorm(hidden_dim)
+    raise NotImplementedError(f"Not support norm_type: {norm_type}")
+
+
 class MoonViTEncoderLayer(nn.Module):
     """Single encoder layer for MoonViT with TP/DP support."""
 
@@ -355,23 +374,33 @@ class MoonViTEncoderLayer(nn.Module):
         *,
         activation=F.gelu,
         attn_bias: bool = False,
+        qkv_hidden_size: int | None = None,
+        norm_type: str = "layernorm",
+        mlp_type: str = "mlp2",
+        linear_bias: bool = True,
     ):
         super().__init__()
         self.use_data_parallel = is_vit_use_data_parallel(num_heads)
 
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
-        self.hidden_size_per_attention_head = self.hidden_dim // self.num_heads
+        self.qkv_hidden_size = (
+            hidden_dim if qkv_hidden_size is None else qkv_hidden_size
+        )
+        self.hidden_size_per_attention_head = self.qkv_hidden_size // self.num_heads
         self.tp_size = (
             1 if self.use_data_parallel else get_tensor_model_parallel_world_size()
         )
         self.num_attention_heads_per_partition = divide(num_heads, self.tp_size)
 
-        self.norm0 = nn.LayerNorm(hidden_dim)
-        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm0 = _make_vision_norm(norm_type, hidden_dim)
+        self.norm1 = _make_vision_norm(norm_type, hidden_dim)
+        if mlp_type != "mlp2":
+            raise NotImplementedError(f"Not support mlp_type: {mlp_type}")
         self.mlp = MLP2(
             [hidden_dim, mlp_dim, hidden_dim],
             activation,
+            bias=linear_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
             use_data_parallel=self.use_data_parallel,
@@ -387,7 +416,7 @@ class MoonViTEncoderLayer(nn.Module):
             disable_tp=self.use_data_parallel,
         )
         self.wo = RowParallelLinear(
-            hidden_dim,
+            self.qkv_hidden_size,
             hidden_dim,
             bias=attn_bias,
             quant_config=quant_config,
@@ -400,12 +429,17 @@ class MoonViTEncoderLayer(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            is_neox_style=False,
+            enable_fp32_compute=True,
+        )
 
     def attention_qkvpacked(
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rope_freqs_cis: torch.Tensor | None = None,
+        rope_freqs_cis: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
@@ -427,7 +461,12 @@ class MoonViTEncoderLayer(nn.Module):
         xqkv = xqkv.view(*qkv_shape)
         xq, xk, xv = torch.unbind(xqkv, dim=-3)
 
-        xq, xk = apply_rope(xq, xk, rope_freqs_cis)
+        _apply_rope_input_validation(xq, rope_freqs_cis)
+        _apply_rope_input_validation(xk, rope_freqs_cis)
+        rope_cos = rope_freqs_cis.real.contiguous()
+        rope_sin = rope_freqs_cis.imag.contiguous()
+        xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
+        xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
 
         if max_seqlen is None:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
@@ -451,7 +490,7 @@ class MoonViTEncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rope_freqs_cis: torch.Tensor | None = None,
+        rope_freqs_cis: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
@@ -493,8 +532,9 @@ class MoonViT3dEncoder(nn.Module):
             f'video_attn_type must be "spatial_temporal", got {video_attn_type}'
         )
         self.video_attn_type = video_attn_type
+        qkv_hidden_size = block_cfg.get("qkv_hidden_size") or block_cfg["hidden_dim"]
         self.rope_2d = Rope2DPosEmbRepeated(
-            block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512
+            qkv_hidden_size // block_cfg["num_heads"], 512, 512
         )
         self.blocks = nn.ModuleList(
             [
@@ -506,13 +546,17 @@ class MoonViT3dEncoder(nn.Module):
                 for layer_idx in range(num_layers)
             ]
         )
-        self.final_layernorm = nn.LayerNorm(hidden_dim)
+        self.final_layernorm = _make_vision_norm(
+            block_cfg.get("norm_type", "layernorm"), hidden_dim
+        )
 
     def prepare_encoder_metadata(
         self,
         grid_thw_list: list[list[int]],
         *,
         device: torch.device,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
     ) -> dict[str, torch.Tensor | None]:
         metadata: dict[str, torch.Tensor | None] = {}
         metadata["rope_freqs_cis"] = self.rope_2d.get_freqs_cis(
@@ -524,15 +568,30 @@ class MoonViT3dEncoder(nn.Module):
         cu_seqlens = np.concatenate(
             [np.zeros(1, dtype=np.int32), lengths.cumsum(dtype=np.int32)]
         )
+        if max_batch_size is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens = np.concatenate(
+                    [
+                        cu_seqlens,
+                        np.full(
+                            max_batch_size - num_seqs,
+                            cu_seqlens[-1],
+                            dtype=np.int32,
+                        ),
+                    ]
+                )
 
         attn_backend = self.blocks[0].attn.attn_backend
         metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(
             attn_backend, cu_seqlens, device
         )
-        metadata["max_seqlen"] = torch.tensor(
-            MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens),
-            dtype=torch.int32,
+        max_seqlen = (
+            max_seqlen_override
+            if max_seqlen_override is not None
+            else MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens)
         )
+        metadata["max_seqlen"] = torch.tensor(max_seqlen, dtype=torch.int32)
         metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
             attn_backend,
             cu_seqlens,
@@ -545,11 +604,12 @@ class MoonViT3dEncoder(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        grid_thws: torch.Tensor | list[list[int]],
+        grid_thws: torch.Tensor | list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         if encoder_metadata is None:
+            assert grid_thws is not None
             grid_thw_list = (
                 grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
             )
@@ -604,6 +664,34 @@ def tpool_patch_merger(
     return outputs
 
 
+def build_image_merge_gather_idx(
+    grid_thws: list[list[int]] | list[tuple[int, int, int]],
+    merge_kernel_size: tuple[int, int],
+) -> np.ndarray:
+    """Build packed spatial-merge indices for image-only CUDA graphs."""
+    kh, kw = merge_kernel_size
+    parts: list[np.ndarray] = []
+    offset = 0
+    for t, h, w in grid_thws:
+        if t != 1:
+            raise ValueError("Image encoder CUDA graphs require grid T == 1")
+        idx = np.arange(h * w, dtype=np.int64).reshape(h, w)
+        idx = idx.reshape(h // kh, kh, w // kw, kw)
+        parts.append(idx.transpose(0, 2, 1, 3).reshape(-1, kh * kw) + offset)
+        offset += h * w
+    if not parts:
+        return np.empty((0, kh * kw), dtype=np.int64)
+    return np.concatenate(parts)
+
+
+def tpool_patch_merger_packed(
+    x: torch.Tensor,
+    merge_gather_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Apply the image-only spatial merge using precomputed tensor indices."""
+    return x[merge_gather_idx]
+
+
 class MoonViT3dPretrainedModel(nn.Module):
     """Main vision tower model.
 
@@ -630,6 +718,10 @@ class MoonViT3dPretrainedModel(nn.Module):
             pos_emb_width=config.init_pos_emb_width,
             pos_emb_time=config.init_pos_emb_time,
             pos_emb_type=config.pos_emb_type,
+            patch_embed_proj_bias=getattr(config, "patch_embed_proj_bias", True),
+            pos_emb_interpolation_mode=getattr(
+                config, "pos_emb_interpolation_mode", "bicubic"
+            ),
         )
 
         self.encoder = MoonViT3dEncoder(
@@ -638,9 +730,15 @@ class MoonViT3dPretrainedModel(nn.Module):
             block_cfg={
                 "num_heads": config.num_attention_heads,
                 "hidden_dim": config.hidden_size,
+                "qkv_hidden_size": getattr(config, "qkv_hidden_size", None),
                 "mlp_dim": config.intermediate_size,
-                "activation": get_act_fn("gelu_pytorch_tanh"),
-                "attn_bias": True,
+                "activation": get_act_fn(
+                    getattr(config, "activation_func", "gelu_pytorch_tanh")
+                ),
+                "attn_bias": getattr(config, "attn_bias", True),
+                "norm_type": getattr(config, "norm_type", "layernorm"),
+                "mlp_type": getattr(config, "mlp_type", "mlp2"),
+                "linear_bias": getattr(config, "linear_bias", True),
             },
             video_attn_type=config.video_attn_type,
             quant_config=quant_config,
@@ -650,7 +748,7 @@ class MoonViT3dPretrainedModel(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thws: torch.Tensor | list[list[int]],
+        grid_thws: torch.Tensor | list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
@@ -662,6 +760,22 @@ class MoonViT3dPretrainedModel(nn.Module):
         Returns:
             torch.Tensor: The output tokens.
         """
+        if encoder_metadata is not None and "pos_embeds" in encoder_metadata:
+            hidden_states = self.patch_embed(
+                pixel_values,
+                None,
+                pos_embeds=encoder_metadata["pos_embeds"],
+            )
+            hidden_states = self.encoder(
+                hidden_states,
+                None,
+                encoder_metadata=encoder_metadata,
+            )
+            merge_gather_idx = encoder_metadata["merge_gather_idx"]
+            assert merge_gather_idx is not None
+            return tpool_patch_merger_packed(hidden_states, merge_gather_idx)
+
+        assert grid_thws is not None
         grid_thw_list = grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
         if encoder_metadata is None:
             encoder_metadata = self.encoder.prepare_encoder_metadata(
@@ -685,13 +799,40 @@ class MoonViT3dPretrainedModel(nn.Module):
 
         return hidden_states
 
+    def prepare_encoder_cudagraph_metadata(
+        self,
+        grid_thw_list: list[list[int]],
+        *,
+        max_batch_size: int,
+        max_seqlen_override: int | None = None,
+        device: torch.device,
+    ) -> dict[str, torch.Tensor | None]:
+        """Precompute fixed-buffer metadata for image encoder CUDA graphs."""
+        grid_thw_list = [list(map(int, grid)) for grid in grid_thw_list]
+        metadata = self.encoder.prepare_encoder_metadata(
+            grid_thw_list,
+            device=device,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=max_seqlen_override,
+        )
+        metadata["pos_embeds"] = self.patch_embed.pos_emb.get_pos_embeds(
+            grid_thw_list
+        ).to(device=device)
+        merge_gather_idx = build_image_merge_gather_idx(
+            grid_thw_list, self.merge_kernel_size
+        )
+        metadata["merge_gather_idx"] = torch.from_numpy(merge_gather_idx).to(
+            device=device, non_blocking=True
+        )
+        return metadata
+
 
 @torch.inference_mode()
 def mm_projector_forward(mm_projector: torch.nn.Module, vt_output: list[torch.Tensor]):
     """Apply MM projector to vision tower outputs."""
     num_embedding_list = [x.shape[0] for x in vt_output]
     batched = torch.cat(vt_output, dim=0)
-    projector_dtype = mm_projector.pre_norm.weight.dtype
+    projector_dtype = next(mm_projector.parameters()).dtype
     if batched.dtype != projector_dtype:
         batched = batched.to(projector_dtype)
     proj_out = mm_projector(batched)
@@ -747,10 +888,33 @@ class KimiK25MultiModalProjector(nn.Module):
     ):
         super().__init__()
         self.use_data_parallel = use_data_parallel
+        self.mm_projector_type = getattr(config, "mm_projector_type", "patchmerger")
 
         # Hidden size after patch merging
         merge_h, merge_w = config.merge_kernel_size
         self.hidden_size = config.hidden_size * merge_h * merge_w
+
+        if self.mm_projector_type == "patchmergerv2":
+            self.linear_1 = ReplicatedLinear(
+                self.hidden_size,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.linear_1",
+            )
+            self.linear_2 = ReplicatedLinear(
+                self.hidden_size,
+                getattr(config, "text_hidden_size", config.mm_hidden_size),
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.linear_2",
+            )
+            self.post_norm = torch.nn.RMSNorm(
+                getattr(config, "text_hidden_size", config.mm_hidden_size),
+                eps=config.projector_ln_eps,
+            )
+            self.act = GELUActivation()
+            return
 
         self.pre_norm = torch.nn.LayerNorm(config.hidden_size, eps=1e-5)
         self.linear_1 = ReplicatedLinear(
@@ -770,6 +934,13 @@ class KimiK25MultiModalProjector(nn.Module):
         self.act = GELUActivation()
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
+        if self.mm_projector_type == "patchmergerv2":
+            hidden_states = image_features.view(image_features.shape[0], -1)
+            hidden_states, _ = self.linear_1(hidden_states)
+            hidden_states = self.act(hidden_states)
+            hidden_states, _ = self.linear_2(hidden_states)
+            return self.post_norm(hidden_states)
+
         hidden_states = self.pre_norm(image_features).view(-1, self.hidden_size)
         hidden_states, _ = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)

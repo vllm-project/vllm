@@ -65,6 +65,10 @@ def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
     assert sampler.topk_topp_sampler.use_fp64_gumbel
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm aiter sampler test only runs on ROCm",
+)
 def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
     monkeypatch: pytest.MonkeyPatch,
 ):
