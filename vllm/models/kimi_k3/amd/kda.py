@@ -262,8 +262,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
 
@@ -297,7 +296,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        output[:] = self.o_proj(core_attn_out)[0]
+        return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
     def _forward(
@@ -446,6 +445,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- non-spec path (prefill or plain decode) ----------
         core_attn_out_non_spec = None
+        non_spec_placed = False
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
@@ -539,10 +539,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 recurrent_state[prefill_state_indices] = last_recurrent_state
 
                 if split_non_spec:
-                    # Restore decode-first token order for the merge below.
-                    core_attn_out_non_spec = torch.cat(
-                        [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                    core_attn_out_prefill = core_attn_out_non_spec
+                    core_attn_out_non_spec = core_attn_out[:, :num_actual_tokens]
+                    torch.cat(
+                        [core_attn_out_decode, core_attn_out_prefill],
+                        dim=1,
+                        out=core_attn_out_non_spec,
                     )
+                    non_spec_placed = True
 
             else:
                 # pure-decode non-spec batch
@@ -580,15 +584,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- merge spec and non-spec outputs ----------
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            # Mixed batches require indexed placement in the original order.
-            merged = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_spec.dtype,
-                device=core_attn_out_spec.device,
-            )
+            merged = core_attn_out[:, :num_actual_tokens]
             merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[0, :num_actual_tokens] = merged[0, :num_actual_tokens]
+        elif non_spec_placed:
+            pass
         elif core_attn_out_non_spec is not None:
             core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
                 0, :num_actual_tokens
