@@ -12,18 +12,19 @@ from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing.context import InputProcessingContext
 from vllm.multimodal.processing.processor import (
+    BaseMultiModalProcessor,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
     PromptReplacement,
     _apply_matches,
     _apply_token_matches_with_placeholders,
-    apply_text_matches,
     apply_token_matches,
     find_mm_placeholders,
     iter_token_matches,
     replace_token_matches,
 )
+from vllm.utils.collection_utils import flatten_2d_lists
 
 from .utils import random_image
 
@@ -242,7 +243,7 @@ def test_find_token_matches(
         for key, target in target_by_key.items()
     }
     result = {
-        key: list(update.iter_token_matches(prompt, tokenizer=None))
+        key: list(update.iter_token_matches(prompt))
         for key, update in prompt_updates.items()
     }
 
@@ -257,315 +258,6 @@ def test_find_token_matches(
         ]
         for key in expected_by_key
     } == expected_by_key
-
-
-@pytest.mark.parametrize(
-    ("prompt", "target_by_key", "expected_by_key"),
-    [
-        # Detokenized test cases of `test_find_token_matches`
-        # using the vocab of llava-hf/llava-v1.6-mistral-7b-hf
-        (
-            "",
-            {
-                "pattern_1": "",
-                "pattern_2": "<image>",
-                "pattern_3": PromptIndexTargets.start(),
-                "pattern_4": PromptIndexTargets.prefix("<image>"),
-                "pattern_5": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": [{"start_idx": 0, "end_idx": 0}],
-                "pattern_2": [],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-                "pattern_4": [],
-                "pattern_5": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-            },
-        ),
-        (
-            "<image><image><image><image>",
-            {
-                "pattern_1": "<image>",
-                "pattern_2": "<image><image>",
-                "pattern_3": "<image><image><image>",
-                "pattern_4": PromptIndexTargets.start(),
-                "pattern_5": PromptIndexTargets.prefix("<image>"),
-                "pattern_6": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": [
-                    {"start_idx": 0, "end_idx": 7},
-                    {"start_idx": 7, "end_idx": 14},
-                    {"start_idx": 14, "end_idx": 21},
-                    {"start_idx": 21, "end_idx": 28},
-                ],
-                "pattern_2": [
-                    {"start_idx": 0, "end_idx": 14},
-                    {"start_idx": 14, "end_idx": 28},
-                ],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 21},
-                ],
-                "pattern_4": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-                "pattern_5": [
-                    {"start_idx": 7, "end_idx": 7},
-                ],
-                "pattern_6": [
-                    {"start_idx": 28, "end_idx": 28},
-                ],
-            },
-        ),
-        (
-            "Image:<image><image><image>Image:<image><image>!",
-            {
-                "pattern_1": "Image:<image>",
-                "pattern_2": "Image:<image><image><image>",
-                "pattern_3": "Image:<unk><image>",
-                "pattern_4": PromptIndexTargets.start(),
-                "pattern_5": PromptIndexTargets.prefix("Image:<image>"),
-                "pattern_6": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": [
-                    {"start_idx": 0, "end_idx": 13},
-                    {"start_idx": 27, "end_idx": 40},
-                ],
-                "pattern_2": [
-                    {"start_idx": 0, "end_idx": 27},
-                ],
-                "pattern_3": [],
-                "pattern_4": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-                "pattern_5": [
-                    {"start_idx": 13, "end_idx": 13},
-                ],
-                "pattern_6": [
-                    {"start_idx": 48, "end_idx": 48},
-                ],
-            },
-        ),
-        # Test regex escape
-        (
-            "<|image|><image><|image|><image>",
-            {
-                "pattern_1": "<|image|>",
-                "pattern_2": "<|image|><image>",
-                "pattern_3": "<|image|><image><|image|>",
-            },
-            {
-                "pattern_1": [
-                    {"start_idx": 0, "end_idx": 9},
-                    {"start_idx": 16, "end_idx": 25},
-                ],
-                "pattern_2": [
-                    {"start_idx": 0, "end_idx": 16},
-                    {"start_idx": 16, "end_idx": 32},
-                ],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 25},
-                ],
-            },
-        ),
-    ],
-)
-@pytest.mark.parametrize("update_type", [PromptInsertion, PromptReplacement])
-def test_find_text_matches(
-    prompt,
-    target_by_key,
-    expected_by_key,
-    update_type,
-):
-    prompt_updates = {
-        key: update_type(key, target, []).resolve(0)
-        for key, target in target_by_key.items()
-    }
-    result = {
-        key: list(update.iter_text_matches(prompt, tokenizer=None))
-        for key, update in prompt_updates.items()
-    }
-
-    # Only displayed on error
-    print("result:", result)
-
-    # Manually constructed results
-    assert {
-        key: [
-            dict(start_idx=item.start_idx, end_idx=item.end_idx)
-            for item in result.get(key, [])
-        ]
-        for key in expected_by_key
-    } == expected_by_key
-
-
-@pytest.mark.parametrize(
-    ("prompt", "target_by_key", "repl_by_key", "expected_by_update_type_mm_count"),  # noqa: E501
-    [
-        (
-            "Image:<image>Image:<image><image>!",
-            {
-                # We use `<image>` before `Image:` to test matches that
-                # occur out of order
-                "pattern_1": "<image>",
-                "pattern_2": "Image:",
-                "pattern_3": "!",
-            },
-            {
-                # Test whether target is confused with replacement
-                "pattern_1": "<image><image>",
-                # Test empty replacement
-                "pattern_2": "",
-                # Test dynamic replacement (beyond the form of `unit * count`)
-                "pattern_3": "?!?",
-            },
-            {
-                PromptInsertion: {
-                    0: "Image:<image>Image:<image><image>!",
-                    1: "Image:<image><image><image>Image:<image><image>!?!?",
-                    2: "Image:<image><image><image><image><image>Image:<image><image>!?!??!?",  # noqa: E501
-                },
-                PromptReplacement: {
-                    0: "Image:<image>Image:<image><image>!",
-                    1: "<image><image>Image:<image><image>?!?",
-                    2: "<image><image><image><image><image>?!?",
-                },
-            },
-        ),
-        # Test index targets
-        (
-            "",
-            {
-                "pattern_1": PromptIndexTargets.start(),
-                "pattern_2": PromptIndexTargets.prefix("<image>"),
-                "pattern_3": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": "1",
-                "pattern_2": "2",
-                "pattern_3": "3",
-            },
-            {
-                PromptInsertion: {
-                    0: "",
-                    1: "13",
-                    2: "1133",
-                },
-                PromptReplacement: {
-                    0: "",
-                    1: "13",
-                    2: "1133",
-                },
-            },
-        ),
-        (
-            "<image>",
-            {
-                "pattern_1": PromptIndexTargets.start(),
-                "pattern_2": PromptIndexTargets.prefix("<image>"),
-                "pattern_3": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": "1",
-                "pattern_2": "2",
-                "pattern_3": "3",
-            },
-            {
-                PromptInsertion: {
-                    0: "<image>",
-                    1: "1<image>23",
-                    2: "11<image>2233",
-                },
-                PromptReplacement: {
-                    0: "<image>",
-                    1: "1<image>23",
-                    2: "11<image>2233",
-                },
-            },
-        ),
-        # Test different replacement per item
-        (
-            "<image><image><image>",
-            {
-                "pattern_1": "<image>",
-            },
-            {
-                "pattern_1": lambda idx: str(idx + 1),
-            },
-            {
-                PromptInsertion: {
-                    0: "<image><image><image>",
-                    1: "<image>1<image><image>",
-                    2: "<image>12<image><image>",
-                },
-                PromptReplacement: {
-                    0: "<image><image><image>",
-                    1: "1<image><image>",
-                    2: "12<image>",
-                },
-            },
-        ),
-        (
-            "<image><image><image>",
-            {
-                "pattern_1": PromptIndexTargets.prefix("<image>"),
-            },
-            {
-                "pattern_1": lambda idx: str(idx + 1),
-            },
-            {
-                PromptInsertion: {
-                    0: "<image><image><image>",
-                    1: "<image>1<image><image>",
-                    2: "<image>12<image><image>",
-                },
-                PromptReplacement: {
-                    0: "<image><image><image>",
-                    1: "<image>1<image><image>",
-                    2: "<image>12<image><image>",
-                },
-            },
-        ),
-    ],
-)
-def test_find_update_text(
-    prompt,
-    target_by_key,
-    repl_by_key,
-    expected_by_update_type_mm_count,
-):
-    for (
-        update_type,
-        expected_by_mm_count,
-    ) in expected_by_update_type_mm_count.items():
-        for mm_count, expected in expected_by_mm_count.items():
-            mm_prompt_updates = {
-                key: [
-                    [update_type(key, target, repl_by_key[key]).resolve(i)]
-                    for i in range(mm_count)
-                ]
-                for key, target in target_by_key.items()
-            }
-
-            new_prompt, result = apply_text_matches(
-                prompt,
-                mm_prompt_updates,
-                tokenizer=None,
-            )
-
-            # Only displayed on error
-            print("update_type:", update_type)
-            print("mm_count:", mm_count)
-            print("mm_prompt_updates:", mm_prompt_updates)
-            print("new_prompt:", new_prompt)
-            print("result:", result)
-
-            # Manually constructed results
-            assert new_prompt == expected
 
 
 FIND_UPDATE_TOKENS_TEST_CASES = [
@@ -891,11 +583,7 @@ def test_find_update_tokens(
                 for key, target in target_by_key.items()
             }
 
-            new_prompt, result = apply_token_matches(
-                prompt,
-                mm_prompt_updates,
-                tokenizer=None,
-            )
+            new_prompt, result = apply_token_matches(prompt, mm_prompt_updates)
 
             # Only displayed on error
             print("update_type:", update_type)
@@ -945,7 +633,6 @@ def test_apply_token_matches_with_placeholders(
             new_prompt, result, placeholders = _apply_token_matches_with_placeholders(
                 prompt,
                 mm_prompt_updates,
-                tokenizer=None,
             )
 
             if any(
@@ -1097,7 +784,7 @@ def test_find_mm_placeholders(
         for key, repl in repl_by_key.items()
     }
 
-    result = find_mm_placeholders(prompt, mm_prompt_updates, tokenizer=None)
+    result = find_mm_placeholders(prompt, mm_prompt_updates)
 
     # Only displayed on error
     print("result:", result)
@@ -1285,24 +972,18 @@ def test_apply_matches_no_match_exits_quickly():
     With the fix, it should exit immediately when no match is found.
     """
     # Create a long prompt with no placeholder
-    long_prompt = "x" * 10000
+    long_prompt = [1] * 10000
 
     # Create update looking for a placeholder that doesn't exist
-    mm_prompt_updates = {
-        "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
-    }
+    mm_prompt_updates = {"image": [[PromptReplacement("image", [0], [-1]).resolve(0)]]}
 
     start = time.perf_counter()
-    result, _ = _apply_matches(
-        long_prompt,
-        mm_prompt_updates,
-        tokenizer=None,
-    )
+    result, _ = _apply_matches(long_prompt, mm_prompt_updates)
     elapsed = time.perf_counter() - start
 
     # Should complete in < 100ms (was taking seconds before the fix)
     assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
-    assert "".join(result) == long_prompt
+    assert flatten_2d_lists(result) == long_prompt
 
 
 def test_apply_matches_many_shared_targets_scales_linearly():
@@ -1317,11 +998,7 @@ def test_apply_matches_many_shared_targets_scales_linearly():
         prompt = [0] * item_count
 
         start = time.perf_counter()
-        result, match_result = apply_token_matches(
-            prompt,
-            mm_prompt_updates,
-            tokenizer=None,
-        )
+        result, match_result = apply_token_matches(prompt, mm_prompt_updates)
         elapsed = time.perf_counter() - start
 
         assert len(result) == item_count * len(replacement)
@@ -1360,7 +1037,7 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
     }
 
     start = time.perf_counter()
-    result = find_mm_placeholders(prompt, mm_prompt_updates, tokenizer=None)
+    result = find_mm_placeholders(prompt, mm_prompt_updates)
     elapsed = time.perf_counter() - start
 
     assert result == {}
@@ -1377,22 +1054,154 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
         [1, 2, 3, 4, 5],
     ],
 )
-def test_find_mm_placeholders_resolves_content_lazily(prompt):
+def test_find_mm_placeholders_stops_at_missing_item(prompt):
     """
-    Test that content of items the scan never reaches is not resolved.
-
-    With `tokenizer=None`, resolving string content raises; the scan must
-    return no placeholders instead of raising on the second item.
+    Test that the scan returns no placeholders once it fails to find
+    an item's placeholder, leaving later items unresolved.
     """
     result = find_mm_placeholders(
         prompt,
         {
             "image": [
                 [PromptReplacement("image", [0], [999]).resolve(0)],
-                [PromptReplacement("image", [0], "never reached").resolve(1)],
+                [PromptReplacement("image", [0], [998]).resolve(1)],
             ]
         },
-        tokenizer=None,
     )
 
     assert result == {}
+
+
+class _FakeTokenizer:
+    """
+    Character-level tokenizer where "foo" merges into one token differently
+    depending on whether it is followed by "d", like BPE merging "foo" in
+    "food" across the search-text boundary.
+    """
+
+    _MERGES = {"food": (1000,), "foo": (101, 111, 111)}
+    _INVERSE = {ids: text for text, ids in _MERGES.items()}
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        token_ids = list[int]()
+        pos = 0
+        while pos < len(text):
+            for length in (4, 3):
+                word = text[pos : pos + length]
+                if word in self._MERGES:
+                    token_ids.extend(self._MERGES[word])
+                    pos += length
+                    break
+            else:
+                token_ids.append(ord(text[pos]))
+                pos += 1
+        return token_ids
+
+    def decode(self, token_ids: list[int], **kwargs) -> str:
+        chars = list[str]()
+        pos = 0
+        while pos < len(token_ids):
+            for length in (3, 1):
+                key = tuple(token_ids[pos : pos + length])
+                if key in self._INVERSE:
+                    chars.append(self._INVERSE[key])
+                    pos += length
+                    break
+            else:
+                chars.append(chr(token_ids[pos]))
+                pos += 1
+        return "".join(chars)
+
+
+class _FakeProcessingInfo:
+    def __init__(self, tokenizer) -> None:
+        self._tokenizer = tokenizer
+
+    def get_tokenizer(self):
+        return self._tokenizer
+
+
+class _TextFallbackProcessor(BaseMultiModalProcessor):
+    """Only `self.info.get_tokenizer()` is needed by the text fallback."""
+
+    def __init__(self, tokenizer: _FakeTokenizer) -> None:
+        self.info = _FakeProcessingInfo(tokenizer)
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        raise NotImplementedError
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        raise NotImplementedError
+
+
+def _text_fallback_processor() -> BaseMultiModalProcessor:
+    return _TextFallbackProcessor(_FakeTokenizer())
+
+
+def test_apply_prompt_updates_falls_back_to_text_matching():
+    """
+    Test that the fallback in `_apply_prompt_updates` finds targets that
+    tokenize differently inside the prompt ("foo" in "food").
+    """
+    processor = _text_fallback_processor()
+
+    new_token_ids, placeholders = processor._apply_prompt_updates(
+        [1000],  # "food"
+        {
+            "image": [
+                [PromptReplacement("image", [101, 111, 111], [200, 201]).resolve(0)]
+            ]
+        },
+    )
+
+    assert new_token_ids == [200, 201, ord("d")]
+    assert [p.to_range().offset for p in placeholders["image"]] == [0]
+    assert [p.tokens for p in placeholders["image"]] == [[200, 201]]
+
+
+def test_apply_prompt_updates_falls_back_with_prefix_target():
+    """
+    Test that `PromptIndexTargets.prefix` targets are resolved against the
+    decoded text in the fallback path of `_apply_prompt_updates`.
+    """
+    processor = _text_fallback_processor()
+
+    new_token_ids, placeholders = processor._apply_prompt_updates(
+        [1000],  # "food"
+        {
+            "image": [
+                [
+                    PromptInsertion(
+                        "image",
+                        PromptIndexTargets.prefix([101, 111, 111]),
+                        [9],
+                    ).resolve(0)
+                ]
+            ]
+        },
+    )
+
+    assert new_token_ids == [101, 111, 111, 9, ord("d")]
+    assert [p.tokens for p in placeholders["image"]] == [[9]]
+
+
+def test_apply_prompt_updates_falls_back_with_index_targets():
+    """
+    Test that the text resolvers of `PromptIndexTargets.start`/`end`
+    match against the decoded text when another item forces the
+    fallback in `_apply_prompt_updates`.
+    """
+    processor = _text_fallback_processor()
+
+    new_token_ids, placeholders = processor._apply_prompt_updates(
+        [1000],  # "food"
+        {
+            "image": [
+                [PromptReplacement("image", [101, 111, 111], [200, 201]).resolve(0)],
+                [PromptInsertion("image", PromptIndexTargets.end(), [9]).resolve(1)],
+            ]
+        },
+    )
+
+    assert new_token_ids == [200, 201, ord("d"), 9]
+    assert [p.tokens for p in placeholders["image"]] == [[200, 201], [9]]
