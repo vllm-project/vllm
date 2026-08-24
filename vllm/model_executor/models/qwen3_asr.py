@@ -328,7 +328,7 @@ class Qwen3ASRMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             ),
         ]
@@ -361,6 +361,7 @@ class Qwen3ASRForConditionalGeneration(
     }
 
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    supports_tower_connector_lora = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -142,16 +143,22 @@ class Phi4SiglipDummyInputsBuilder(
 class Phi4SiglipMultiModalProcessor(
     BaseMultiModalProcessor[Phi4SiglipProcessingInfo],
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processed = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        processed = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
 
         # The HF processor's tokenizer_image_token() replaces the "<image>"
@@ -163,10 +170,12 @@ class Phi4SiglipMultiModalProcessor(
         # NOTE: tokenizer.__call__() (not .encode()) must be used so that
         # added/special tokens like <|user|>, <|end|> are kept as single IDs.
         tokenizer = self.info.get_tokenizer()
-        new_ids = tokenizer(prompt).input_ids
+        new_ids = tokenizer(prompt_text).input_ids
         processed["input_ids"] = torch.tensor([new_ids])
 
-        return processed
+        processed_data = processed
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -185,6 +194,8 @@ class Phi4SiglipMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
+
         def get_replacement(item_idx: int):
             # Read the actual patch grid from the NaFlex processor's
             # spatial_shapes output (same pattern as LFM2-VL).  This avoids
@@ -199,7 +210,9 @@ class Phi4SiglipMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="image",
-                target=DEFAULT_IMAGE_TOKEN,
+                target=cached_encode(
+                    tokenizer, DEFAULT_IMAGE_TOKEN, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]
