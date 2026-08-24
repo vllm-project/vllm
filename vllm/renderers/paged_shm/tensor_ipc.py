@@ -179,7 +179,6 @@ class PagedShmTensorIPC:
 
         # 3. Allocate shm for all these mm tensors at once
         # Refer to the wiki:Dining philosophers problem.
-        start = time.perf_counter()
         try:
             alloc = self.client.open_write(items, timeout=self.open_write_timeout)
         except RuntimeError as e:
@@ -209,12 +208,6 @@ class PagedShmTensorIPC:
                 shape=tuple(elem.data.shape),
             )
             elem.data = None  # Free the original tensor reference.
-
-        end = time.perf_counter()
-        elapsed_time = end - start
-        print(
-            f"PagedShmTensorIPC.write {elapsed_time * 1000} ms",
-        )
 
     def read(
         self,
@@ -251,16 +244,21 @@ class PagedShmTensorIPC:
                 torch_dtype = getattr(torch, pshm_tensor.dtype)
 
                 # 1. Wait for the writer to complete and read the data.
-                tensor_gpu = self.client.read(
-                    pshm_tensor.uuid,
-                    device=device,
-                    timeout=self.read_timeout,
-                )
-                tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
+                # swap_blocks_batch needs to run on another stream.
+                stream = torch.cuda.Stream()
+                with stream:
+                    tensor_gpu = self.client.read(
+                        pshm_tensor.uuid,
+                        device=device,
+                        timeout=self.read_timeout,
+                    )
+                    current_stream = torch.cuda.current_stream()
+                    current_stream.wait_stream(stream)
 
-                # 2. Replace the metadata with the actual tensor.
-                pixel_values.data = tensor_gpu
-                pixel_values.pshm_tensor = None
+                    # 2. Replace the metadata with the actual tensor.
+                    tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
+                    pixel_values.data = tensor_gpu
+                    pixel_values.pshm_tensor = None
 
     def shutdown(self) -> None:
         """Release all resources (client connection, background threads, etc.)."""

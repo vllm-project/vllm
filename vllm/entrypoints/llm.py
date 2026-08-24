@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -55,7 +56,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
-from ..utils.time_utils import set_arrival_time
 from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
@@ -458,10 +458,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
         """
-        # Linux: time.perf_counter() uses CLOCK_MONOTONIC (system‑wide),
-        # so it's safe for cross‑process timing.
-        set_arrival_time()
-
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError(

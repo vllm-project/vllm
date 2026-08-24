@@ -11,7 +11,6 @@ import torch.nn as nn
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-import vllm.utils.time_utils as time_utils
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
@@ -30,7 +29,6 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.time_utils import debug_spend_time
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
@@ -236,8 +234,6 @@ class LLMEngine:
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
 
-        arrival_time = time_utils.arrival_time
-
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
@@ -281,9 +277,7 @@ class LLMEngine:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
-            debug_spend_time("before engine_core.add_request")
             self.engine_core.add_request(request)
-            debug_spend_time("after engine_core.add_request")
             return req_id
 
         # Fan out child requests (for n>1).

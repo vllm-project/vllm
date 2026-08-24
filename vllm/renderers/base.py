@@ -44,7 +44,6 @@ from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
-from ..utils.time_utils import debug_spend_time
 from .embed_utils import safe_load_prompt_embeds
 from .inputs import (
     DictPrompt,
@@ -763,10 +762,7 @@ class BaseRenderer(ABC, Generic[_T]):
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
-        debug_spend_time("after mm_processor.apply")
-
         self._pshm_tensor_ipc.write(mm_inputs)
-        debug_spend_time("after pshm_tensor_ipc.write")
         self.update_mm_cache_stats()
 
         return mm_inputs
@@ -958,8 +954,6 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = self._process_singleton(prompt, skip_mm_cache=skip_mm_cache)
 
-        debug_spend_time("after process_for_engine")
-
         engine_input["arrival_time"] = arrival_time
 
         return engine_input
@@ -1004,8 +998,6 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
-
-        debug_spend_time("after render_prompts")
 
         return [
             self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)

@@ -20,7 +20,6 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
-from vllm.utils.time_utils import debug_spend_time
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
@@ -157,12 +156,7 @@ class EncoderRunner:
         self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
-
-        stream = torch.cuda.Stream()
-        with stream:
-            self._pshm_tensor_ipc.read(mm_kwargs, device=self.device)
-        stream.synchronize()
-        debug_spend_time("after execute_mm_encoder")
+        self._pshm_tensor_ipc.read(mm_kwargs, device=self.device)
 
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
