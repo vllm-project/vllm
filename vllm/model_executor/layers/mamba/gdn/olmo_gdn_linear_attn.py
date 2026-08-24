@@ -305,10 +305,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata.get(self.prefix)  # type: ignore[assignment]
-        if attn_metadata is None:
-            # Profile/warmup dummy runs skip mamba-family metadata.
-            return
+        attn_metadata = attn_metadata[self.prefix]  # type: ignore[assignment]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc

@@ -269,8 +269,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw.get(self.prefix)
-        if attn_metadata is not None:
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
             query_start_loc_p = attn_metadata.query_start_loc_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
