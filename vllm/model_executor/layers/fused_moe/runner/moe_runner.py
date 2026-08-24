@@ -825,8 +825,13 @@ class MoERunner(MoERunnerInterface):
         | tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]
     ):
         if self.do_naive_dispatch_combine:
+            if isinstance(hidden_states, UnfinalizedMoEOutput):
+                raise RuntimeError(
+                    "Naive expert-parallel combine cannot consume a deferred "
+                    "MoE output."
+                )
             hidden_states = get_ep_group().combine(
-                cast(torch.Tensor, hidden_states),
+                hidden_states,
                 self.moe_config.is_sequence_parallel,
             )
 
@@ -834,9 +839,11 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.pcp_size > 1
             and not self.moe_config.moe_parallel_config.use_all2all_kernels
         ):
-            hidden_states = get_pcp_group().reduce_scatter(
-                cast(torch.Tensor, hidden_states), dim=0
-            )
+            if isinstance(hidden_states, UnfinalizedMoEOutput):
+                raise RuntimeError(
+                    "PCP reduce-scatter cannot consume a deferred MoE output."
+                )
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
             assert shared_output is not None
