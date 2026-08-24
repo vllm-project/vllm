@@ -8,6 +8,10 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.batch_invariant_configs import (
+    _get_matmul_config,
+    resolve_tuned_matmul_configs,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
@@ -200,7 +204,7 @@ def matmul_persistent(
         B_LARGE=b.numel() > 2**31,
         C_LARGE=c.numel() > 2**31,
         HAS_BIAS=bias is not None,
-        **configs[dtype],
+        **_get_matmul_config(M, N, K, dtype, configs[dtype]),
     )
     return c
 
@@ -997,6 +1001,7 @@ def override_envs_for_invariance():
 def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
+        resolve_tuned_matmul_configs()
         override_envs_for_invariance()
         enable_batch_invariant_mode()
 
