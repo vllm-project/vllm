@@ -291,18 +291,17 @@ class CudaGraphManager:
         for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
             mode_descs = tuple(reversed(descs_by_mode.get(mode, [])))
             for num_active_loras in self.lora_capture_cases:
-                descs = filter(
-                    lambda d: d.num_active_loras == num_active_loras,
-                    mode_descs,
-                )
+                lora_descs = [
+                    d for d in mode_descs if d.num_active_loras == num_active_loras
+                ]
                 current_range_start = 0
                 # Dynamic speculative decoding can produce multiple graphs with the same
                 # num_tokens. Group them so each graph covers the same candidate range.
-                for num_tokens, group in groupby(descs, lambda d: d.num_tokens):
-                    group = list(group)
+                for num_tokens, group in groupby(lora_descs, lambda d: d.num_tokens):
+                    matching = list(group)
                     for i in range(current_range_start, num_tokens + 1):
                         key = (i, num_active_loras)
-                        self._candidates.setdefault(key, []).extend(group)
+                        self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
 
     def needs_capture(self) -> bool:
