@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -495,6 +496,15 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
     def has_fused_bf16_shared_experts(self) -> bool:
         return self._transformed_bf16_shared_l1_weight is not None
 
+    @property
+    def supports_published_shared_reduce_scatter(self) -> bool:
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        return hasattr(
+            _import_deep_gemm(),
+            "fp8_fp4_mega_moe_bf16_shared_rs",
+        )
+
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
@@ -546,7 +556,9 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         shared_hidden_states: torch.Tensor | None = None,
         rms_weight: torch.Tensor | None = None,
         rms_epsilon: float | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        shared_reduce_scatter_workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         self.synchronize_first_launch()
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
@@ -612,27 +624,58 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 )
             assert self._transformed_bf16_shared_l1_weight is not None
             assert self._transformed_bf16_shared_l2_weight is not None
-            shared_y = torch.empty(
-                (num_tokens, self._bf16_shared_hidden_size),
-                dtype=torch.bfloat16,
-                device=hidden_states.device,
-            )
-            deep_gemm.fp8_fp4_mega_moe_bf16_shared(
-                y,
-                shared_y,
-                self._transformed_l1_weights,
-                self._transformed_l2_weights,
-                shared_hidden_states,
-                self._transformed_bf16_shared_l1_weight,
-                self._transformed_bf16_shared_l2_weight,
-                rms_weight,
-                rms_epsilon,
-                symm_buffer,
-                activation=self.activation,
-                situ_beta=self.activation_beta,
-                situ_linear_beta=self.activation_linear_beta,
-                fast_math=fast_math,
-            )
+            if shared_reduce_scatter_workspace is not None:
+                if not self.supports_published_shared_reduce_scatter:
+                    raise RuntimeError(
+                        "DeepGEMM does not support published shared "
+                        "ReduceScatter outputs."
+                    )
+                (
+                    shared_rs_workspace,
+                    shared_rs_flags,
+                    shared_rs_peer_ptrs,
+                ) = shared_reduce_scatter_workspace
+                deep_gemm.fp8_fp4_mega_moe_bf16_shared_rs(
+                    y,
+                    self._transformed_l1_weights,
+                    self._transformed_l2_weights,
+                    shared_hidden_states,
+                    self._transformed_bf16_shared_l1_weight,
+                    self._transformed_bf16_shared_l2_weight,
+                    rms_weight,
+                    rms_epsilon,
+                    shared_rs_workspace,
+                    shared_rs_flags,
+                    shared_rs_peer_ptrs,
+                    symm_buffer,
+                    activation=self.activation,
+                    situ_beta=self.activation_beta,
+                    situ_linear_beta=self.activation_linear_beta,
+                    fast_math=fast_math,
+                )
+                shared_y = None
+            else:
+                shared_y = torch.empty(
+                    (num_tokens, self._bf16_shared_hidden_size),
+                    dtype=torch.bfloat16,
+                    device=hidden_states.device,
+                )
+                deep_gemm.fp8_fp4_mega_moe_bf16_shared(
+                    y,
+                    shared_y,
+                    self._transformed_l1_weights,
+                    self._transformed_l2_weights,
+                    shared_hidden_states,
+                    self._transformed_bf16_shared_l1_weight,
+                    self._transformed_bf16_shared_l2_weight,
+                    rms_weight,
+                    rms_epsilon,
+                    symm_buffer,
+                    activation=self.activation,
+                    situ_beta=self.activation_beta,
+                    situ_linear_beta=self.activation_linear_beta,
+                    fast_math=fast_math,
+                )
             return y, shared_y
 
         deep_gemm.fp8_fp4_mega_moe(
@@ -792,13 +835,19 @@ class KimiMoE(nn.Module):
             self.fuse_shared_mega_moe and self.tp_size > 1 and not use_sequence_parallel
         )
         fused_shared_api_available = False
+        published_shared_api_available = False
         if self.fuse_shared_mega_moe:
             from vllm.utils.deep_gemm import _import_deep_gemm
 
+            deep_gemm = _import_deep_gemm()
             fused_shared_api_available = hasattr(
-                _import_deep_gemm(), "fp8_fp4_mega_moe_bf16_shared"
+                deep_gemm, "fp8_fp4_mega_moe_bf16_shared"
+            )
+            published_shared_api_available = hasattr(
+                deep_gemm, "fp8_fp4_mega_moe_bf16_shared_rs"
             )
         self._mega_normalized_tail: Any | None = None
+        self._mega_published_shared_available = False
 
         self.routed_expert_down_proj: ReplicatedLinear | None
         self.routed_expert_norm: RMSNorm | None
@@ -844,8 +893,14 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
+        published_shared_topology_supported = False
         if self.use_mega_moe:
             ep_group = get_ep_group()
+            # DeepGEMM synchronizes this publication over its EP group, while
+            # the consumer peer-reads a TP symmetric allocation. They must
+            # contain exactly the same ranks; DP-expanded EP falls back to the
+            # ordinary shared-output path.
+            published_shared_topology_supported = ep_group.ranks == get_tp_group().ranks
             ep_size = ep_group.world_size
             ep_rank = ep_group.rank_in_group
             if num_experts % ep_size != 0:
@@ -915,6 +970,9 @@ class KimiMoE(nn.Module):
                 dtype=norm.weight.dtype,
                 device=norm.weight.device,
                 rms_eps=norm.variance_epsilon,
+            )
+            self._mega_published_shared_available = bool(
+                published_shared_api_available and published_shared_topology_supported
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -1015,6 +1073,21 @@ class KimiMoE(nn.Module):
                     raise ValueError(
                         "Fused Kimi K3 shared MegaMoE requires routed RMSNorm."
                     )
+                normalized_tail = getattr(self, "_mega_normalized_tail", None)
+                use_normalized_tail = (
+                    normalized_tail is not None
+                    and 0 < num_tokens <= normalized_tail.contract.max_num_tokens
+                )
+                use_published_shared = bool(
+                    use_normalized_tail
+                    and getattr(self, "_mega_published_shared_available", False)
+                )
+                shared_reduce_scatter_workspace = None
+                if use_published_shared:
+                    assert normalized_tail is not None
+                    shared_reduce_scatter_workspace = (
+                        normalized_tail.published_shared_workspace()
+                    )
                 final_hidden_states, shared_output = self.experts(
                     routed_hidden_states,
                     router_output,
@@ -1023,14 +1096,20 @@ class KimiMoE(nn.Module):
                     shared_hidden_states=hidden_states,
                     rms_weight=norm.weight,
                     rms_epsilon=norm.variance_epsilon,
+                    shared_reduce_scatter_workspace=(shared_reduce_scatter_workspace),
                 )
-                normalized_tail = getattr(self, "_mega_normalized_tail", None)
-                use_normalized_tail = (
-                    normalized_tail is not None
-                    and 0 < num_tokens <= normalized_tail.contract.max_num_tokens
-                )
-                if use_normalized_tail:
+                if use_published_shared:
                     assert normalized_tail is not None
+                    assert shared_output is None
+                    final_hidden_states = (
+                        normalized_tail.from_normalized_replicated_routed_published(
+                            final_hidden_states,
+                            self.routed_output_transform.up_proj.weight,
+                        )
+                    )
+                elif use_normalized_tail:
+                    assert normalized_tail is not None
+                    assert shared_output is not None
                     final_hidden_states = (
                         normalized_tail.from_normalized_replicated_routed(
                             final_hidden_states,
@@ -1039,8 +1118,10 @@ class KimiMoE(nn.Module):
                         )
                     )
                 elif self.fused_shared_output_needs_tp_reduce:
+                    assert shared_output is not None
                     shared_output = tensor_model_parallel_all_reduce(shared_output)
                 if not use_normalized_tail:
+                    assert shared_output is not None
                     # Kernel 1 returned an already-normalized routed latent plus
                     # the BF16 shared output (reduced above when it was TP-sharded).
                     # addmm_ is kernel 2 and folds the shared add into the

@@ -1114,6 +1114,12 @@ class CollectiveKernel:
             )
         return self._shared_shard
 
+    def published_shared_workspace(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the Lamport workspace metadata written by DeepGEMM."""
+        return self._shared_workspace, self._shared_flags, self._shared_peer_ptrs
+
     def __call__(
         self,
         latent_source: torch.Tensor | UnfinalizedMoEOutput,

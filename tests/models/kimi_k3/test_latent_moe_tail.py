@@ -296,6 +296,72 @@ def _test_latent_moe_tail_worker(
         rtol=3e-2,
     )
 
+    # DeepGEMM can scatter every rank's shared partial directly into the
+    # destination rank's symmetric Lamport workspace. The up-projection
+    # epilogue reduces the already-local fragments without an intermediate
+    # full shared output or standalone consumer kernel.
+    published_workspace, published_flags, _ = op.published_shared_workspace()
+    torch.manual_seed(3200)
+    routed_published = torch.randn(
+        16,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(3300 + rank)
+    shared_published = torch.randn(
+        16,
+        HIDDEN_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    published_sources = [torch.empty_like(shared_published) for _ in range(tp_size)]
+    dist.all_gather(published_sources, shared_published, group=group)
+    local_hidden_size = HIDDEN_SIZE // tp_size
+
+    def populate_published_generation(generation: int) -> None:
+        local_workspace = published_workspace[generation, :16]
+        for source_rank, source in enumerate(published_sources):
+            local_workspace[:, source_rank].copy_(
+                source[:, rank * local_hidden_size : (rank + 1) * local_hidden_size]
+            )
+
+    published_generation = int(published_flags[0].item())
+    populate_published_generation(published_generation)
+    shared_published_reference = shared_published.clone()
+    dist.all_reduce(shared_published_reference, group=group)
+    expected_published = F.linear(routed_published, up_weight)
+    expected_published.add_(shared_published_reference)
+
+    actual_published = op.from_normalized_replicated_routed_published(
+        routed_published,
+        up_weight,
+    )
+    torch.testing.assert_close(
+        actual_published,
+        expected_published,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+    # Populate all generations with the same source so capture and replay can
+    # exercise device-side generation rotation without a host synchronization.
+    for generation in range(published_workspace.shape[0]):
+        populate_published_generation(generation)
+    published_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(published_graph):
+        published_graph_output = op.from_normalized_replicated_routed_published(
+            routed_published,
+            up_weight,
+        )
+    published_graph.replay()
+    torch.testing.assert_close(
+        published_graph_output,
+        expected_published,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
 
 def _run_latent_moe_tail_test(
     monkeypatch: pytest.MonkeyPatch,
