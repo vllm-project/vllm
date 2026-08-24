@@ -17,13 +17,15 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
-    generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
+)
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
