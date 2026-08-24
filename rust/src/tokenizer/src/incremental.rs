@@ -61,6 +61,14 @@ pub struct DecodedText {
 }
 
 impl DecodedText {
+    /// Create decoded text without token attribution records. Mostly for testing purposes.
+    pub fn unattributed(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attributions: SmallVec::new(),
+        }
+    }
+
     /// Append another decoded fragment, rebasing its token anchors.
     pub fn append(&mut self, other: Self) {
         if self.text.is_empty() && self.attributions.is_empty() {

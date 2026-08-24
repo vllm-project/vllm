@@ -600,10 +600,7 @@ mod tests {
         finished: Option<Finished>,
     ) -> DecodedTextEvent {
         DecodedTextEvent::TextDelta {
-            decoded: DecodedText {
-                text: text.into(),
-                ..Default::default()
-            },
+            decoded: DecodedText::unattributed(text),
             sampled: SampledDelta {
                 token_ids,
                 logprobs,

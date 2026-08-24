@@ -140,10 +140,7 @@ mod tests {
                 }),
             }),
             Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText {
-                    text: "bc".to_string(),
-                    ..Default::default()
-                },
+                decoded: DecodedText::unattributed("bc"),
                 sampled: SampledDelta {
                     token_ids: vec![1, 2],
                     logprobs: Some(DecodedLogprobs {
@@ -230,10 +227,7 @@ mod tests {
                 prompt_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText {
-                    text: "he".to_string(),
-                    ..Default::default()
-                },
+                decoded: DecodedText::unattributed("he"),
                 sampled: SampledDelta {
                     token_ids: vec![1, 2],
                     logprobs: Some(DecodedLogprobs {
@@ -260,10 +254,7 @@ mod tests {
                 finished: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText {
-                    text: "llo".to_string(),
-                    ..Default::default()
-                },
+                decoded: DecodedText::unattributed("llo"),
                 sampled: SampledDelta {
                     token_ids: vec![3, 4, 5],
                     logprobs: Some(DecodedLogprobs {

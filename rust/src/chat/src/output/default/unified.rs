@@ -378,10 +378,7 @@ mod tests {
 
     fn decoded_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
-            decoded: vllm_text::DecodedText {
-                text: delta.to_string(),
-                ..Default::default()
-            },
+            decoded: vllm_text::DecodedText::unattributed(delta),
             sampled: vllm_text::SampledDelta::default(),
             finished: None,
         }
@@ -389,10 +386,7 @@ mod tests {
 
     fn finished_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
-            decoded: vllm_text::DecodedText {
-                text: delta.to_string(),
-                ..Default::default()
-            },
+            decoded: vllm_text::DecodedText::unattributed(delta),
             sampled: vllm_text::SampledDelta::default(),
             finished: Some(Box::new(vllm_text::output::Finished {
                 usage: vllm_llm::TokenUsage::default(),

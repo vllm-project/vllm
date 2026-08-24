@@ -748,10 +748,7 @@ fn decoded_completion_stream(
                 ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
-                decoded: vllm_text::DecodedText {
-                    text: chunk.delta,
-                    ..Default::default()
-                },
+                decoded: vllm_text::DecodedText::unattributed(chunk.delta),
                 sampled: vllm_text::SampledDelta {
                     token_ids: chunk.token_ids,
                     logprobs: None,
