@@ -877,10 +877,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.encoder_runner.capture()
 
             if capture_decoder:
+                input_buffers = (
+                    self.pcp_manager.input_buffers
+                    if self.pcp_manager is not None
+                    else self.input_buffers
+                )
                 self.cudagraph_manager.capture(
                     self.model,
                     self.model_state,
-                    self.input_buffers,
+                    input_buffers,
                     self.intermediate_tensors,
                     self.block_tables,
                     self.attn_groups,
