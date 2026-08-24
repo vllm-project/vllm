@@ -157,6 +157,40 @@ MESSAGES_CITATIONS_KEY = "_messages_citations"
 POSITION_TO_SOURCE_KEY = "_position_to_source"
 
 
+# Reserved ``chat_template_kwargs`` key carrying the original Cohere v2
+# tool-message content, keyed by request-message index. Populated by
+# :meth:`CohereServingChatV2._apply_cohere_template_kwargs` and consumed
+# by :func:`_conversation_to_melody_messages`, which runs each block
+# through :func:`_v2_tool_content_to_melody_block` to produce the
+# melody-shape content list the renderer emits.
+#
+# Motivation: OpenAI's ``ChatCompletionContentPartParam`` union (in
+# ``vllm/entrypoints/chat_utils.py``) only allows ``text`` / ``image_url``
+# / ``audio`` / ``video`` / ``file`` content parts on tool messages, so
+# ``{"type": "document", "document": {...}}`` blocks -- valid in Cohere
+# v2 -- get rejected by vLLM's shared chat validator before they can
+# reach the renderer.
+# ``CohereServingChatV2._convert_tool_message`` works around that by
+# rewriting each content block into a plain ``text`` part (with document
+# blocks JSON-serialized inline), but that flattening loses the
+# structural distinction the cohere renderer needs to shape tool-result
+# payloads for cmd3/cmd4. The serving layer therefore forwards the
+# original v2 content blocks verbatim (as plain dicts) under this key,
+# and the renderer owns the v2-shape → melody-shape mapping.
+#
+# Value type: ``dict[int, list[dict[str, Any]]]``. Each list entry is a
+# ``model_dump``'d ``TextToolContent`` / ``DocumentToolContent`` block
+# (e.g. ``{"type": "text", "text": ...}`` or ``{"type": "document",
+# "document": {"id": ..., "data": {...}}}``). Index is the position of
+# the tool message in the request's ``messages`` list, which -- since
+# ``_convert_messages`` is 1-to-1 -- also matches its position in the
+# ``ConversationMessage`` list handed to the renderer. Leading
+# underscore signals "internal, not part of the public
+# ``chat_template_kwargs`` surface" -- clients should not set this key
+# directly.
+TOOL_MESSAGE_V2_CONTENT_KEY = "_tool_message_v2_content"
+
+
 # Keys this renderer interprets directly from ``chat_template_kwargs`` and
 # maps onto typed melody render-config fields. Everything *not* in this
 # set is forwarded verbatim to melody as ``additional_template_fields``
@@ -196,6 +230,7 @@ _RENDERER_CONSUMED_KEYS = frozenset(
         "platform_instruction",
         MESSAGES_CITATIONS_KEY,
         POSITION_TO_SOURCE_KEY,
+        TOOL_MESSAGE_V2_CONTENT_KEY,
     }
 )
 
@@ -377,6 +412,69 @@ def _content_blocks(content: Any) -> list[dict[str, Any]]:
     return blocks
 
 
+def _v2_tool_content_to_melody_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert one Cohere v2 tool-message content block into a melody
+    ``document`` content block.
+
+    Cohere's chat v2 admits two shapes for tool-message content parts:
+
+    * ``TextToolContent`` -- ``{"type": "text", "text": "..."}``.
+    * ``DocumentToolContent`` -- ``{"type": "document", "document":
+      {"id"?: str, "data": {...}}}``.
+
+    Both are emitted as melody ``document`` blocks, mirroring the cohere
+    api, which routes every tool content part through the same
+    "tool output as document" conversion. The rules:
+
+    * Text that parses to a JSON object becomes that object directly
+      (so structured tool output flows through as first-class fields).
+    * Text that doesn't parse as an object -- empty, non-JSON,
+      or JSON scalar/array -- gets wrapped as ``{"content": <text>}``
+      so templates have a stable field name to look up.
+    * ``document`` blocks unwrap ``document.data`` (a flat map) into
+      the melody payload; ``document.id`` is intentionally dropped
+      here because outbound citation binding tracks it separately via
+      ``POSITION_TO_SOURCE_KEY``.
+
+    Only the JSON-object case actually changes what gets rendered. The
+    cmd3/cmd4 templates already wrap a bare ``text`` content block as
+    ``{"content": <text>}`` themselves, so routing plain text through
+    here is a no-op on the prompt -- it is the JSON-object unwrap that
+    promotes structured tool output from an escaped string blob into
+    individually addressable (and citable) result fields.
+
+    Note the payload is the *flat* field map: melody's ``Content``
+    carries ``document`` as a plain map, so re-nesting it under a
+    ``data`` key would render a spurious ``{"data": {...}}`` wrapper
+    into the tool-result block.
+
+    Returns ``None`` for unrecognised shapes; the caller should skip
+    those blocks (the citation-numbering walk in
+    ``CohereServingChatV2._walk_citable_positions`` advances its own
+    cursor over unknown blocks, so slot alignment is preserved).
+    """
+    block_type = block.get("type")
+    if block_type == "text":
+        text = block.get("text") or ""
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            payload: dict[str, Any] = dict(parsed)
+        else:
+            payload = {"content": text}
+        return {"type": MelodyContentType.DOCUMENT, "document": payload}
+    if block_type == "document":
+        doc = block.get("document")
+        if not isinstance(doc, dict):
+            return None
+        data = doc.get("data")
+        payload = dict(data) if isinstance(data, dict) else {}
+        return {"type": MelodyContentType.DOCUMENT, "document": payload}
+    return None
+
+
 def _document_to_melody(doc: Any) -> dict[str, Any]:
     """Coerce a Cohere v2 document into melody's ``Document`` (dict) shape."""
     match doc:
@@ -421,6 +519,7 @@ def _tool_to_melody(tool: Any) -> dict[str, Any]:
 def _conversation_to_melody_messages(
     conversation: list[ConversationMessage],
     messages_citations: dict[int, list[dict[str, Any]]] | None = None,
+    tool_message_v2_content: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert vLLM ``ConversationMessage``s into melody's message dict shape.
 
@@ -429,17 +528,42 @@ def _conversation_to_melody_messages(
     ``CohereServingChatV2`` under the
     :data:`MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values
     must already be in melody's ``FilterCitation`` dict shape (see
-    ``CohereServingChatV2._sdk_citation_to_melody``). Index is the
-    position in the *input* ``conversation`` list, which currently maps
-    1-to-1 with ``CohereChatV2Request.messages`` for text-only Cohere
-    requests. This mapping breaks silently if ``parse_chat_messages``
-    ever expands a single input message into multiple entries (e.g.
+    ``CohereServingChatV2._sdk_citation_to_melody``).
+
+    ``tool_message_v2_content`` is an optional index-keyed lookup of
+    the original Cohere v2 tool-message content blocks (as plain
+    dicts), populated by ``CohereServingChatV2`` under the
+    :data:`TOOL_MESSAGE_V2_CONTENT_KEY` entry. When set for a given
+    index, its blocks -- run through
+    :func:`_v2_tool_content_to_melody_block` to apply the v2 → melody
+    mapping -- replace the block list this function would otherwise
+    derive from ``msg["content"]``. This lets the renderer own the
+    v2-shape → melody-shape conversion for the structured ``document``
+    blocks cohere v2 allows on tool messages (which don't survive
+    OpenAI's content-parts validator on the way in, so
+    ``_convert_tool_message`` rewrites them into ``text`` parts).
+
+    Both index lookups key by position in the *input* ``conversation``
+    list, which currently maps 1-to-1 with
+    ``CohereChatV2Request.messages`` for text-only Cohere requests.
+    This mapping breaks silently if ``parse_chat_messages`` ever
+    expands a single input message into multiple entries (e.g.
     multi-modal splitting), which is not the case today.
     """
     out: list[dict[str, Any]] = []
     for i, msg in enumerate(conversation):
         role = _role_to_melody(msg.get("role", "user"))
-        content_blocks = _content_blocks(msg.get("content"))
+        if (
+            tool_message_v2_content is not None
+            and (v2_blocks := tool_message_v2_content.get(i)) is not None
+        ):
+            content_blocks = []
+            for v2_block in v2_blocks:
+                mapped = _v2_tool_content_to_melody_block(v2_block)
+                if mapped is not None:
+                    content_blocks.append(mapped)
+        else:
+            content_blocks = _content_blocks(msg.get("content"))
 
         # Treat reasoning content as a thinking block on assistant turns
         # so multi-turn reasoning is preserved in the rendered prompt.
@@ -513,6 +637,7 @@ def _build_render_config(
         "messages": _conversation_to_melody_messages(
             conversation,
             chat_template_kwargs.get(MESSAGES_CITATIONS_KEY),
+            chat_template_kwargs.get(TOOL_MESSAGE_V2_CONTENT_KEY),
         ),
     }
 

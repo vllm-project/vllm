@@ -224,39 +224,16 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
         if inputs.mm_data_items:
-            if isinstance(inputs.prompt, str):
-                if len(inputs.prompt) > 0:
-                    raise ValueError(
-                        "CLIP accepts text-only or image-only inputs, not both! "
-                        "You must pass an image with an empty text prompt."
-                    )
+            special_tokens = self.info.get_tokenizer().all_special_ids
+            if all(tok in special_tokens for tok in inputs.prompt):
+                inputs.prompt = []
             else:
-                special_tokens = self.info.get_tokenizer().all_special_ids
-                if all(tok in special_tokens for tok in inputs.prompt):
-                    inputs.prompt = []
-                else:
-                    raise ValueError(
-                        "CLIP accepts text-only or image-only inputs, not both! "
-                        "You must pass an image with an empty token prompt."
-                    )
-
-            # For multi-modal data, the prompt after processing should
-            # only contain the dummy image tokens
-            inputs.tokenization_kwargs = {
-                **inputs.tokenization_kwargs,
-                "add_special_tokens": False,
-            }
+                raise ValueError(
+                    "CLIP accepts text-only or image-only inputs, not both! "
+                    "You must pass an image with an empty token prompt."
+                )
 
         return super().apply(inputs, timing_ctx)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_mm_fields_config(
         self,

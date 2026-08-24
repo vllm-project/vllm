@@ -12,11 +12,12 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler
@@ -104,33 +105,37 @@ class JinaForRankingPool(StepPool):
     def get_supported_tasks(self) -> set[PoolingTask]:
         return {"token_embed"}
 
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooled_data_lst = super().forward(hidden_states, pooling_metadata)
-        prompt_token_ids = pooling_metadata.get_prompt_token_ids()
+        prompt_token_ids_cpu = pooling_metadata.get_prompt_token_ids_cpu()
 
         embeds_list = list[torch.Tensor | None]()
-        # `torch.where` resolves the match count on the host.
-        with gpu_sync_allowed():
-            for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
-                # for unfinished chunked prefill
-                if data is None:
-                    embeds_list.append(None)
-                else:
-                    doc_match = torch.eq(token_ids, self.doc_token_id)
-                    docs_indexes = torch.where(doc_match)[0]
-                    query_indexes = torch.where(
-                        torch.eq(token_ids, self.query_token_id)
-                    )[0]
+        for data, token_ids_cpu in zip(pooled_data_lst, prompt_token_ids_cpu):
+            # for unfinished chunked prefill
+            if data is None:
+                embeds_list.append(None)
+            else:
+                doc_match = torch.eq(token_ids_cpu, self.doc_token_id)
+                docs_indexes_cpu = torch.where(doc_match)[0]
+                query_indexes_cpu = torch.where(
+                    torch.eq(token_ids_cpu, self.query_token_id)
+                )[0]
 
-                    # The JinaForRanking model concatenates docs first, then query.
-                    # Let's stay consistent with this novel design.
-                    indexes = torch.cat([docs_indexes, query_indexes])
-                    embeds = self.projector(data[indexes])
-                    embeds_list.append(embeds)
+                # The JinaForRanking model concatenates docs first, then query.
+                # Let's stay consistent with this novel design.
+                indexes_cpu = torch.cat([docs_indexes_cpu, query_indexes_cpu])
+                indexes = async_tensor_h2d(
+                    indexes_cpu, device=data.device, dtype=torch.long
+                )
+                embeds = self.projector(data[indexes])
+                embeds_list.append(embeds)
 
         return embeds_list
 
