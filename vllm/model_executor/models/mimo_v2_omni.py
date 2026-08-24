@@ -912,16 +912,23 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
         Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
         the singular form.
         """
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
         # Remap audios → audio (MiMoOmniProcessor uses singular param name)
         if "audios" in mm_data:
             mm_data = {**mm_data, "audio": mm_data["audios"]}
@@ -999,7 +1006,13 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
             mm_data = {**mm_data, "videos": converted}
 
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            mm_data,
+            hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -1099,7 +1112,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             embed_t = torch.tensor(is_embed_mask)
             return PromptUpdateDetails(
                 full=full,
-                is_embed=lambda _tok, _seq: embed_t,
+                is_embed=lambda _seq: embed_t,
             )
 
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
