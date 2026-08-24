@@ -87,7 +87,7 @@ class Scheduler(SchedulerInterface):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
-        self.model_uses_xdrope = vllm_config.model_config.uses_xdrope_dim > 0
+        self.model_uses_xdrope = vllm_config.model_config.uses_xdrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config

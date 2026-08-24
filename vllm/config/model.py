@@ -1844,6 +1844,10 @@ class ModelConfig:
         return uses_xdrope_dim(self.hf_config)
 
     @property
+    def uses_xdrope(self) -> bool:
+        return self.uses_xdrope_dim > 0
+
+    @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
