@@ -1099,11 +1099,25 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
         else:
-            layer_page_size = layer_spec.page_size_bytes
-            if max_page_size % layer_page_size == 0:
-                ratio = max_page_size // layer_page_size
+            # Both scaling paths work from the natural page: a pre-padded
+            # attention spec would otherwise pick its branch and ratio from
+            # the stale padding, under-scale, and trip the ``page_size_padded
+            # >= unpadded`` assertion once the grown natural page outruns it.
+            if isinstance(layer_spec, AttentionSpec):
+                natural_page_size = layer_spec.unpadded_page_size_bytes
+            else:
+                natural_page_size = layer_spec.page_size_bytes
+            if max_page_size % natural_page_size == 0:
+                ratio = max_page_size // natural_page_size
                 new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
+                if isinstance(layer_spec, AttentionSpec):
+                    new_spec = replace(
+                        layer_spec,
+                        block_size=new_block_size,
+                        page_size_padded=None,
+                    )
+                else:
+                    new_spec = replace(layer_spec, block_size=new_block_size)
             elif isinstance(layer_spec, AttentionSpec) and not isinstance(
                 layer_spec, MLAAttentionSpec
             ):
@@ -1119,7 +1133,7 @@ def unify_kv_cache_spec_page_size(
                 # candidate: a pre-padded spec would otherwise under-scale and
                 # trip the ``page_size_padded >= unpadded`` assertion once the
                 # grown natural page outruns the stale padding.
-                ratio = max_page_size // layer_spec.unpadded_page_size_bytes
+                ratio = max_page_size // natural_page_size
                 scaled = replace(
                     layer_spec,
                     block_size=layer_spec.block_size * ratio,

@@ -3095,6 +3095,27 @@ def test_unify_kv_cache_page_size_scales_pre_padded_spec_from_natural_page():
     assert unified["pre_padded_layer"].page_size_bytes == 40960
     assert unified["large_attn_layer"] == large
 
+    # Divisible path: the natural 16 KiB page divides the 48 KiB maximum, and
+    # so does the stale 24 KiB padding -- which is exactly the trap: a ratio
+    # taken from the padded size (48 // 24 == 2) under-scales and then trips
+    # the padding assertion once the natural page grows past 24 KiB. The
+    # ratio must be 48 // 16 == 3, and dropping the padding lands exactly on
+    # the maximum with no pad at all.
+    pre_padded = replace(new_kv_cache_spec(block_size=16), page_size_padded=24576)
+    large = new_kv_cache_spec(block_size=48)
+    assert large.page_size_bytes == 49152
+    assert large.page_size_bytes % pre_padded.page_size_bytes == 0
+    assert large.page_size_bytes % pre_padded.unpadded_page_size_bytes == 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"pre_padded_layer": pre_padded, "large_attn_layer": large}
+    )
+
+    assert unified["pre_padded_layer"].block_size == 48
+    assert unified["pre_padded_layer"].page_size_padded is None
+    assert unified["pre_padded_layer"].page_size_bytes == 49152
+    assert unified["large_attn_layer"] == large
+
 
 def test_hma_not_disabled_when_kv_events_enabled():
     """
