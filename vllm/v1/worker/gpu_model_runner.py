@@ -4613,6 +4613,20 @@ class GPUModelRunner(
             <= self.effective_drafter_max_model_len
         )
 
+    def _get_bookkeeping_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+        draft_before_bookkeeping: bool,
+    ) -> torch.Tensor:
+        if not draft_before_bookkeeping or not any(
+            req_id in scheduler_output.num_scheduled_tokens
+            for req_id in self.num_prompt_logprobs
+        ):
+            return hidden_states
+        # A padded model drafter can reuse the target CUDA graph output buffer.
+        return hidden_states[: scheduler_output.total_num_scheduled_tokens].clone()
+
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -4690,6 +4704,7 @@ class GPUModelRunner(
 
         spec_config = self.speculative_config
         draft_after_bookkeeping = False
+        bookkeeping_hidden_states = hidden_states
         if spec_config is not None:
             # Decide whether to run the drafter or zero out draft tokens.
             input_fits_in_drafter = self._input_fits_in_drafter(
@@ -4705,6 +4720,11 @@ class GPUModelRunner(
             use_gpu_toks = (
                 drafter_runs_model_forward
                 and not spec_config.disable_padded_drafter_batch
+            )
+            bookkeeping_hidden_states = self._get_bookkeeping_hidden_states(
+                hidden_states,
+                scheduler_output,
+                draft_before_bookkeeping=use_gpu_toks,
             )
             if use_gpu_toks:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
@@ -4791,7 +4811,7 @@ class GPUModelRunner(
                 scheduler_output,
                 sampler_output,
                 logits,
-                hidden_states,
+                bookkeeping_hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
             )
 
