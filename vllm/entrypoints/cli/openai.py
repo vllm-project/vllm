@@ -38,6 +38,8 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
         model_name = args.model_name
     else:
         available_models = openai_client.models.list()
+        if not available_models.data:
+            raise RuntimeError(f"No models found on server at {base_url}")
         model_name = available_models.data[0].id
 
     print(f"Using model: {model_name}")
