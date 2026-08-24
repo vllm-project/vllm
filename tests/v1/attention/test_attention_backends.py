@@ -1058,6 +1058,35 @@ def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_sm120_nvfp4_xqa_uses_model_dtype_for_decode(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.cache_dtype = "nvfp4"
+    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(disable_flashinfer_q_quantization=False)
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability",
+        lambda capability: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
+
+    assert builder.get_q_data_type(is_prefill=False) == torch.bfloat16
+    assert builder.get_q_data_type(is_prefill=True) == flashinfer_backend.FP8_DTYPE
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend

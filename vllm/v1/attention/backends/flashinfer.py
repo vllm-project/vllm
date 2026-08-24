@@ -942,9 +942,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if cache_config requests a quantized dtype globally.
         cache_dtype = self.cache_dtype
 
-        # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
-        # FI native prefill on SM90 still uses FP8-Q in that case; SM12x prefill
-        # is fa2-only and keeps the model dtype (handled below).
+        # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 or NVFP4
+        # KV cache. FI native prefill on SM90 still uses FP8-Q in that case;
+        # SM12x prefill is fa2-only and keeps the model dtype (handled below).
         if (
             (
                 current_platform.is_device_capability(90)
@@ -952,7 +952,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
             and not is_prefill
             and force_use_trtllm_attention() is not False
-            and cache_dtype.startswith("fp8")
+            and (
+                cache_dtype.startswith("fp8")
+                or (
+                    current_platform.is_device_capability_family(120)
+                    and cache_dtype.startswith("nvfp4")
+                )
+            )
         ):
             return self.model_config.dtype
 
@@ -2138,7 +2144,6 @@ class FlashInferImpl(AttentionImpl):
         use_dcp = self.dcp_world_size > 1
         if decode_with_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -2482,7 +2487,9 @@ class FlashInferImpl(AttentionImpl):
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
                         query=decode_query,
-                        kv_cache=kv_cache_tuple,
+                        kv_cache=(
+                            nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
+                        ),
                         workspace_buffer=workspace_buffer,
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
@@ -2495,6 +2502,9 @@ class FlashInferImpl(AttentionImpl):
                         kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                         q_len_per_req=q_len_per_req,
                         mask=attn_metadata.decode.mask,
+                        kv_cache_sf=(
+                            nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                        ),
                         q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
                     )
                     return output_padded
