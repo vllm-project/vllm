@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <cstdio>
 #include <optional>
 
 #include <hip/hip_runtime.h>
@@ -41,6 +42,10 @@
 #include <torch/headeronly/core/ScalarType.h>
 
 #include "../torch_utils.h"
+
+#if defined(__gfx950__) || !defined(__HIP_DEVICE_COMPILE__)
+  #define ROCM_USE_FUSED_PREFILL_KDA 1
+#endif
 
 using bf16_t = __bf16;
 using bf16x2 = __bf16 __attribute__((ext_vector_type(2)));
@@ -50,6 +55,15 @@ using u32x2 = uint32_t __attribute__((ext_vector_type(2)));
 using u32x4 = uint32_t __attribute__((ext_vector_type(4)));
 
 namespace {
+
+#ifndef ROCM_USE_FUSED_PREFILL_KDA
+__device__ inline void kda_unsupported_arch(const char* name) {
+  if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+    printf("vLLM %s is built for gfx950 only, aborting.\n", name);
+  }
+  __builtin_trap();
+}
+#endif
 
 constexpr int kK = 128;
 constexpr int kV = 128;
@@ -396,6 +410,7 @@ __device__ __forceinline__ void chunk_phase_b(const bf16_t* lds,
 
 template <int BVW, int WAVES, bool HAS_H0, bool PASS2>
 __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
+#ifdef ROCM_USE_FUSED_PREFILL_KDA
   constexpr int kNV = BVW / 16;
   constexpr int kBV = BVW * WAVES;
   constexpr int kNThread = 64 * WAVES;
@@ -764,6 +779,9 @@ __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
     for (int vt = 0; vt < kNV; ++vt)
       for (int kt = 0; kt < kNKT; ++kt)
         *reinterpret_cast<f32x4*>(s1 + vt * st_vt + kt * st_kt) = S[kt][vt];
+#else
+  kda_unsupported_arch("kda_chunk_fused");
+#endif // ifdef ROCM_USE_FUSED_PREFILL_KDA
 }
 
 // Compose the group operators exactly:
@@ -780,6 +798,7 @@ constexpr int kScanThreads = 64 * kScanWaves;
 __global__ __launch_bounds__(kScanThreads) void kda_group_scan(
     const float* __restrict__ bg, const float* __restrict__ ag,
     const bf16_t* __restrict__ mgT, float* __restrict__ sin_, int G, int NH) {
+#ifdef ROCM_USE_FUSED_PREFILL_KDA
   constexpr int64_t plane = static_cast<int64_t>(kV) * kK;
   // Partial products, one row per reduction quarter.
   __shared__ f32x4 red[kScanWaves][kNKT][64];
@@ -865,6 +884,9 @@ __global__ __launch_bounds__(kScanThreads) void kda_group_scan(
     bv[0] = nb[0];
     bv[1] = nb[1];
   }
+#else
+  kda_unsupported_arch("kda_group_scan");
+#endif // ifdef ROCM_USE_FUSED_PREFILL_KDA
 }
 
 constexpr int kBC = 16;  // widest span over which exp2(+/-g) stays finite
@@ -989,6 +1011,7 @@ __device__ __forceinline__ f32x4 mm16f(const float* A, int lda, const float* B,
 template <int NTHREAD, bool FUSE_CONV>
 __global__ __launch_bounds__(NTHREAD,
                              8) void kda_chunk_prologue(PrologueParams p) {
+#ifdef ROCM_USE_FUSED_PREFILL_KDA
   // Four 16-row bands share the workgroup; the waves inside a band split the
   // output column tiles, so the mapping follows from the thread count.
   constexpr int kWPB = NTHREAD / 64 / kNC;  // waves per band
@@ -1463,6 +1486,9 @@ __global__ __launch_bounds__(NTHREAD,
       roll(cv);
     }
   }
+#else
+  kda_unsupported_arch("kda_chunk_prologue");
+#endif // ifdef ROCM_USE_FUSED_PREFILL_KDA
 }
 
 }  // namespace
