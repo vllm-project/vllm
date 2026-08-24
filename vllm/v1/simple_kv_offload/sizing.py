@@ -102,11 +102,13 @@ def sync_num_offload_blocks_across_workers(num_offload_blocks: int) -> int:
 
 def gpu_total_bytes(gpu_config: KVCacheConfig) -> int:
     assert len(gpu_config.kv_cache_tensors) > 0
-    is_packed = any(t.block_stride for t in gpu_config.kv_cache_tensors)
-    assert not is_packed or all(t.block_stride for t in gpu_config.kv_cache_tensors)
-    if is_packed:
-        return gpu_config.kv_cache_tensors[0].size
-    return sum(t.size for t in gpu_config.kv_cache_tensors)
+    tensors = gpu_config.kv_cache_tensors
+    sizes = {t.size for t in tensors}
+    if len(sizes) == 1:
+        # All KVCacheTensor entries describe regions in one backing allocation.
+        return tensors[0].size
+    # Fallback when tensors describe disjoint allocations.
+    return sum(t.size for t in tensors)
 
 
 def compute_num_offload_blocks_from_config(
