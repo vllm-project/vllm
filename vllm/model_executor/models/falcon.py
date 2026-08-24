@@ -413,6 +413,7 @@ class FalconModel(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
         for layer in islice(self.h, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)

@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
     TimingContext,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -700,6 +701,15 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         """Replace each modality's placeholder token with the token ids that item's
         replacement text encodes to, marking which of them hold embeddings."""
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+
+        def get_target_token_ids(token: str | int | Sequence[int]) -> list[int]:
+            if isinstance(token, str):
+                return cached_encode(tokenizer, token, add_special_tokens=False)
+            if isinstance(token, int):
+                return [token]
+            return list(token)
+
         updates = []
         for modality, items in out_mm_kwargs.items():
             # Popped so they are neither cached nor sent to the model; the updates
@@ -711,10 +721,11 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                 )
                 for item in items
             ]
+            token = getattr(hf_processor, f"{modality}_token")
             updates.append(
                 PromptReplacement(
                     modality=modality,
-                    target=getattr(hf_processor, f"{modality}_token"),
+                    target=get_target_token_ids(token),
                     replacement=replacements.__getitem__,
                 )
             )
@@ -830,7 +841,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         replacements = defaultdict[str, list[list[int]]](list)
         for entry in offsets[0]:
             replacements[entry["type"]].append(
-                tokenizer.encode(entry["replacement"], add_special_tokens=False)
+                cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
         for modality, seqs in replacements.items():

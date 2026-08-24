@@ -53,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
@@ -1376,6 +1377,8 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = processor.tokenizer
+
         out_mm_data = out_mm_kwargs.get_data()
         audio_data_seqlens = out_mm_data.get("audio_data_seqlens")
         if audio_data_seqlens is None:
@@ -1393,7 +1396,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         def get_replacement(
             item_idx: int,
             suffix_token_ids: list[int] | None = None,
-        ) -> PromptUpdateDetails[list[int]]:
+        ) -> PromptUpdateDetails:
             num_tokens = audio_token_lens[item_idx]
             if num_tokens == 0:
                 raise ValueError("The audio is too short to be represented.")
@@ -1410,7 +1413,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                     processor.audio_end_id,
                     *suffix_token_ids,
                 ],
-                is_embed=lambda _tokenizer, _seq: torch.cat(
+                is_embed=lambda _seq: torch.cat(
                     [
                         torch.tensor([False]),
                         is_embed,
@@ -1431,11 +1434,13 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
             )
         ]
         for suffix in ("", "\n"):
-            tokenizer_target = processor.tokenizer.encode(
+            tokenizer_target = cached_encode(
+                tokenizer,
                 MOSS_AUDIO_PLACEHOLDER + suffix,
                 add_special_tokens=False,
             )
-            suffix_token_ids = processor.tokenizer.encode(
+            suffix_token_ids = cached_encode(
+                tokenizer,
                 suffix,
                 add_special_tokens=False,
             )
