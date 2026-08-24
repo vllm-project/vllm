@@ -305,7 +305,6 @@ def test_quark_w4a8_fp8_moe(monkeypatch, dist_init, workspace_init):
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
         Qwen3MoeForCausalLM,
-        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
     )
     with set_current_vllm_config(vllm_config):
         moe = model.model.layers[0].mlp.experts
