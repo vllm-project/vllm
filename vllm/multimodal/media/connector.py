@@ -22,8 +22,12 @@ from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
-from vllm.connections import HTTPConnection, global_http_connection
-from vllm.exceptions import VLLMUnprocessableEntityError
+from vllm.connections import (
+    HTTPConnection,
+    MediaDownloadSizeExceededError,
+    global_http_connection,
+)
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
@@ -70,6 +74,9 @@ def _wrap_media_fetch_error(
         Original exception for transient errors (5xx, 408, 429, network blips)
             or other exceptions
     """
+    if isinstance(exc, VLLMValidationError):
+        return exc
+
     if isinstance(exc, aiohttp.ClientResponseError):
         if exc.status in (408, 429):
             return exc
@@ -97,6 +104,13 @@ def _wrap_media_fetch_error(
     if isinstance(exc, requests.exceptions.InvalidURL):
         return VLLMUnprocessableEntityError(
             "Failed to fetch media from URL: Invalid URL format",
+            parameter="image_url",
+            value=url,
+        )
+
+    if isinstance(exc, MediaDownloadSizeExceededError):
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {exc}",
             parameter="image_url",
             value=url,
         )
@@ -363,6 +377,7 @@ class MediaConnector:
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
+            max_bytes = media_io.get_max_bytes()
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
@@ -374,6 +389,7 @@ class MediaConnector:
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                    max_bytes=max_bytes,
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
@@ -409,6 +425,7 @@ class MediaConnector:
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
+            max_bytes = media_io.get_max_bytes()
 
             cached = await loop.run_in_executor(
                 global_thread_pool, self._get_cached_bytes, url
@@ -425,6 +442,7 @@ class MediaConnector:
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                    max_bytes=max_bytes,
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
