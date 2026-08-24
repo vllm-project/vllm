@@ -390,14 +390,6 @@ def test_processing_correctness(
             "OpenVLA uses a custom vLLM processor because its HF remote "
             "processor is incompatible with current Transformers."
         )
-    if model_id == "jinaai/jina-reranker-m0":
-        pytest.skip(
-            "JinaVL reverses the multi-modal item order inside "
-            "_apply_hf_processor_main to match its document-before-query "
-            "score template, which breaks the positional correspondence "
-            "between multi-modal kwargs and hashes assumed by the "
-            "processing cache. Needs a fix that keeps both consistent."
-        )
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
             "Voxtral Realtime doesn't make use of any place-holder "
