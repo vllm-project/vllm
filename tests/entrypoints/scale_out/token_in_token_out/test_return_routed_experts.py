@@ -57,9 +57,10 @@ async def client(server: RemoteOpenAIServer):
 @pytest.mark.asyncio
 async def test_generate_routed_experts(client):
     """Test that /inference/v1/generate returns routed_experts when enabled."""
+    prompt_token_ids = [1, 2, 3]
     payload = {
         "model": MODEL_NAME,
-        "token_ids": [1, 2, 3],
+        "token_ids": prompt_token_ids,
         "sampling_params": {"max_tokens": 10, "temperature": 0.0},
         "stream": False,
     }
@@ -81,3 +82,4 @@ async def test_generate_routed_experts(client):
     assert topk == NUM_EXPERTS_PER_TOK
     assert (routed_experts >= 0).all()
     assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+    assert num_tokens == len(prompt_token_ids) + len(choice["token_ids"]) - 1

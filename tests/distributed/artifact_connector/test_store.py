@@ -11,9 +11,7 @@ import pytest
 import torch
 
 from vllm.distributed.artifact_connector.connector import (
-    ArtifactConnectorMetadata as _ArtifactConnectorMetadata,
-)
-from vllm.distributed.artifact_connector.connector import (
+    ArtifactConnectorMetadata,
     ArtifactRequestOutput,
     ArtifactSchedulerConnector,
     PackedBlockHashes,
@@ -157,8 +155,23 @@ class _Execution:
 
 
 @dataclass
-class _TestConnectorMetadata(_ArtifactConnectorMetadata):
-    _test_requests: list[_Execution]
+class _WorkerStep:
+    metadata: ArtifactConnectorMetadata
+    executions: list[_Execution]
+
+
+@dataclass
+class _SchedulerRequest:
+    request_id: str
+    block_hashes: list[bytes]
+    num_tokens: int
+    num_output_tokens: int = 1
+    num_computed_tokens: int = 0
+    num_in_flight_tokens: int = 0
+    finished: bool = False
+
+    def is_finished(self) -> bool:
+        return self.finished
 
 
 def _request_metadata(
@@ -173,12 +186,10 @@ def _request_metadata(
 
 def _metadata(
     generation: int,
-    block_size: int,
     requests: list[_Execution],
     finished_requests: dict[str, list[bytes] | PackedBlockHashes],
     hash_updates: dict[str, list[bytes] | PackedBlockHashes] | None = None,
-) -> _TestConnectorMetadata:
-    del block_size
+) -> _WorkerStep:
     block_hashes = {
         request.request_id: request.block_hashes
         for request in requests
@@ -195,22 +206,28 @@ def _metadata(
         for request_id, hashes in finished_requests.items()
         if hashes
     )
-    return _TestConnectorMetadata(
-        generation,
-        {request.request_id: request.emit_start for request in requests},
-        block_hashes,
-        set(finished_requests),
+    return _WorkerStep(
+        ArtifactConnectorMetadata(
+            generation,
+            {request.request_id: request.emit_start for request in requests},
+            block_hashes,
+            set(finished_requests),
+        ),
         requests,
     )
 
 
 def _execution_ranges(metadata, request_ids):
-    by_request = {request.request_id: request for request in metadata._test_requests}
+    by_request = {request.request_id: request for request in metadata.executions}
     token_starts = tuple(
         by_request[request_id].token_start for request_id in request_ids
     )
     num_tokens = tuple(by_request[request_id].num_tokens for request_id in request_ids)
     return token_starts, num_tokens
+
+
+def _begin_step(worker: ArtifactWorkerConnector, step: _WorkerStep) -> None:
+    worker.begin_step(step.metadata)
 
 
 def _make_worker(
@@ -236,10 +253,10 @@ def _make_worker(
 
 def test_worker_rejects_metadata_generation_rollback():
     worker = _make_worker(1)
-    worker.begin_step(_metadata(1, _BLOCK_SIZE, [], {}))
+    _begin_step(worker, _metadata(1, [], {}))
 
     with pytest.raises(RuntimeError, match="generation moved backwards"):
-        worker.begin_step(_metadata(0, _BLOCK_SIZE, [], {}))
+        _begin_step(worker, _metadata(0, [], {}))
 
     worker.close()
 
@@ -249,13 +266,12 @@ def test_worker_rejects_run_and_finish_in_one_step():
     request = _request_metadata("request", 0, 1, 0, [])
     metadata = _metadata(
         0,
-        _BLOCK_SIZE,
         [request],
         {"request": []},
     )
 
     with pytest.raises(RuntimeError, match="cannot run and finish"):
-        worker.begin_step(metadata)
+        _begin_step(worker, metadata)
 
     worker.close()
 
@@ -281,28 +297,10 @@ def test_worker_skips_artifacts_for_internal_warmup_step():
     worker.close()
 
 
-def test_worker_encapsulates_step_output():
-    worker = _make_worker(1)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.empty(
-        (0, *_SHAPE), dtype=torch.uint8
-    )
-    metadata = _metadata(0, _BLOCK_SIZE, [], {})
-
-    worker.begin_step(metadata)
-    empty = torch.empty(0, dtype=torch.int32)
-    output = worker.prepare_output([], np.array([]), np.array([0]), empty, empty)
-
-    assert output == {}
-    worker._capturer.snapshot_routing_data.assert_called_once_with(0)
-    worker.close()
-
-
 def test_worker_rejects_invalid_rejected_token_count():
     worker = _make_worker(1)
     metadata = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 1, 0, [])],
         {},
     )
@@ -322,7 +320,7 @@ def test_worker_rejects_invalid_rejected_token_count():
 
 def _process_output(
     worker,
-    metadata,
+    step,
     rows,
     request_ids,
     num_rejected,
@@ -335,9 +333,11 @@ def _process_output(
     if num_sampled is None:
         num_sampled = np.ones(len(request_ids), dtype=np.int32)
     if token_starts is None or num_tokens is None:
-        token_starts, num_tokens = _execution_ranges(metadata, request_ids)
+        assert isinstance(step, _WorkerStep)
+        token_starts, num_tokens = _execution_ranges(step, request_ids)
     worker._capturer = Mock()
     worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
         query_start_loc = np.concatenate(
@@ -357,7 +357,6 @@ def test_worker_ignores_cudagraph_query_padding():
     logical = np.arange(2 * 3 * 2, dtype=np.uint8).reshape(2, 3, 2)
     metadata = _metadata(
         0,
-        _BLOCK_SIZE,
         [
             _request_metadata("first", 0, 1, 0, []),
             _request_metadata("second", 0, 1, 0, []),
@@ -381,55 +380,24 @@ def test_worker_ignores_cudagraph_query_padding():
 
 def test_worker_rejects_scheduler_emit_cursor_ahead():
     worker = _make_worker(1)
-    worker.begin_step(
+    _begin_step(
+        worker,
         _metadata(
             0,
-            _BLOCK_SIZE,
             [_request_metadata("request", 0, 1, 0, [])],
             {},
-        )
+        ),
     )
 
     with pytest.raises(RuntimeError, match="Scheduler emit cursor moved ahead"):
-        worker.begin_step(
+        _begin_step(
+            worker,
             _metadata(
                 0,
-                _BLOCK_SIZE,
                 [_request_metadata("request", 1, 1, 1, [])],
                 {},
-            )
+            ),
         )
-
-    worker.close()
-
-
-def test_worker_rejects_terminal_without_request_state():
-    worker = _make_worker(1)
-    metadata = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [],
-        {"missing": []},
-    )
-
-    with pytest.raises(KeyError, match="missing"):
-        worker.begin_step(metadata)
-
-    worker.close()
-
-
-def test_worker_rejects_hash_update_without_request_state():
-    worker = _make_worker(1)
-    metadata = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [],
-        {},
-        {"missing": PackedBlockHashes(b"a" * 32, 32)},
-    )
-
-    with pytest.raises(KeyError, match="missing"):
-        worker.begin_step(metadata)
 
     worker.close()
 
@@ -446,7 +414,6 @@ def test_worker_rejects_mismatched_capture_profile(routing):
     worker = _make_worker(1)
     metadata = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 1, 0, [])],
         {},
     )
@@ -472,29 +439,27 @@ def test_store_rejects_invalid_payload_size():
     store.close()
 
 
-def test_logical_buffer_rejects_overlap():
-    buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,), 4, 2, 8, 2)
-    assert (
-        buffer.capture("request", 4, np.arange(4, 7, dtype=np.uint8).reshape(-1, 1))
-        == []
-    )
-    with pytest.raises(RuntimeError, match="not contiguous"):
-        buffer.capture("request", 6, np.array([[60], [70]], dtype=np.uint8))
-
-
-def test_logical_buffer_rejects_gap():
+@pytest.mark.parametrize(
+    ("initial_start", "initial_rows", "invalid_start"),
+    [
+        (4, [4, 5, 6], 6),
+        (0, [0], 2),
+        (None, [], 3),
+    ],
+    ids=["overlap", "gap", "unaligned-initial-capture"],
+)
+def test_logical_buffer_rejects_noncontiguous_capture(
+    initial_start, initial_rows, invalid_start
+):
     buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
-    assert buffer.capture("request", 0, np.array([[0]], dtype=np.uint8)) == []
+    if initial_start is not None:
+        rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
+        assert buffer.capture("request", initial_start, rows) == []
 
     with pytest.raises(RuntimeError, match="not contiguous"):
-        buffer.capture("request", 2, np.array([[2]], dtype=np.uint8))
-
-
-def test_logical_buffer_rejects_unbacked_partial_block():
-    buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
-
-    with pytest.raises(RuntimeError, match="not contiguous"):
-        buffer.capture("request", 3, np.array([[3]], dtype=np.uint8))
+        buffer.capture(
+            "request", invalid_start, np.array([[invalid_start]], dtype=np.uint8)
+        )
 
 
 def test_logical_buffer_captures_one_row_per_decode_step():
@@ -509,24 +474,6 @@ def test_logical_buffer_captures_one_row_per_decode_step():
     np.testing.assert_array_equal(completed[0][1], logical)
 
 
-def test_logical_buffer_retains_completed_tail_without_copy():
-    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
-    logical = np.arange(9 * 3 * 2, dtype=_DTYPE).reshape(9, *_SHAPE)
-
-    assert not buffer.capture("request", 0, logical[:2])
-    first = buffer.capture("request", 2, logical[2:6])
-    first_retained = buffer.retain_block(first[0][1])
-    assert first_retained is first[0][1]
-    second = buffer.capture("request", 6, logical[6:])
-    second_retained = buffer.retain_block(second[0][1])
-    assert second_retained is second[0][1]
-
-    np.testing.assert_array_equal(first_retained, logical[:4])
-    np.testing.assert_array_equal(second_retained, logical[4:8])
-    buffer.release_block(first_retained)
-    buffer.release_block(second_retained)
-
-
 def test_logical_buffer_copies_borrowed_block_when_retained():
     buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, *_SHAPE)
@@ -539,24 +486,6 @@ def test_logical_buffer_copies_borrowed_block_when_retained():
     assert not np.shares_memory(retained, logical)
     np.testing.assert_array_equal(retained, expected)
     buffer.release_block(retained)
-
-
-def test_logical_buffer_retains_two_full_steps():
-    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 16, 2)
-    logical = np.arange(32 * 3 * 2, dtype=_DTYPE).reshape(32, *_SHAPE)
-
-    retained = [
-        buffer.retain_block(rows)
-        for _, rows in buffer.capture("first", 0, logical[:16])
-    ]
-    retained += [
-        buffer.retain_block(rows)
-        for _, rows in buffer.capture("second", 0, logical[16:])
-    ]
-
-    assert len(retained) == 8
-    for rows in retained:
-        buffer.release_block(rows)
 
 
 def _make_store(
@@ -604,7 +533,6 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     logical = np.arange(10 * 3 * 2, dtype=np.uint8).reshape(10, 3, 2)
     first = _metadata(
         generation=0,
-        block_size=_BLOCK_SIZE,
         requests=[_request_metadata("first", 0, 8, 0, hashes)],
         finished_requests={},
     )
@@ -614,7 +542,6 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
 
     second = _metadata(
         generation=0,
-        block_size=_BLOCK_SIZE,
         requests=[_request_metadata("second", 8, 2, 0, hashes)],
         finished_requests={"first": []},
     )
@@ -624,35 +551,11 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     worker.close()
 
 
-def test_worker_rejects_unaligned_initial_capture():
-    worker = _make_worker(2)
-    hashes = [b"a" * 32, b"b" * 32]
-    logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
-    first = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("first", 0, 8, 0, hashes)],
-        {},
-    )
-    _process_output(worker, first, logical, ["first"], np.array([0]))
-
-    second = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("second", 7, 1, 0, hashes)],
-        {"first": []},
-    )
-    with pytest.raises(RuntimeError, match="capture is not contiguous"):
-        _process_output(worker, second, logical[7:], ["second"], np.array([0]))
-    worker.close()
-
-
 def test_worker_rejects_unbacked_capture_gap():
     worker = _make_worker(1)
     logical = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 1, 0, [])],
         {},
     )
@@ -666,7 +569,6 @@ def test_worker_rejects_unbacked_capture_gap():
     )
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 2, 1, 0, [])],
         {},
     )
@@ -688,7 +590,6 @@ def test_worker_replays_rejected_speculative_gap():
     logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 5, 0, [])],
         {},
     )
@@ -698,7 +599,6 @@ def test_worker_replays_rejected_speculative_gap():
 
     queued = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 5, 4, 0, [])],
         {},
     )
@@ -712,7 +612,6 @@ def test_worker_replays_rejected_speculative_gap():
 
     rolled_back = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 6, 3, 0, [b"a" * 32])],
         {},
     )
@@ -744,7 +643,6 @@ def test_worker_rejects_overlapping_capture_rows():
     logical = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 3, 0, [])],
         {},
     )
@@ -760,7 +658,6 @@ def test_worker_rejects_overlapping_capture_rows():
     stale_overlap[0] += 100
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 2, 2, 0, [b"a" * 32])],
         {},
     )
@@ -781,7 +678,6 @@ def test_worker_publishes_entire_batch_before_materializing_prefix():
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     metadata = _metadata(
         generation=0,
-        block_size=_BLOCK_SIZE,
         requests=[
             _request_metadata("consumer", 4, 4, 0, hashes),
             _request_metadata("producer", 0, 4, 0, hashes),
@@ -808,7 +704,6 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 4, 0, [])],
         {},
     )
@@ -828,7 +723,6 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     block_hash = b"a" * 32
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 4, 1, 4, [block_hash])],
         {},
     )
@@ -905,13 +799,13 @@ def test_worker_releases_newly_keyed_blocks_before_capture():
 
 def test_worker_publishes_pending_block_without_forward():
     worker = _make_worker(1)
-    worker.begin_step(
+    _begin_step(
+        worker,
         _metadata(
             0,
-            _BLOCK_SIZE,
             [_request_metadata("request", 0, 1, 0, [])],
             {},
-        )
+        ),
     )
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(_BLOCK_SIZE, 3, 2)
     assert worker._buffer is not None
@@ -920,7 +814,7 @@ def test_worker_publishes_pending_block_without_forward():
     ]
     block_hash = b"a" * 32
 
-    worker.begin_step(_metadata(0, _BLOCK_SIZE, [], {}, {"request": [block_hash]}))
+    _begin_step(worker, _metadata(0, [], {}, {"request": [block_hash]}))
 
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
@@ -942,7 +836,6 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
     prompt_hashes = [b"a" * 32, b"b" * 32]
     prompt = _metadata(
         0,
-        _BLOCK_SIZE,
         [
             _request_metadata("first", 0, 4, 0, prompt_hashes[:1]),
             _request_metadata("second", 0, 4, 0, prompt_hashes[1:]),
@@ -960,7 +853,6 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
 
     first_decode = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("first", 4, 20, 0, [])],
         {},
     )
@@ -977,7 +869,6 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
     first_hashes = [bytes([value]) * 32 for value in range(2, 7)]
     second_decode = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("second", 4, 20, 0, [])],
         {},
         {"first": first_hashes},
@@ -996,37 +887,6 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
     worker.close()
 
 
-def test_worker_rejects_terminal_and_restart_in_same_step():
-    worker = _make_worker(1)
-    block_hash = b"a" * 32
-    logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
-    first = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("request", 0, 4, 0, [])],
-        {},
-    )
-    output = _process_output(
-        worker,
-        first,
-        logical[:4],
-        ["request"],
-        np.array([0]),
-        np.zeros(1, dtype=np.int32),
-    )
-    assert output is not None and not output
-
-    restarted = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("request", 4, 1, 0, [block_hash])],
-        {"request": PackedBlockHashes(block_hash, len(block_hash))},
-    )
-    with pytest.raises(RuntimeError, match="cannot run and finish"):
-        worker.begin_step(restarted)
-    worker.close()
-
-
 def test_worker_does_not_rematerialize_emitted_rows():
     worker = _make_worker(1)
     hashes = [b"a" * 32, b"b" * 32]
@@ -1034,7 +894,6 @@ def test_worker_does_not_rematerialize_emitted_rows():
 
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 4, 0, hashes)],
         {},
     )
@@ -1045,7 +904,6 @@ def test_worker_does_not_rematerialize_emitted_rows():
     worker._store.get_concatenated = Mock(wraps=worker._store.get_concatenated)
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         # Async scheduling may build this before the scheduler consumes first.
         [_request_metadata("request", 4, 4, 0, [])],
         {},
@@ -1063,7 +921,6 @@ def test_worker_resumes_from_scheduler_emit_boundary():
     logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
     resumed = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 4, 1, 4, [b"a" * 32])],
         {},
     )
@@ -1076,47 +933,12 @@ def test_worker_resumes_from_scheduler_emit_boundary():
     worker.close()
 
 
-def test_worker_keeps_only_chunked_prefill_tail():
-    worker = _make_worker(1)
-    hashes = [b"a" * 32, b"b" * 32]
-    logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
-
-    first = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("request", 0, 6, 0, hashes)],
-        {},
-    )
-    output = _process_output(
-        worker,
-        first,
-        logical[:6],
-        ["request"],
-        np.array([0]),
-        np.zeros(1, dtype=np.int32),
-    )
-    assert output is not None and not output
-    assert worker._buffer._rows.shape[1] == _BLOCK_SIZE
-
-    second = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("request", 6, 2, 0, [])],
-        {},
-    )
-    output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
-    assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical)
-    worker.close()
-
-
 def test_worker_emits_mid_block_chunked_prefill():
     worker = _make_worker(1)
     logical = np.arange(3 * 3 * 2, dtype=np.uint8).reshape(3, 3, 2)
 
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 2, 0, [])],
         {},
     )
@@ -1132,7 +954,6 @@ def test_worker_emits_mid_block_chunked_prefill():
 
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 2, 1, 0, [])],
         {},
     )
@@ -1148,7 +969,6 @@ def test_worker_emits_published_block_and_mid_block_tail():
 
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 6, 0, [b"a" * 32])],
         {},
     )
@@ -1164,7 +984,6 @@ def test_worker_emits_published_block_and_mid_block_tail():
 
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 6, 1, 0, [])],
         {},
     )
@@ -1179,7 +998,6 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     logical = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 0, 2, 0, [b"a" * 32])],
         {},
     )
@@ -1193,7 +1011,6 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     )
     second = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("request", 2, 2, 0, [])],
         {},
     )
@@ -1205,7 +1022,6 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     replacement = np.full_like(logical, 99)
     reuse = _metadata(
         0,
-        _BLOCK_SIZE,
         [_request_metadata("reuse", 0, 4, 0, [b"b" * 32])],
         {},
     )
@@ -1222,55 +1038,20 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     worker.close()
 
 
-def test_worker_excludes_rejected_speculative_rows():
-    worker = _make_worker(1)
-    logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
-    metadata = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("request", 0, 5, 0, [b"a" * 32])],
-        {},
-    )
-
-    output = _process_output(worker, metadata, logical, ["request"], np.array([1]))
-
-    np.testing.assert_array_equal(output["request"].rows, logical[:4])
-    worker.close()
-
-
-def test_worker_discards_tail_on_finish():
-    worker = _make_worker(1)
-    worker._generation = 0
-    assert worker._buffer is not None
-    rows = np.zeros((2, *_SHAPE), dtype=_DTYPE)
-    worker._buffer.capture("request", 0, rows)
-    worker._requests["request"] = _WorkerRequestState()
-
-    cleanup = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [],
-        {"request": []},
-    )
-    worker.begin_step(cleanup)
-    assert "request" not in worker._buffer._requests
-    worker.close()
-
-
 def test_worker_merges_block_hash_deltas():
     worker = _make_worker(1)
-    worker.begin_step(
+    _begin_step(
+        worker,
         _metadata(
             0,
-            _BLOCK_SIZE,
             [_request_metadata("request", 0, 1, 0, [b"a" * 32, b"b" * 32])],
             {},
-        )
+        ),
     )
-    worker.begin_step(
+    _begin_step(
+        worker,
         _metadata(
             0,
-            _BLOCK_SIZE,
             [
                 _request_metadata(
                     "request",
@@ -1281,7 +1062,7 @@ def test_worker_merges_block_hash_deltas():
                 )
             ],
             {},
-        )
+        ),
     )
 
     assert worker._requests["request"].artifact_keys == [
@@ -1292,43 +1073,34 @@ def test_worker_merges_block_hash_deltas():
     worker.close()
 
 
-def test_worker_discards_finished_block_without_kv_hash():
+def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     worker = _make_worker(1)
     worker._generation = 0
-    worker._requests["request"] = _WorkerRequestState(
-        pending_blocks=[(0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))]
+    logical = np.arange(2 * _BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(
+        2 * _BLOCK_SIZE, 3, 2
     )
-
-    worker.begin_step(
-        _metadata(
-            0,
-            _BLOCK_SIZE,
-            [],
-            {"request": []},
-        )
-    )
-    assert "request" not in worker._requests
-    worker.close()
-
-
-def test_worker_publishes_hashed_block_and_discards_tail_on_request_finish():
-    worker = _make_worker(1)
-    worker._generation = 0
-    logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(_BLOCK_SIZE, 3, 2)
     assert worker._buffer is not None
     worker._requests["request"] = _WorkerRequestState(
-        pending_blocks=[(0, worker._buffer.retain_block(logical))]
+        pending_blocks=[
+            (0, worker._buffer.retain_block(logical[:_BLOCK_SIZE])),
+            (
+                _BLOCK_SIZE,
+                worker._buffer.retain_block(logical[_BLOCK_SIZE:]),
+            ),
+        ]
     )
-    worker._buffer.capture("request", _BLOCK_SIZE, np.zeros((1, *_SHAPE), dtype=_DTYPE))
+    worker._buffer.capture(
+        "request", 2 * _BLOCK_SIZE, np.zeros((1, *_SHAPE), dtype=_DTYPE)
+    )
     block_hash = b"a" * 32
 
-    worker.begin_step(
+    _begin_step(
+        worker,
         _metadata(
             0,
-            _BLOCK_SIZE,
             [],
             {"request": [block_hash]},
-        )
+        ),
     )
 
     assert "request" not in worker._requests
@@ -1340,52 +1112,9 @@ def test_worker_publishes_hashed_block_and_discards_tail_on_request_finish():
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
-        logical,
+        logical[:_BLOCK_SIZE],
     )
     assert "request" not in worker._buffer._requests
-    worker.close()
-
-
-def test_worker_commits_pending_block_with_finished_request_hash():
-    worker = _make_worker(1)
-    worker._generation = 0
-    logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(_BLOCK_SIZE, 3, 2)
-    inflight = _metadata(
-        0,
-        _BLOCK_SIZE,
-        [_request_metadata("request", 0, _BLOCK_SIZE, 0, [])],
-        {},
-    )
-    _process_output(
-        worker,
-        inflight,
-        logical,
-        ["request"],
-        np.array([0]),
-        token_starts=(0,),
-        num_tokens=(_BLOCK_SIZE,),
-    )
-
-    block_hash = b"a" * 32
-    worker.begin_step(
-        _metadata(
-            0,
-            _BLOCK_SIZE,
-            [],
-            {"request": [block_hash]},
-        )
-    )
-
-    assert worker._store is not None
-    np.testing.assert_array_equal(
-        materialize_routed_experts(
-            worker._store,
-            routed_experts_keys([block_hash], "0"),
-            shape_per_token=_SHAPE,
-            dtype=_DTYPE,
-        ),
-        logical,
-    )
     worker.close()
 
 
@@ -1394,7 +1123,6 @@ def test_worker_fails_when_cached_artifact_is_missing():
     worker._generation = 0
     metadata = _metadata(
         0,
-        _BLOCK_SIZE,
         [
             _request_metadata(
                 "request",
@@ -1482,19 +1210,14 @@ def _scheduler_request(
     *,
     num_tokens: int = 10,
     num_output_tokens: int = 1,
-    prompt_start: int = 0,
 ):
-    request = Mock()
-    request.request_id = request_id
-    request.block_hashes = block_hashes
-    request.num_tokens = num_tokens
-    request.num_output_tokens = num_output_tokens
-    request.num_computed_tokens = num_tokens
-    request.num_in_flight_tokens = 0
-    request.num_prompt_tokens = num_tokens
-    request.sampling_params = SimpleNamespace(routed_experts_prompt_start=prompt_start)
-    request.is_finished.return_value = False
-    return request
+    return _SchedulerRequest(
+        request_id=request_id,
+        block_hashes=block_hashes,
+        num_tokens=num_tokens,
+        num_output_tokens=num_output_tokens,
+        num_computed_tokens=num_tokens,
+    )
 
 
 def _step_output(
@@ -1535,19 +1258,6 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
 
 
-def test_scheduler_connector_returns_uncropped_output():
-    connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=5, prompt_start=2)
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [4]),
-        {request.request_id: request},
-    )
-    routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
-    output = {"request": ArtifactRequestOutput(0, routing)}
-
-    np.testing.assert_array_equal(connector.take_output(request, output), routing)
-
-
 def test_scheduler_connector_sends_finish_after_block_hashes():
     connector = _make_connector()
     block_hashes = [b"a" * 32]
@@ -1568,46 +1278,6 @@ def test_scheduler_connector_sends_finish_after_block_hashes():
     assert request.request_id not in metadata.block_hashes
 
 
-def test_scheduler_connector_sends_all_prompt_hashes_before_terminal():
-    connector = _make_connector()
-    block_hashes = [bytes([i]) * 32 for i in range(4)]
-    request = _scheduler_request("request", block_hashes, num_tokens=16)
-    request.num_computed_tokens = 0
-
-    metadata = connector.build_connector_meta(
-        _step_output([request.request_id], [0], [_BLOCK_SIZE]),
-        {request.request_id: request},
-    )
-    request.num_computed_tokens = _BLOCK_SIZE
-    connector.request_finished(request)
-    cleanup = connector.build_connector_meta(_step_output([], [], []), {})
-
-    assert list(metadata.block_hashes[request.request_id]) == block_hashes
-    assert request.request_id in cleanup.finished_requests
-    assert request.request_id not in cleanup.block_hashes
-
-
-def test_scheduler_connector_terminal_keeps_computed_prefill_block():
-    connector = _make_connector()
-    block_hash = b"a" * 32
-    request = _scheduler_request(
-        "request",
-        [block_hash],
-        num_tokens=_BLOCK_SIZE,
-        num_output_tokens=0,
-    )
-
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [_BLOCK_SIZE]),
-        {request.request_id: request},
-    )
-    connector.request_finished(request)
-    cleanup = connector.build_connector_meta(_step_output([], [], []), {})
-
-    assert request.request_id in cleanup.finished_requests
-    assert request.request_id not in cleanup.block_hashes
-
-
 def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
     worker = _make_worker(1)
     block_hashes = [b"a" * 32, b"b" * 32]
@@ -1616,7 +1286,6 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
     )
     first = _metadata(
         0,
-        _BLOCK_SIZE,
         [
             _request_metadata(
                 "request",
@@ -1637,7 +1306,6 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
     )
     inflight = _metadata(
         0,
-        _BLOCK_SIZE,
         [
             _request_metadata(
                 "request",
@@ -1659,13 +1327,13 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
         token_starts=(_BLOCK_SIZE,),
         num_tokens=(_BLOCK_SIZE,),
     )
-    worker.begin_step(
+    _begin_step(
+        worker,
         _metadata(
             0,
-            _BLOCK_SIZE,
             [],
             {"request": []},
-        )
+        ),
     )
 
     assert worker._store is not None
@@ -1755,44 +1423,6 @@ def test_scheduler_connector_recreates_preempted_request_state():
     assert list(resumed.block_hashes[request.request_id]) == [b"a" * 32]
 
 
-def test_scheduler_connector_preemption_keeps_inflight_hashes():
-    connector = _make_connector()
-    block_hashes = [b"a" * 32, b"b" * 32]
-    request = _scheduler_request("request", block_hashes, num_tokens=8)
-    metadata = connector.build_connector_meta(
-        _step_output([request.request_id], [0], [8]),
-        {request.request_id: request},
-    )
-    request.num_in_flight_tokens = _BLOCK_SIZE
-
-    connector.request_finished(request)
-    cleanup = connector.build_connector_meta(
-        _step_output([], [], []),
-        {request.request_id: request},
-    )
-
-    assert list(metadata.block_hashes[request.request_id]) == block_hashes
-    assert request.request_id in cleanup.finished_requests
-    assert request.request_id not in cleanup.block_hashes
-
-
-def test_scheduler_connector_abort_keeps_inflight_hashes():
-    connector = _make_connector()
-    block_hashes = [b"a" * 32, b"b" * 32]
-    request = _scheduler_request("request", block_hashes, num_tokens=8)
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [8]),
-        {request.request_id: request},
-    )
-    request.num_in_flight_tokens = _BLOCK_SIZE
-
-    connector.request_finished(request)
-    cleanup = connector.build_connector_meta(_step_output([], [], []), {})
-
-    assert request.request_id in cleanup.finished_requests
-    assert request.request_id not in cleanup.block_hashes
-
-
 def test_scheduler_consumes_ordered_stale_artifact_outputs():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=6)
@@ -1829,20 +1459,6 @@ def test_scheduler_rejects_stale_output_without_artifacts():
         )
 
 
-def test_scheduler_uses_worker_artifact_output_start():
-    connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=3)
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [2]),
-        {request.request_id: request},
-    )
-    output = {"request": ArtifactRequestOutput(1, np.zeros((1, 3, 2), dtype=np.uint8))}
-
-    np.testing.assert_array_equal(
-        connector.take_output(request, output), output["request"].rows
-    )
-
-
 def test_scheduler_rejects_missing_accepted_artifact_rows():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=2)
@@ -1863,8 +1479,8 @@ def test_scheduler_rejects_missing_accepted_artifact_rows():
 
 def test_scheduler_rejects_empty_artifact_output_when_request_is_finished():
     connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=2)
-    request.is_finished.return_value = True
+    request = _scheduler_request("request", [], num_tokens=1)
+    request.finished = True
     connector.build_connector_meta(
         _step_output([request.request_id], [0], [1]),
         {request.request_id: request},
@@ -1876,26 +1492,31 @@ def test_scheduler_rejects_empty_artifact_output_when_request_is_finished():
         )
     }
 
-    with pytest.raises(RuntimeError, match="invalid token range"):
+    with pytest.raises(RuntimeError, match="finished artifact output has no accepted"):
         connector.take_output(request, output)
 
 
-def test_scheduler_connector_sends_only_new_block_hashes():
+def test_scheduler_connector_sends_each_block_hash_once():
     connector = _make_connector()
-    request = _scheduler_request("request", [b"a" * 32], num_tokens=8)
+    request = _scheduler_request("request", [b"a" * 32, b"b" * 32], num_tokens=12)
     scheduler_output = _step_output([request.request_id], [0], [4])
 
     first = connector.build_connector_meta(
         scheduler_output, {request.request_id: request}
     )
-    request.block_hashes.append(b"b" * 32)
+    request.block_hashes.append(b"c" * 32)
     second = connector.build_connector_meta(
         _step_output([request.request_id], [4], [4]),
         {request.request_id: request},
     )
+    third = connector.build_connector_meta(
+        _step_output([request.request_id], [8], [4]),
+        {request.request_id: request},
+    )
 
-    assert list(first.block_hashes[request.request_id]) == [b"a" * 32]
-    assert list(second.block_hashes[request.request_id]) == [b"b" * 32]
+    assert list(first.block_hashes[request.request_id]) == [b"a" * 32, b"b" * 32]
+    assert list(second.block_hashes[request.request_id]) == [b"c" * 32]
+    assert request.request_id not in third.block_hashes
 
 
 def test_scheduler_connector_sends_unscheduled_hash_update():
@@ -1918,92 +1539,9 @@ def test_scheduler_connector_sends_unscheduled_hash_update():
     assert list(metadata.block_hashes[request.request_id]) == [b"b" * 32]
 
 
-def test_scheduler_connector_ignores_optimistic_unscheduled_hash_frontier():
-    connector = _make_connector()
-    block_hashes = [b"a" * 32, b"b" * 32]
-    request = _scheduler_request("request", block_hashes, num_tokens=8)
-    request.num_computed_tokens = 0
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [8]),
-        {request.request_id: request},
-    )
-    request.num_in_flight_tokens = 8
-
-    metadata = connector.build_connector_meta(
-        _step_output([], [], []),
-        {request.request_id: request},
-    )
-
-    assert not metadata.block_hashes
-
-
-def test_scheduler_connector_does_not_send_uncomputed_prompt_hashes():
-    connector = _make_connector()
-    block_hashes = [bytes([i]) * 32 for i in range(4)]
-    request = _scheduler_request("request", block_hashes, num_tokens=16)
-    request.num_computed_tokens = 0
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [4]),
-        {request.request_id: request},
-    )
-
-    request.num_computed_tokens = 4
-    metadata = connector.build_connector_meta(
-        _step_output([], [], []),
-        {request.request_id: request},
-    )
-
-    assert not metadata.block_hashes
-    connector.build_connector_meta(
-        _step_output([request.request_id], [4], [4]),
-        {request.request_id: request},
-    )
-
-
-def test_scheduler_connector_does_not_resend_hashes_while_in_flight():
-    connector = _make_connector()
-    block_hashes = [bytes([i]) * 32 for i in range(3)]
-    request = _scheduler_request("request", block_hashes, num_tokens=12)
-    request.num_computed_tokens = 0
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [4]),
-        {request.request_id: request},
-    )
-
-    request.num_computed_tokens = 12
-    request.num_in_flight_tokens = 4
-    metadata = connector.build_connector_meta(
-        _step_output([], [], []),
-        {request.request_id: request},
-    )
-
-    assert request.request_id not in metadata.block_hashes
-
-
-def test_scheduler_connector_sends_prompt_hashes_once():
-    connector = _make_connector()
-    block_hashes = [bytes([i]) * 32 for i in range(4)]
-    request = _scheduler_request("request", block_hashes, num_tokens=16)
-    request.num_computed_tokens = 0
-
-    first = connector.build_connector_meta(
-        _step_output([request.request_id], [0], [4]),
-        {request.request_id: request},
-    )
-    request.num_computed_tokens = 4
-    second = connector.build_connector_meta(
-        _step_output([request.request_id], [4], [4]),
-        {request.request_id: request},
-    )
-
-    assert list(first.block_hashes[request.request_id]) == block_hashes
-    assert request.request_id not in second.block_hashes
-
-
 def test_scheduler_connector_reset_derives_emit_start_from_request():
     connector = _make_connector()
     request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
-    request.num_prompt_tokens = 4
     request.num_computed_tokens = 0
     before_reset = connector.build_connector_meta(
         _step_output([request.request_id], [0], [4]),

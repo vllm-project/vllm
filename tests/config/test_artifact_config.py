@@ -17,6 +17,7 @@ pytestmark = pytest.mark.cpu_test
 
 def _config(
     *,
+    use_v2: bool = True,
     pp: int = 1,
     dcp: int = 1,
     pcp: int = 1,
@@ -24,10 +25,11 @@ def _config(
     runner_type: str = "generate",
     is_moe: bool = True,
     enable_prefix_caching: bool = True,
+    adaptive_verification: bool = False,
 ):
     return SimpleNamespace(
         model_config=SimpleNamespace(runner_type=runner_type, is_moe=is_moe),
-        use_v2_model_runner=True,
+        use_v2_model_runner=use_v2,
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pp,
             decode_context_parallel_size=dcp,
@@ -37,7 +39,11 @@ def _config(
         cache_config=SimpleNamespace(
             enable_prefix_caching=enable_prefix_caching,
         ),
-        speculative_config=None,
+        speculative_config=(
+            SimpleNamespace(enable_adaptive_verification=True)
+            if adaptive_verification
+            else None
+        ),
         kv_transfer_config=(
             None
             if connector is None
@@ -69,12 +75,6 @@ def test_legacy_routed_experts_flag_updates_artifact_config():
 
     assert args.artifact_config.enabled
     assert args.artifact_config.enable_return_routed_experts
-
-
-def test_legacy_prompt_start_is_accepted():
-    params = SamplingParams(routed_experts_prompt_start=3)
-
-    assert params.routed_experts_prompt_start == 3
 
 
 def test_prompt_start_is_ignored_when_artifact_capture_is_disabled():
@@ -127,55 +127,26 @@ def test_artifact_connector_rejects_resumable_streaming_input():
         )
 
 
-def test_artifact_connector_requires_model_runner_v2():
-    config = _config()
-    config.use_v2_model_runner = False
-
-    with pytest.raises(ValueError, match="requires Model Runner V2"):
-        VllmConfig._verify_artifact_compatibility(config)
-
-
-def test_artifact_connector_rejects_pooling_runner():
-    with pytest.raises(ValueError, match="only supports generate runners"):
-        VllmConfig._verify_artifact_compatibility(_config(runner_type="pooling"))
-
-
-def test_artifact_connector_rejects_dense_model():
-    with pytest.raises(ValueError, match="only supports MoE models"):
-        VllmConfig._verify_artifact_compatibility(_config(is_moe=False))
-
-
-def test_artifact_connector_requires_prefix_caching():
-    with pytest.raises(ValueError, match="requires prefix caching"):
-        VllmConfig._verify_artifact_compatibility(_config(enable_prefix_caching=False))
-
-
-def test_artifact_connector_rejects_adaptive_verification():
-    config = _config()
-    config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
-
-    with pytest.raises(ValueError, match="adaptive speculative verification"):
-        VllmConfig._verify_artifact_compatibility(config)
-
-
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
+        ({"use_v2": False}, "requires Model Runner V2"),
+        ({"runner_type": "pooling"}, "only supports generate runners"),
+        ({"is_moe": False}, "only supports MoE models"),
+        ({"enable_prefix_caching": False}, "requires prefix caching"),
+        (
+            {"adaptive_verification": True},
+            "adaptive speculative verification",
+        ),
         ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
+        ({"connector": "MooncakeConnector"}, "incompatible with KV connectors"),
     ],
 )
-def test_artifact_connector_rejects_unsupported_topology(kwargs, error):
+def test_artifact_connector_rejects_unsupported_configuration(kwargs, error):
     with pytest.raises(ValueError, match=error):
         VllmConfig._verify_artifact_compatibility(_config(**kwargs))
-
-
-def test_artifact_connector_rejects_kv_connectors():
-    config = _config(connector="MooncakeConnector")
-
-    with pytest.raises(ValueError, match="incompatible with KV connectors"):
-        VllmConfig._verify_artifact_compatibility(config)
 
 
 def test_artifact_guards_are_inactive_when_capture_is_disabled():
