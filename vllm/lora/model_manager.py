@@ -870,6 +870,10 @@ class LoRAModelManager:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
 
+            if lora_model.modules_to_save:
+                for full_module in lora_model.modules_to_save.values():
+                    full_module.pin_memory()
+
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
     ):
