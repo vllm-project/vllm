@@ -243,21 +243,20 @@ class PagedShmTensorIPC:
                 torch_dtype = getattr(torch, pshm_tensor.dtype)
 
                 # 1. Wait for the writer to complete and read the data.
-                # swap_blocks_batch needs to run on another stream.
-                current_stream = torch.cuda.current_stream()
-                stream = torch.cuda.Stream()
-                with stream:
-                    tensor_gpu = self.client.read(
-                        pshm_tensor.uuid,
-                        device=device,
-                        timeout=self.read_timeout,
-                    )
-                    current_stream.wait_stream(stream)
+                # Here we sync the swap_blocks_batch stream, then call close_read,
+                # which releases the SHM read reference.
+                # We'd better not call close_read here, so that we can avoid syncing
+                # the swap_blocks_batch stream.
+                tensor_gpu = self.client.read(
+                    pshm_tensor.uuid,
+                    device=device,
+                    timeout=self.read_timeout,
+                )
 
-                    # 2. Replace the metadata with the actual tensor.
-                    tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
-                    pixel_values.data = tensor_gpu
-                    pixel_values.pshm_tensor = None
+                # 2. Replace the metadata with the actual tensor.
+                tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
+                pixel_values.data = tensor_gpu
+                pixel_values.pshm_tensor = None
 
     def shutdown(self) -> None:
         """Release all resources (client connection, background threads, etc.)."""
