@@ -1770,9 +1770,15 @@ class MoRIIOConnectorWorker:
                 reg_tensor = kv_cache
             else:
                 cache_u8 = kv_cache.view(torch.uint8)
-                total_bytes = (
-                    kv_cache.shape[0] * kv_cache.stride(0) * kv_cache.element_size()
+                # Span of the strided view measured from its own storage offset.
+                # Multiplying the outer size by the outer stride would instead
+                # count a full stride for the last page, overrunning the backing
+                # allocation whenever the layout pads or interleaves pages.
+                span_elems = 1 + sum(
+                    (size - 1) * stride
+                    for size, stride in zip(kv_cache.shape, kv_cache.stride())
                 )
+                total_bytes = span_elems * kv_cache.element_size()
                 reg_tensor = torch.as_strided(
                     cache_u8, (total_bytes,), (1,), cache_u8.storage_offset()
                 )
