@@ -1202,13 +1202,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             v_dim = core_attn_out.shape[-1] * core_attn_out.shape[-2]
             self._warmup_prefill_kernels(qkvz, v_dim)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
@@ -1259,12 +1260,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
@@ -1773,12 +1775,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         mixed_qkv, output_gate_flat = mixed_qkvz.split(
             [qkv_size, self.value_dim // self.tp_size], dim=-1
@@ -1805,7 +1808,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
             and self.gdn_decode_kernel == "cuda"
-            and self.num_v_heads == 8 * self.num_k_heads
+            and self.num_v_heads % self.num_k_heads == 0
+            and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
@@ -1855,12 +1859,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         if (
             self._can_use_fused_gdn_mtp_decode(attn_metadata)

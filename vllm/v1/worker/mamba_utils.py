@@ -114,6 +114,11 @@ def _memcpy_u64_tiled(
             tl.store(dst_u8 + i + offsets, data, mask=mask)
 
 
+def _reinterpret_u64_as_i64(value: int) -> int:
+    """Preserve a uint64 pointer bit pattern in a torch.int64 tensor."""
+    return value if value < (1 << 63) else value - (1 << 64)
+
+
 @triton.jit
 def _copy_mamba_state_block(
     state_idx,
@@ -828,9 +833,17 @@ class MambaSpecDecodeGPUContext:
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
 
-                for state_type_idx, state in enumerate(kv_caches):
+                if len(kv_caches) < self.num_state_types:
+                    raise ValueError(
+                        f"Expected at least {self.num_state_types} Mamba state "
+                        f"tensors, got {len(kv_caches)}"
+                    )
+                for state_type_idx, copy_func in enumerate(mamba_state_copy_funcs):
+                    state = kv_caches[state_type_idx]
                     # Base address
-                    self.state_base_addrs[idx] = state.data_ptr()
+                    self.state_base_addrs[idx] = _reinterpret_u64_as_i64(
+                        state.data_ptr()
+                    )
 
                     # Block stride (bytes between consecutive blocks)
                     # state shape: [num_blocks, ...], stride(0) = elements per block
@@ -845,7 +858,6 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    copy_func = mamba_state_copy_funcs[state_type_idx]
                     assert (
                         copy_func is get_conv_copy_spec
                         or copy_func is get_temporal_copy_spec
@@ -918,7 +930,7 @@ class MambaSpecDecodeGPUContext:
         )
         self.block_table_stride_req = int(next(iter(strides)))
         for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = bt.data_ptr()
+            self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
 
         self.is_initialized = True
 
