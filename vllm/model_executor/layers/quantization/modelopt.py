@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -1574,6 +1575,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            use_a16=self.use_a16,
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1610,6 +1612,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
+            use_a16=self.use_a16,
         )
 
     @property
@@ -1622,7 +1625,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
