@@ -353,6 +353,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 k_cache_prefix=self.prefix,
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+
+            if (
+                has_cutedsl()
+                and self.backend_cls.get_name() == "FLASHMLA_SPARSE_DSV4"
+            ):
+                from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
+                    _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+                )
+
+                _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL.register_warmup()
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -879,6 +892,21 @@ class DeepseekV4Indexer(nn.Module):
             torch.cuda.Event(),
             torch.cuda.Event(),
         ]
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+
+            if has_cutedsl():
+                from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
+                    _INDEXER_Q_FP8_KERNEL,
+                    _INDEXER_Q_MXFP4_KERNEL,
+                )
+
+                (
+                    _INDEXER_Q_MXFP4_KERNEL
+                    if self.use_fp4_kv
+                    else _INDEXER_Q_FP8_KERNEL
+                ).register_warmup()
 
     def forward(
         self,
