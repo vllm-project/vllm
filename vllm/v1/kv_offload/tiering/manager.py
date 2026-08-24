@@ -892,7 +892,6 @@ class TieringOffloadingManager(OffloadingManager):
         finished_req_ids = []
         for req_id, state in self._req_state.items():
             state.pending_primary_stores = 0
-            # The primary reset below drops the blocks these keys waited on.
             state.pending_cascade_keys.clear()
             if not state.is_finished:
                 continue
