@@ -148,10 +148,19 @@ class PCPManager:
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
-        if speculative_config is not None and speculative_config.method != "mtp":
-            raise NotImplementedError(
-                "MRV2 PCP only supports MTP speculative decoding."
-            )
+        if speculative_config is not None:
+            if (
+                speculative_config.method != "mtp"
+                or speculative_config.use_multi_module_mtp()
+            ):
+                raise NotImplementedError(
+                    "MRV2 PCP only supports single-module MTP speculative decoding."
+                )
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "MRV2 PCP with MTP does not support CUDA graphs yet. "
+                    "Set -cc.cudagraph_mode=NONE."
+                )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         if (
             is_sparse_mla
