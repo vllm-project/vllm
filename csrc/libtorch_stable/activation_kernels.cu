@@ -543,8 +543,8 @@ __device__ __forceinline__ fp8_type quant_to_fp8(float val, float inv_scale,
 
 __device__ __forceinline__ float warp_reduce_max(float v) {
 #pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, offset));
+  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+    v = fmaxf(v, VLLM_SHFL_XOR_SYNC(v, offset));
   }
   return v;
 }
