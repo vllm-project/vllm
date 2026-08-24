@@ -1625,7 +1625,10 @@ async fn control_aggregates_multi_engine_capacity() {
     let mut ready_0 = default_ready_response();
     ready_0.max_model_len = 8_192;
     ready_0.num_gpu_blocks = 10;
-    ready_0.data_parallel_size = 2;
+    ready_0.effective_data_parallel_size = 2;
+    ready_0.tensor_parallel_size = 2;
+    ready_0.pipeline_parallel_size = 3;
+    ready_0.world_size = 12;
     ready_0.weight_transfer_backend = Some("nccl".to_string());
     ready_0.enable_sleep_mode = true;
     ready_0.supports_draft_weight_updates = true;
@@ -1633,7 +1636,10 @@ async fn control_aggregates_multi_engine_capacity() {
     let mut ready_1 = default_ready_response();
     ready_1.max_model_len = 4_096;
     ready_1.num_gpu_blocks = 20;
-    ready_1.data_parallel_size = 2;
+    ready_1.effective_data_parallel_size = 2;
+    ready_1.tensor_parallel_size = 2;
+    ready_1.pipeline_parallel_size = 3;
+    ready_1.world_size = 12;
     ready_1.data_parallel_rank = 1;
 
     let engine_tasks = [ready_0, ready_1].map(|ready| {
@@ -1667,7 +1673,7 @@ async fn control_aggregates_multi_engine_capacity() {
         Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let state = AppState::new(vec!["test-model".to_string()], chat).with_data_parallel_size(4);
+    let state = AppState::new(vec!["test-model".to_string()], chat);
     let service = ControlServiceImpl::new(Arc::new(state));
 
     let server = pb::control_server::Control::get_server_info(
@@ -1684,7 +1690,9 @@ async fn control_aggregates_multi_engine_capacity() {
     assert!(rl.weight_transfer_backend.is_empty());
     assert!(!rl.sleep_mode_enabled);
     assert!(!rl.draft_weight_updates_enabled);
-    assert_eq!(server.parallelism.unwrap().data_parallel_size, 4);
+    let parallelism = server.parallelism.unwrap();
+    assert_eq!(parallelism.data_parallel_size, 2);
+    assert_eq!(parallelism.world_size, 12);
 
     drop(engine_tasks);
 }

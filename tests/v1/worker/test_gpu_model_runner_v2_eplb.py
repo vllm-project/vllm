@@ -159,13 +159,12 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
 
     runner = _make_runner(model=SimpleNamespace(is_moe=True))
     mapping = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
-    mrv2.GPUModelRunner.setup_eplb_from_mapping(runner, mapping, 2)
+    mrv2.GPUModelRunner.setup_eplb_from_mapping(runner, mapping)
 
     assert runner.eplb_state is not None
     assert runner.eplb_state.built_from_mapping is True
     assert FakeEplbState.from_mapping_kwargs is not None
     assert FakeEplbState.from_mapping_kwargs["expanded_physical_to_logical"] is mapping
-    assert FakeEplbState.from_mapping_kwargs["num_valid_physical_experts"] == 2
 
 
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
@@ -180,6 +179,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         hidden_states=None,
         aux_hidden_states=None,
         finished_req_ids=set(),
+        ec_connector_output=None,
         routed_experts=None,
         num_tokens_across_dp=None,
     )
