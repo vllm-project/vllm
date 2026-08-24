@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
+from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
 
 
 def test_kernel_buffer_registration_reuses_captured_storage() -> None:
@@ -30,3 +31,35 @@ def test_kernel_buffer_registration_reuses_captured_storage() -> None:
     layer._buffers["_moe_scale"] = restored
     FusedMoEExperts.rebind_sleep_buffers(owner, layer)
     assert owner.scale is restored
+
+
+def test_weight_wake_hooks_reset_module_and_quant_state() -> None:
+    from vllm.v1.worker.gpu_worker import _run_post_weights_wake_up_hooks
+
+    events: list[str] = []
+
+    class QuantMethod:
+        def post_weights_wake_up(self, layer: nn.Module) -> None:
+            events.append("quant")
+
+    class Layer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = QuantMethod()
+
+        def post_weights_wake_up(self) -> None:
+            events.append("module")
+
+    model = nn.Sequential(Layer())
+    _run_post_weights_wake_up_hooks(model)
+
+    assert events == ["module", "quant"]
+
+
+def test_humming_moe_can_be_prepared_for_repeated_reload() -> None:
+    method = object.__new__(HummingMoEMethod)
+    method.processed = True
+
+    method.prepare_for_reload(SimpleNamespace())
+
+    assert not method.processed
