@@ -516,6 +516,7 @@ def test_flashinfer_xqa_nvfp4_spec_decode_with_baseline() -> None:
     mask_u32 = ((1 << torch.arange(1, q_len + 1)) - 1).to(torch.uint32)
     mask = mask_u32.view(torch.uint16).reshape(q_len, 2)
     mask = mask.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+    workspace.zero_()
 
     flashinfer.decode.xqa_batch_decode_with_kv_cache(
         query=query,
