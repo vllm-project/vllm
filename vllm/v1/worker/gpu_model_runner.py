@@ -6290,6 +6290,7 @@ class GPUModelRunner(
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.method == "orthrus"
             ):
                 assert isinstance(
                     self.drafter,
@@ -6297,7 +6298,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | OrthrusProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -7293,10 +7295,15 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
+            or self.speculative_config.method == "orthrus"
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer
+                | OrthrusProposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -7348,6 +7355,7 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
+            or self.speculative_config.method == "orthrus"
         ):
             assert isinstance(
                 self.drafter,
@@ -7355,7 +7363,8 @@ class GPUModelRunner(
                 | DFlashProposer
                 | DraftModelProposer
                 | ExtractHiddenStatesProposer
-                | Gemma4Proposer,
+                | Gemma4Proposer
+                | OrthrusProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
