@@ -28,13 +28,6 @@ from vllm.model_executor.model_loader.reload.sharding import (
     install_sharding_recorders,
 )
 from vllm.model_executor.model_loader.reload.source import observe_weight_sources
-from vllm.model_executor.model_loader.reload.units import (
-    ReloadUnit,
-    ShardCoverageTracker,
-    StagingSpec,
-    install_trackers,
-    uninstall_trackers,
-)
 
 logger = init_logger(__name__)
 
@@ -68,90 +61,6 @@ class _RuntimeBindings:
 _MODEL_METADATA: WeakKeyDictionary[torch.nn.Module, _ModelMetadata] = (
     WeakKeyDictionary()
 )
-
-
-def _discover_manifest_expert_trackers(
-    model: torch.nn.Module,
-    metadata: _ModelMetadata,
-    expected: set[RankShard],
-    skip_modules: frozenset[str],
-) -> list[tuple[str, torch.nn.Module, ShardCoverageTracker]]:
-    """Build generic expert trackers directly from the rank manifest.
-
-    Quant methods do not need to implement a reload-specific hook for this
-    fallback. Expert loaders already expose ``shard_id`` and ``expert_id``;
-    the manifest supplies the complete coverage set, while checkpoint tensor
-    metadata supplies one-expert staging shapes.
-    """
-    modules = _modules(model)
-    parameter_metadata = metadata.parameters
-    candidates: dict[str, set[RankShard]] = {}
-    for shard in expected:
-        fragment = dict(shard.fragment.items)
-        if "expert_id" not in fragment:
-            continue
-        target_parts = shard.target_name.rsplit(".", 1)
-        if len(target_parts) != 2:
-            continue
-        module_name, parameter_name = target_parts
-        if module_name in skip_modules or module_name not in modules:
-            continue
-        module = modules[module_name]
-        has_expert_loader = (
-            any(
-                getattr(param, "weight_loader", None).__class__.__name__
-                == "ReloadAwareWeightLoader"
-                for param in module._parameters.values()
-                if param is not None
-            )
-            or getattr(module, "local_num_experts", None) is not None
-        )
-        if has_expert_loader:
-            candidates.setdefault(module_name, set()).add(shard)
-
-    found = []
-    for module_name, shards in candidates.items():
-        module = modules[module_name]
-        keys = set()
-        staged: dict[str, StagingSpec] = {}
-        for shard in shards:
-            fragment = dict(shard.fragment.items)
-            expert_id = int(fragment["expert_id"])
-            mapper = getattr(module, "_map_global_expert_id_to_local_expert_id", None)
-            local_expert = mapper(expert_id) if mapper is not None else expert_id
-            if local_expert < 0:
-                continue
-            shard_id = str(
-                fragment.get("shard_id", fragment.get("loaded_shard_id", "default"))
-            )
-            _, parameter_name = shard.target_name.rsplit(".", 1)
-            keys.add((parameter_name, local_expert, shard_id))
-            entry = parameter_metadata.get((module_name, parameter_name))
-            if entry is not None and entry.tensor is not None:
-                shape = tuple(entry.tensor.shape[1:])
-                if not shape and shard_id in ("w1", "w3"):
-                    # Per-tensor MoE scales are stored as one value per fused
-                    # half, while the serving schema keeps their reduction.
-                    shape = (2,)
-                staged[parameter_name] = StagingSpec(shape, entry.tensor.dtype)
-        if not keys or not staged:
-            continue
-
-        def commit(pieces, module=module):
-            """Assemble staged expert slices into checkpoint-format tensors."""
-            for (parameter_name, expert), slab in pieces.items():
-                parameter = module._parameters[parameter_name]
-                parameter.data[expert].copy_(slab)
-
-        unit = ReloadUnit(
-            name=f"{module_name}.manifest",
-            keys=frozenset(keys),
-            commit=commit,
-            staged=staged,
-            deferred=True,
-        )
-        found.append((module_name, module, ShardCoverageTracker(module, [unit])))
-    return found
 
 
 def _modules(model: torch.nn.Module) -> dict[str, torch.nn.Module]:
@@ -771,7 +680,35 @@ class _LazyCheckpointBindings:
         expected: set[RankShard],
         skip_modules: frozenset[str],
     ) -> None:
-        """Build source-target and quant-module coverage indexes."""
+        """Build source-target and quant-module coverage indexes.
+
+        Args:
+            model: The model currently rebound to checkpoint-format
+                parameters and buffers for this reload transaction. Its module
+                paths are used to assign each manifest target to an owning
+                module and to identify quantization methods.
+            runtime: Strong references to the serving-format parameters and
+                buffers captured before the transaction started. These
+                bindings are used when a target can write directly to serving
+                storage and when a processed module is committed back.
+            device: Device on which lazy checkpoint tensors are materialized.
+                This is normally the restore device recorded with the model's
+                checkpoint metadata, and may differ from ``target_device``.
+            target_device: Device passed to quantization post-load processing.
+                It is the device on which the serving/runtime kernel expects
+                processed tensors and is intentionally kept separate from the
+                temporary checkpoint allocation device.
+            expected: The exact rank-local ``RankShard`` records captured
+                during the initial checkpoint load. Each record identifies a
+                source tensor, its checkpoint target, and optional loader
+                fragment fields such as ``expert_id`` and ``shard_id``. This
+                set is the sole sharding and completeness truth for the
+                transaction; the constructor compiles it into lightweight
+                source and module indexes without allocating tensor storage.
+            skip_modules: Qualified module names managed by another reload
+                path. Targets owned by these modules are excluded from lazy
+                binding and modelwise PWAL decisions.
+        """
         self.model = model
         self.runtime = runtime
         self.device = device
@@ -788,15 +725,14 @@ class _LazyCheckpointBindings:
             and name not in skip_modules
         }
         self._quant_modules = quant_modules
-        all_modules = set(modules)
-        self._all_modules = all_modules
+        self._module_names = frozenset(modules)
         shards_by_module: dict[str, set[RankShard]] = {}
         for shard in expected:
             self._source_targets.setdefault(shard.source_name, set()).add(
                 shard.target_name
             )
-            owner = self._owner(shard.target_name, all_modules)
-            if owner is not None:
+            owner, separator, _ = shard.target_name.rpartition(".")
+            if (separator or owner == "") and owner in modules:
                 shards_by_module.setdefault(owner, set()).add(shard)
         self._module_shards = {
             name: shards_by_module[name] for name in modules if name in shards_by_module
@@ -805,23 +741,15 @@ class _LazyCheckpointBindings:
         self._module_order = [
             name
             for name in self._module_shards
-            if getattr(
-                getattr(modules[name], "quant_method", None),
-                "supports_incremental_pwal",
-                False,
+            if (
+                isinstance(
+                    quant_method := getattr(modules[name], "quant_method", None),
+                    QuantizeMethodBase,
+                )
+                and quant_method.supports_incremental_pwal(modules[name])
             )
         ]
         self._next_module = 0
-
-    @staticmethod
-    def _owner(target_name: str, candidates: set[str]) -> str | None:
-        """Find the nearest quantized ancestor that owns a target tensor."""
-        matches = [
-            name
-            for name in candidates
-            if target_name == name or target_name.startswith(f"{name}.")
-        ]
-        return max(matches, key=len) if matches else None
 
     def before_source(self, source_name: str) -> None:
         """Prepare only the destinations used by the next checkpoint source."""
@@ -859,8 +787,12 @@ class _LazyCheckpointBindings:
     def note_received(self, received: set[RankShard]) -> None:
         """Record received shards and mark their owning modules as touched."""
         for shard in received:
-            owner = self._owner(shard.target_name, self._all_modules)
-            if owner is not None and owner not in self._module_shards:
+            owner, separator, _ = shard.target_name.rpartition(".")
+            if (
+                (separator or owner == "")
+                and owner in self._module_names
+                and owner not in self._module_shards
+            ):
                 self._module_shards[owner] = {shard}
         self.received.update(received)
         self._touched_modules.update(
@@ -985,7 +917,7 @@ class ModelwiseReloadSession:
         self._loaded_weights: set[str] = set()
         self._loaded_weights_unknown = False
         self._received_shards: set[RankShard] = set()
-        self._unit_layers: list[tuple[str, torch.nn.Module, ShardCoverageTracker]] = []
+        self._legacy_loaded_name_fallback = False
         self._skip_modules: frozenset[str] = frozenset()
         self._lazy_bindings: _LazyCheckpointBindings | None = None
 
@@ -1022,32 +954,14 @@ class ModelwiseReloadSession:
         runtime = _capture_runtime_bindings(self.model)
         self._original_torchao = getattr(self.model, "_do_torchao_reload", False)
         self.model._do_torchao_reload = False
-        # Layers that can commit a reload unit at a time keep their serving
-        # tensors bound: they receive checkpoint shards into small staging
-        # slabs and write serving values back in place, so they never need a
-        # checkpoint-format copy of the whole layer.
         skip_modules = frozenset()
-        trackers = _discover_manifest_expert_trackers(
-            self.model, metadata, set(manifest.shards), skip_modules
-        )
         try:
             _restore_checkpoint_bindings(self.model, metadata, skip_modules)
             install_sharding_recorders(self.model)
-            install_trackers(trackers)
         except BaseException:
-            uninstall_trackers(trackers)
             _restore_runtime_bindings(self.model, runtime)
             self.model._do_torchao_reload = self._original_torchao
             raise
-
-        if trackers:
-            logger.info(
-                "Streaming reload: %d expert layer(s) use manifest-driven "
-                "per-expert staging",
-                len(trackers),
-            )
-
-        self._unit_layers = trackers
         self._skip_modules = skip_modules
         self._runtime = runtime
         self._lazy_bindings = _LazyCheckpointBindings(
@@ -1058,6 +972,7 @@ class ModelwiseReloadSession:
             set(manifest.shards),
             skip_modules,
         )
+        self._legacy_loaded_name_fallback = manifest.state == "legacy"
         self._loaded_weights.clear()
         self._loaded_weights_unknown = False
         self._received_shards.clear()
@@ -1101,7 +1016,11 @@ class ModelwiseReloadSession:
                         ),
                     )
                 )
-            if not received and loaded is not None:
+            if (
+                self._legacy_loaded_name_fallback
+                and not received
+                and loaded is not None
+            ):
                 received.update(
                     RankShard(source_name, target_name) for target_name in loaded
                 )
@@ -1123,12 +1042,11 @@ class ModelwiseReloadSession:
         runtime = self._runtime
         if runtime is None:
             return
-        uninstall_trackers(self._unit_layers)
         _restore_runtime_bindings(self.model, runtime, self._skip_modules)
         self.model._do_torchao_reload = self._original_torchao
-        self._unit_layers = []
         self._skip_modules = frozenset()
         self._lazy_bindings = None
+        self._legacy_loaded_name_fallback = False
         self._runtime = None
 
     @torch.no_grad()
@@ -1194,12 +1112,6 @@ class ModelwiseReloadSession:
             _materialize_checkpoint_bindings(
                 self.model, lazy_bindings.device, remaining - direct
             )
-
-            # Complete generic expert trackers now have checkpoint-format
-            # destination tensors available for their deferred assembly.
-            # Partial units are dropped without failing the whole transaction.
-            for _, _, tracker in self._unit_layers:
-                tracker.finish(fail_on_partial=False)
 
             _audit_meta_bindings_before_pwal(
                 self.model,

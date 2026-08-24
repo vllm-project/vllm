@@ -20,22 +20,31 @@ manifest captured during initial checkpoint loading. Each `RankShard` records:
 No quant-method-specific reload hook is required. Completion is set coverage,
 not tensor size or transport-call boundaries.
 
-## Expert staging
+## Lazy checkpoint staging
 
-`ExpertShardLoader` remains installed on expert parameters. During reload it
-uses the active `ShardCoverageTracker` to redirect each expert fragment into a
-checkpoint-format slab for that local expert. The original weight loader still
-performs expert mapping, TP narrowing, padding, and fused `w1`/`w3` placement.
+`ModelwiseReloadSession` does not install a second expert tracker. At start it
+constructs `_LazyCheckpointBindings`, which compiles the manifest once into the
+following lightweight indexes:
 
-`ModelwiseReloadSession.start()` builds trackers directly from the manifest and
-construction-time tensor metadata. A tracker therefore knows:
+```text
+source_name -> target names
+module name -> expected RankShard set
+```
 
-- the complete set of expert/shard fragments expected for the module;
-- the checkpoint-format shape and dtype of each per-expert destination;
-- which repeated source transmission replaces a previously received fragment.
+The original weight loader still performs expert mapping, TP narrowing, padding,
+and fused `w1`/`w3` placement. The manifest's `RankShard.fragment` retains the
+loader facts such as `expert_id` and `shard_id`; the same `RankShard` objects are
+used for module completeness and PWAL selection.
 
-The tracker retains only expert slices that have started loading. It does not
-materialize the full expert tensor merely because the transaction started.
+`before_source()` materializes only targets belonging to the source currently
+being loaded. Compatible non-quantized targets can bind directly to runtime
+storage. Quantized or incompatible targets receive checkpoint-format storage on
+first use. Thus the transaction does not allocate all expert tensors at start.
+
+`ReloadUnit` and `ShardCoverageTracker` remain available for their standalone
+unit-level API and tests, but modelwise reload does not install them. Reusing
+them as a second manifest-derived coverage system would duplicate the sharding
+truth and may allocate additional expert staging slabs.
 
 ## Finish semantics
 
@@ -46,9 +55,10 @@ At `finish`, `_LazyCheckpointBindings` classifies manifest modules as:
 - **untouched**: no shard for the module arrived.
 
 Incomplete and untouched modules are rebound to their original serving
-storage. Complete expert trackers assemble their staged slices into the
-checkpoint-format module tensors, after which normal model PWAL runs. Processed
-values are validated and copied into stable serving storage.
+storage. Complete modules participate in normal model PWAL; no separate expert
+tracker assembly step is needed because the model's original loaders wrote the
+manifest targets directly. Processed values are validated and copied into
+stable serving storage.
 
 This permits trainer updates containing only selected layers. It does not make
 an incomplete module visible: a partially transmitted linear or MoE module is

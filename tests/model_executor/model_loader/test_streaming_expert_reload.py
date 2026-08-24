@@ -443,8 +443,8 @@ def test_modelwise_reload_allows_a_partial_expert_update():
     assert getattr(model.experts, "_reload_shard_tracker", None) is None
 
 
-def test_manifest_driven_tracker_stages_experts_without_quant_hook():
-    """Generic expert loaders stream per-expert storage without a hook."""
+def test_manifest_drives_expert_reload_without_a_second_tracker():
+    """The rank manifest alone drives complete expert-module reload."""
     model = _StreamingModel([])
     initial = list(_expert_weights())
     record_modelwise_reload_metadata(model)
@@ -458,3 +458,4 @@ def test_manifest_driven_tracker_stages_experts_without_quant_hook():
     assert loaded is not None
     assert torch.equal(model.experts.w13_weight[0][:INTERMEDIATE], _shard(9.0))
     assert not torch.equal(model.experts.w13_weight, runtime)
+    assert getattr(model.experts, "_reload_shard_tracker", None) is None

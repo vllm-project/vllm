@@ -392,7 +392,9 @@ def test_modelwise_session_runs_pwal_when_module_shards_complete() -> None:
     class TwoWeightMethod(_Int8Method):
         """Quantize two checkpoint weights as one module-level reload unit."""
 
-        supports_incremental_pwal = True
+        def supports_incremental_pwal(self, layer: torch.nn.Module) -> bool:
+            """Allow the test method to run after its two inputs arrive."""
+            return True
 
         def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
             """Convert both weights to runtime INT8 format and derive scale."""
@@ -474,7 +476,9 @@ def test_modelwise_session_preserves_model_order_for_completed_pwal() -> None:
     class OrderedMethod(_Int8Method):
         """Record PWAL order while preserving the checkpoint tensor schema."""
 
-        supports_incremental_pwal = True
+        def supports_incremental_pwal(self, layer: torch.nn.Module) -> bool:
+            """Allow the test method to run after its input arrives."""
+            return True
 
         def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
             """Record the layer name and leave its runtime-compatible weight."""

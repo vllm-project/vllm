@@ -562,6 +562,10 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
             layer=layer,
         )
 
+    def supports_incremental_pwal(self, layer: Module) -> bool:
+        """Allow incremental PWAL after all manifest MoE shards arrive."""
+        return True
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -618,6 +622,10 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             weight_block_size=[128, 128],
             layer=layer,
         )
+
+    def supports_incremental_pwal(self, layer: Module) -> bool:
+        """Allow incremental PWAL after all manifest MoE shards arrive."""
+        return True
 
     def maybe_roundup_sizes(
         self,

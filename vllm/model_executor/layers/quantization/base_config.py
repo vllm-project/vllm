@@ -71,6 +71,23 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def supports_incremental_pwal(self, layer: nn.Module) -> bool:
+        """Return whether this method supports module-local incremental PWAL.
+
+        An implementation may return ``True`` only when all checkpoint inputs
+        owned by ``layer`` being complete is sufficient to run
+        ``process_weights_after_loading`` and commit the result independently
+        of the rest of the model. The conservative default keeps processing at
+        the model-wide reload finish boundary.
+
+        Args:
+            layer: Quantized module whose checkpoint inputs may have arrived.
+
+        Returns:
+            Whether the module can be processed and committed immediately.
+        """
+        return False
+
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
     """

@@ -43,6 +43,8 @@ Modelwise Reload 的目标是：
 5. 统一执行 quant、Attention、MLA 和 HPC 的 PWAL。
 6. commit 后保持原 runtime Parameter、Buffer 和 storage 地址不变。
 7. 接收失败时恢复旧模型，不提交半成品权重。
+8. 使用 initial load 捕获的 rank manifest 作为唯一 sharding truth，避免在 reload
+   阶段重新发现 expert ownership 或维护第二套 shard tracker。
 
 ## 2. 核心设计
 
@@ -60,8 +62,8 @@ Runtime schema
 
 ```text
 1. 保存当前 runtime bindings。
-2. 临时恢复 checkpoint bindings。
-3. 一次或多次调用 model.load_weights(chunk)。
+2. 临时恢复 checkpoint bindings，并从 rank manifest 编译轻量索引。
+3. 一次或多次调用 model.load_weights(chunk)，按 source 懒 materialize 目标 tensor。
 4. 显式 finish 时执行全模型 PWAL。
 5. 校验处理后的 runtime schema。
 6. 将处理结果 copy 回原 runtime storage。
@@ -84,19 +86,20 @@ flowchart TD
     F --> G[start / ModelwiseReloadSession.start]
     G --> H[保存 runtime bindings]
     H --> I[恢复并 materialize checkpoint bindings]
-    I --> J[update chunk 0]
-    J --> K[model.load_weights]
-    K --> L{还有 chunk?}
-    L -- 是 --> M[update chunk N]
-    M --> K
-    L -- 否 --> N[finish]
-    N --> O[全模型 PWAL force=True]
-    O --> P[捕获 processed runtime schema]
-    P --> Q[校验 shape/dtype]
-    Q --> R[copy 到旧 runtime storage]
-    R --> S[恢复原 runtime bindings]
-    S --> T[清空 prefix/MM/encoder cache]
-    T --> F
+    I --> J[从 rank manifest 编译轻量索引]
+    J --> K[update chunk 0]
+    K --> L[model.load_weights]
+    L --> M{还有 chunk?}
+    M -- 是 --> N[update chunk N]
+    N --> L
+    M -- 否 --> O[finish]
+    O --> P[全模型 PWAL force=True]
+    P --> Q[捕获 processed runtime schema]
+    Q --> R[校验 shape/dtype]
+    R --> S[copy 到旧 runtime storage]
+    S --> T[恢复原 runtime bindings]
+    T --> U[清空 prefix/MM/encoder cache]
+    U --> F
 ```
 
 ### 3.1 数据平面与控制平面
@@ -256,7 +259,8 @@ flowchart LR
 ### 4.5 `_materialize_checkpoint_bindings`
 
 metadata 中的 tensor 位于 meta device，没有实际 storage。该模块在 reload start 时按
-目标 device 分配临时 checkpoint storage：
+目标 device 分配临时 checkpoint storage；实际分配由即将处理的 checkpoint source 触发，
+而不是在 reload start 一次性 materialize 整个模型：
 
 ```text
 BF16 meta Parameter
@@ -265,7 +269,119 @@ BF16 meta Parameter
 
 共享 tensor 只 materialize 一次，所有 alias 继续指向同一个对象。
 
-### 4.6 `ModelwiseReloadSession`
+### 4.6 `_LazyCheckpointBindings`：manifest 的一次轻量编译
+
+`ModelwiseReloadSession.start()` 在恢复 checkpoint bindings、安装 sharding recorder 后，
+构造 `_LazyCheckpointBindings`。构造函数只遍历当前 rank 的
+`RankShardingManifest.shards` 一次，建立 Python 索引，不分配权重 storage：
+
+```text
+source_name -> set[target_name]
+module_name -> set[RankShard]
+```
+
+`expected` 参数的结构以及一次编译后的索引关系如下：
+
+```mermaid
+flowchart LR
+    E[expected: set[RankShard]] --> S1[RankShard]
+    S1 --> N[source_name: str]
+    S1 --> T[target_name: str]
+    S1 --> F[fragment: LoadFragment]
+    F --> FI[expert_id / shard_id / weight_name ...]
+
+    E --> I1[_source_targets]
+    I1 --> K1[source_name]
+    K1 --> V1[set[target_name]]
+
+    E --> I2[_module_shards]
+    I2 --> K2[module_name from target_name parent]
+    K2 --> V2[set[RankShard]]
+```
+
+例如，一个 fused MoE expert 的 manifest 可能包含：
+
+```text
+expected = {
+    RankShard(
+        source_name="model.layers.0.mlp.experts.w13_weight",
+        target_name="model.layers.0.mlp.experts.w13_weight",
+        fragment=LoadFragment.from_fields(
+            expert_id=7,
+            shard_id="w1",
+            weight_name="...experts.w13_weight",
+        ),
+    ),
+    RankShard(
+        source_name="model.layers.0.mlp.experts.w2_weight",
+        target_name="model.layers.0.mlp.experts.w2_weight",
+        fragment=LoadFragment.from_fields(
+            expert_id=7,
+            shard_id="w2",
+            weight_name="...experts.w2_weight",
+        ),
+    ),
+}
+```
+
+编译后可直接得到：
+
+```text
+_source_targets = {
+    "model.layers.0.mlp.experts.w13_weight": {
+        "model.layers.0.mlp.experts.w13_weight",
+    },
+    "model.layers.0.mlp.experts.w2_weight": {
+        "model.layers.0.mlp.experts.w2_weight",
+    },
+}
+
+_module_shards = {
+    "model.layers.0.mlp.experts": expected,
+}
+```
+
+同时记录 quantized module 集合和支持 incremental PWAL 的模块顺序。模块 owner 直接由
+`target_name` 的父路径解析；不会再次扫描所有 module 来推导 expert loader、expert id 或
+staging shape。
+
+manifest 中的 `RankShard.fragment`（例如 `expert_id`、`shard_id`）只作为模型 loader
+实际消费的 rank-local 事实保存。模块完整性由同一份 `RankShard` 集合和已收到的 shard
+集合判断。这样 source 路由、模块完成判断和 PWAL 选择共享同一个 sharding truth。
+
+旧的 `_discover_manifest_expert_trackers`、`ReloadUnit` 和
+`ShardCoverageTracker` 不再由 modelwise reload 安装。它们会重复表示 shard coverage，
+并可能为 expert 申请额外 staging slab；generic modelwise path 不再维护这套第二状态。
+
+`RankShardingManifest.state == "exact"` 时，只接受 initial load 捕获的 `RankShard`；
+只有 legacy manifest 才允许使用 loaded-name fallback。若 manifest 不可用，modelwise
+reload 会拒绝启动，而不会猜测 rank sharding。
+
+#### Quant method 能力清单
+
+`QuantizeMethodBase.supports_incremental_pwal(layer)` 是显式能力接口，默认返回
+`False`。当前量化实现按代码目录盘点如下；同一 method 可能由多个 checkpoint scheme
+或 backend 复用，因此这里按实现家族列出，而不是把 scheme 名称误当成独立 PWAL 契约：
+
+| 实现家族 | 主要实现位置 | 当前增量 PWAL 标记 | 说明 |
+|---|---|---:|---|
+| Online FP8 MoE per-tensor | `quantization/online/fp8.py` | **True** | 已用 day0 kit Qwen3 MoE 验证 |
+| Online FP8 MoE per-block | `quantization/online/fp8.py` | **True** | 已用 day0 kit Qwen3 MoE 验证 |
+| Online FP8 linear / PTPC MoE | `quantization/online/fp8.py` | False | 尚未完成独立 PWAL 验证 |
+| Online INT8 / MXFP8 / MXFP4 / NVFP4 | `quantization/online/` | False | 可能有跨参数或 kernel 派生依赖 |
+| Compressed-tensors linear | `quantization/compressed_tensors/` | False | scheme/backend 组合较多，默认延迟 |
+| Compressed-tensors MoE | `quantization/compressed_tensors/compressed_tensors_moe/` | False | 未证明所有 scale/repack 组合可局部提交 |
+| ModelOpt | `quantization/modelopt.py` | False | 包含多种 linear/MoE 后处理路径 |
+| Quark | `quantization/quark/` | False | 包含多种 linear/MoE scheme |
+| GPTQ / AWQ / Marlin / WNA16 | `auto_gptq.py`, `auto_awq.py`, `moe_wna16.py` | False | repack 和 backend 依赖未统一验证 |
+| FP8 checkpoint-native | `quantization/fp8.py` | False | 已验证完整 modelwise reload，但未承诺局部 PWAL |
+| Humming / FBGEMM / TorchAO / INC | 对应 `quantization/*.py` 和 `inc/` | False | 保持 model-wide finish 语义 |
+
+只有明确验证了以下契约的实现才能改为 `True`：manifest 覆盖的本模块输入全部到齐后，
+quant method 可以不依赖其他模块独立运行 PWAL、重复处理 reload 输入，并把结果提交回
+原 runtime storage；否则保持默认 `False`，在 `finish()` 统一处理。
+
+### 4.7 `ModelwiseReloadSession`
 
 这是核心事务对象，状态机为：
 
@@ -290,7 +406,7 @@ stateDiagram-v2
     -> capture runtime bindings
     -> 禁止 TorchAO 特殊 reload 分支
     -> restore checkpoint bindings
-    -> materialize checkpoint tensors
+    -> 从 rank manifest 编译 source/module 轻量索引
 ```
 
 start 完成后，serving runtime tensor 仍被 `_RuntimeBindings` 持有，但 model tree 当前
@@ -317,6 +433,8 @@ session.load_weights(chunk_2)
 该阶段：
 
 - 不运行 PWAL；
+- `before_source()` 只为当前 source 的 checkpoint targets 分配 storage；
+- 可直接绑定 runtime storage 的 target 不额外分配临时 buffer；
 - 不进行 layer finalization；
 - 不统计 `numel`；
 - 不假设 tensor 顺序；
@@ -343,7 +461,7 @@ process_weights_after_loading(force=True)
 不运行 PWAL、不 copy-back，只恢复事务开始时的 runtime binding。因此接收失败不会
 提交临时 checkpoint tensor。
 
-### 4.7 `ModelwiseReloader`
+### 4.8 `ModelwiseReloader`
 
 提供单次文件系统 reload 的便捷封装：
 
@@ -359,7 +477,7 @@ except:
 
 调用点位于 `GPUModelRunner.reload_weights()` 的 checkpoint-format 分支。
 
-### 4.8 `process_weights_after_loading(force=True)`
+### 4.9 `process_weights_after_loading(force=True)`
 
 finish 阶段统一处理三类 post-load 状态：
 
@@ -384,7 +502,7 @@ finish 阶段统一处理三类 post-load 状态：
 每个模块的 PWAL 仍在其 reload arena scope 中运行，以便派生 tensor 复用稳定的
 arena storage。
 
-### 4.9 `_validate_copy_back`
+### 4.10 `_validate_copy_back`
 
 commit 前对完整 runtime schema 做预检查：
 
@@ -400,7 +518,7 @@ commit 前对完整 runtime schema 做预检查：
 当前允许 processed schema 中缺失旧 Buffer，因为某些 runtime-only Buffer 不属于
 本次 checkpoint commit；Parameter 缺失则视为错误。
 
-### 4.10 `_copy_back` 与 `_restore_runtime_bindings`
+### 4.11 `_copy_back` 与 `_restore_runtime_bindings`
 
 `_copy_back` 不替换 runtime object：
 
@@ -417,7 +535,7 @@ storage.data_ptr() == original_data_ptr
 
 这保证 graph-visible storage identity 稳定。
 
-### 4.11 `reload_storage_guard`
+### 4.12 `reload_storage_guard`
 
 Modelwise Reload 外层仍由 storage guard 包围，用于校验：
 
@@ -428,7 +546,7 @@ Modelwise Reload 外层仍由 storage guard 包围，用于校验：
 Modelwise 自身负责 Parameter/Buffer schema 和 copy-back；storage guard 负责更广泛的
 graph-visible runtime 状态验证，两者职责不同。
 
-### 4.12 NCCL 与 CUDA IPC Engine
+### 4.13 NCCL 与 CUDA IPC Engine
 
 两个 backend 都持有：
 
@@ -469,7 +587,7 @@ packed buffer 2 -> unpack -> session.load_weights(chunk 2)
 IPC handle 被重建为 receiver device tensor，组成一个 chunk 后传入
 `session.load_weights()`。packed 模式可多次回调 update，但它们共享同一个 session。
 
-### 4.13 `GPUWorker`
+### 4.14 `GPUWorker`
 
 Worker 负责控制事务合法性：
 
@@ -480,7 +598,7 @@ Worker 负责控制事务合法性：
 
 Worker 不管理 layer 状态，也不判断权重完成数量。
 
-### 4.14 `LLM` 与 `AsyncLLM`
+### 4.15 `LLM` 与 `AsyncLLM`
 
 控制器调用顺序：
 
@@ -793,16 +911,18 @@ copy-back 是原位写操作；如果底层 `copy_` 在部分 tensor 已提交�
 
 ### 9.1 峰值显存
 
-Modelwise start 会同时持有：
+Modelwise reload 的 runtime bindings 会从 start 起被强引用保存；checkpoint storage 则按
+source 懒 materialize。随着更新覆盖更多 source，峰值逐步接近：
 
 ```text
 完整 runtime schema
-+ 完整临时 checkpoint schema
++ 已收到 source 对应的临时 checkpoint schema
 + PWAL 临时 workspace
 ```
 
-峰值显存高于 layerwise。Modelwise 以简化正确性和完整模型 post-load 语义换取 reload
-期间的额外显存。
+因此不会在初始化阶段一次性为整个模型创建 checkpoint buffer；未开始加载的权重仍保持
+meta binding。事务完成前，如果更新覆盖整个模型，峰值仍可能接近 runtime 权重加完整
+checkpoint schema，这是 lazy materialization 降低启动峰值而不是消除全量 commit 峰值。
 
 部署可通过以下方式预留空间：
 
@@ -812,23 +932,21 @@ Modelwise start 会同时持有：
 - 在请求 drain 后执行 reload；
 - 将 checkpoint staging 放在容量更大的 device/host memory。
 
-### 9.2 Packed Chunk 不降低 Staging 峰值
+### 9.2 Packed Chunk 与懒 materialization
 
-packed NCCL/IPC 减少传输 buffer 峰值，但当前 modelwise 仍 materialize 完整 checkpoint
-schema。因此：
+packed NCCL/IPC 只减少传输 buffer 峰值；source 分块还决定 checkpoint storage 何时
+materialize。因此：
 
 ```text
-传输分块 != checkpoint staging 分层释放
+传输分块 == checkpoint target 的按 source 懒 materialize
 ```
 
-若未来需要降低 staging 峰值，应设计显式 model reload state 或可释放的 checkpoint
-tensor arena，而不是重新引入 `numel` completion。
+已经到齐的模块可以触发显式 incremental PWAL；不支持增量 PWAL 的模块保留至 model-wide
+finish。未完成的模块不会被提交，partial update 会恢复其原 runtime binding。
 
-支持 streaming reload unit 的层（当前为 per-tensor / block FP8 MoE + Triton）已经
-不再进入上述 staging：它们保持 runtime binding，按 expert 暂存极小的 checkpoint
-分片，凑齐一个可量化单元就立即量化、写回原 storage 并释放暂存。判定依据仍是显式的
-shard 集合覆盖，不是 `numel`。详见
-[`streaming_expert_reload.md`](streaming_expert_reload.md)。
+manifest 编译索引只占 Python 元数据，不创建 tensor storage；不要重新引入独立的
+expert `ReloadUnit`/`ShardCoverageTracker`，否则会产生第二份 sharding coverage 和额外
+staging。
 
 ### 9.3 PWAL 次数
 

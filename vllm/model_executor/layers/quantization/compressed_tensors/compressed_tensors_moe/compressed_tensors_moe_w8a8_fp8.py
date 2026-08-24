@@ -10,7 +10,6 @@ from compressed_tensors.quantization import (
 
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.reload_arena import arena_scope, get_reload_arena
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -43,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
 )
+from vllm.model_executor.reload_arena import arena_scope, get_reload_arena
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -342,6 +342,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     experts_cls=self.experts_cls,
                     routing_tables=layer._expert_routing_tables(),
                 )
+
+    def supports_incremental_pwal(self, layer: torch.nn.Module) -> bool:
+        """Allow module-local PWAL after all native FP8 MoE shards arrive."""
+        return True
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
