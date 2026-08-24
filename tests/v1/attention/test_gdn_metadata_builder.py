@@ -567,3 +567,62 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
     # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
     # tokens of the third prefill, whose states start at index 3.
     assert rows == [0, 1, 0, 5]
+
+
+@pytest.mark.parametrize("full_cuda_graph", [False, True])
+@pytest.mark.parametrize("mixed_prefill", [False, True])
+def test_runtime_k_keeps_contiguous_state_slots(
+    full_cuda_graph: bool, mixed_prefill: bool
+):
+    """Reduced K retains the previous step's accepted state and graph addresses."""
+    src, dst = (
+        _create_gdn_builder(num_speculative_tokens=7, full_cuda_graph=full_cuda_graph)
+        for _ in range(2)
+    )
+    for builder in (src, dst):
+        builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    table = torch.arange(60, dtype=torch.int32).reshape(5, 12) + 10
+    pointers = None
+    for width in (8, 4, 2, 1, 4):
+        query_lens = [width] * 3 + ([16, 0] if mixed_prefill else [0, 0])
+        batch = BatchSpec(seq_lens=[80] * 5, query_lens=query_lens)
+        common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+            block_table_tensor=table
+        )
+        accepted = torch.tensor([7, 3, 1, 1, 1], dtype=torch.int32)
+        meta = src.build(
+            0,
+            common,
+            accepted,
+            torch.tensor([width - 1] * 3 + [-1, -1], dtype=torch.int32),
+        )
+        assert meta.uniform_spec_sequence_length == width
+        assert meta.spec_state_indices_tensor is not None
+        expected = table[:3, :8]
+        if full_cuda_graph and not mixed_prefill:
+            expected = torch.cat((expected, torch.zeros(2, 8, dtype=torch.int32)))
+        torch.testing.assert_close(meta.spec_state_indices_tensor, expected)
+        assert meta.spec_state_indices_tensor.is_contiguous()
+        for row in range(3):
+            assert (
+                meta.spec_state_indices_tensor[row, accepted[row] - 1]
+                == (table[row, accepted[row] - 1])
+            )
+        remapped = dst.update_block_table(meta, table + 100, common.slot_mapping)
+        assert remapped.spec_state_indices_tensor is not None
+        expected_remapped = expected.clone()
+        expected_remapped[:3] += 100
+        torch.testing.assert_close(
+            remapped.spec_state_indices_tensor, expected_remapped
+        )
+        torch.testing.assert_close(meta.spec_state_indices_tensor, expected)
+        assert remapped.spec_state_indices_tensor.is_contiguous()
+        if full_cuda_graph and not mixed_prefill:
+            addresses = (
+                meta.spec_state_indices_tensor.data_ptr(),
+                remapped.spec_state_indices_tensor.data_ptr(),
+            )
+            assert addresses[0] != addresses[1]
+            if pointers is not None:
+                assert addresses == pointers
+            pointers = addresses
