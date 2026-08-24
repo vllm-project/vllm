@@ -1071,3 +1071,45 @@ def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
     assert md.prefill.mm_prefill_ranges is not None
     # The prefill slice holds exactly the tail row: its range, inclusive.
     assert md.prefill.mm_prefill_ranges.tolist() == [100, 200]
+
+
+def test_flashinfer_mm_prefix_restricts_kernel_block_sizes(monkeypatch):
+    """Automatic page-size selection must stay off trtllm-only pages.
+
+    On Blackwell GQA the backend normally advertises kernel block sizes up
+    to 1024, which only run on trtllm-gen; an mm-prefix model must keep the
+    fa2-servable [16, 32, 64] so selection never picks a page the mm path
+    dies on. A non-mm model under the same conditions keeps the large pages.
+    """
+    from types import MethodType
+
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    vllm_config, _, _ = _flashinfer_builder_env(SLIDING_WINDOW)
+    mc = vllm_config.model_config
+    assert mc.is_mm_prefix_lm
+
+    # Blackwell GQA conditions that advertise large pages on non-mm models.
+    monkeypatch.setattr(
+        fi.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 100,
+    )
+    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda q, kv: True)
+    monkeypatch.setattr(
+        mc, "get_num_attention_heads", MethodType(lambda self, pc: 8, mc)
+    )
+    monkeypatch.setattr(mc, "get_num_kv_heads", MethodType(lambda self, pc: 2, mc))
+
+    with set_current_vllm_config(vllm_config):
+        assert FlashInferBackend.get_supported_kernel_block_sizes() == [16, 32, 64]
+
+        # Same conditions without mm-prefix: large pages stay advertised.
+        mc.__dict__["is_mm_prefix_lm"] = False
+        try:
+            sizes = FlashInferBackend.get_supported_kernel_block_sizes()
+        finally:
+            mc.__dict__.pop("is_mm_prefix_lm", None)
+        assert sizes == [16, 32, 64, 128, 256, 512, 1024]
