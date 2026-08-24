@@ -335,15 +335,19 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             plugins, request_output, vllm_xargs
         )
 
-    def post_generation_refusal_response(self, outcome) -> ErrorResponse | None:
-        if outcome.blocked and outcome.replacement is None:
-            return self.create_error_response(
-                outcome.error_message
-                or "Request blocked by post-generation hook",
-                err_type="RefusalError",
-                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-            )
-        return None
+    def post_generation_refusal_response(
+        self, outcome, *, streaming: bool = False
+    ) -> ErrorResponse | None:
+        from vllm.plugins.endpoint_plugins.post_generation import refusal_message
+
+        message = refusal_message(outcome, streaming=streaming)
+        if message is None:
+            return None
+        return self.create_error_response(
+            message,
+            err_type="RefusalError",
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+        )
 
     @staticmethod
     def _get_decoded_token(

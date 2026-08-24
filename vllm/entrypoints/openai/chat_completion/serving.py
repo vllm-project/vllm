@@ -909,7 +909,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 hook_outcome = await self.apply_post_generation_hooks(
                     raw_request, last_res, request.vllm_xargs
                 )
-                refusal = self.post_generation_refusal_response(hook_outcome)
+                refusal = self.post_generation_refusal_response(
+                    hook_outcome, streaming=True
+                )
                 if refusal is not None:
                     err_chunk = self.create_streaming_error_response(
                         refusal.error.message,

@@ -160,3 +160,24 @@ async def apply_post_generation_hooks(
         outcome.scores = dict(external)
 
     return outcome
+
+
+def refusal_message(
+    outcome: PostGenerationOutcome, *, streaming: bool = False
+) -> str | None:
+    """HTTP refusal text, or ``None`` if the request should proceed.
+
+    Non-streaming replacements already mutated ``RequestOutput.text``, so they
+    are not refusals. Streaming cannot unsend tokens, so any block is a refusal.
+    """
+    if not outcome.blocked:
+        return None
+    if outcome.replacement is not None and not streaming:
+        return None
+    if streaming and outcome.replacement is not None:
+        return (
+            outcome.error_message
+            or "Request blocked by post-generation hook "
+            "(replacement cannot be applied to already-streamed content)"
+        )
+    return outcome.error_message or "Request blocked by post-generation hook"

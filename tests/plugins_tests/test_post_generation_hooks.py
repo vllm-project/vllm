@@ -9,7 +9,9 @@ import pytest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.plugins.endpoint_plugins.interface import EndpointPlugin
 from vllm.plugins.endpoint_plugins.post_generation import (
+    PostGenerationOutcome,
     apply_post_generation_hooks,
+    refusal_message,
 )
 
 
@@ -159,3 +161,20 @@ async def test_annotation_timeout_fail_open():
     )
     assert not outcome.blocked
     assert output.outputs[0].text == "hello world"
+
+
+def test_non_streaming_replacement_is_not_a_refusal():
+    outcome = PostGenerationOutcome(blocked=True, replacement="refused")
+    assert refusal_message(outcome, streaming=False) is None
+
+
+def test_streaming_block_with_replacement_is_a_refusal():
+    outcome = PostGenerationOutcome(blocked=True, replacement="refused")
+    message = refusal_message(outcome, streaming=True)
+    assert message is not None
+    assert "already-streamed" in message
+
+
+def test_streaming_block_without_replacement_uses_error_message():
+    outcome = PostGenerationOutcome(blocked=True, error_message="not allowed")
+    assert refusal_message(outcome, streaming=True) == "not allowed"

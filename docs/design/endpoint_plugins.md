@@ -161,8 +161,10 @@ class GroundingPlugin:
 
 The hook is invoked from `GenerateBaseServing` after the final `RequestOutput`
 (`finished=True`) and before OpenAI serialization. Streaming still flushes tokens
-as they are produced; a blocking refusal can only replace the last SSE chunk /
-final response. Mid-stream mutation is out of scope.
+as they are produced. A blocking plugin with `replacement` rewrites the
+non-streaming body; in streaming it cannot unsend tokens, so the server emits a
+final SSE error instead of silently dropping the block. Mid-stream mutation is
+out of scope.
 
 Allowlist the plugin with `VLLM_PLUGINS` like any other endpoint plugin. Nothing
 loads in engine-core or GPU workers.
