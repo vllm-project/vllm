@@ -156,6 +156,12 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             k=k2,
             num_groups=num_experts_w2,
         )
+        for name in ("_fc2_input_scale", "w1_sf_mma", "w2_sf_mma"):
+            setattr(
+                self,
+                name,
+                self._register_persistent_buffer(layer, name, getattr(self, name)),
+            )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
