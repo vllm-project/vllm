@@ -40,18 +40,19 @@ class OMPProcessManager:
 
         assert not (self.use_iomp and self.use_gomp)
 
-        # at least reserve 1/local_world_size(for ARM/RISC-V) core for scheduler
-        # proc as always use MP executor
+        # Reserve one CPU per local rank on x86, ARM, and RISC-V for scheduler
+        # processes, which always use the MP executor.
         # TODO: make scheduler proc sleep when idle
         self.reserve_cpu_num = (
             self.local_world_size
             if current_platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.RISCV)
+            in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.RISCV)
             else 1
         )
-        # reserve at one more core for nixl_connector under p/d case
+        # Reserve one additional CPU per local rank for the NIXL connector in
+        # the P/D case.
         if config.kv_transfer_config:
-            self.reserve_cpu_num += 1
+            self.reserve_cpu_num += self.local_world_size
 
         if envs.VLLM_CPU_NUM_OF_RESERVED_CPU is not None:
             if self.reserve_cpu_num > envs.VLLM_CPU_NUM_OF_RESERVED_CPU:
