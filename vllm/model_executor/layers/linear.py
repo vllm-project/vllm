@@ -211,9 +211,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
             # only when K > N; K < N weights regress, so convert only when
             # K > N (or when forced via VLLM_XPU_FORCE_N_CONTIG_WEIGHT).
             weight = layer.weight.data
-            if weight.ndim == 2 and weight.stride(0) != 1 and (
-                envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
-                or weight.shape[1] > weight.shape[0]
+            if (
+                weight.ndim == 2
+                and weight.stride(0) != 1
+                and (
+                    envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
+                    or weight.shape[1] > weight.shape[0]
+                )
             ):
                 layer.weight.data = weight.t().contiguous().t()
 
