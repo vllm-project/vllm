@@ -33,6 +33,7 @@ class CuteSkinnyGemm:
         k_unroll: int = 1,
         has_residual: bool = False,
         use_pdl: bool = False,
+        early_pdl_trigger: bool = False,
         static_k: int | None = None,
     ) -> None:
         if block_size % cute.arch.WARP_SIZE != 0:
@@ -50,6 +51,7 @@ class CuteSkinnyGemm:
         self.k_unroll = k_unroll
         self.has_residual = has_residual
         self.use_pdl = use_pdl
+        self.early_pdl_trigger = early_pdl_trigger
         self.static_k = static_k
         self.num_warps = block_size // cute.arch.WARP_SIZE
 
@@ -216,6 +218,11 @@ class CuteSkinnyGemm:
                                 cutlass.Float32
                             ) * b_regs[ni, vi].to(cutlass.Float32)
 
+        # Activation A is fully consumed.  The K3 C=1 specialization exposes
+        # reduction and stores to the dependent without changing other shapes.
+        if const_expr(self.use_pdl and self.early_pdl_trigger):
+            cute.arch.griddepcontrol_launch_dependents()
+
         for mi in cutlass.range_constexpr(num_rows):
             for ni in cutlass.range_constexpr(outputs_per_block):
                 acc[mi, ni] = cute.arch.warp_reduction_sum(acc[mi, ni])
@@ -249,5 +256,5 @@ class CuteSkinnyGemm:
                         total += gResidual[mi, n_idx].to(cutlass.Float32)
                     gC[mi, n_idx] = cutlass.Float32(total).to(self.element_type)
 
-        if const_expr(self.use_pdl):
+        if const_expr(self.use_pdl and not self.early_pdl_trigger):
             cute.arch.griddepcontrol_launch_dependents()

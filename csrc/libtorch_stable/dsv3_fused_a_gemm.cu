@@ -583,7 +583,7 @@ struct MmaComputer {
 
 // AB swapped, kernel is k-major, k-major, m-major
 template <int batch_size, int gemm_m, int gemm_k, int tile_m, int tile_n,
-          int tile_k, int stage_cnt>
+          int tile_k, int stage_cnt, bool early_pdl_trigger = false>
 __global__ __launch_bounds__(256, 1) void fused_a_gemm_kernel(
     bf16_t* output, bf16_t const* mat_a, bf16_t const* mat_b, int gemm_n) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
@@ -646,6 +646,10 @@ __global__ __launch_bounds__(256, 1) void fused_a_gemm_kernel(
         gmem_b_local, smem_b, smem_barrier, gemm_n);
     b_loader.prepare();
     b_loader.issue_mainloop();
+    if constexpr (early_pdl_trigger) {
+      // Activation A has been consumed; expose the MMA/reduction/store tail.
+      cudaTriggerProgrammaticLaunchCompletion();
+    }
   } else {
     MmaComputer<gemm_m, gemm_k, tile_m, tile_n, tile_k, stage_cnt> mma_computer(
         gmem_c_local, smem_a, smem_b, smem_barrier, warp_idx, gemm_n);
@@ -653,14 +657,17 @@ __global__ __launch_bounds__(256, 1) void fused_a_gemm_kernel(
     mma_computer.issue_mainloop();
     mma_computer.epi();
   }
-  cudaTriggerProgrammaticLaunchCompletion();
+  if constexpr (!early_pdl_trigger) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
 #endif
 }
 
 template <typename T, int kHdIn, int kHdOut, int kTileN, int kTileK = 256,
           int kTileM = 16>
 void invokeFusedAGemm(T* output, T const* mat_a, T const* mat_b, int num_tokens,
-                      cudaStream_t const stream, bool enable_pdl) {
+                      cudaStream_t const stream, bool enable_pdl,
+                      bool early_pdl_trigger) {
   constexpr int gemm_m = kHdOut;
   int const gemm_n = num_tokens;
   constexpr int gemm_k = kHdIn;
@@ -694,34 +701,37 @@ void invokeFusedAGemm(T* output, T const* mat_a, T const* mat_b, int num_tokens,
       enable_pdl || getEnvEnablePDL();
   config.numAttrs = 1;
   config.attrs = attrs;
+  auto kernel = early_pdl_trigger
+                    ? &fused_a_gemm_kernel<batch_size, gemm_m, gemm_k, tile_m,
+                                           tile_n, tile_k, stage_cnt, true>
+                    : &fused_a_gemm_kernel<batch_size, gemm_m, gemm_k, tile_m,
+                                           tile_n, tile_k, stage_cnt, false>;
   if (smem_bytes >= (48 * 1024)) {
-    cudaFuncSetAttribute(fused_a_gemm_kernel<batch_size, gemm_m, gemm_k, tile_m,
-                                             tile_n, tile_k, stage_cnt>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                          smem_bytes);
   }
-  cudaLaunchKernelEx(&config,
-                     fused_a_gemm_kernel<batch_size, gemm_m, gemm_k, tile_m,
-                                         tile_n, tile_k, stage_cnt>,
-                     output, mat_a, mat_b, gemm_n);
+  cudaLaunchKernelEx(&config, kernel, output, mat_a, mat_b, gemm_n);
 }
 
 template <typename T, int kHdIn, int kHdOut, int kTileK = 256, int kTileM = 16>
 void invokeFusedAGemmForTokens(T* output, T const* mat_a, T const* mat_b,
                                int num_tokens, cudaStream_t const stream,
-                               bool enable_pdl) {
+                               bool enable_pdl, bool early_pdl_trigger) {
   if (num_tokens <= 8) {
     invokeFusedAGemm<T, kHdIn, kHdOut, 8, kTileK, kTileM>(
-        output, mat_a, mat_b, num_tokens, stream, enable_pdl);
+        output, mat_a, mat_b, num_tokens, stream, enable_pdl,
+        early_pdl_trigger);
   } else {
     invokeFusedAGemm<T, kHdIn, kHdOut, 16, kTileK, kTileM>(
-        output, mat_a, mat_b, num_tokens, stream, enable_pdl);
+        output, mat_a, mat_b, num_tokens, stream, enable_pdl,
+        early_pdl_trigger);
   }
 }
 
 void dsv3_fused_a_gemm(torch::stable::Tensor& output,
                        torch::stable::Tensor const& mat_a,
-                       torch::stable::Tensor const& mat_b, bool enable_pdl) {
+                       torch::stable::Tensor const& mat_b, bool enable_pdl,
+                       bool early_pdl_trigger) {
   STD_TORCH_CHECK(mat_a.dim() == 2 && mat_b.dim() == 2 && output.dim() == 2);
   int const num_tokens = mat_a.size(0);
   int const hd_in = mat_a.size(1);
@@ -743,8 +753,8 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
   // The kernels index global memory with raw pointers and packed strides, so
   // reject any padded or transposed view rather than reading out of bounds.
   STD_TORCH_CHECK(
-      mat_a.stride(0) == hd_in && mat_a.stride(1) == 1,
-      "mat_a must be a packed row-major [num_tokens, hd_in] tensor");
+      mat_a.stride(1) == 1 && (num_tokens == 1 || mat_a.stride(0) == hd_in),
+      "mat_a must be row-contiguous; multiple rows must be packed");
   STD_TORCH_CHECK(
       output.stride(0) == hd_out && output.stride(1) == 1,
       "output must be a packed row-major [num_tokens, hd_out] tensor");
@@ -771,11 +781,12 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
   auto const* mat_b_ptr =
       reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr());
 
-#define DISPATCH_DSV3_SHAPE(HD_IN, HD_OUT)                                 \
-  if (hd_in == HD_IN && hd_out == HD_OUT) {                                \
-    invokeFusedAGemmForTokens<__nv_bfloat16, HD_IN, HD_OUT>(               \
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl); \
-    return;                                                                \
+#define DISPATCH_DSV3_SHAPE(HD_IN, HD_OUT)                                \
+  if (hd_in == HD_IN && hd_out == HD_OUT) {                               \
+    invokeFusedAGemmForTokens<__nv_bfloat16, HD_IN, HD_OUT>(              \
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl, \
+        early_pdl_trigger && num_tokens == 1);                            \
+    return;                                                               \
   }
 
   // Shapes the Kimi-K3 selector routes to dsv3_fused_a (see the dsv3 winners
@@ -795,7 +806,8 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
 
   if (hd_in == 6144 && hd_out == 2624) {
     invokeFusedAGemmForTokens<__nv_bfloat16, 6144, 2624, 256, 32>(
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl,
+        early_pdl_trigger && num_tokens == 1);
     return;
   }
   DISPATCH_DSV3_SHAPE(2048, 2048)
@@ -821,30 +833,35 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
 
   if (hd_in == 128 && hd_out == 1536) {
     invokeFusedAGemmForTokens<__nv_bfloat16, 128, 1536, 128>(
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl,
+        early_pdl_trigger && num_tokens == 1);
     return;
   }
   if (hd_in == 128 && hd_out == 3072) {
     invokeFusedAGemmForTokens<__nv_bfloat16, 128, 3072, 128>(
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl,
+        early_pdl_trigger && num_tokens == 1);
     return;
   }
   // TP16 KDA f_b_proj and shared_expert down_proj. Neither hd_in is a multiple
   // of 256, so both need the 128 tile_k.
   if (hd_in == 128 && hd_out == 768) {
     invokeFusedAGemmForTokens<__nv_bfloat16, 128, 768, 128>(
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl,
+        early_pdl_trigger && num_tokens == 1);
     return;
   }
   if (hd_in == 384 && hd_out == 7168) {
     invokeFusedAGemmForTokens<__nv_bfloat16, 384, 7168, 128>(
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl,
+        early_pdl_trigger && num_tokens == 1);
     return;
   }
 #ifdef VLLM_K3_BENCH_SHAPES
   if (hd_in == 4224 && hd_out == 7168) {
     invokeFusedAGemmForTokens<__nv_bfloat16, 4224, 7168, 128>(
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl,
+        early_pdl_trigger && num_tokens == 1);
     return;
   }
 #endif

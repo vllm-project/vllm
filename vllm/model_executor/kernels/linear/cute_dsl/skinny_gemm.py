@@ -24,6 +24,7 @@ class SkinnyGemmConfig:
     k_unroll: int = 1
     vector_width: int = 8
     static_k: int | None = None
+    early_pdl_trigger: bool = False
 
 
 class ShapeDynamicSkinnyGemm:
@@ -139,6 +140,7 @@ class ShapeDynamicSkinnyGemm:
             k_unroll=config.k_unroll,
             has_residual=has_residual,
             use_pdl=self._use_pdl(),
+            early_pdl_trigger=config.early_pdl_trigger,
             static_k=config.static_k,
         )
         self._compiled[(dtype, config, has_residual)] = cute.compile(
@@ -191,6 +193,7 @@ class ShapeDynamicSkinnyGemm:
                     item[1].outputs_per_block,
                     item[1].k_unroll,
                     item[1].vector_width,
+                    item[1].early_pdl_trigger,
                     item[2],
                 ),
             )

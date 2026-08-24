@@ -1615,7 +1615,10 @@ class KimiLinearForCausalLM(
             )
         else:
             self.lm_head = PPMissingLayer()
-        enable_kimi_k3_low_latency_gemm(self, self.model_config.dtype)
+        enable_kimi_k3_low_latency_gemm(
+            self,
+            self.model_config.dtype,
+        )
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale

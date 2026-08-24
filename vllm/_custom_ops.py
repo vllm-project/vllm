@@ -3303,6 +3303,7 @@ def dsv3_fused_a_gemm(
     mat_a: torch.Tensor,
     mat_b: torch.Tensor,
     enable_pdl: bool = False,
+    early_pdl_trigger: bool = False,
 ) -> None:
     """Low-latency fused-A-style GEMM (SM 9.0+, BF16, 1-16 tokens).
 
@@ -3313,7 +3314,7 @@ def dsv3_fused_a_gemm(
 
     Requires SM 9.0+.
     """
-    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
+    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl, early_pdl_trigger)
 
 
 if hasattr(torch.ops._C, "weight_packed_linear"):
