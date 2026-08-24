@@ -10,11 +10,9 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import run_server, setup_server
+from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.dp_supervisor import (
-    run_dp_supervisor,
-)
+from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -352,6 +350,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 output_address=addresses.outputs[0],
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,
+                data_parallel_size=parallel_config.data_parallel_size,
                 stats_update_address=stats_update_address,
             )
         else:

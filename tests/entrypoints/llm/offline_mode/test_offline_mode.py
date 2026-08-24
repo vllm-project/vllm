@@ -9,9 +9,6 @@ import pytest
 import regex as re
 import urllib3
 
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
-
 MODEL_CONFIGS = [
     {
         "model": "facebook/opt-125m",
@@ -55,19 +52,26 @@ MODEL_CONFIGS = [
 ]
 
 
+def _create_runner(vllm_runner, model_config):
+    runner_config = model_config.copy()
+    model = runner_config.pop("model")
+    tokenizer_name = runner_config.pop("tokenizer", None)
+    return vllm_runner(model, tokenizer_name=tokenizer_name, **runner_config)
+
+
 @pytest.fixture(scope="module")
-def cache_models():
+def cache_models(vllm_runner):
     # Cache model files first
     for model_config in MODEL_CONFIGS:
-        LLM(**model_config)
-        cleanup_dist_env_and_memory()
+        with _create_runner(vllm_runner, model_config):
+            pass
 
     yield
 
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.usefixtures("cache_models")
-def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
+def test_offline_mode(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     # Set HF to offline mode and ensure we can still construct an LLM
     with monkeypatch.context() as m:
         try:
@@ -93,7 +97,8 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
             _re_import_modules()
             # Cached model files should be used in offline mode
             for model_config in MODEL_CONFIGS:
-                LLM(**model_config)
+                with _create_runner(vllm_runner, model_config):
+                    pass
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode
@@ -136,7 +141,7 @@ def _re_import_modules():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.usefixtures("cache_models")
-def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
+def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     # Set HF to offline mode and ensure we can still construct an LLM
     with monkeypatch.context() as m:
         try:
@@ -159,7 +164,8 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
             # Need to re-import huggingface_hub
             # and friends to set up offline mode
             _re_import_modules()
-            LLM(model="facebook/opt-125m")
+            with vllm_runner("facebook/opt-125m"):
+                pass
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode

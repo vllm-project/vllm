@@ -352,7 +352,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
             prefix=maybe_prefix(prefix, "output"),
         )
         if self.config.tie_word_embeddings:
-            self.output.weight = self.model.tok_embeddings.weight
+            self.output = self.output.tie_weights(self.model.tok_embeddings)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -381,10 +381,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["output."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -57,6 +58,53 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
+def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
+    monkeypatch,
+) -> None:
+    method = object.__new__(Nvfp4OnlineMoEMethod)
+    method.moe = SimpleNamespace(is_act_and_mul=True)
+    method.nvfp4_backend = object()
+    method.experts_cls = object
+    method.moe_quant_config = None
+    method.moe_kernel = None
+
+    layer = Mock()
+    converted_weights = tuple(object() for _ in range(8))
+    convert_weights = Mock(return_value=converted_weights)
+    process_weights = Mock()
+    kernel = SimpleNamespace(
+        fused_experts=SimpleNamespace(
+            process_weights_after_loading=process_weights,
+        )
+    )
+    make_kernel = Mock(return_value=kernel)
+    get_quant_config = Mock(return_value=object())
+    method.get_fused_moe_quant_config = get_quant_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4."
+        "convert_to_nvfp4_moe_kernel_format",
+        convert_weights,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4.replace_parameter",
+        Mock(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4.make_nvfp4_moe_kernel",
+        make_kernel,
+    )
+
+    method._setup_kernel(layer)
+    method._setup_kernel(layer)
+
+    assert method.moe_kernel is kernel
+    assert convert_weights.call_count == 2
+    make_kernel.assert_called_once()
+    get_quant_config.assert_called_once()
+    assert process_weights.call_count == 2
 
 
 @pytest.mark.skipif(

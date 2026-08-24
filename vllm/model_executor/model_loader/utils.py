@@ -14,10 +14,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    MMEncoderAttention,
-)
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -27,6 +24,7 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
+from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
@@ -99,6 +97,10 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
+    # Reclaim memory when an explicit lm_head has been
+    # loaded, but it is identical to the input embeddings.
+    maybe_retie_word_embeddings(model, model_config)
+
     for _, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
@@ -124,9 +126,7 @@ def process_weights_after_loading(
     # encoder. NOTE: Happens after other modules so we can easily decompress
     # weights.
     for _, module in model.named_modules():
-        if isinstance(module, (AttentionLayerBase, MMEncoderAttention)) and hasattr(
-            module, "process_weights_after_loading"
-        ):
+        if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
@@ -281,6 +281,6 @@ def configure_quant_config(
 
         # pass mappings by reference to quant_config
         if hf_to_vllm_mapper is not None:
-            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping

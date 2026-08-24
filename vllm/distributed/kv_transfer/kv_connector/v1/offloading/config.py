@@ -23,12 +23,7 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
-
-
-def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
-    """Return whether a KV cache tensor uses a packed block stride."""
-    return bool(kv_cache_tensor.block_stride)
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def build_offloading_config(
@@ -99,18 +94,10 @@ def build_offloading_config(
         blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
 
     worker_kv_bytes_per_block = 0
-    if kv_cache_config.num_blocks > 0:
-        packed_tensors = tuple(
-            is_kv_cache_tensor_packed(tensor)
-            for tensor in kv_cache_config.kv_cache_tensors
-        )
-        is_packed = any(packed_tensors)
-        assert not is_packed or all(packed_tensors)
-        total_gpu_kv_bytes = (
-            kv_cache_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
-        )
+    if kv_cache_config.num_blocks > 0 and kv_cache_config.kv_cache_tensors:
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total, not a per-tensor share.
+        total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 
     single_group_spec = (
@@ -139,15 +126,6 @@ def build_offloading_config(
     )
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))
-    canonical_format = None
-    if canonical_layout:
-        from vllm.config import set_current_vllm_config
-
-        from .canonical_mapping import canonical_format_id
-
-        # Resolved once here; consumers may run outside the vLLM config context
-        with set_current_vllm_config(vllm_config):
-            canonical_format = canonical_format_id()
 
     # Only a single non-MLA full-attention group with genuinely head-sharded
     # pages is parallelism-invariant: replicated latent or GQA heads,
@@ -179,7 +157,7 @@ def build_offloading_config(
                 return False
             if type(spec) is MLAAttentionSpec:
                 return (
-                    spec.compress_ratio == 1
+                    spec.tokens_per_state == 1
                     and spec.real_page_size_bytes % spec.block_size == 0
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
@@ -230,9 +208,11 @@ def build_offloading_config(
             pcp_size=parallel_config.prefill_context_parallel_size,
             dcp_size=parallel_config.decode_context_parallel_size,
             data_parallel_index=parallel_config.data_parallel_index,
+            data_parallel_size=parallel_config.data_parallel_size,
+            data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
-        canonical_format=canonical_format,
+        kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
     )
