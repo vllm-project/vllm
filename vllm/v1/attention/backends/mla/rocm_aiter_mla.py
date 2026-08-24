@@ -221,13 +221,6 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_decode: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
-    # Small-head multi-token verify: paged-KV metadata with one row per verify
-    # token holding that token's causal KV window, built in _build_decode so
-    # forward_mqa stays free of device->host syncs.
-    # flat_kv_indptr is [num_reqs * max_qo_len + 1]; flat_kv_indices is the
-    # whole persistent buffer, indexed through flat_kv_indptr.
-    flat_kv_indptr: torch.Tensor | None = None
-    flat_kv_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -355,85 +348,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self.paged_kv_indices = torch.zeros(
             max_num_pages, dtype=torch.int32, device=device
         )
-
-        # Small-head (< 16) multi-token verify expands each request's paged-KV
-        # range into one row per verify token, each holding that token's causal
-        # window. reorder_batch_threshold is the longest query block the decode
-        # path admits, so it bounds the row count per request. Sizing the
-        # buffers here keeps the expansion at fixed addresses, which is what
-        # lets the mla_gluon call in forward_mqa be captured in a full CUDA
-        # graph.
-        #
-        # The flatten is selected by the *impl's* per-layer query head count, so
-        # the buffers are reserved for any multi-token decode block this group
-        # can admit rather than from this builder's own num_heads, which is not
-        # required to agree with it. That reserves them for >= 16-head
-        # deployments too, where mla_decode_fwd serves the block and never reads
-        # them.
-        self._flat_max_qo_len = max(1, int(self.reorder_batch_threshold or 1))
-        self._flat_kv_enabled = self._flat_max_qo_len > 1
-        if self._flat_kv_enabled:
-            # The rows write at most max_qo_len times the sum of the batch's
-            # sequence lengths. max_num_pages bounds that sum by assuming every
-            # request is max_model_len long at the same time, which needs many
-            # times more entries than the KV cache can hold. Without prefix
-            # caching no two requests share a slot, so the pool's own token
-            # capacity is the real bound.
-            #
-            # cache_config.kv_cache_size_tokens is that capacity,
-            # max_concurrency * max_model_len, and it is a genuine upper bound
-            # on the sum even though every group draws block ids from one
-            # shared pool: a group's block count for a request of L tokens is
-            # either constant in L or concave in L through the origin, so it is
-            # never below L / max_model_len of what a full-length request
-            # takes. Summing that over the pool gives exactly this figure.
-            # num_gpu_blocks * block_size counts only this group's slots and so
-            # overstates the bound on hybrid layouts, where the other groups'
-            # blocks come out of the same pool; it is kept as the fallback for
-            # engines that have not published the group-aware capacity.
-            cache_config = vllm_config.cache_config
-            flat_pages = max_num_pages
-            if not cache_config.enable_prefix_caching:
-                kv_capacity = cache_config.kv_cache_size_tokens
-                if not kv_capacity and cache_config.num_gpu_blocks:
-                    kv_capacity = (
-                        int(cache_config.num_gpu_blocks) * self.kernel_block_size
-                    )
-                if kv_capacity:
-                    # A cudagraph padding request holds no KV, so the pool
-                    # capacity does not account for it, but _build_decode's
-                    # pad_uniform_mtp path raises its seq_len from 0 to
-                    # max_qo_len so the kernel sees a uniform block. Its rows
-                    # are discarded, yet they still consume entries here.
-                    # Reserve for a whole batch of them. max_num_pages needs no
-                    # such allowance: it already assumes every request is
-                    # max_model_len long.
-                    kv_capacity = (
-                        int(kv_capacity) + max_num_reqs * self._flat_max_qo_len
-                    )
-                    flat_pages = min(flat_pages, kv_capacity)
-            self.flat_kv_indptr = torch.zeros(
-                max_num_reqs * self._flat_max_qo_len + 1,
-                dtype=torch.int32,
-                device=device,
-            )
-            self.flat_kv_indices = torch.zeros(
-                flat_pages * self._flat_max_qo_len, dtype=torch.int32, device=device
-            )
-            # [0, 1, ..., max_qo_len - 1]. Added to a request's context length
-            # this gives each verify row its own causal KV bound; materialised
-            # once so the per-step build allocates nothing.
-            self._flat_causal_offsets = torch.arange(
-                self._flat_max_qo_len, dtype=torch.int32, device=device
-            )
-            logger.info(
-                "AITER MLA small-head verify buffers allocated "
-                "(max_qo_len=%d, pages=%d of %d, %.1f MiB)",
-                self._flat_max_qo_len,
-                flat_pages,
-                max_num_pages,
-                self.flat_kv_indices.numel() * 4 / (1024 * 1024),
-            )
 
         from aiter import dtypes, get_mla_metadata_info_v1
 
@@ -817,7 +731,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_indptr,
             KERNEL_BLOCK_SIZE=self.kernel_block_size,
             BLOCK_SIZE=1024,
-            QLEN=1,
         )
         paged_kv_indices = self.paged_kv_indices
 
@@ -920,97 +833,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             has_persistent_metadata = True
 
-        # Small-head multi-token verify: build the per-verify-token causal
-        # paged-KV view here, once per step, instead of once per MLA layer in
-        # forward_mqa. That removes four device->host syncs per layer (an
-        # .item(), two tensor-driven repeat_interleave calls and a .min()) plus
-        # a data-dependent allocation, all of which abort HIP graph capture.
-        flat_kv_indptr = None
-        flat_kv_indices = None
+        # Small-head multi-token verify uses mla_gluon's 4-D MTP entry over the
+        # ordinary per-request paged-KV view, so there is no expanded per-token
+        # buffer to build here. mla_gluon still wants a lower bound on the KV
+        # length it is asked to split; on the verify path that bound is over
+        # requests, not over expanded rows. The .item() below runs in the
+        # builder, outside the captured region, so it does not abort HIP graph
+        # capture the way the per-layer syncs in forward_mqa did.
         min_kv_seq_len = 1
-        if self._flat_kv_enabled and max_qo_len > 1:
-            qlen = int(max_qo_len)
-            # Raise rather than assert: both this and the entry-count check
-            # below guard writes into the persistent buffers, so they have to
-            # survive `python -O`.
-            if qlen > self._flat_max_qo_len:
-                raise ValueError(
-                    f"verify block {qlen} exceeds the reserved maximum "
-                    f"{self._flat_max_qo_len}"
-                )
-            num_rows = num_kernel_reqs * qlen
-            # Row r * qlen + t is request r's verify token t. seq_lens counts
-            # the tokens scheduled in this step, so a request's KV range already
-            # spans its whole verify block and context_r = seq_len_r - qlen.
-            # Causal masking lets token t attend to KV positions
-            # [0, context_r + t], i.e. seq_len_r - (qlen - 1) + t entries, so
-            # only the last row of a block may see the full range. A cudagraph
-            # padding request left at seq_len 0 clamps all of its rows to empty;
-            # under pad_uniform_mtp its seq_len was raised to max_qo_len above,
-            # so its rows run 1..qlen instead, over whatever block ids the
-            # padding slot happens to hold. Either way the rows are discarded,
-            # but the second case still consumes entries, which is what the
-            # padding allowance in __init__ reserves for.
+        if AiterMLAHelper.use_gluon_verify(
+            self.num_heads, int(max_qo_len), self._kv_cache_dtype_str
+        ):
             per_req_len = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
-            row_len = (
-                (
-                    per_req_len.unsqueeze(1)
-                    - (qlen - 1)
-                    + self._flat_causal_offsets[:qlen]
-                )
-                .clamp_(min=0)
-                .flatten()
-            )
-            # Element 0 stays zero from the initial torch.zeros; assigning a
-            # Python scalar to it would be a blocking host->device copy.
-            self.flat_kv_indptr[1 : num_rows + 1].copy_(
-                row_len.cumsum(dim=0, dtype=torch.int32), non_blocking=True
-            )
-            # A replayed cudagraph reads seq_info out to its captured row count,
-            # which can exceed num_rows. Repeating the final offset rather than
-            # zeroing makes every such row report length 0 instead of a large
-            # negative one, the same reason paged_kv_indptr's tail above is
-            # filled with its last entry.
-            self.flat_kv_indptr[num_rows + 1 :].fill_(self.flat_kv_indptr[num_rows])
-            flat_kv_indptr = self.flat_kv_indptr[: num_rows + 1]
-            # One device->host read serves both uses below; a sync is legal here
-            # because the builder runs outside the captured region.
-            #
-            # What min_kv_seq_len buys depends on the aiter version. Up to
-            # v0.1.19 the bh16 regimes capped NUM_KV_SPLITS with it, so it had
-            # to be the shortest row actually submitted -- not the shortest
-            # per-request length those rows were cut from -- or a split could
-            # come out empty. From v0.1.20 (ROCm/aiter#4555) both bh16 regimes
-            # size the split count from the launch budget alone and derive the
-            # real partition from the runtime KV length, so they never read it.
-            # bh64 still does, but only to assert a lower bound, and small-head
-            # verify never routes there. Keep sending the shortest submitted
-            # row: it is the only value that is right on both, and it is free
-            # here because total_entries needs this read regardless.
-            min_kv_seq_len, total_entries = torch.stack(
-                (row_len.min(), self.flat_kv_indptr[num_rows])
-            ).tolist()
-            # flat_kv_indices is reserved from the KV pool's token capacity,
-            # which bounds this sum. Check it rather than let a bound that is
-            # wrong for some future layout corrupt memory silently.
-            if total_entries > self.flat_kv_indices.numel():
-                raise ValueError(
-                    f"verify KV view needs {total_entries} entries but only "
-                    f"{self.flat_kv_indices.numel()} are reserved"
-                )
-            # No need to clear flat_kv_indices: the kernel writes exactly the
-            # [flat_kv_indptr[row], flat_kv_indptr[row + 1]) range that
-            # mla_gluon reads back for that row.
-            _expand_page_indices_kernel[(num_rows,)](
-                self.flat_kv_indices,
-                block_table_tensor,
-                block_table_tensor.stride(0),
-                flat_kv_indptr,
-                KERNEL_BLOCK_SIZE=self.kernel_block_size,
-                BLOCK_SIZE=1024,
-                QLEN=qlen,
-            )
-            flat_kv_indices = self.flat_kv_indices
+            min_kv_seq_len = int(per_req_len.min().item())
 
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
@@ -1025,8 +860,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             use_gluon_decode=use_gluon_decode,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
-            flat_kv_indptr=flat_kv_indptr,
-            flat_kv_indices=flat_kv_indices,
         )
 
         return attn_metadata
@@ -1067,7 +900,6 @@ def _expand_page_indices_kernel(
     cu_num_tokens,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    QLEN: tl.constexpr,
 ):
     """Expand block table entries into per-token flat page indices.
 
@@ -1081,19 +913,11 @@ def _expand_page_indices_kernel(
 
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-
-    QLEN is the number of output rows per request: 1 for ordinary decode, and
-    the verify block length for the small-head multi-token verify expansion,
-    where output row ``r * QLEN + t`` is request ``r``'s verify token ``t`` and
-    takes the first ``cu_num_tokens[row + 1] - cu_num_tokens[row]`` tokens of
-    that request -- its causal window, since block_table lists a request's
-    blocks in ascending position order.
     """
-    row_idx = tl.program_id(0)
-    req_idx = row_idx // QLEN
+    req_idx = tl.program_id(0)
     row_ptr = block_table + req_idx * block_table_stride
-    start_idx = tl.load(cu_num_tokens + row_idx)
-    num_tokens = tl.load(cu_num_tokens + row_idx + 1) - start_idx
+    start_idx = tl.load(cu_num_tokens + req_idx)
+    num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
     offset = tl.arange(0, BLOCK_SIZE)
     for i in tl.range(0, num_tokens, BLOCK_SIZE):
@@ -1245,11 +1069,12 @@ class AiterMLAHelper:
 
     @staticmethod
     def use_gluon_verify(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
-        """Whether a small-head multi-token verify is flattened onto Gluon.
+        """Whether a small-head multi-token verify uses native Gluon MTP.
 
-        bf16 has no gqa<16, qseqlen>1 asm kernel, so the verify is flattened
-        into per-token Gluon decodes. fp8 has one via the q-row fold and must
-        not come here: the flatten hands Gluon the batch size its fp8 regime
+        bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through
+        ``mla_gluon``'s 4-D MTP entry (``q`` shaped ``[batch, qlen, nhead, dim]``)
+        with ``use_2d_view=True``. fp8 has one via the q-row fold and must not
+        come here: the MTP path hands Gluon the batch size its fp8 regime
         asserts against. A predicate rather than inline in forward_mqa so the
         builder sees the same answer the impl acts on.
         """
@@ -1580,12 +1405,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return o, None
 
         # 12-head (<16) multi-token verify (DSpark): the asm path has no
-        # gqa<16, qseqlen>1 kernel. Flatten each verify token to its own
-        # qseqlen=1 gluon decode, mirroring the TRITON_MLA / sparse-backend
-        # flatten but on the fast gluon kernel. The block is causal -- the
-        # target is checking draft tokens, so position t must not see t+1 --
-        # and attention rows are independent, so giving row t the KV range
-        # [0, context + t] is exactly causal multi-token attention.
+        # gqa<16, qseqlen>1 kernel, so the block goes to the gluon kernel's 4-D
+        # MTP entry, which serves a whole (1 + num_spec) block in one launch.
+        # The block is causal -- the target is checking draft tokens, so
+        # position t must not see t+1 -- and the kernel bounds each query
+        # position's scores itself.
         # Arch, mode and dtype gating all live in use_gluon_verify, so that the
         # builder -- which has to know whether the asm decode will run -- sees
         # the same answer as this branch.
@@ -1607,29 +1431,33 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 device=q_nope.device,
             )
             kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
-            # The per-verify-token view -- row r*qlen+t reads request r's
-            # committed prefix plus verify tokens 0..t, i.e. its causal window --
-            # is built once per step in _build_decode, where device->host syncs
-            # are legal. Reading it back here keeps this path free of the syncs
-            # that previously aborted HIP graph capture.
-            assert decode.flat_kv_indptr is not None
-            assert decode.flat_kv_indices is not None
-            # A non-causal block would need the untruncated range instead, and
-            # cannot arrive here: this builder leaves
-            # supports_non_causal_multi_token_decode False, so
-            # MLACommonMetadataBuilder.build rejects causal=False before
-            # _build_decode ever runs.
             assert attn_metadata.causal, (
-                "AITER MLA small-head verify flatten is causal-only"
+                "AITER MLA small-head verify MTP is causal-only"
             )
+            # Hand mla_gluon its 4-D MTP entry instead of an expanded
+            # per-verify-token paged-KV view. The flat query layout is already
+            # row-major (r * qlen + t), so unflatten is a free view. mla_gluon
+            # applies the per-position causal bound
+            # score_end = min(split_kv_end, seq_len - qlen + q_pos + 1)
+            # in-kernel, and seq_lens already spans the verify block, so that
+            # bound is context_r + q_pos + 1 -- the same window the expanded
+            # view supplied by truncating each row's page list.
+            qlen = int(decode.max_qo_len)
+            num_reqs = B // qlen
+            if num_reqs * qlen != B:
+                raise ValueError(
+                    f"verify block {B} rows is not a multiple of qlen {qlen}"
+                )
+            assert decode.paged_kv_indptr is not None
+            assert decode.paged_kv_indices is not None
             mla_gluon = _get_mla_gluon()
             mla_gluon(
-                q_nope=q_nope,
-                q_pe=q_pe,
+                q_nope=q_nope.unflatten(0, (num_reqs, qlen)),
+                q_pe=q_pe.unflatten(0, (num_reqs, qlen)),
                 kv_c=kv_buffer,
-                o=o,
-                page_table=decode.flat_kv_indices,
-                seq_info=decode.flat_kv_indptr,
+                o=o.unflatten(0, (num_reqs, qlen)),
+                page_table=decode.paged_kv_indices,
+                seq_info=decode.paged_kv_indptr,
                 sm_scale=self.scale,
                 k_pe=None,
                 kv_pe_offset=self.kv_lora_rank,
