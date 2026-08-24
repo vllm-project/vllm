@@ -212,7 +212,7 @@ steps:
     agent_tags:
       label: production
       gpu: 2+
-      mem: 32+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
