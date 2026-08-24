@@ -5,7 +5,9 @@ import asyncio
 
 import pytest
 import torch
+from torch import nn
 
+import vllm.device_allocator.cumem as cumem
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
@@ -14,6 +16,21 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
+
+def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
+    """Wake discarded allocations with deterministic nonzero contents."""
+    original_create_and_map = cumem.create_and_map
+
+    def create_and_map_with_poison(handle) -> None:
+        original_create_and_map(handle)
+        _, size, ptr, _ = handle
+        cumem.libcudart.cudaMemset(ptr, byte_value, size)
+
+    cumem.create_and_map = create_and_map_with_poison
+    try:
+        allocator.wake_up()
+    finally:
+        cumem.create_and_map = original_create_and_map
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -98,16 +115,90 @@ def test_discard_tags():
     # Weights are still usable
     assert torch.allclose(weights, torch.ones_like(weights))
 
-    # Wake up and verify kv_cache is remapped (zeroed content)
+    # Wake up and verify kv_cache is remapped; discarded contents are undefined.
     allocator.wake_up()
-    # After wake_up the VA is remapped; content is not preserved
-    # but the allocation is valid
     assert kv.shape == (512, 512)
 
     # Full sleep/wake cycle still works after discard
     allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_tagged_ordinary_tensor_is_discarded_with_kv_cache():
+    """Reproduce allocation-tag contamination with an ordinary torch tensor.
+
+    The allocator tags allocations, not semantic tensor owners. This test is a
+    contract-level reproducer: production code must keep persistent metadata
+    outside the discardable KV-cache scope.
+    """
+    allocator = get_mem_allocator_instance()
+
+    with allocator.use_memory_pool("weights"):
+        weight = torch.full((4096,), 0x11, dtype=torch.uint8, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("kv_cache"):
+        fake_kv = torch.full((4096,), 0x22, dtype=torch.uint8, device=DEVICE_TYPE)
+        ordinary_tensor = torch.full(
+            (4096,), 0x33, dtype=torch.uint8, device=DEVICE_TYPE
+        )
+
+    pointers = tuple(t.data_ptr() for t in (weight, fake_kv, ordinary_tensor))
+    allocator.sleep(offload_tags=("weights",))
+    _wake_up_with_poisoned_mappings(allocator)
+    torch.accelerator.synchronize()
+
+    assert tuple(t.data_ptr() for t in (weight, fake_kv, ordinary_tensor)) == pointers
+    assert torch.all(weight == 0x11)
+    assert torch.all(fake_kv == 0xA5)
+    assert torch.all(ordinary_tensor == 0xA5)
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses CUDA graph and CuMem")
+def test_cudagraph_replays_with_corrupted_tagged_constant():
+    """Reproduce silent model corruption despite a stable captured pointer."""
+
+    class TinyScaleModel(nn.Module):
+        """One-operation model with persistent runtime metadata.
+
+        ``scale`` deliberately remains a plain tensor attribute. Constructing
+        this model in the KV-cache pool reproduces a persistent model value
+        accidentally inheriting the cache's discard-on-sleep policy.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.scale = torch.tensor([3.0], device=DEVICE_TYPE)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x * self.scale
+
+    allocator = get_mem_allocator_instance()
+    x = torch.tensor([2.0], device=DEVICE_TYPE)
+    with allocator.use_memory_pool("kv_cache"):
+        model = TinyScaleModel()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = model(x)
+    scale_ptr = model.scale.data_ptr()
+
+    allocator.sleep(offload_tags=())
+    _wake_up_with_poisoned_mappings(allocator)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    assert model.scale.data_ptr() == scale_ptr
+    assert not torch.equal(output, torch.tensor([6.0], device=DEVICE_TYPE))
+
+    # Owners that cannot move storage out of a discardable scope must recover
+    # values in place so captured pointers remain valid.
+    model.scale.fill_(3.0)
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(output, torch.tensor([6.0], device=DEVICE_TYPE))
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
