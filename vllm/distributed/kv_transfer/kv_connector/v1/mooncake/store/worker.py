@@ -2028,8 +2028,9 @@ class MooncakeStoreWorker:
         """Return the hash boundary used to store each group's tail block.
 
         With fine-grained prefix matching, ``hit_length`` may fall within a
-        physical cache block whose store key uses a later hash boundary. Exact
-        matches are recorded too, so every nonzero hit has one entry per group.
+        physical cache block and may not align with the hash boundary used to
+        store that block. For each KV-cache group, return the token boundary
+        whose hash was used as the store key.
         """
         if hit_length <= 0:
             return ()
@@ -2039,9 +2040,12 @@ class MooncakeStoreWorker:
         for group_id, db in enumerate(self.token_dbs):
             chunk_id = cdiv(hit_length, db.block_size) - 1
             boundary_tokens = hit_length
-            if self.coord.enable_partial_hash_hits and not cached_block_pool.contains(
+            contains_hit_boundary = cached_block_pool.contains(
                 group_id, block_hashes[hit_boundary_hash_idx]
-            ):
+            )
+            if not self.coord.enable_partial_hash_hits:
+                assert contains_hit_boundary
+            elif not contains_hit_boundary:
                 next_chunk_hash_idx = min(
                     (chunk_id + 1) * db.block_size // self.hash_block_size,
                     len(block_hashes),
@@ -2050,6 +2054,11 @@ class MooncakeStoreWorker:
                     if cached_block_pool.contains(group_id, block_hashes[hash_idx]):
                         boundary_tokens = (hash_idx + 1) * self.hash_block_size
                         break
+                else:
+                    raise AssertionError(
+                        f"No tail key found for cache group {group_id} at "
+                        f"hit length {hit_length}"
+                    )
             boundaries.append(TailKeyBoundary(group_id, boundary_tokens))
         return tuple(boundaries)
 
