@@ -13,7 +13,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
 use super::{ControlServer, pb};
-use crate::lora::{LoadLoraError, UnloadLoraError};
+use crate::lora::{LoadLoraError, LoraDisabledError, UnloadLoraError};
 use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
@@ -135,15 +135,6 @@ fn weight_version(value: String) -> Result<String, Status> {
     Ok(value)
 }
 
-fn ensure_lora_enabled(state: &AppState) -> Result<(), Status> {
-    state
-        .engine_core_client()
-        .ready_response()
-        .supports_lora
-        .then_some(())
-        .ok_or_else(|| Status::failed_precondition("engine was not started with LoRA enabled"))
-}
-
 fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
     pb::LoraAdapter {
         lora_id: adapter.lora_int_id.min(i64::MAX as u64) as i64,
@@ -154,6 +145,7 @@ fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
 
 fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
+        LoadLoraError::Disabled(_) => Code::FailedPrecondition,
         LoadLoraError::InvalidRequest(_) => Code::InvalidArgument,
         LoadLoraError::AlreadyLoaded { .. } | LoadLoraError::BaseModelName { .. } => {
             Code::AlreadyExists
@@ -165,12 +157,17 @@ fn load_lora_status(error: LoadLoraError) -> Status {
 
 fn unload_lora_status(error: UnloadLoraError) -> Status {
     let code = match &error {
+        UnloadLoraError::Disabled(_) => Code::FailedPrecondition,
         UnloadLoraError::NotFound { .. } => Code::NotFound,
         UnloadLoraError::IntIdMismatch { .. }
         | UnloadLoraError::Engine { .. }
         | UnloadLoraError::NotRemoved { .. } => Code::Internal,
     };
     Status::new(code, error.to_report_string())
+}
+
+fn list_loras_status(error: LoraDisabledError) -> Status {
+    Status::failed_precondition(error.to_report_string())
 }
 
 #[tonic::async_trait]
@@ -244,7 +241,6 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
-        ensure_lora_enabled(&self.state)?;
         let request = request.into_inner();
         let adapter = self
             .state
@@ -260,7 +256,6 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         request: Request<pb::UnloadLoraRequest>,
     ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
-        ensure_lora_enabled(&self.state)?;
         let name = request.into_inner().lora_name;
         if name.trim().is_empty() {
             return Err(Status::invalid_argument("lora_name is required"));
@@ -268,8 +263,9 @@ impl pb::control_server::Control for ControlServiceImpl {
 
         let adapter = self
             .state
-            .served_lora_requests()
+            .list_loras()
             .await
+            .map_err(list_loras_status)?
             .into_iter()
             .find(|adapter| adapter.lora_name == name)
             .ok_or_else(|| Status::not_found(format!("LoRA adapter `{name}` is not loaded")))?;
@@ -287,8 +283,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         _request: Request<pb::ListLorasRequest>,
     ) -> Result<Response<pb::ListLorasResponse>, Status> {
-        ensure_lora_enabled(&self.state)?;
-        let mut adapters = self.state.served_lora_requests().await;
+        let mut adapters = self.state.list_loras().await.map_err(list_loras_status)?;
         adapters.sort_by(|left, right| left.lora_name.cmp(&right.lora_name));
         Ok(Response::new(pb::ListLorasResponse {
             adapters: adapters.iter().map(lora_to_proto).collect(),

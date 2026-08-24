@@ -111,6 +111,7 @@ fn validate_lora_path_access(
 fn load_lora_api_error(error: LoadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
+        LoadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
         LoadLoraError::InvalidRequest(_) => ApiError::invalid_request(message, None),
         LoadLoraError::AlreadyLoaded { .. } => ApiError::invalid_request(
             format!(
@@ -130,6 +131,7 @@ fn load_lora_api_error(error: LoadLoraError) -> ApiError {
 fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
+        UnloadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
         UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))

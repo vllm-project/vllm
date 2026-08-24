@@ -28,7 +28,13 @@ pub(crate) struct LoraManager {
 }
 
 #[derive(Debug, Error)]
+#[error("engine was not started with LoRA enabled")]
+pub(crate) struct LoraDisabledError;
+
+#[derive(Debug, Error)]
 pub(crate) enum LoadLoraError {
+    #[error(transparent)]
+    Disabled(#[from] LoraDisabledError),
     #[error(transparent)]
     InvalidRequest(#[from] LoraRequestError),
     #[error("LoRA adapter `{lora_name}` is already loaded")]
@@ -47,6 +53,8 @@ pub(crate) enum LoadLoraError {
 
 #[derive(Debug, Error)]
 pub(crate) enum UnloadLoraError {
+    #[error(transparent)]
+    Disabled(#[from] LoraDisabledError),
     #[error("LoRA adapter `{lora_name}` is not loaded")]
     NotFound { lora_name: String },
     #[error(
