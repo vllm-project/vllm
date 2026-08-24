@@ -38,6 +38,7 @@ message ServerInfo {
   uint64 total_kv_blocks = 7;
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
+  uint32 max_loras = 10;
   RlCapabilities rl_capabilities = 11;
 }
 
@@ -54,6 +55,7 @@ message ParallelismInfo {
   uint32 data_parallel_size = 3;
   uint32 data_parallel_rank = 4;
   uint32 decode_context_parallel_size = 5;
+  uint64 world_size = 6;
 }
 
 message GetModelInfoRequest {}
@@ -65,6 +67,7 @@ message ModelInfo {
 
   bool supports_text_input = 20;
   bool supports_token_ids_input = 21;
+  bool supports_lora = 22;
   bool supports_multimodal = 23;
   string reasoning_parser = 24;
   string tool_call_parser = 25;

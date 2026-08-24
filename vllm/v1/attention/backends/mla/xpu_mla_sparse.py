@@ -23,7 +23,8 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
@@ -65,16 +66,6 @@ class XPUMLASparseBackend(AttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -249,16 +240,18 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_indices_global = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
-        attn_out = self._forward_bf16_kv(
-            q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
-        )
+        attn_out = self._forward_bf16_kv(q, kv_rows, topk_indices_global, attn_metadata)
 
         return attn_out, None
