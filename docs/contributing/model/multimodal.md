@@ -460,11 +460,11 @@ return a schema of the tensors outputted by the HF processor that are related to
 
         def _postprocess_hf_mm_data(
             self,
-            mm_data: Mapping[str, object],
-            hf_processor_mm_kwargs: Mapping[str, object],
+            hf_data: Mapping[str, object],
+            hf_kwargs: Mapping[str, object],
             processed_data: BatchFeature,
         ) -> BatchFeature:
-            if not mm_data:
+            if not hf_data:
                 return processed_data
 
             pixel_values = processed_data.get("pixel_values")
@@ -497,14 +497,25 @@ return a schema of the tensors outputted by the HF processor that are related to
     If you need to modify the output of the HF processor,
     you should override
     [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data].
+    Passthrough fields have already been merged into `processed_data` when this
+    hook is called.
+    If you need to change how the normalized inputs are passed to the HF
+    processor (for example, to call a method other than `__call__`, or to use
+    different kwargs to construct and invoke it), override
+    [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
     If the HF processor applies additional transformations to the prompt tokens
     that are not reflected in its multi-modal outputs (e.g. prepending a BOS token),
     you should override
     [_postprocess_prompt][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_prompt]
     to replicate them.
-    For even more control over how the HF processor is called, you can override
+    Only processors that require multiple HF calls or manually construct the
+    complete output should override
     [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
-    directly.
+    directly. Such implementations must obtain their normalized inputs through
+    [_get_hf_mm_inputs][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs]
+    and return through
+    [_finalize_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._finalize_hf_mm_data]
+    so passthrough fields and model-specific postprocessing are applied consistently.
 
     Since `pixel_values` is now a list with one tensor per image, we can override
     [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
@@ -725,7 +736,7 @@ Examples:
 
 ### Custom HF processor
 
-Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and return it from [BaseProcessingInfo.get_hf_processor][vllm.multimodal.processing.BaseProcessingInfo.get_hf_processor]. It is then applied to the multi-modal data via [InputProcessingContext.call_hf_processor][vllm.multimodal.processing.InputProcessingContext.call_hf_processor] inside [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main].
+Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and return it from [BaseProcessingInfo.get_hf_processor][vllm.multimodal.processing.BaseProcessingInfo.get_hf_processor]. The default [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor] applies it to the normalized multi-modal data via [InputProcessingContext.call_hf_processor][vllm.multimodal.processing.InputProcessingContext.call_hf_processor]. Override `_call_hf_processor` if the custom processor instead exposes a different callable interface.
 
 Examples:
 

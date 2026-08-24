@@ -8,9 +8,16 @@ In vLLM's rendering pipeline (see [BaseRenderer][vllm.renderers.base.BaseRendere
 
 Since Transformers 5.10, `ProcessorMixin` now allows multi-modal inputs to be passed by themselves. However, certain subclasses (such as `ChameleonProcessor`) and older out-of-tree implementations may still define their own `__call__` method that assumes the presence of text with corresponding placeholder tokens. This causes a problem as we don't have the original text anymore to pass to these processors.
 
-To work around this, each model defines how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text], which its override of [_get_hf_mm_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_text] returns so that [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] passes it to the HF processor together with the multi-modal inputs to obtain the processed multi-modal data.
+To work around this, each model defines how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text], which its override of [_get_hf_mm_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_text] returns. [_get_hf_mm_inputs][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs] adds this text and `truncation=False` to the normalized HF inputs. The truncation setting is attached only to calls that use dummy text, so unrelated processor calls do not receive a text-specific option.
 
-Similarly, since the multi-modal data extracted by vLLM may not match what a specific HF processor expects, [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] allows each model to adapt the inputs via [_get_hf_mm_inputs][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs] (e.g. renaming keys or injecting extra keyword arguments such as `sampling_rate`) and the outputs via [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data], without having to reimplement the entire method.
+HF processing is split into four overridable stages:
+
+1. [_get_hf_mm_inputs][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs] extracts and normalizes processor data, kwargs, and passthrough data. It centrally renames vLLM's `audios` field to the standard HF `audio` keyword; processors that require another spelling can adapt it in an override.
+2. [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor] invokes the HF processor. Models can override it when they use a different callable or need separate construction and invocation kwargs.
+3. [_finalize_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._finalize_hf_mm_data] merges passthrough fields into the processed output. It lazily creates an empty output when there is no processor data.
+4. [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data] performs model-specific output transformations after passthrough fields have been merged.
+
+This division lets most models customize one stage without reimplementing [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]. Implementations that genuinely require multiple processor calls or manually construct their complete output may still override that method, but must use `_get_hf_mm_inputs` and `_finalize_hf_mm_data` to retain the common input and output behavior.
 
 ## Prompt Update Detection
 
