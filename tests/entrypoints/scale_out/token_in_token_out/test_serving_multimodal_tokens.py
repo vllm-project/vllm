@@ -10,6 +10,7 @@ tests (e.g. test_weight_transfer_llm.py) deadlock-free.
 """
 
 import httpx
+import pybase64
 import pytest
 import pytest_asyncio
 from PIL import Image
@@ -26,6 +27,12 @@ DETOKENIZE_ENDPOINT = "/detokenize"
 @pytest.fixture(scope="module")
 def test_image():
     return Image.new("RGB", (224, 224), color=(255, 0, 0))
+
+
+@pytest.fixture(scope="module")
+def second_test_image():
+    """A second, visually distinct image for multi-item tests."""
+    return Image.new("RGB", (224, 224), color=(0, 0, 255))
 
 
 @pytest.fixture(scope="module")
@@ -232,6 +239,116 @@ async def test_skip_pixel_values_rejects_mismatched_raw_images(client, test_imag
     render_data = render_resp.json()
 
     render_data["features"]["raw_images"]["image"] = [other_url.split(",", 1)[1]]
+    render_data["sampling_params"] = {"max_tokens": 10, "temperature": 0.0}
+
+    gen_resp = await client.post(GEN_ENDPOINT, json=render_data)
+    assert gen_resp.status_code == 400
+    assert "raw_images" in gen_resp.text
+
+
+def _two_color_message(first_url: str, second_url: str) -> list[dict]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": first_url}},
+                {"type": "image_url", "image_url": {"url": second_url}},
+                {
+                    "type": "text",
+                    "text": "What are the colors of these two images?",
+                },
+            ],
+        }
+    ]
+
+
+def _b64_payload(data_url: str) -> str:
+    return data_url.split(",", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_skip_pixel_values_carries_two_images(
+    client, test_image, second_test_image
+):
+    """Two images must survive the raw-bytes detour without losing alignment.
+
+    ``raw_images``, ``mm_hashes`` and ``mm_placeholders`` are parallel lists
+    that the generate tier zips back together. A single item cannot catch a
+    dropped or transposed entry; two differently coloured ones can, because
+    the model has to name both.
+    """
+    red_url = encode_image_url(test_image, format="PNG")
+    blue_url = encode_image_url(second_test_image, format="PNG")
+
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "messages": _two_color_message(red_url, blue_url),
+            "skip_pixel_values": True,
+        },
+    )
+    render_resp.raise_for_status()
+    render_data = render_resp.json()
+
+    features = render_data["features"]
+    assert features["kwargs_data"] is None
+    assert len(features["mm_hashes"]["image"]) == 2
+    assert len(features["mm_placeholders"]["image"]) == 2
+    # Distinct images must hash distinctly, or the reordering test below
+    # would pass for the wrong reason.
+    assert len(set(features["mm_hashes"]["image"])) == 2
+    # Bytes come back in request order, which is what makes them pairable
+    # with the hashes and placeholder ranges above.
+    assert [
+        pybase64.b64decode(b, validate=True) for b in features["raw_images"]["image"]
+    ] == [
+        pybase64.b64decode(_b64_payload(red_url), validate=True),
+        pybase64.b64decode(_b64_payload(blue_url), validate=True),
+    ]
+
+    render_data["sampling_params"] = {"max_tokens": 32, "temperature": 0.0}
+    gen_resp = await client.post(GEN_ENDPOINT, json=render_data)
+    gen_resp.raise_for_status()
+    choice = gen_resp.json()["choices"][0]
+
+    detok_resp = await client.post(
+        DETOKENIZE_ENDPOINT,
+        json={"model": MODEL_NAME, "tokens": choice["token_ids"]},
+    )
+    detok_resp.raise_for_status()
+    text = detok_resp.json()["prompt"].lower()
+    assert "red" in text and "blue" in text, (
+        f"Expected both images to reach the model, got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skip_pixel_values_rejects_reordered_raw_images(
+    client, test_image, second_test_image
+):
+    """Transposing the bytes must fail loudly.
+
+    Nothing downstream re-derives item order, so a swap would pair the second
+    image's tensors with the first one's placeholder range and answer about
+    the wrong picture. The generate tier's hash check is what stops it.
+    """
+    red_url = encode_image_url(test_image, format="PNG")
+    blue_url = encode_image_url(second_test_image, format="PNG")
+
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "messages": _two_color_message(red_url, blue_url),
+            "skip_pixel_values": True,
+        },
+    )
+    render_resp.raise_for_status()
+    render_data = render_resp.json()
+
+    raw_images = render_data["features"]["raw_images"]["image"]
+    render_data["features"]["raw_images"]["image"] = list(reversed(raw_images))
     render_data["sampling_params"] = {"max_tokens": 10, "temperature": 0.0}
 
     gen_resp = await client.post(GEN_ENDPOINT, json=render_data)
