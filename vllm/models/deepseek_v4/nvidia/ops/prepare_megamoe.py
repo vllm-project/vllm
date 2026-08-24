@@ -198,9 +198,10 @@ class PrepareMegaMoeInputsKernel(
 
         hidden_size = vllm_config.model_config.hf_config.hidden_size
         top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-        has_shared_experts = getattr(
-            vllm_config.model_config.hf_config, "n_shared_experts", None
-        ) is not None
+        has_shared_experts = (
+            getattr(vllm_config.model_config.hf_config, "n_shared_experts", None)
+            is not None
+        )
         if hidden_size <= 0 or top_k <= 0:
             return []
 
@@ -237,9 +238,7 @@ class PrepareMegaMoeInputsKernel(
         fp8_ptr = TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, hidden_size))
         int32_ptr = TritonWarmupTensor(torch.int32)
         shared_scale_ptr = (
-            TritonWarmupTensor(torch.int32)
-            if compile_key.has_shared_x_sf
-            else None
+            TritonWarmupTensor(torch.int32) if compile_key.has_shared_x_sf else None
         )
         topk_int32_ptr = TritonWarmupTensor(torch.int32, shape=(1, top_k))
         topk_int64_ptr = TritonWarmupTensor(torch.int64, shape=(1, top_k))
