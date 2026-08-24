@@ -253,7 +253,7 @@ See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, support
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
-- Default `auto` thread-binding is recommended for most cases. Ideally, each OpenMP thread will be bound to a dedicated physical core respectively, threads of each rank will be bound to the same NUMA node respectively, and 1 CPU per rank will be reserved for other vLLM components when `world_size > 1`. If you have any performance problems or unexpected binding behaviours, please try to bind threads as following.
+- Default `auto` thread-binding is recommended for most cases. Ideally, each OpenMP thread will be bound to a dedicated physical core respectively, threads of each rank will be bound to the same NUMA node respectively, and the default reserved CPUs will be kept for other vLLM components. On x86, ARM, and RISC-V, `local_world_size` CPUs are reserved in total, plus one additional CPU per local rank when KV transfer is enabled. If you have any performance problems or unexpected binding behaviours, please try to bind threads as following.
 
 - On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
 
