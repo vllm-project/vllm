@@ -278,12 +278,26 @@ class TestThinkingModeConfig:
         )
 
         reasoning, content = parser.extract_reasoning(
-            "<think>Let me check.</think> Here is the answer.", None
+            "<think>Let me check.</think>Here is the answer.", None
         )
 
         assert reasoning == "Let me check."
         assert content == "Here is the answer."
         assert parser._parser_engine.reasoning_ended
+
+    def test_combined_parser_ignores_keep_thinking_tags(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"thinking": True, "keep_thinking_tags": True},
+        )
+
+        reasoning, content = parser.extract_reasoning(
+            "<think>Let me check.</think>Here is the answer.", None
+        )
+
+        assert reasoning == "Let me check."
+        assert content == "Here is the answer."
+        assert parser.reasoning_ended
 
     def test_thinking_mode_reasoning_without_tags(self, mock_tokenizer):
         parser = DeepSeekV4Parser(

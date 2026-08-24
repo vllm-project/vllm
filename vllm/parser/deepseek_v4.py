@@ -239,12 +239,9 @@ class DeepSeekV4Parser(ParserEngine):
         if "thinking" not in chat_kwargs and "enable_thinking" not in chat_kwargs:
             thinking = True
         thinking = thinking and chat_kwargs.get("reasoning_effort") != "none"
-        keep_thinking_tags = bool(chat_kwargs.get("keep_thinking_tags"))
-        # Reasoning adapters must keep the think terminals so they can move
-        # from REASONING to CONTENT. The option is display-only and applies
-        # to raw tool-parser output, not structured reasoning extraction.
-        if adapter_role == "reasoning":
-            keep_thinking_tags = False
+        keep_thinking_tags = adapter_role == "tool" and bool(
+            chat_kwargs.get("keep_thinking_tags")
+        )
         super().__init__(
             tokenizer,
             tools,
