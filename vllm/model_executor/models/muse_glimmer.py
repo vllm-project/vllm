@@ -69,6 +69,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -1651,3 +1652,13 @@ class MuseGlimmerForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="model",
+            connector=["vision_adapter.", "vision_projection."],
+            tower_model="vision_encoder.",
+        )
