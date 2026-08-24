@@ -41,7 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -87,6 +87,9 @@ class MiMoModel(Qwen2Model):
 
 
 class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
+    # MTP layers are loaded by the draft model, not the main model.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp_layers.": None})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
@@ -101,15 +104,14 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -120,11 +122,8 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
-        # MTP layers are loaded by the draft model, not the main model.
-        skip_prefixes.append("model.mtp_layers.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def compute_logits(
         self,

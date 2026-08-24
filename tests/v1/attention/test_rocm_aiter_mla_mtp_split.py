@@ -15,6 +15,7 @@ if not current_platform.is_rocm():
 
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
+    AiterMLAHelper,
     AiterMLAMetadataBuilder,
 )
 
@@ -83,7 +84,7 @@ def _builder(
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
-        _num_attention_heads=16,
+        _num_attention_heads=AiterMLAHelper.get_actual_mla_num_heads(num_heads),
         _mla_work_meta_data=torch.empty(1, dtype=torch.int32),
         _mla_work_info_set=torch.empty(1, dtype=torch.int32),
         _mla_work_indptr=torch.empty(1, dtype=torch.int32),
@@ -109,7 +110,7 @@ def test_backend_declares_uniform_batch_support():
     )
 
 
-@pytest.mark.parametrize("num_heads", [8, 16, 32, 64, 128])
+@pytest.mark.parametrize("num_heads", [8, 16, 24, 32, 64, 128])
 @pytest.mark.parametrize(
     "spec_method, parallel_drafting",
     [
@@ -127,8 +128,8 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
 ):
     """Aiter init sizes the metadata for every query length decode can be handed.
 
-    Sweeping num_heads asserts the max(16, num_heads) clamp is what sizes the
-    metadata, covering the fp8 nhead=32 (TP4) fold path.
+    Sweeping num_heads asserts metadata is sized for the padded decode shape,
+    covering Kimi-K3 TP4's 24 -> 32 head path and native fp8 nhead=32 folding.
     """
 
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
@@ -207,7 +208,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
             "max_qo_len": builder.reorder_batch_threshold,
-            "num_attention_heads": max(16, num_heads),
+            "num_attention_heads": AiterMLAHelper.get_actual_mla_num_heads(num_heads),
             "q_dtype": dtypes.fp8,
             "kv_dtype": dtypes.fp8,
             "is_sparse": False,
@@ -381,6 +382,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         (1, 1, 16, "auto", True),  # non-MTP decode
         (4, 2, 16, "auto", True),  # MTP deployment, in-range step
         (4, 4, 16, "auto", True),  # MTP deployment, full-qlen verification step
+        (1, 1, 24, "auto", True),  # unaligned H24 pads to H32 persistent decode
         (2, 4, 16, "auto", False),  # step demand exceeds provisioned K -> fallback
         (1, 1, 8, "auto", False),  # divisor head count -> Gluon decode owns qlen==1
         (4, 4, 8, "auto", False),  # small head count -> Gluon flatten owns qlen>1
@@ -410,7 +412,8 @@ def test_persistent_metadata_gate(
     K = _mtp_decode_qlen sizes the metadata buffers at init; a decode step gets
     the pre-built schedule only when its qlen fits those buffers, otherwise it
     falls back to the kernel computing its own. qlen==1 (non-MTP) must stay
-    in-range -- dropping it is the regression this guards.
+    in-range -- dropping it is the regression this guards. This includes
+    unaligned H24, whose padded H32 decode uses persistent metadata.
 
     Only the Gluon paths ignore the schedule, so the gate follows the routing
     predicates rather than the raw head count. Reading `num_heads >= 16` instead
