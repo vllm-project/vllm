@@ -80,9 +80,7 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
-    _PREPARE_MEGAMOE_INPUTS_KERNEL,
-)
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -698,7 +696,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 self.top_k,
                 "fp8xfp4",
             )
-        _PREPARE_MEGAMOE_INPUTS_KERNEL(
+
+        prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
             topk_ids,
@@ -834,108 +833,6 @@ class DeepseekV4MoE(nn.Module):
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
             self._init_fused_moe_experts(vllm_config, config, quant_config, prefix)
-
-        if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
-                _DSV4_TOPK_KERNEL,
-            )
-
-            if vllm_config.parallel_config.enable_eplb:
-                from vllm.model_executor.layers.fused_moe.router.base_router import (
-                    _EPLB_MAP_AND_RECORD_KERNEL,
-                )
-
-                _EPLB_MAP_AND_RECORD_KERNEL.register_warmup()
-            _DSV4_TOPK_KERNEL.register_warmup()
-            if self.use_mega_moe:
-                from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
-                    _DEEPGEMM_EP_GATHER_KERNEL,
-                    _DEEPGEMM_EP_SCATTER_COPY_KERNEL,
-                    _DEEPGEMM_EP_SCATTER_START_KERNEL,
-                )
-
-                _PREPARE_MEGAMOE_INPUTS_KERNEL.register_warmup()
-                _DEEPGEMM_EP_SCATTER_START_KERNEL.register_warmup()
-                _DEEPGEMM_EP_SCATTER_COPY_KERNEL.register_warmup()
-                _DEEPGEMM_EP_GATHER_KERNEL.register_warmup()
-            else:
-                from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (  # noqa: E501
-                    DeepGemmExperts,
-                    DeepGemmFP4Experts,
-                )
-                from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (  # noqa: E501
-                    _BATCHED_TRITON_KERNEL,
-                    BatchedTritonExperts,
-                )
-                from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
-                    TritonExperts,
-                )
-                from vllm.model_executor.layers.fused_moe.fused_moe import (
-                    _COMPUTE_IDENTITY_KERNEL,
-                    _FUSED_MOE_TRITON_KERNEL,
-                )
-                from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
-                    _MOE_FUSED_MUL_SUM_KERNEL,
-                )
-                from vllm.model_executor.layers.fused_moe.utils import (
-                    _COUNT_EXPERT_NUM_TOKENS_KERNEL,
-                    _PACK_TOPK_IDS_WEIGHTS_KERNEL,
-                    _SWIGLU_LIMIT_PAD_AWARE_KERNEL,
-                )
-
-                experts_cls = getattr(
-                    self.experts.routed_experts.quant_method,
-                    "experts_cls",
-                    None,
-                )
-                if not isinstance(experts_cls, type) or issubclass(
-                    experts_cls, TritonExperts
-                ):
-                    _FUSED_MOE_TRITON_KERNEL.register_warmup()
-                if not isinstance(experts_cls, type) or issubclass(
-                    experts_cls, BatchedTritonExperts
-                ):
-                    _BATCHED_TRITON_KERNEL.register_warmup()
-                if isinstance(experts_cls, type) and issubclass(
-                    experts_cls, (DeepGemmExperts, DeepGemmFP4Experts)
-                ):
-                    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (  # noqa: E501
-                        _DEEPGEMM_EP_GATHER_KERNEL,
-                        _DEEPGEMM_EP_SCATTER_COPY_KERNEL,
-                        _DEEPGEMM_EP_SCATTER_START_KERNEL,
-                    )
-
-                    _DEEPGEMM_EP_SCATTER_START_KERNEL.register_warmup()
-                    _DEEPGEMM_EP_SCATTER_COPY_KERNEL.register_warmup()
-                    _DEEPGEMM_EP_GATHER_KERNEL.register_warmup()
-                _COMPUTE_IDENTITY_KERNEL.register_warmup()
-                _MOE_FUSED_MUL_SUM_KERNEL.register_warmup()
-                _COUNT_EXPERT_NUM_TOKENS_KERNEL.register_warmup()
-                _PACK_TOPK_IDS_WEIGHTS_KERNEL.register_warmup()
-                _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
-
-                if vllm_config.kernel_config.moe_backend == "emulation":
-                    from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
-                        _FUSED_MOE_NVFP4_EMULATION_KERNEL,
-                    )
-
-                    _FUSED_MOE_NVFP4_EMULATION_KERNEL.register_warmup()
-
-                if vllm_config.lora_config is not None:
-                    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (  # noqa: E501
-                        _TRTLLM_LORA_FINALIZE_KERNEL,
-                        _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL,
-                    )
-
-                    _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL.register_warmup()
-                    _TRTLLM_LORA_FINALIZE_KERNEL.register_warmup()
-
-                if vllm_config.parallel_config.all2all_backend == "deepep_v2":
-                    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (  # noqa: E501
-                        _GLOBALIZE_RECV_TOPK_IDX_KERNEL,
-                    )
-
-                    _GLOBALIZE_RECV_TOPK_IDX_KERNEL.register_warmup()
 
     def _init_mega_moe_experts(
         self,

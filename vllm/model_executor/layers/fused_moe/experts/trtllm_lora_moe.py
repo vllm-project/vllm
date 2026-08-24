@@ -20,8 +20,6 @@ Constraints (matching the PR support matrix; final gating lives in the oracle):
 """
 
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Any
 
 import torch
 
@@ -43,257 +41,74 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    TritonWarmupTensor,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
-class TrtLlmLoraUnpermuteActivationKernel(
-    VllmJitKernel["TrtLlmLoraUnpermuteActivationKernel.CompileKey"]
+@triton.jit
+def _unpermute_activation_kernel(
+    act_ptr,  # act_permuted: (num_permuted, num_cols)
+    idx_ptr,  # idx_map: (num_rows,), values in [0, num_permuted) or -1
+    out_ptr,  # out: (num_rows, num_cols)
+    num_cols,
+    stride_ar,
+    stride_or,
+    BLOCK_I: tl.constexpr,
 ):
-    @dataclass(frozen=True)
-    class CompileKey:
-        dtype: torch.dtype
-        num_cols: int
-        block_i: int
+    row = tl.program_id(0)
+    col_offs = tl.program_id(1) * BLOCK_I + tl.arange(0, BLOCK_I)
+    col_mask = col_offs < num_cols
 
-    @staticmethod
-    @triton.jit
-    def kernel(
-        act_ptr,  # act_permuted: (num_permuted, num_cols)
-        idx_ptr,  # idx_map: (num_rows,), values in [0, num_permuted) or -1
-        out_ptr,  # out: (num_rows, num_cols)
-        num_cols,
-        stride_ar,
-        stride_or,
-        BLOCK_I: tl.constexpr,
-    ):
-        row = tl.program_id(0)
-        col_offs = tl.program_id(1) * BLOCK_I + tl.arange(0, BLOCK_I)
-        col_mask = col_offs < num_cols
+    idx = tl.load(idx_ptr + row)
+    out_ptrs = out_ptr + row * stride_or + col_offs
+    if idx >= 0:
+        vals = tl.load(act_ptr + idx * stride_ar + col_offs, mask=col_mask, other=0.0)
+        tl.store(out_ptrs, vals, mask=col_mask)
+    else:
+        zeros = tl.zeros((BLOCK_I,), dtype=out_ptr.dtype.element_ty)
+        tl.store(out_ptrs, zeros, mask=col_mask)
 
-        idx = tl.load(idx_ptr + row)
-        out_ptrs = out_ptr + row * stride_or + col_offs
-        if idx >= 0:
-            vals = tl.load(
-                act_ptr + idx * stride_ar + col_offs, mask=col_mask, other=0.0
+
+@triton.jit
+def _finalize_lora_kernel(
+    gemm2_ptr,  # (num_permuted, K) base FC2 output, permuted, unweighted
+    weight_ptr,  # (num_tokens * top_k,) routing weights (expanded order)
+    idx_ptr,  # (num_tokens * top_k,) expanded_idx -> permuted_idx or -1
+    delta_ptr,  # (num_tokens, top_k, K) W2 LoRA delta, already routing-weighted
+    out_ptr,  # (num_tokens, K)
+    K,
+    stride_g0,
+    stride_d0,
+    stride_d1,
+    stride_o0,
+    scale,
+    TOP_K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    token = tl.program_id(0)
+    col = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask = col < K
+
+    acc_base = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    acc_delta = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    for k in tl.static_range(TOP_K):
+        eid = token * TOP_K + k
+        pidx = tl.load(idx_ptr + eid)
+        if pidx >= 0:
+            w = tl.load(weight_ptr + eid).to(tl.float32)
+            base = tl.load(gemm2_ptr + pidx * stride_g0 + col, mask=mask, other=0.0).to(
+                tl.float32
             )
-            tl.store(out_ptrs, vals, mask=col_mask)
-        else:
-            zeros = tl.zeros((BLOCK_I,), dtype=out_ptr.dtype.element_ty)
-            tl.store(out_ptrs, zeros, mask=col_mask)
+            acc_base += w * base
+        acc_delta += tl.load(
+            delta_ptr + token * stride_d0 + k * stride_d1 + col, mask=mask, other=0.0
+        ).to(tl.float32)
 
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        dtype: torch.dtype,
-        intermediate_size: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            dtype=dtype,
-            num_cols=intermediate_size,
-            block_i=1024,
-        )
-
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.lora_config is None:
-            return []
-        hf_config = vllm_config.model_config.hf_config
-        intermediate_size = hf_config.moe_intermediate_size
-        dtype = vllm_config.model_config.dtype
-        if intermediate_size <= 0:
-            return []
-        return self._trace_dispatch(self.dispatch)(
-            dtype=dtype,
-            intermediate_size=intermediate_size,
-        )
-
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.num_cols)),
-            TritonWarmupTensor(torch.int64, shape=(1,)),
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.num_cols)),
-            compile_key.num_cols,
-            compile_key.num_cols,
-            compile_key.num_cols,
-            BLOCK_I=compile_key.block_i,
-            grid=(1, triton.cdiv(compile_key.num_cols, compile_key.block_i)),
-        )
-
-    def __call__(
-        self,
-        act_permuted: torch.Tensor,
-        idx_map: torch.Tensor,
-        out: torch.Tensor,
-        intermediate_size: int,
-    ) -> Any:
-        compile_key = self.dispatch(
-            dtype=act_permuted.dtype,
-            intermediate_size=intermediate_size,
-        )
-        grid = (
-            out.shape[0],
-            triton.cdiv(intermediate_size, compile_key.block_i),
-        )
-        return self.kernel[grid](
-            act_permuted,
-            idx_map,
-            out,
-            intermediate_size,
-            act_permuted.stride(0),
-            out.stride(0),
-            BLOCK_I=compile_key.block_i,
-        )
-
-
-class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKey"]):
-    @dataclass(frozen=True)
-    class CompileKey:
-        dtype: torch.dtype
-        hidden_size: int
-        top_k: int
-        block_k: int
-
-    @staticmethod
-    @triton.jit
-    def kernel(
-        gemm2_ptr,  # (num_permuted, K) base FC2 output, permuted, unweighted
-        weight_ptr,  # (num_tokens * top_k,) routing weights (expanded order)
-        idx_ptr,  # (num_tokens * top_k,) expanded_idx -> permuted_idx or -1
-        delta_ptr,  # (num_tokens, top_k, K) W2 LoRA delta, already routing-weighted
-        out_ptr,  # (num_tokens, K)
-        K,
-        stride_g0,
-        stride_d0,
-        stride_d1,
-        stride_o0,
-        scale,
-        TOP_K: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-    ):
-        token = tl.program_id(0)
-        col = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
-        mask = col < K
-
-        acc_base = tl.zeros((BLOCK_K,), dtype=tl.float32)
-        acc_delta = tl.zeros((BLOCK_K,), dtype=tl.float32)
-        for k in tl.static_range(TOP_K):
-            eid = token * TOP_K + k
-            pidx = tl.load(idx_ptr + eid)
-            if pidx >= 0:
-                w = tl.load(weight_ptr + eid).to(tl.float32)
-                base = tl.load(
-                    gemm2_ptr + pidx * stride_g0 + col, mask=mask, other=0.0
-                ).to(tl.float32)
-                acc_base += w * base
-            acc_delta += tl.load(
-                delta_ptr + token * stride_d0 + k * stride_d1 + col,
-                mask=mask,
-                other=0.0,
-            ).to(tl.float32)
-
-        out = acc_base * scale + acc_delta
-        tl.store(
-            out_ptr + token * stride_o0 + col,
-            out.to(out_ptr.dtype.element_ty),
-            mask=mask,
-        )
-
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        dtype: torch.dtype,
-        hidden_size: int,
-        top_k: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            dtype=dtype,
-            hidden_size=hidden_size,
-            top_k=top_k,
-            block_k=512,
-        )
-
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.lora_config is None:
-            return []
-        hidden_size = vllm_config.model_config.hf_config.hidden_size
-        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-        dtype = vllm_config.model_config.dtype
-        if hidden_size <= 0 or top_k <= 0:
-            return []
-        return self._trace_dispatch(self.dispatch)(
-            dtype=dtype,
-            hidden_size=hidden_size,
-            top_k=top_k,
-        )
-
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.hidden_size)),
-            TritonWarmupTensor(torch.float32, shape=(compile_key.top_k,)),
-            TritonWarmupTensor(torch.int64, shape=(compile_key.top_k,)),
-            TritonWarmupTensor(
-                compile_key.dtype,
-                shape=(1, compile_key.top_k, compile_key.hidden_size),
-            ),
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.hidden_size)),
-            compile_key.hidden_size,
-            compile_key.hidden_size,
-            compile_key.top_k * compile_key.hidden_size,
-            compile_key.hidden_size,
-            compile_key.hidden_size,
-            1.0,
-            TOP_K=compile_key.top_k,
-            BLOCK_K=compile_key.block_k,
-            grid=(1, triton.cdiv(compile_key.hidden_size, compile_key.block_k)),
-        )
-
-    def __call__(
-        self,
-        gemm2_permuted: torch.Tensor,
-        expert_weights: torch.Tensor,
-        idx_map: torch.Tensor,
-        w2_delta: torch.Tensor,
-        output: torch.Tensor,
-        *,
-        top_k: int,
-        scale: float,
-    ) -> Any:
-        hidden_size = gemm2_permuted.size(1)
-        compile_key = self.dispatch(
-            dtype=gemm2_permuted.dtype,
-            hidden_size=hidden_size,
-            top_k=top_k,
-        )
-        grid = (
-            output.shape[0],
-            triton.cdiv(hidden_size, compile_key.block_k),
-        )
-        return self.kernel[grid](
-            gemm2_permuted,
-            expert_weights.reshape(-1),
-            idx_map,
-            w2_delta,
-            output,
-            hidden_size,
-            gemm2_permuted.stride(0),
-            w2_delta.stride(0),
-            w2_delta.stride(1),
-            output.stride(0),
-            scale,
-            TOP_K=compile_key.top_k,
-            BLOCK_K=compile_key.block_k,
-        )
+    out = acc_base * scale + acc_delta
+    tl.store(
+        out_ptr + token * stride_o0 + col, out.to(out_ptr.dtype.element_ty), mask=mask
+    )
 
 
 class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
@@ -626,11 +441,16 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             dtype=act_permuted.dtype,
             device=act_permuted.device,
         )
-        _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL(
+        BLOCK_I = 1024
+        grid = (num_rows, triton.cdiv(intermediate_size, BLOCK_I))
+        _unpermute_activation_kernel[grid](
             act_permuted,
             idx_map,
             out,
             intermediate_size,
+            act_permuted.stride(0),
+            out.stride(0),
+            BLOCK_I=BLOCK_I,
         )
         return out
 
@@ -651,14 +471,23 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         (``expert_weights`` in expanded order, ``idx_map < 0`` dropped), scale by
         ``scale``, and add the already-weighted ``w2_delta`` reduced over top_k.
         """
-        _TRTLLM_LORA_FINALIZE_KERNEL(
+        K = gemm2_permuted.size(1)
+        BLOCK_K = 512
+        grid = (num_tokens, triton.cdiv(K, BLOCK_K))
+        _finalize_lora_kernel[grid](
             gemm2_permuted,
-            expert_weights,
+            expert_weights.reshape(-1),
             idx_map,
             w2_delta,
             output,
-            top_k=top_k,
-            scale=scale,
+            K,
+            gemm2_permuted.stride(0),
+            w2_delta.stride(0),
+            w2_delta.stride(1),
+            output.stride(0),
+            scale,
+            TOP_K=top_k,
+            BLOCK_K=BLOCK_K,
         )
 
 
@@ -726,7 +555,3 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             return list(ret)
         # do_finalize=True finalized directly into `output`.
         return [output]
-
-
-_TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL = TrtLlmLoraUnpermuteActivationKernel()
-_TRTLLM_LORA_FINALIZE_KERNEL = TrtLlmLoraFinalizeKernel()

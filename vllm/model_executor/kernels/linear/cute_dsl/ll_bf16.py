@@ -157,9 +157,9 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     ) -> CompileKey:
         tuned_configs = _arch_tuned_configs()
         is_dotprod = M <= _DEFAULT_DOTPROD_MAX_M or K < 2048
-        bs = tuned_configs[0].get((K, N), {}).get(M, _DEFAULT_DOTPROD_BS)
-        splitk_config = tuned_configs[1].get((K, N), {}).get(
-            M, _DEFAULT_SPLITK_CONFIG
+        bs = tuned_configs[0].get((K, N), dict()).get(M, _DEFAULT_DOTPROD_BS)
+        splitk_config = (
+            tuned_configs[1].get((K, N), dict()).get(M, _DEFAULT_SPLITK_CONFIG)
         )
         return self.CompileKey(
             backend="dotprod" if is_dotprod else "splitk",
@@ -187,7 +187,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
 
         cute = _cute()
@@ -309,4 +309,4 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         return output
 
 
-LL_BF16_GEMM_KERNEL = LLBf16Gemm()
+_LL_BF16_GEMM_KERNEL = LLBf16Gemm()
