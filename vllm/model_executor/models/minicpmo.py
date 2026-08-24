@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -436,7 +437,6 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (audios := mm_data.get("audios")) is None:
             return {}
@@ -449,11 +449,10 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
             audio_inputs = {}
         else:
-            audio_inputs = self._base_call_hf_processor(
+            audio_inputs = self._call_hf_processor_on_prompts(
                 prompts=[self.info.audio_pattern] * len(parsed_audios),
                 mm_data={"audios": [[audio] for audio in parsed_audios]},
                 mm_kwargs={**mm_kwargs, "chunk_input": True},
-                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -486,11 +485,10 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **super().process_mm_inputs(mm_data, mm_kwargs, tok_kwargs),
-            **self.process_audios(mm_data, mm_kwargs, tok_kwargs),
+            **super().process_mm_inputs(mm_data, mm_kwargs),
+            **self.process_audios(mm_data, mm_kwargs),
         }
 
     def _get_prompt_updates(
@@ -505,7 +503,13 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
             out_mm_kwargs=out_mm_kwargs,
         )
 
-        audio_placeholder = self.info.audio_pattern
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        audio_placeholder = cached_encode(
+            tokenizer, self.info.audio_pattern, add_special_tokens=False
+        )
+        unk_token_ids = [vocab["<unk>"]]
 
         def get_audio_replacement(item_idx: int):
             audios = mm_items.get_items(
@@ -520,9 +524,13 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
             else:
                 audio_len = audios.get_audio_length(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_audio_prompt_texts(audio_len),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_audio_prompt_texts(audio_len),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         return [
