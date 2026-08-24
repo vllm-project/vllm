@@ -136,21 +136,18 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and PIN_MEMORY
 
         full_parameters: dict[str, dict[str, torch.Tensor]] = {}
-
-        # parsed_full = parse_fine_tuned_module_to_save_name(
-        #     tensor_name,
-        #     peft_helper.modules_to_save,
-        #     weights_mapper,
-        # )
-        # if parsed_full is not None:
-        #     module_name, parameter_name = parsed_full
-        #     full_parameters.setdefault(module_name, {})[parameter_name] = tensor.to(
-        #         device=device
-        #     )
-        #     continue
+        # split the full-parameters weights from the LoRA weights.
+        lora_tensors = tensors.copy()
+        for tensor_name, tensor in tensors.items():
+            module_name, _ = parse_fine_tuned_lora_name(tensor_name, weights_mapper)
+            if module_name in (peft_helper.modules_to_save or ()):
+                full_parameters.setdefault(module_name, {})[
+                    tensor_name.split(".")[-1]
+                ] = tensor.to(device=device)
+                lora_tensors.pop(tensor_name)
 
         loras: dict[str, LoRALayerWeights] = {}
-        for tensor_name, tensor in tensors.items():
+        for tensor_name, tensor in lora_tensors.items():
             if is_base_embedding_weights(tensor_name):
                 continue
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
@@ -192,6 +189,13 @@ class LoRAModel:
                 module_name=module_name,
                 weight=weight,
                 bias=parameters.get("bias"),
+            )
+        # score.weight and classifier.weight cannot exist at the same time.
+        if "score" in modules_to_save and "classifier" in modules_to_save:
+            raise ValueError(
+                "Both 'score' and 'classifier' modules "
+                "are present in the LoRA checkpoint. "
+                "Only one of them should be present."
             )
 
         return cls(lora_model_id, peft_helper.r, loras, modules_to_save=modules_to_save)
