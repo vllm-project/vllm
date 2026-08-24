@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skip(reason="Kernel warmup coverage is still incomplete
 class JitModel:
     model: str
     draft: str | None = None
+    method: str | None = None
     trust_remote_code: bool = False
 
 
@@ -39,11 +40,13 @@ JIT_MONITOR_MODELS = [
     JitModel(
         "luccafong/deepseek_mtp_main_random",
         draft="luccafong/deepseek_mtp_draft_random",
+        method="mtp",
         trust_remote_code=True,
     ),
     JitModel(
         "eagle618/deepseek-v3-random",
         draft="eagle618/eagle-deepseek-v3-random",
+        method="eagle",
         trust_remote_code=True,
     ),
 ]
@@ -113,6 +116,7 @@ def can_run_without_jit(spec: JitModel):
         jit_monitor_mode="error",
         speculative_config={
             "model": spec.draft,
+            "method": spec.method,
             "num_speculative_tokens": 2,
         }
         if spec.draft

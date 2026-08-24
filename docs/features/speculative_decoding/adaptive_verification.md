@@ -24,7 +24,6 @@ vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \
   --speculative-config '{
     "method": "dspark",
     "model": "deepseek-ai/DeepSeek-V4-Flash-DSpark",
-    "num_speculative_tokens": 7,
     "draft_sample_method": "probabilistic",
     "enable_adaptive_verification": true
   }'
