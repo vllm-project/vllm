@@ -825,7 +825,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
+        boundary_tokens = (
+            (request.num_prompt_tokens - 1) // hash_block_size * hash_block_size
+        )
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
@@ -1087,6 +1089,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 end = aligned // block_size + shift
                 for j in range(max(start_block, end - need), min(end_block, end)):
                     mask[j - start_block] = True
+                # The partial-tail entry sits on the hash boundary itself (the
+                # SWA block is the hash unit); keep the tail ending there too.
+                fine_end = boundary_tokens // block_size
+                if fine_end != end:
+                    for j in range(
+                        max(start_block, fine_end - need),
+                        min(end_block, fine_end),
+                    ):
+                        mask[j - start_block] = True
 
         return mask
 
@@ -1913,8 +1924,10 @@ class MambaManager(SingleTypeKVCacheManager):
         if num_tokens % hash_block_size != 0:
             return None
         latest_prompt_hash_boundary = (
-            request.num_prompt_tokens // hash_block_size
+            (request.num_prompt_tokens - 1) // hash_block_size
         ) * hash_block_size
+        if self.use_eagle:
+            latest_prompt_hash_boundary -= hash_block_size
         if num_tokens != latest_prompt_hash_boundary:
             return None
 

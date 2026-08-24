@@ -71,6 +71,16 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _last_hittable_boundary(num_tokens: int, unit: int, eagle_block_drop: bool) -> int:
+    """Last ``unit``-aligned position a prefix-cache hit can end at: lookups are
+    capped at ``num_tokens - 1`` (``get_computed_blocks``) and Eagle block drop
+    prunes one more unit. State registered above it is never reused."""
+    boundary = (num_tokens - 1) // unit * unit
+    if eagle_block_drop:
+        boundary = max(boundary - unit, 0)
+    return boundary
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -418,12 +428,9 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
-        last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle_block_drop:
-            last_cache_position = max(last_cache_position - block_size, 0)
+        last_cache_position = _last_hittable_boundary(
+            request.num_tokens, block_size, self.use_eagle_block_drop
+        )
 
         end = start + num_new_tokens
         use_internal_checkpoint = (
@@ -447,7 +454,11 @@ class Scheduler(SchedulerInterface):
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
-            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            _last_hittable_boundary(
+                request.num_prompt_tokens,
+                self.hash_block_size,
+                self.use_eagle_block_drop,
+            )
             if self.mamba_partial_cache_hit
             else 0
         )

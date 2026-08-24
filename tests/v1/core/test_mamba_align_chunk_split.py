@@ -278,7 +278,10 @@ def test_unaligned_resume_never_runs_past_its_block(
     """
     prompt_len = 3602
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
-    tail_boundary = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    # Last hash boundary a lookup can reach, one unit lower under Eagle.
+    tail_boundary = (prompt_len - 1) // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE - (
+        ATTN_BLOCK_SIZE if partial_hit and use_eagle else 0
+    )
 
     pos, ends = resume_at, []
     while pos < prompt_len:
@@ -307,3 +310,40 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail boundary"
         )
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "use_eagle", "partial_hit", "expected_ends"),
+    [
+        # Block-aligned prompt: the stop is one block below n, not at n.
+        (3 * MAMBA_BLOCK_SIZE, False, False, [3200, 4800]),
+        # Eagle block drop backs it off one more block.
+        (3 * MAMBA_BLOCK_SIZE, True, False, [1600, 4800]),
+        # Nothing cacheable mid-prefill: a single terminal chunk.
+        (2 * MAMBA_BLOCK_SIZE, True, False, [3200]),
+        # Partial tail under Eagle: hash boundary below n - 1, minus one unit.
+        (3602, True, True, [1600, 3584, 3602]),
+        # Hash-aligned prompt: the tail stop is a block boundary.
+        (2 * MAMBA_BLOCK_SIZE + 2 * ATTN_BLOCK_SIZE, True, True, [1600, 3200, 3232]),
+    ],
+)
+def test_deliberate_stops_land_on_hittable_boundaries(
+    prompt_len: int,
+    use_eagle: bool,
+    partial_hit: bool,
+    expected_ends: list[int],
+) -> None:
+    """Every non-terminal chunk end must be a position a lookup can reach:
+    lookups are capped at n - 1, so flooring from n leaves block-aligned
+    prompts with state no request can hit."""
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    pos, ends = 0, []
+    while pos < prompt_len:
+        request.num_computed_tokens = pos
+        num_new = _split(
+            request, prompt_len - pos, use_eagle=use_eagle, partial_hit=partial_hit
+        )
+        assert num_new > 0
+        pos += num_new
+        ends.append(pos)
+    assert ends == expected_ends

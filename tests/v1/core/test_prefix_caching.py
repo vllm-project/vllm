@@ -3311,7 +3311,8 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     # The SWA manager uses the configured 64-token interval (a multiple of the
     # 32-token lcm_block_size) as its retention segment. For this 128-token
     # prompt, the retained SWA tails are the 64-token interval boundary, the
-    # 96-token replay boundary, and the 128-token interval boundary.
+    # 96-token replay boundary, the 120-token partial-tail boundary (the last
+    # hash boundary a lookup can reach), and the 128-token interval boundary.
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
     computed_blocks, _, _ = manager.get_computed_blocks(req)
@@ -3324,7 +3325,7 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {7, 11, 15}
+    expected_swa_cached = {7, 11, 14, 15}
     for i in range(16):
         cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
@@ -3537,7 +3538,8 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {11}
+    # The replay boundary (96) and the reachable partial-tail boundary (120).
+    expected_swa_cached = {11, 14}
     for i in range(16):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
