@@ -16,7 +16,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -31,24 +30,22 @@ logger = init_logger(__name__)
 
 @dataclass
 class ReqMeta:
-    # Request tokens
-    token_ids: torch.Tensor
-    # Slot mappings, should have the same length as token_ids
+    # Key of the cached prefix, derived once on the scheduler side from the
+    # request's block hashes. The worker never re-derives it.
+    cache_key: str
+    # Slot mappings, one per cached token
     slot_mapping: torch.Tensor
     # Is store or load
     is_store: bool
-    mm_hashes: list[str]
 
     @staticmethod
     def make_meta(
-        token_ids: list[int],
+        cache_key: str,
+        num_tokens: int,
         block_ids: list[int],
         block_size: int,
         is_store: bool,
-        mm_hashes: list[str],
     ) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
-        token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, block_size)
@@ -56,12 +53,11 @@ class ReqMeta:
             block_offsets.reshape((1, block_size))
             + block_ids_tensor.reshape((num_blocks, 1)) * block_size
         )
-        slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
+        slot_mapping = slot_mapping.flatten()[:num_tokens]
         return ReqMeta(
-            token_ids=token_ids_tensor,
+            cache_key=cache_key,
             slot_mapping=slot_mapping,
             is_store=is_store,
-            mm_hashes=mm_hashes,
         )
 
 
@@ -71,14 +67,14 @@ class ExampleConnectorMetadata(KVConnectorMetadata):
 
     def add_request(
         self,
-        token_ids: list[int],
+        cache_key: str,
+        num_tokens: int,
         block_ids: list[int],
         block_size: int,
         is_store: bool,
-        mm_hashes: list[str],
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(token_ids, block_ids, block_size, is_store, mm_hashes)
+            ReqMeta.make_meta(cache_key, num_tokens, block_ids, block_size, is_store)
         )
 
 
@@ -101,6 +97,16 @@ class ExampleConnector(KVConnectorBase_V1):
         )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
+        # Scheduler side: cache key and cached-token count per request, set in
+        # update_state_after_alloc and consumed by build_connector_meta.
+        self._pending: dict[str, tuple[str, int]] = {}
+        self._hash_block_size = self._block_size
+        if role == KVConnectorRole.SCHEDULER and kv_cache_config is not None:
+            from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+
+            _, self._hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
@@ -174,9 +180,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 if kv_cache_layer is None:
                     continue
 
-                filename = self._generate_filename_debug(
-                    layer_name, request.token_ids, request.mm_hashes
-                )
+                filename = self._layer_filename(request.cache_key, layer_name)
                 kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
                 kv_cache = kv_cache_cpu.to(kv_cache_layer.device, non_blocking=True)
                 if isinstance(attn_metadata, dict):
@@ -236,8 +240,8 @@ class ExampleConnector(KVConnectorBase_V1):
         assert isinstance(connector_metadata, ExampleConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
-                filename = self._generate_filename_debug(
-                    layer_name, request.token_ids, request.mm_hashes
+                filename = self._layer_filename(
+                    request.cache_key, layer_name, create_folder=True
                 )
                 kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
                 with gpu_sync_allowed():
@@ -267,22 +271,18 @@ class ExampleConnector(KVConnectorBase_V1):
         """
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
-        # Therefore, we use prompt_token_ids[:-1] to determine the folder name
+        # Therefore, we cache prompt_token_ids[:-1] aligned to a block.
 
         # NOTE: in current v1 scheduler, the num_computed_tokens is aligned
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
-        if not self._found_match_for_request(request):
+        cache_key, num_cached_tokens = self._cache_key(request)
+        if cache_key is None or not self._found_match(cache_key):
             return 0, False
 
         logger.info("External Cache Hit!")
 
-        # Now, first num_tokens_to_check tokens are hit, we need to prepare
-        # the metadata for the worker connector to correctly load the KV
-        token_ids = request.prompt_token_ids or []
-        num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
-
-        return num_tokens_to_check - num_computed_tokens, False
+        return num_cached_tokens - num_computed_tokens, False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -290,9 +290,13 @@ class ExampleConnector(KVConnectorBase_V1):
         """
         Update KVConnector state after block allocation.
 
-        If blocks were allocated, add to _requests_need_load,
-        such that we load the KVs in the next forward pass.
+        Record the request's cache key for build_connector_meta. If blocks
+        were allocated, add to _requests_need_load, such that we load the
+        KVs in the next forward pass.
         """
+        cache_key, num_cached_tokens = self._cache_key(request)
+        if cache_key is not None:
+            self._pending[request.request_id] = (cache_key, num_cached_tokens)
         if num_external_tokens > 0:
             self._requests_need_load[request.request_id] = request
 
@@ -312,15 +316,17 @@ class ExampleConnector(KVConnectorBase_V1):
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
-            token_ids = new_req.prompt_token_ids or []
-            mm_hashes = [f.identifier for f in new_req.mm_features]
+            pending = self._pending.get(new_req.req_id)
+            if pending is None:
+                continue
+            cache_key, num_cached_tokens = pending
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(
-                    token_ids=token_ids,
+                    cache_key=cache_key,
+                    num_tokens=num_cached_tokens,
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
                     is_store=False,
-                    mm_hashes=mm_hashes,
                 )
                 total_need_load += 1
             else:
@@ -328,13 +334,13 @@ class ExampleConnector(KVConnectorBase_V1):
                 # but a single request can have both store and load.
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
-                if not self._found_match_for_prompt(token_ids, mm_hashes):
+                if not self._found_match(cache_key):
                     meta.add_request(
-                        token_ids=token_ids,
+                        cache_key=cache_key,
+                        num_tokens=num_cached_tokens,
                         block_ids=new_req.block_ids[0],
                         block_size=self._block_size,
                         is_store=True,
-                        mm_hashes=mm_hashes,
                     )
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -343,16 +349,10 @@ class ExampleConnector(KVConnectorBase_V1):
             if not resumed_from_preemption or req_id not in self._requests_need_load:
                 continue
 
-            num_computed_tokens = cached_reqs.num_computed_tokens[i]
-            num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            # A resumed request passes through update_state_after_alloc
+            # again, so its key is pending like a new request's.
+            cache_key, num_cached_tokens = self._pending[req_id]
             new_block_ids = cached_reqs.new_block_ids[i]
-
-            # NOTE(rob): cached_req_data does not have the full
-            # list of token ids (only new tokens). So we look it
-            # up in the actual request object.
-            request = self._requests_need_load[req_id]
-            total_tokens = num_computed_tokens + num_new_tokens
-            token_ids = request.all_token_ids[:total_tokens]
 
             # NOTE(rob): For resumed req, new_block_ids is all
             # of the block_ids for the request.
@@ -360,81 +360,53 @@ class ExampleConnector(KVConnectorBase_V1):
             block_ids = new_block_ids[0]
 
             meta.add_request(
-                token_ids=token_ids,
+                cache_key=cache_key,
+                num_tokens=num_cached_tokens,
                 block_ids=block_ids,
                 block_size=self._block_size,
                 is_store=False,
-                mm_hashes=[f.identifier for f in request.mm_features],
             )
             total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
+        self._pending.clear()
         return meta
 
     # ==============================
     # Helper functions
     # ==============================
 
-    def _found_match_for_request(
-        self,
-        request: "Request",
-    ) -> bool:
-        """Check if the cache is hit for the request."""
-        return self._found_match_for_prompt(
-            list(request.prompt_token_ids or []),
-            [f.identifier for f in request.mm_features],
-        )
+    def _cache_key(self, request: "Request") -> tuple[str | None, int]:
+        """Key the cached prefix on the request's own block hashes.
 
-    def _found_match_for_prompt(
-        self,
-        prompt_token_ids: list[int],
-        mm_hashes: list[str],
-    ) -> bool:
-        num_tokens_to_check = align_to_block_size(
-            len(prompt_token_ids) - 1, self._block_size
-        )
-        foldername = self._generate_foldername_debug(
-            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
-            mm_hashes,
-            create_folder=False,
-        )
-        return os.path.exists(foldername)
+        The block hash chain already binds the tokens, ``cache_salt``, LoRA
+        identity, multimodal items and ``prompt_embeds`` content, so the
+        hash of the last cached block is the whole key. Deriving it from
+        raw tokens instead would drop every one of those dimensions.
 
-    def _generate_foldername_debug(
-        self,
-        token_ids: torch.Tensor,
-        mm_hashes: list[str],
-        create_folder=False,
-    ) -> str:
-        """Generate a folder name based on the hash of the bytes of the input
-        ids.
+        Returns:
+            The key and the number of cached tokens, or ``(None, 0)`` when
+            the prompt does not cover a full block.
         """
-        token_bytes = token_ids.numpy().tobytes()
-        # Add mm_hashes to the bytes being hashed to avoid path traversal and
-        # to create a canonical key.
-        if mm_hashes:
-            mm_str = "-".join(mm_hashes)
-            token_bytes += mm_str.encode("utf-8")
-        input_ids_hash = safe_hash(token_bytes, usedforsecurity=False).hexdigest()
+        num_cached_tokens = align_to_block_size(
+            request.num_prompt_tokens - 1, self._block_size
+        )
+        num_hashed_blocks = num_cached_tokens // self._hash_block_size
+        block_hashes = request.block_hashes
+        if num_hashed_blocks <= 0 or len(block_hashes) < num_hashed_blocks:
+            return None, 0
+        return block_hashes[num_hashed_blocks - 1].hex(), num_cached_tokens
 
-        foldername = os.path.join(self._storage_path, input_ids_hash)
+    def _found_match(self, cache_key: str) -> bool:
+        return os.path.exists(os.path.join(self._storage_path, cache_key))
+
+    def _layer_filename(
+        self, cache_key: str, layer_name: str, create_folder: bool = False
+    ) -> str:
+        foldername = os.path.join(self._storage_path, cache_key)
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
-        return foldername
-
-    def _generate_filename_debug(
-        self,
-        layer_name: str,
-        token_ids: torch.Tensor,
-        mm_hashes: list[str],
-    ) -> str:
-        """Generate a file name based on the layer name and the hash
-        of the bytes of the input ids.
-        """
-        foldername = self._generate_foldername_debug(
-            token_ids, mm_hashes=mm_hashes, create_folder=True
-        )
         return os.path.join(foldername, f"{layer_name}.safetensors")
 
 
