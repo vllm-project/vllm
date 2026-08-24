@@ -306,24 +306,27 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
 class MiniMaxM3VLMultiModalProcessor(
     BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
 ):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
 
-        if not mm_data:
-            return BatchFeature(passthrough_data)
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        if not hf_data:
+            return self._postprocess_hf_mm_data(
+                hf_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
         # With ``video_needs_metadata=True`` each video arrives as a
         # ``(frames, metadata)`` tuple. Split the frames back out and forward the
         # metadata as ``VideoMetadata`` so the processor emits timestamps.
-        videos = cast(list | None, mm_data.get("videos"))
+        videos = cast(list | None, hf_data.get("videos"))
         video_metadata: list[VideoMetadata] | None = None
         if videos:
             frames_only = []
@@ -343,12 +346,12 @@ class MiniMaxM3VLMultiModalProcessor(
                 # stays consistent with _get_prompt_updates.
                 meta.setdefault("total_num_frames", len(frames))
                 video_metadata.append(VideoMetadata(**meta))
-            mm_data["videos"] = frames_only
+            hf_data["videos"] = frames_only
 
         # Override the video processor's default do_resize=False (set for a
         # pre-resized pipeline) to True for vLLM's raw-frame inputs.
         merged = dict(do_resize=True, **hf_kwargs)
-        data = dict(text=prompt_text, **mm_data)
+        data = hf_data
         if video_metadata is not None:
             data["video_metadata"] = video_metadata
         processed_data = self.info.ctx.call_hf_processor(
@@ -357,7 +360,7 @@ class MiniMaxM3VLMultiModalProcessor(
             merged,
         )
         processed_data.update(passthrough_data)
-        return processed_data
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

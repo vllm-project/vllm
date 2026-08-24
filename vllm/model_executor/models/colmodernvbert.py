@@ -164,7 +164,9 @@ class ColModernVBertMultiModalProcessor(
         )
 
         if not mm_data:
-            return BatchFeature(passthrough_data)
+            return self._postprocess_hf_mm_data(
+                mm_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
@@ -193,7 +195,7 @@ class ColModernVBertMultiModalProcessor(
 
         processed_data = result
         processed_data.update(passthrough_data)
-        return processed_data
+        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

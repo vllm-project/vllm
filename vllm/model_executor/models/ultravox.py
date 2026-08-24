@@ -208,47 +208,17 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             hf_data["audios"] = hf_data.pop("audio")
 
         feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        normalized_kwargs = dict(hf_inputs.hf_kwargs)
+        # The remote processor already hardcodes truncation=False and forwards
+        # its kwargs to the audio processor, where another value would collide.
+        normalized_kwargs.pop("truncation", None)
         return hf_inputs._replace(
             hf_kwargs=dict(
-                hf_inputs.hf_kwargs,
+                normalized_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
                 include_audio_num_chunks=True,
             )
         )
-
-    def _apply_hf_processor_main(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
-
-        if hf_data:
-            hf_processor = self.info.get_hf_processor(**hf_kwargs)
-
-            def patched_call(**kwargs) -> BatchFeature:
-                # The remote UltravoxProcessor does not support the
-                # `truncation` kwarg injected by `_get_hf_mm_inputs`: it
-                # passes `truncation` to its audio processor by itself while
-                # also forwarding `**kwargs` there, causing a duplicate
-                # keyword argument error. Its hardcoded `truncation=False`
-                # already matches vLLM's intended behavior.
-                kwargs.pop("truncation", None)
-
-                return hf_processor(**kwargs)
-
-            processed_data = self.info.ctx.call_hf_processor(
-                patched_call,
-                hf_data,
-                hf_kwargs,
-            )
-            processed_data.update(passthrough_data)
-        else:
-            processed_data = BatchFeature(passthrough_data)
-
-        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _postprocess_hf_mm_data(
         self,

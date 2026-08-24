@@ -321,31 +321,37 @@ class LlavaOnevisionMultiModalProcessor(
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
         )
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
 
-        if not mm_data:
-            return BatchFeature(passthrough_data)
+        if not hf_data:
+            return self._postprocess_hf_mm_data(
+                hf_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        videos = mm_data.pop("videos", [])
+        videos = hf_data.pop("videos", [])
         assert isinstance(videos, list)
 
         if not videos:
             processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**hf_kwargs),
-                dict(text=prompt_text, **mm_data),
+                dict(text=prompt_text, **hf_data),
                 hf_kwargs,
             )
             processed_data.update(passthrough_data)
-            return processed_data
+            return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
         # LLaVA-OneVision processor doesn't support multiple videos
         # with different sizes when converting back to tensors
@@ -355,7 +361,7 @@ class LlavaOnevisionMultiModalProcessor(
         image_token = processor.image_token
         video_token = processor.video_token
 
-        images = mm_data.pop("images", [])
+        images = hf_data.pop("images", [])
         assert isinstance(images, list)
         if images:
             processor_outputs = self.info.ctx.call_hf_processor(
@@ -390,7 +396,7 @@ class LlavaOnevisionMultiModalProcessor(
         )
         processed_data = BatchFeature(combined_outputs)
         processed_data.update(passthrough_data)
-        return processed_data
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_prompt_updates(
         self,

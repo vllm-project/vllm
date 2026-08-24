@@ -1346,7 +1346,9 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         )
 
         if not mm_data:
-            return BatchFeature(passthrough_data)
+            return self._postprocess_hf_mm_data(
+                mm_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
         processor_kwargs = _filter_moss_audio_processor_config(dict(hf_kwargs))
         processed_data = self.info.ctx.call_hf_processor(
@@ -1355,7 +1357,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
             {},
         )
         processed_data.update(passthrough_data)
-        return processed_data
+        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

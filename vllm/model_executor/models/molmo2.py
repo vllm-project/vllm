@@ -1929,6 +1929,9 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
 
 
 class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
         tokenizer = processor.tokenizer
@@ -1945,15 +1948,12 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_counts = mm_items.get_all_counts()
-
-        processor_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
-
-        mm_data = dict(processor_data)
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
         hf_config = self.info.get_hf_config()
         hf_processor = self.info.get_hf_processor(**hf_kwargs)
@@ -1971,7 +1971,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         tokenizer = hf_processor.tokenizer
         image_processor = hf_processor.image_processor
 
-        if videos := mm_data.pop("videos", []):
+        if videos := hf_data.pop("videos", []):
             bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
 
             pixel_values_videos_lst = []
@@ -2062,11 +2062,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
 
         processed_data = self.info.ctx.call_hf_processor(
             patched_call,
-            dict(text=prompt_text, **mm_data),
+            dict(text=prompt_text, **hf_data),
             hf_kwargs,
         )
 
-        if (images := mm_data.get("images")) is not None:
+        if (images := hf_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
@@ -2111,7 +2111,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return processed_data
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

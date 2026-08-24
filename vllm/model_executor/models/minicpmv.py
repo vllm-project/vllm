@@ -1031,7 +1031,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             }
         )
         processed_data.update(passthrough_data)
-        return processed_data
+        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
 
     def _get_prompt_updates(
         self,

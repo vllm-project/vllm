@@ -333,22 +333,28 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
 class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo]):
     """Basic image-only MultiModalProcessor for InternS1-style models."""
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
 
-        if not mm_data:
-            return BatchFeature(passthrough_data)
+        if not hf_data:
+            return self._postprocess_hf_mm_data(
+                hf_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        videos = mm_data.pop("videos", [])
-        images = mm_data.pop("images", [])
+        videos = hf_data.pop("videos", [])
+        images = hf_data.pop("images", [])
         assert isinstance(videos, list)
         assert isinstance(images, list)
 
@@ -428,7 +434,7 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         processed_data.update(video_outputs)
         processed_data.update(passthrough_data)
 
-        return processed_data
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

@@ -235,7 +235,7 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
 
         processed_data = BatchFeature(data=data, tensor_type=None)
         processed_data.update(passthrough_data)
-        return processed_data
+        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
 
     def _tokenize_with_placeholders(
         self,

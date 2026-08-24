@@ -49,7 +49,6 @@ from vllm.multimodal.processing import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -287,33 +286,8 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 class DeepseekOCRMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
 ):
-    def _apply_hf_processor_main(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
-            mm_items, hf_kwargs
-        )
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        if mm_data:
-            processed_data = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_kwargs),
-                dict(prompt=prompt_text, **mm_data),
-                hf_kwargs,
-            )
-
-        else:
-            tokenizer = self.info.get_tokenizer()
-            assert isinstance(tokenizer, HfTokenizer)
-            processed_data = tokenizer(
-                prompt_text, add_special_tokens=True, return_tensors="pt"
-            )
-
-        processed_data.update(passthrough_data)
-        return processed_data
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
         self,

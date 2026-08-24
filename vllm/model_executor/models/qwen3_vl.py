@@ -1280,24 +1280,27 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         proc_impl = getattr(type(hf_processor), "replace_video_token", None)
         return proc_impl is not None and proc_impl is not mixin_impl
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
 
-        if not mm_data:
-            return BatchFeature(passthrough_data)
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        if not hf_data:
+            return self._postprocess_hf_mm_data(
+                hf_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
         # Separate video processing from image processing. Because the videos
         # are processed into several image patches
         video_input_ids_lst: list[list[int]] = []
-        if videos := mm_data.pop("videos", []):
+        if videos := hf_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
@@ -1437,7 +1440,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         }
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**non_video_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
+            hf_data,
             non_video_mm_kwargs,
         )
 
@@ -1464,7 +1467,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         processed_data.update(video_outputs)
         processed_data.update(passthrough_data)
 
-        return processed_data
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,

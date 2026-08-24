@@ -200,7 +200,9 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         )
 
         if not mm_data:
-            return BatchFeature(passthrough_data)
+            return self._postprocess_hf_mm_data(
+                mm_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
         for video_idx, video_arr in enumerate(mm_data.get("videos", [])):
             if video_arr.dtype != np.uint8:
@@ -253,7 +255,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
 
         processed_data.update(passthrough_data)
 
-        return processed_data
+        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
 
     def _get_prompt_updates(
         self,

@@ -560,19 +560,25 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
 
-        if not mm_data:
-            return BatchFeature(passthrough_data)
+        if not hf_data:
+            return self._postprocess_hf_mm_data(
+                hf_data, hf_kwargs, BatchFeature(passthrough_data)
+            )
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
         val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
@@ -588,7 +594,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # Each frame is processed with max_soft_tokens=70 through the
         # same vision tower, matching transformers processing_gemma4.py.
         video_outputs: dict[str, Any] = {}
-        if videos := mm_data.pop("videos", []):
+        if videos := hf_data.pop("videos", []):
             processor = self.info.get_hf_processor()
 
             all_video_pixel_values: list[torch.Tensor] = []
@@ -685,13 +691,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             }
 
         # Warn if any audio waveform exceeds the model's max duration.
-        if "audio" in mm_data:
+        if "audio" in hf_data:
             processor = self.info.get_hf_processor()
             sr = processor.feature_extractor.sampling_rate
             max_tokens = processor.audio_seq_length
             ms_per_tok = processor.audio_ms_per_token
             max_duration_s = max_tokens * ms_per_tok / 1000.0
-            audios = mm_data["audio"]
+            audios = hf_data["audio"]
             if not isinstance(audios, (list, tuple)):
                 audios = [audios]
             for i, waveform in enumerate(audios):
@@ -720,7 +726,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**patched_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
+            dict(text=prompt_text, **hf_data),
             patched_mm_kwargs,
         )
 
@@ -753,7 +759,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         processed_data.update(video_outputs)
         processed_data.update(passthrough_data)
 
-        return processed_data
+        return self._postprocess_hf_mm_data(hf_data, hf_kwargs, processed_data)
 
     def _get_mm_fields_config(
         self,
