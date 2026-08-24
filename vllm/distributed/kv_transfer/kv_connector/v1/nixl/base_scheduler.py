@@ -121,7 +121,8 @@ class NixlBaseConnectorScheduler:
         # Heartbeat tracking: requests needing periodic lease-renewal heartbeats to
         # remote P-side, stored as ready-to-send HeartbeatInfo grouped by remote engine
         self._heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
-        # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
+        # Reverse lookup: local req_id -> (engine_id, req_id) for O(1) removal
+        # The req_id is remote in pull mode and local in push mode.
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
 
@@ -221,10 +222,13 @@ class NixlBaseConnectorScheduler:
                 tp_size=tp_size,
                 pp_size=pp_size,
             )
-        self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
+        heartbeat_request_id = (
+            request.request_id if self._TRANSFER_MODE == "push" else remote_request_id
+        )
+        self._heartbeat_by_engine[remote_engine_id].req_ids.add(heartbeat_request_id)
         self._heartbeat_req_engine[request.request_id] = (
             remote_engine_id,
-            remote_request_id,
+            heartbeat_request_id,
         )
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
