@@ -14,13 +14,13 @@ import pytest
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
 from vllm.connections import HTTPConnection
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.run_batch import (
+from vllm.entrypoints.launchers.run_batch import (
     BatchRequestOutput,
     BatchTranscriptionRequest,
     download_bytes_from_url,
     make_transcription_wrapper,
 )
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
 
@@ -919,7 +919,7 @@ async def test_download_bytes_allows_permitted_domain():
     mock_session = _make_aiohttp_mocks(expected)
 
     with patch(
-        "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+        "vllm.entrypoints.openai.launchers.aiohttp.ClientSession",
         return_value=mock_session,
     ):
         result = await download_bytes_from_url(
@@ -936,7 +936,7 @@ async def test_download_bytes_no_allowlist_permits_any_domain():
     mock_session = _make_aiohttp_mocks(expected)
 
     with patch(
-        "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+        "vllm.entrypoints.openai.launchers.aiohttp.ClientSession",
         return_value=mock_session,
     ):
         result = await download_bytes_from_url(url, allowed_media_domains=None)
@@ -993,7 +993,7 @@ async def test_transcription_wrapper_rejects_oversized_data_url_before_decode(
         }
     )
 
-    with patch("vllm.entrypoints.openai.run_batch.base64.b64decode") as decode:
+    with patch("vllm.entrypoints.launchers.run_batch.base64.b64decode") as decode:
         response = await wrapped_handler(request)
 
     assert isinstance(response, ErrorResponse)
@@ -1010,7 +1010,7 @@ async def test_download_bytes_allows_http_body_at_audio_limit(
     monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
     connection = HTTPConnection()
     monkeypatch.setattr(
-        "vllm.entrypoints.openai.run_batch.global_http_connection",
+        "vllm.entrypoints.launchers.run_batch.global_http_connection",
         connection,
     )
 
@@ -1031,7 +1031,7 @@ async def test_transcription_wrapper_rejects_oversized_http_before_handler(
     monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
     connection = HTTPConnection()
     monkeypatch.setattr(
-        "vllm.entrypoints.openai.run_batch.global_http_connection",
+        "vllm.entrypoints.launchers.run_batch.global_http_connection",
         connection,
     )
     handler = AsyncMock()
