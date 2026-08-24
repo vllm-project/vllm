@@ -374,6 +374,299 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "batch_size,num_speculative_tokens,min_seq_len,max_seq_len",
+    [
+        pytest.param(1, 2, 125_000, 250_000, id="eight-splits"),
+        pytest.param(7, 4, 125_000, 250_000, id="four-splits"),
+        pytest.param(16, 4, 2_500, 2_501, id="dynamic-short-rows"),
+        pytest.param(13, 4, 25_000, 25_001, id="dynamic-three-splits"),
+        pytest.param(16, 4, 65_535, 65_536, id="dynamic-boundary-mixed"),
+        pytest.param(16, 4, 125_000, 125_001, id="dynamic-two-splits"),
+        pytest.param(64, 3, 125_000, 125_001, id="dynamic-two-splits-max-rows"),
+        pytest.param(64, 4, 125_000, 125_001, id="baseline-fallback"),
+    ],
+)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_long_c4a(
+    batch_size: int,
+    num_speculative_tokens: int,
+    min_seq_len: int,
+    max_seq_len: int,
+) -> None:
+    properties = torch.cuda.get_device_properties(0)
+    if not properties.gcnArchName.startswith("gfx950"):
+        pytest.skip("This test exercises the gfx950 launch configuration")
+
+    query_tokens = num_speculative_tokens + 1
+    num_rows = batch_size * query_tokens
+    stride = 262_144
+    top_k = 1024
+    offsets = torch.arange(num_rows, dtype=torch.int32, device="cuda")
+    seq_lens = min_seq_len + offsets * (max_seq_len - min_seq_len) // max(
+        num_rows - 1, 1
+    )
+    seq_lens = seq_lens.reshape(batch_size, query_tokens)
+    logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        query_tokens,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    validate_topk_against_reference(
+        logits,
+        indices,
+        row_starts,
+        seq_lens.reshape(-1),
+        top_k,
+        "gfx950 long C4A top-k",
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_long_c4a_1d_seq_lens() -> None:
+    properties = torch.cuda.get_device_properties(0)
+    if not properties.gcnArchName.startswith("gfx950"):
+        pytest.skip("This test exercises the gfx950 launch configuration")
+
+    batch_size = 20
+    query_tokens = 4
+    num_rows = batch_size * query_tokens
+    stride = 262_144
+    top_k = 1024
+    seq_lens = torch.linspace(
+        125_003,
+        250_000,
+        batch_size,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    row_offsets = torch.arange(query_tokens, dtype=torch.int32, device="cuda")
+    row_ends = (seq_lens[:, None] - query_tokens + row_offsets + 1).reshape(-1)
+    logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        query_tokens,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    validate_topk_against_reference(
+        logits,
+        indices,
+        row_starts,
+        row_ends,
+        top_k,
+        "gfx950 long C4A top-k with 1-D sequence lengths",
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _get_aiter_top_k_kernel,
+        _launch_aiter_top_k_per_row_prefill,
+    )
+
+    row_starts = torch.tensor([1, 6, 20], dtype=torch.int32, device="cuda")
+    row_ends = torch.tensor([3, 18, 23], dtype=torch.int32, device="cuda")
+    logits = torch.arange(96, dtype=torch.float32, device="cuda").reshape(3, 32)
+    top_k = 4
+    indices = torch.empty((3, top_k), dtype=torch.int32, device="cuda")
+
+    aiter_topk_kernel = _get_aiter_top_k_kernel(
+        is_prefill=True,
+        compress_ratio=4,
+        num_rows=logits.shape[0],
+        on_gfx950=True,
+    )
+    if aiter_topk_kernel is None:
+        pytest.skip("AITER top-k is unavailable")
+    assert (
+        _launch_aiter_top_k_per_row_prefill(
+            aiter_topk_kernel,
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            top_k,
+        )
+        is None
+    )
+
+    for row_idx, (row_start, row_end) in enumerate(
+        zip(row_starts.tolist(), row_ends.tolist())
+    ):
+        num_valid = min(top_k, row_end - row_start)
+        expected = logits[row_idx, row_start:row_end].topk(num_valid).indices
+        actual = indices[row_idx, :num_valid]
+        assert set(actual.tolist()) == set(expected.tolist())
+        assert torch.all(indices[row_idx, num_valid:] == -1)
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [2, 3, 4])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
+    num_speculative_tokens: int,
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _get_aiter_top_k_kernel,
+        _launch_aiter_top_k_per_row_decode,
+    )
+
+    query_tokens = num_speculative_tokens + 1
+    offsets = torch.arange(query_tokens, dtype=torch.int32, device="cuda")
+    final_uncompressed_lens = torch.tensor([43, 59], dtype=torch.int32, device="cuda")
+    seq_lens = (final_uncompressed_lens[:, None] - query_tokens + offsets + 1) // 4
+    seq_lens[0, 0] = 0
+
+    num_rows = seq_lens.numel()
+    logits = torch.arange(num_rows * 16, dtype=torch.float32, device="cuda").reshape(
+        num_rows, 16
+    )
+    top_k = 4
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    aiter_topk_kernel = _get_aiter_top_k_kernel(
+        is_prefill=False,
+        compress_ratio=4,
+        num_rows=num_rows,
+        max_valid_seq_len=seq_lens.max().item(),
+        on_gfx950=True,
+    )
+    if aiter_topk_kernel is None:
+        pytest.skip("AITER top-k is unavailable")
+    assert (
+        _launch_aiter_top_k_per_row_decode(
+            aiter_topk_kernel,
+            logits,
+            seq_lens,
+            indices,
+            top_k,
+        )
+        is None
+    )
+
+    for row_idx, row_end in enumerate(seq_lens.reshape(-1).tolist()):
+        num_valid = min(top_k, row_end)
+        expected = logits[row_idx, :row_end].topk(num_valid).indices
+        actual = indices[row_idx, :num_valid]
+        assert set(actual.tolist()) == set(expected.tolist())
+        assert torch.all(indices[row_idx, num_valid:] == -1)
+
+
+def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse
+
+    def prefill_kernel(*args, **kwargs) -> None:
+        pass
+
+    def decode_kernel(*args, **kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(
+        rocm_aiter_mla_sparse,
+        "_get_aiter_topk_ops",
+        lambda: (prefill_kernel, decode_kernel),
+    )
+    get_kernel = rocm_aiter_mla_sparse._get_aiter_top_k_kernel
+
+    eligible_cases = [
+        (
+            dict(is_prefill=True, compress_ratio=4, num_rows=1, on_gfx950=True),
+            prefill_kernel,
+        ),
+        (
+            dict(
+                is_prefill=False,
+                compress_ratio=4,
+                num_rows=1,
+                max_valid_seq_len=65_536,
+                on_gfx950=True,
+            ),
+            decode_kernel,
+        ),
+        (
+            dict(
+                is_prefill=False,
+                compress_ratio=4,
+                num_rows=257,
+                max_valid_seq_len=250_000,
+                on_gfx950=True,
+            ),
+            decode_kernel,
+        ),
+    ]
+    for kwargs, expected_kernel in eligible_cases:
+        assert get_kernel(**kwargs) is expected_kernel
+
+    def fail_if_imported() -> None:
+        pytest.fail("ineligible shapes must not import AITER top-k")
+
+    monkeypatch.setattr(
+        rocm_aiter_mla_sparse,
+        "_get_aiter_topk_ops",
+        fail_if_imported,
+    )
+    ineligible_cases = [
+        dict(is_prefill=True, compress_ratio=1, num_rows=1, on_gfx950=True),
+        dict(
+            is_prefill=False,
+            compress_ratio=4,
+            num_rows=1,
+            max_valid_seq_len=65_537,
+            on_gfx950=True,
+        ),
+        dict(
+            is_prefill=False,
+            compress_ratio=4,
+            num_rows=256,
+            max_valid_seq_len=125_000,
+            on_gfx950=True,
+        ),
+        dict(
+            is_prefill=False,
+            compress_ratio=4,
+            num_rows=320,
+            max_valid_seq_len=2_500,
+            on_gfx950=False,
+        ),
+    ]
+    for kwargs in ineligible_cases:
+        assert get_kernel(**kwargs) is None
+
+    monkeypatch.setattr(rocm_aiter_mla_sparse, "_get_aiter_topk_ops", lambda: None)
+    assert (
+        get_kernel(
+            is_prefill=True,
+            compress_ratio=4,
+            num_rows=1,
+            on_gfx950=True,
+        )
+        is None
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "seq_len_range,test_id",

@@ -172,7 +172,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/test_envs.py
-  - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
@@ -189,7 +188,6 @@ steps:
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
-  - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
@@ -860,7 +858,7 @@ steps:
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
   - examples/rl/
-  - tests/examples/features/data_parallel/data_parallel_offline.py
+  - examples/features/data_parallel/data_parallel_offline.py
   - vllm/platforms/rocm.py
   commands:
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py

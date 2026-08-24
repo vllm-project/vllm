@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import torch
 from einops import rearrange
@@ -36,7 +37,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
 )
-from vllm.model_executor.parameter import BasevLLMParameter
+from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
@@ -45,7 +46,10 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -102,7 +106,11 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_rank = self.tp_rank
         param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
+        replicate_block_scale = (
+            isinstance(param, BlockQuantScaleParameter)
+            and loaded_weight.shape[param.output_dim] < self.tp_size
+        )
+        if loaded_shard_id == self.replicated_shard_id or replicate_block_scale:
             self.tp_rank = 0
             if param_tp_rank is not None:
                 param.tp_rank = 0
@@ -121,7 +129,11 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_rank = self.tp_rank
         param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
+        replicate_block_scale = (
+            isinstance(param, BlockQuantScaleParameter)
+            and loaded_weight.shape[param.output_dim] < self.tp_size
+        )
+        if loaded_shard_id == self.replicated_shard_id or replicate_block_scale:
             self.tp_rank = 0
             if param_tp_rank is not None:
                 param.tp_rank = 0
@@ -191,6 +203,8 @@ def _flashkda_prefill(
     out: torch.Tensor,
     final_state: torch.Tensor,
     workspace: torch.Tensor,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import vllm._flashkda_C  # noqa: F401
 
@@ -213,8 +227,73 @@ def _flashkda_prefill(
         initial_state.contiguous(),
         final_state,
         cu_seqlens.contiguous(),
+        checkpoint_state,
+        checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None,
     )
     return out, final_state
+
+
+@triton.jit
+def _store_cache_checkpoints_kernel(
+    x_ptr,
+    conv_state_ptr,
+    recurrent_checkpoint_ptr,
+    recurrent_state_ptr,
+    query_start_loc_ptr,
+    checkpoint_offsets_ptr,
+    checkpoint_state_indices_ptr,
+    x_stride_0: tl.constexpr,
+    x_stride_1: tl.constexpr,
+    state_stride_0: tl.constexpr,
+    state_stride_1: tl.constexpr,
+    state_stride_2: tl.constexpr,
+    checkpoint_stride_0: tl.constexpr,
+    recurrent_state_stride_0: tl.constexpr,
+    checkpoint_offset_stride: tl.constexpr,
+    STATE_LEN: tl.constexpr,
+    WIDTH: tl.constexpr,
+    RECURRENT_ROW_SIZE: tl.constexpr,
+    NULL_STATE_IDX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # store checkpoints to cache
+    seq_idx = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx)
+    checkpoint_offset = tl.load(
+        checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
+    )
+    valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
+    valid_conv = (
+        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
+    )
+    width_idx = cols // STATE_LEN
+    history_idx = cols % STATE_LEN
+    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
+    token_idx = checkpoint_end - STATE_LEN + history_idx
+    values = tl.load(
+        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
+        mask=valid_conv,
+    )
+    tl.store(
+        conv_state_ptr
+        + state_idx * state_stride_0
+        + width_idx * state_stride_1
+        + history_idx * state_stride_2,
+        values,
+        mask=valid_conv,
+    )
+
+    valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
+    recurrent = tl.load(
+        recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
+        mask=valid_recurrent,
+    )
+    tl.store(
+        recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
+        recurrent,
+        mask=valid_recurrent,
+    )
 
 
 def resolve_kda_prefill_backend(
@@ -319,7 +398,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
         self.use_recoverssm = self.cache_config.use_kda_recoverssm
@@ -463,6 +542,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self._flashkda_buffer_specs = (
                 ((1, T, H, D), self.model_config.dtype),
                 ((N, H, D, D), self.get_state_dtype()[1]),
+                ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
 
@@ -491,20 +571,32 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.run_gemm_rs = run_gemm_rs
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        self.gemm_rs_ar = None
+        if run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
-            if not self.run_gemm_rs:
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.o_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
                 logger.warning_once(
-                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
                 )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        assert isinstance(spec, MambaSpec)
+        return replace(
+            spec,
+            num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
+        )
 
     def forward(
         self,
@@ -541,12 +633,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
-
-            gemm_rs = get_gemm_rs()
-            if gemm_rs.should_run(core_attn_out):
-                return gemm_rs(core_attn_out, self.o_proj.weight)
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
+            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
@@ -582,6 +670,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         spec_query_start_loc = m.spec_query_start_loc
         num_accepted_tokens = m.num_accepted_tokens
         num_actual_tokens = m.num_actual_tokens
+        checkpoint = m.checkpoint
         has_spec_decode = m.num_spec_decodes > 0
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
@@ -772,7 +861,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
                     assert self._flashkda_buffer_specs is not None
-                    workspace_out, final_state, workspace = (
+                    workspace_out, final_state, checkpoint_state, workspace = (
                         current_workspace_manager().get_simultaneous(
                             *self._flashkda_buffer_specs
                         )
@@ -780,24 +869,85 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     flashkda_out = (
                         workspace_out if has_spec_decode else core_attn_out
                     )[:, : q_ns.shape[1]]
-                    (
-                        core_attn_out_non_spec,
-                        last_recurrent_state,
-                    ) = _flashkda_prefill(
-                        q=q_ns,
-                        k=k_ns,
-                        v=v_ns,
-                        g=g1_ns,
-                        beta=beta_ns,
-                        A_log=self.A_log,
-                        dt_bias=self.dt_bias,
-                        lower_bound=self.gate_lower_bound,
-                        initial_state=initial_state,
-                        cu_seqlens=non_spec_query_start_loc,
-                        out=flashkda_out,
-                        final_state=final_state[: initial_state.shape[0]],
-                        workspace=workspace,
-                    )
+                    if checkpoint is not None:
+                        assert non_spec_query_start_loc is not None
+                        num_sequences = initial_state.shape[0]
+                        assert checkpoint.checkpoint_offsets.shape == (num_sequences,)
+                        final_state = final_state[:num_sequences]
+                        checkpoint_state = checkpoint_state[:num_sequences]
+                        checkpoint_offsets = checkpoint.checkpoint_offsets
+                        _flashkda_prefill(
+                            q=q_ns,
+                            k=k_ns,
+                            v=v_ns,
+                            g=g1_ns,
+                            beta=beta_ns,
+                            A_log=self.A_log,
+                            dt_bias=self.dt_bias,
+                            lower_bound=self.gate_lower_bound,
+                            initial_state=initial_state,
+                            cu_seqlens=non_spec_query_start_loc,
+                            out=flashkda_out,
+                            final_state=final_state,
+                            workspace=workspace,
+                            checkpoint_state=checkpoint_state,
+                            checkpoint_offsets=checkpoint_offsets,
+                        )
+                        core_attn_out_non_spec = flashkda_out
+                        last_recurrent_state = final_state
+                        state_len = conv_state.shape[-1]
+                        width = mixed_qkv_ns.shape[-1]
+                        recurrent_row_size = checkpoint_state[0].numel()
+                        block_size = 256
+                        _store_cache_checkpoints_kernel[
+                            (
+                                checkpoint_offsets.numel(),
+                                triton.cdiv(
+                                    max(width * state_len, recurrent_row_size),
+                                    block_size,
+                                ),
+                            )
+                        ](
+                            mixed_qkv_ns,
+                            conv_state,
+                            checkpoint_state,
+                            recurrent_state,
+                            non_spec_query_start_loc,
+                            checkpoint_offsets,
+                            checkpoint.state_indices,
+                            mixed_qkv_ns.stride(0),
+                            mixed_qkv_ns.stride(1),
+                            conv_state.stride(0),
+                            conv_state.stride(1),
+                            conv_state.stride(2),
+                            checkpoint_state.stride(0),
+                            recurrent_state.stride(0),
+                            checkpoint_offsets.stride(0),
+                            state_len,
+                            width,
+                            recurrent_row_size,
+                            NULL_BLOCK_ID,
+                            block_size,
+                        )
+                    else:
+                        (
+                            core_attn_out_non_spec,
+                            last_recurrent_state,
+                        ) = _flashkda_prefill(
+                            q=q_ns,
+                            k=k_ns,
+                            v=v_ns,
+                            g=g1_ns,
+                            beta=beta_ns,
+                            A_log=self.A_log,
+                            dt_bias=self.dt_bias,
+                            lower_bound=self.gate_lower_bound,
+                            initial_state=initial_state,
+                            cu_seqlens=non_spec_query_start_loc,
+                            out=flashkda_out,
+                            final_state=final_state[: initial_state.shape[0]],
+                            workspace=workspace,
+                        )
                 else:
                     (
                         core_attn_out_non_spec,
