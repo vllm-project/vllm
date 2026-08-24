@@ -901,8 +901,14 @@ class RocmPlatform(Platform):
         parallel_config = vllm_config.parallel_config
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
-            # decode context parallel does not support full cudagraphs
-            if parallel_config.decode_context_parallel_size > 1:
+            # Decode context parallel does not support full cudagraphs, except
+            # for the all-to-all ("a2a") backend: its Triton pack/unpack kernels
+            # and private-pool send/recv buffers are capture-safe, matching CUDA
+            # (which does not downgrade this path).
+            if (
+                parallel_config.decode_context_parallel_size > 1
+                and parallel_config.dcp_comm_backend != "a2a"
+            ):
                 logger.warning_once(
                     "Decode context parallel (DCP) is enabled, which is "
                     "incompatible with full CUDA graphs. "
