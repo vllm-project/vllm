@@ -281,6 +281,13 @@ class IquestMoeV13MTP(nn.Module, SupportsPP):
     ``NemotronHMTP``.
     """
 
+    @staticmethod
+    def safetensors_weights_filter(weight_name: str) -> bool:
+        return weight_name.startswith("mtp_layers.") or weight_name in (
+            "model.embed_tokens.weight",
+            "lm_head.weight",
+        )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config

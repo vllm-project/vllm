@@ -617,6 +617,49 @@ def filter_duplicate_safetensors_files(
     return hf_weights_files
 
 
+def filter_safetensors_files_by_weight_name(
+    hf_weights_files: list[str],
+    hf_folder: str,
+    index_file: str,
+    weight_name_filter: Callable[[str], bool],
+) -> list[str]:
+    """Select checkpoint shards containing weights accepted by a model.
+
+    This uses the safetensors index only to reduce the files passed to the
+    underlying loader. If no index is available, or the index contains no
+    matching files, loading falls back to the original file list.
+    """
+    index_file_name = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_file_name):
+        return hf_weights_files
+
+    with open(index_file_name) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    selected_files = {
+        os.path.join(hf_folder, filename)
+        for weight_name, filename in weight_map.items()
+        if weight_name_filter(weight_name)
+    }
+    filtered_files = [
+        filename for filename in hf_weights_files if filename in selected_files
+    ]
+    if not filtered_files:
+        logger.warning_once(
+            "No safetensors shards matched the model's weight-name filter; "
+            "loading all checkpoint shards."
+        )
+        return hf_weights_files
+
+    logger.info_once(
+        "Selected %d of %d safetensors checkpoint shards using the model's "
+        "weight-name filter.",
+        len(filtered_files),
+        len(hf_weights_files),
+    )
+    return filtered_files
+
+
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
     """
     Exclude files that are not needed for inference.
