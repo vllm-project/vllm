@@ -3,12 +3,13 @@
 """Abstract base class for MLA prefill backends."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-import torch
-
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
@@ -37,10 +38,7 @@ class MLADimensions:
 class MLAPrefillBackend(ABC):
     """Abstract base class for MLA prefill backends."""
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [
-        torch.float16,
-        torch.bfloat16,
-    ]
+    supported_dtypes: ClassVar[Sequence["torch.dtype"]] = ()
     supported_mla_dimensions: ClassVar[list[MLADimensions]] = []
 
     @staticmethod
@@ -53,8 +51,13 @@ class MLAPrefillBackend(ABC):
         return True
 
     @classmethod
-    def supports_dtype(cls, dtype: torch.dtype) -> bool:
-        return dtype in cls.supported_dtypes
+    def supports_dtype(cls, dtype: "torch.dtype") -> bool:
+        if cls.supported_dtypes:
+            return dtype in cls.supported_dtypes
+
+        import torch
+
+        return dtype in (torch.float16, torch.bfloat16)
 
     @classmethod
     def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
@@ -166,22 +169,22 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_new_tokens(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q: "torch.Tensor",
+        k: "torch.Tensor",
+        v: "torch.Tensor",
         return_softmax_lse: bool,
-        out: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        out: "torch.Tensor | None" = None,
+        output_scale: "torch.Tensor | None" = None,
+    ) -> "torch.Tensor | tuple[torch.Tensor, torch.Tensor]":
         raise NotImplementedError
 
     @abstractmethod
     def run_prefill_context_chunk(
         self,
         chunk: "MLACommonPrefillMetadata.ContextChunk",
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        out: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q: "torch.Tensor",
+        k: "torch.Tensor",
+        v: "torch.Tensor",
+        out: "torch.Tensor | None" = None,
+    ) -> "tuple[torch.Tensor, torch.Tensor]":
         raise NotImplementedError

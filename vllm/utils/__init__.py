@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import uuid
+from __future__ import annotations
 
-import torch
+import uuid
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 MASK_64_BITS = (1 << 64) - 1
 

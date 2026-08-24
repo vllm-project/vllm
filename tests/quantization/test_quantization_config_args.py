@@ -120,7 +120,7 @@ def test_resolve_rejects_quantization_config_with_non_shorthand_quant():
 def test_quant_key_names_round_trip():
     # Every advertised name should round-trip through QuantSpec without error
     # and produce the same QuantKey it maps to.
-    for name, expected in QUANT_KEY_NAMES.items():
+    for name, expected in QUANT_KEY_NAMES().items():
         assert QuantSpec(weight=name).weight == expected, name
         assert QuantSpec(activation=name).activation == expected, name
 

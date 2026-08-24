@@ -27,7 +27,6 @@ from typing import (
 
 import huggingface_hub
 import regex as re
-import torch
 from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs
@@ -106,11 +105,9 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import CpuArchEnum
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -119,21 +116,23 @@ from vllm.utils.argparse_utils import (
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
-from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
     from vllm.v1.executor import Executor
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
     Executor = Any
-    QuantizationMethods = str
-    LoadFormats = str
+    LogitsProcessor = Any
+    QuantizationMethods = Any
+    LoadFormats = Any
     UsageContext = Any
 
 
@@ -141,6 +140,7 @@ logger = init_logger(__name__)
 
 # object is used to allow for special typing forms
 T = TypeVar("T")
+
 TypeHint: TypeAlias = type[Any] | object
 TypeHintT: TypeAlias = type[T] | object
 
@@ -192,8 +192,12 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
 
     If `type_hints` also contains `str`, we use `metavar` instead of `choices`.
     """
-    type_hint = get_type(type_hints, Literal)
-    options = get_args(type_hint)
+    options = [
+        option
+        for type_hint in type_hints
+        if is_type(type_hint, Literal)
+        for option in get_args(type_hint)
+    ]
     option_type = type(options[0])
     if not all(isinstance(option, option_type) for option in options):
         raise ValueError(
@@ -292,11 +296,17 @@ def _expand_json_human_readable_numbers(val: str) -> str:
 
 
 @functools.lru_cache(maxsize=30)
-def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
+def _compute_kwargs(
+    cls: ConfigType,
+    names: frozenset[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
     cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
     kwargs = {}
     for field in fields(cls):
+        if names is not None and field.name not in names:
+            continue
+
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = get_type_hints(field.type)
 
@@ -407,7 +417,10 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return kwargs
 
 
-def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
+def get_kwargs(
+    cls: ConfigType,
+    names: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Return argparse kwargs for the given Config dataclass.
 
     If `--help` or `mkdocs` are not present in the command line command, the
@@ -417,7 +430,8 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     is returned so callers can mutate the dictionary without affecting the
     cached version.
     """
-    return copy.deepcopy(_compute_kwargs(cls))
+    selected_names = None if names is None else frozenset(names)
+    return copy.deepcopy(_compute_kwargs(cls, selected_names))
 
 
 @dataclass
@@ -614,7 +628,7 @@ class EngineArgs:
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
-    lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
+    lora_dtype: "str | torch.dtype | None" = LoRAConfig.lora_dtype
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
@@ -815,6 +829,8 @@ class EngineArgs:
             # HF repo IDs and will be resolved later by
             # ModelConfig.maybe_pull_model_tokenizer_for_runai().
             if not is_cloud_storage(self.model):
+                from vllm.transformers_utils.repo_utils import get_model_path
+
                 model_id = self.model
                 self.model = get_model_path(self.model, self.revision)
                 if model_id is not self.model:
@@ -825,6 +841,8 @@ class EngineArgs:
                         self.model,
                     )
             if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
+                from vllm.transformers_utils.repo_utils import get_model_path
+
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:
@@ -1383,12 +1401,16 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
+        from vllm.platforms import get_current_platform_device_type
+
+        platform_device_type = get_current_platform_device_type()
+
         multimodal_group.add_argument(
             "--mm-processor-device",
             choices=["auto", "cpu"]
             + (
-                [current_platform.device_type]
-                if current_platform.device_type not in ("", "cpu")
+                [platform_device_type]
+                if platform_device_type not in ("", "cpu")
                 else []
             ),
             default="auto",
@@ -1626,7 +1648,27 @@ class EngineArgs:
         kernel_group.add_argument("--linear-backend", **linear_backend_kwargs)
 
         # vLLM arguments
-        vllm_kwargs = get_kwargs(VllmConfig)
+        vllm_kwargs = get_kwargs(
+            VllmConfig,
+            {
+                "additional_config",
+                "attention_config",
+                "compilation_config",
+                "diffusion_config",
+                "ec_manager_config",
+                "ec_transfer_config",
+                "kernel_config",
+                "kv_events_config",
+                "kv_transfer_config",
+                "optimization_level",
+                "performance_mode",
+                "profiler_config",
+                "reasoning_config",
+                "speculative_config",
+                "structured_outputs_config",
+                "weight_transfer_config",
+            },
+        )
         vllm_group = parser.add_argument_group(
             title="VllmConfig",
             description=VllmConfig.__doc__,
@@ -1895,6 +1937,8 @@ class EngineArgs:
     def _resolve_device_ids(self) -> list[int] | None:
         if not self.device_ids:
             return None
+        from vllm.platforms import current_platform
+
         if self.distributed_executor_backend == "ray":
             logger.warning(
                 "--device-ids has no effect when using the Ray executor. "
@@ -1968,6 +2012,8 @@ class EngineArgs:
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
+        from vllm.platforms import current_platform
+
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
@@ -1979,6 +2025,8 @@ class EngineArgs:
         # Skip speculator detection for cloud storage models (eg: S3, GCS) since
         # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
         # use speculators with explicit --speculative-config.
+        from vllm.transformers_utils.config import maybe_override_with_speculators
+
         if not is_cloud_storage(self.model):
             (self.model, self.tokenizer, self.speculative_config) = (
                 maybe_override_with_speculators(
@@ -2000,6 +2048,8 @@ class EngineArgs:
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_reasoning_config_args()
         sliding_window: int | None = None
+        from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+
         layer_types = getattr(model_config.hf_text_config, "layer_types", None)
         if layer_types is None or all(lt == "sliding_attention" for lt in layer_types):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -2581,6 +2631,7 @@ class EngineArgs:
         cls,
         world_size: int,
     ) -> tuple[dict[UsageContext | None, int], dict[UsageContext | None, int]]:
+        from vllm.platforms import current_platform
         from vllm.usage.usage_lib import UsageContext
 
         default_max_num_batched_tokens: dict[UsageContext | None, int]
@@ -2673,6 +2724,8 @@ class EngineArgs:
     def _set_default_chunked_prefill_and_prefix_caching_args(
         self, model_config: ModelConfig
     ) -> None:
+        from vllm.platforms import current_platform
+
         default_chunked_prefill = model_config.is_chunked_prefill_supported
         default_prefix_caching = model_config.is_prefix_caching_supported
 
@@ -2897,7 +2950,12 @@ class AsyncEngineArgs(EngineArgs):
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
         )
-        current_platform.pre_register_and_update(parser)
+        from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
+
+        if load_plugins_by_group(PLATFORM_PLUGINS_GROUP):
+            from vllm.platforms import current_platform
+
+            current_platform.pre_register_and_update(parser)
         return parser
 
 

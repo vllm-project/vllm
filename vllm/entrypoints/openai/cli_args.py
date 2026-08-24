@@ -16,10 +16,6 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-    validate_chat_template,
-)
 from vllm.entrypoints.launchers.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
@@ -27,6 +23,8 @@ from vllm.entrypoints.launchers.utils.constants import (
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
 
 class LoRAParserAction(argparse.Action):
@@ -423,6 +421,8 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     # LaunchSubcommandBase.add_cli_args), so its args are serve args as well.
     if hasattr(args, "subparser") and args.subparser not in ("serve", "launch"):
         return
+
+    from vllm.entrypoints.chat_utils import validate_chat_template
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)

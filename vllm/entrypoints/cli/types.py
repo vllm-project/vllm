@@ -13,7 +13,19 @@ else:
 class CLISubcommand:
     """Base class for CLI argument handlers."""
 
+    SUBCMD_EPILOG: typing.ClassVar[str] = (
+        "For full list:            vllm {subcmd} --help=all\n"
+        "For a section:            vllm {subcmd} --help=ModelConfig    "
+        "(case-insensitive)\n"
+        "For a flag:               vllm {subcmd} --help=max-model-len  "
+        "(_ or - accepted)\n"
+        "Documentation:            https://docs.vllm.ai\n"
+    )
+
     name: str
+    help: str
+    description: str
+    usage: str
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:

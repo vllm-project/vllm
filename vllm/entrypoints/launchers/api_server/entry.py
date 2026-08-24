@@ -204,17 +204,17 @@ async def run_server_worker(
 def main():
     import uvloop
 
+    from vllm.entrypoints.cli import cli_env_setup
     from vllm.entrypoints.openai.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
-    cli_env_setup()
+    cli_env_setup(logger)
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )

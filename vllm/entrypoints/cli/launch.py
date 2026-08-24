@@ -7,12 +7,6 @@ import inspect
 import uvloop
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
-from vllm.entrypoints.openai.cli_args import (
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -34,6 +28,8 @@ class LaunchSubcommandBase(CLISubcommand):
         the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         if cls.__doc__:
             parser.description = inspect.cleandoc(cls.__doc__)
         make_arg_parser(parser)
@@ -61,6 +57,8 @@ class RenderSubcommand(LaunchSubcommandBase):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
+
         uvloop.run(run_launch_fastapi(args))
 
 
@@ -72,6 +70,9 @@ class LaunchSubcommand(CLISubcommand):
     """
 
     name = "launch"
+    help = DESCRIPTION
+    description = DESCRIPTION
+    usage = "vllm launch <component> [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -81,6 +82,8 @@ class LaunchSubcommand(CLISubcommand):
         args.launch_command(args)
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
@@ -88,10 +91,11 @@ class LaunchSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         launch_parser = subparsers.add_parser(
             self.name,
-            help=DESCRIPTION,
-            description=DESCRIPTION,
-            usage=f"vllm {self.name} <component> [options]",
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
+
         launch_subparsers = launch_parser.add_subparsers(
             required=True, dest="launch_component"
         )
@@ -104,7 +108,7 @@ class LaunchSubcommand(CLISubcommand):
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
-            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            cmd_subparser.epilog = self.SUBCMD_EPILOG.format(
                 subcmd=f"{self.name} {cmd_cls.name}"
             )
 
