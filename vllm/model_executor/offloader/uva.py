@@ -83,55 +83,104 @@ class UVAOffloader(BaseOffloader):
                 # one module might have some parameters offloaded and some not
                 break
 
-            if self.cpu_offload_params:
-                # Check if parameter belongs to the offloading set
-                # Add dots here to ensure we match full segments only
-                # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight"
-                # but not "mlp.experts.w2_weight_scale"
-                should_offload = any(
-                    f".{param}." in f".{name}." for param in self.cpu_offload_params
-                )
-                if not should_offload:
-                    continue
-
-            cpu_data = p.data.to(device="cpu")
-            if self.pin_memory:
-                cpu_data = cpu_data.pin_memory()
-
-            if not self.uva_offloading:
-                p.data = cpu_data
-            else:
-                p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
-                p._vllm_is_uva_offloaded = True
-
-            self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
-            offloaded_parameters = True
+            offloaded_parameters |= self._offload_param(name, p)
 
         if offloaded_parameters and not self.uva_offloading:
-            original_forward = module.forward
-
-            def forward(*args, **kwargs):
-                module.forward = original_forward
-                device_state = {
-                    # here we blindly call `to(device)`
-                    # if the parameter is already on the device,
-                    # it will be a no-op
-                    k: v.to(device, non_blocking=True)
-                    for k, v in module.state_dict().items()
-                }
-
-                # set `tie_weights=False` as tied weights in original model
-                # become untied when calling .to(device) individually
-                output = functional_call(
-                    module,
-                    device_state,
-                    args=args,
-                    kwargs=kwargs,
-                    tie_weights=False,
-                )
-                module.forward = forward
-                return output
-
-            module.forward = forward
+            self._install_fallback_forward_hook(module, device)
 
         return module
+
+    def _offload_param(self, name: str, p: nn.Parameter) -> bool:
+        """Offload a single parameter to CPU. Returns whether it was offloaded."""
+        # Skip parameters an earlier pass already handled. The UVA path leaves
+        # p.device as the accelerator (it is a view of CPU memory), so the
+        # marker is the only way to recognize those.
+        if p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False):
+            return False
+
+        if self.cpu_offload_params:
+            # Check if parameter belongs to the offloading set
+            # Add dots here to ensure we match full segments only
+            # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight"
+            # but not "mlp.experts.w2_weight_scale"
+            should_offload = any(
+                f".{param}." in f".{name}." for param in self.cpu_offload_params
+            )
+            if not should_offload:
+                return False
+
+        cpu_data = p.data.to(device="cpu")
+        if self.pin_memory:
+            cpu_data = cpu_data.pin_memory()
+
+        if not self.uva_offloading:
+            p.data = cpu_data
+        else:
+            p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+            p._vllm_is_uva_offloaded = True
+
+        self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
+        return True
+
+    def offload_model(self, model: nn.Module) -> None:
+        """Offload parameters `make_layers` never routed through `wrap_modules`.
+
+        Walks the module tree and offloads each module's own parameters, so
+        names are fully qualified (`visual.blocks.0.attn.qkv.weight`) and
+        segment matching can target a tower by name. Parameters already
+        offloaded by `wrap_modules` are skipped.
+        """
+        offloaded_bytes_before = self.cpu_offload_bytes
+
+        for name, module in model.named_modules():
+            if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
+                break
+
+            device: torch.device | None = None
+            for param_name, p in module.named_parameters(prefix=name, recurse=False):
+                if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
+                    break
+
+                # Capture before offloading; afterwards p.data is CPU-backed.
+                param_device = p.device
+                if self._offload_param(param_name, p):
+                    device = param_device
+
+            if device is not None and not self.uva_offloading:
+                self._install_fallback_forward_hook(module, device)
+
+        if self.cpu_offload_bytes > offloaded_bytes_before:
+            logger.info(
+                "Total CPU offloaded parameters: %s",
+                format_gib(self.cpu_offload_bytes),
+            )
+
+    def _install_fallback_forward_hook(
+        self, module: nn.Module, device: torch.device
+    ) -> None:
+        """Move parameters back on-demand when UVA is unavailable."""
+        original_forward = module.forward
+
+        def forward(*args, **kwargs):
+            module.forward = original_forward
+            device_state = {
+                # here we blindly call `to(device)`
+                # if the parameter is already on the device,
+                # it will be a no-op
+                k: v.to(device, non_blocking=True)
+                for k, v in module.state_dict().items()
+            }
+
+            # set `tie_weights=False` as tied weights in original model
+            # become untied when calling .to(device) individually
+            output = functional_call(
+                module,
+                device_state,
+                args=args,
+                kwargs=kwargs,
+                tie_weights=False,
+            )
+            module.forward = forward
+            return output
+
+        module.forward = forward

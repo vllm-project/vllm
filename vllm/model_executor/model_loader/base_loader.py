@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
+from vllm.model_executor.offloader import get_offloader
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
@@ -57,6 +58,12 @@ class BaseModelLoader(ABC):
                     model_config=model_config,
                     prefix=prefix,
                 )
+
+            # Offload submodules `make_layers` never routed through the
+            # offloader (e.g. vision towers). Runs before weights are loaded,
+            # like `make_layers` does, so their weights never occupy device
+            # memory.
+            get_offloader().offload_model(model)
 
             log_model_inspection(model)
 

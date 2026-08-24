@@ -76,6 +76,21 @@ class BaseOffloader(ABC):
         """
         return
 
+    def offload_model(self, model: nn.Module) -> None:  # noqa: B027
+        """Offload parameters that `wrap_modules` never reached.
+
+        `wrap_modules` is only called from `make_layers`, so it only ever sees
+        the decoder layer stack. Directly-constructed submodules such as vision
+        and audio towers are invisible to it, and name segments targeting them
+        silently match nothing. This runs once after the model is built and its
+        weights are final, and sweeps whatever the layer stack left behind.
+
+        Not implemented by `PrefetchOffloader`: its `wrap_modules` must be
+        called exactly once and it schedules prefetches over a circular layer
+        stack, which a tower is not.
+        """
+        pass
+
     def sync_prev_onload(self) -> None:  # noqa: B027
         """Sync previous onload operations. Override in subclasses."""
         pass
