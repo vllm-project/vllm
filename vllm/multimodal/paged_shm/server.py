@@ -35,7 +35,7 @@ from .constant import (
     SHUTDOWN,
     WAIT_WRITE,
 )
-from .manager import PagedShmManager
+from .manager import REF_WRITING, PagedShmManager
 from .storage import PagedShmStorage
 from .types import ShmAllocation, ShmWriteRequest
 
@@ -107,7 +107,7 @@ class PagedShmServer:
         item = self.manager._all_items.get(uuid)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
-        if item.ref_count == -1:  # REF_WRITING
+        if item.ref_count == REF_WRITING:
             raise RuntimeError(f"Item {uuid} is still being written")
         return item.size, item.blocks.copy()
 
@@ -345,7 +345,7 @@ class PagedShmServer:
             # Get the item info without modifying ref_count
             try:
                 size, blocks = self._get_item_blocks_no_ref(real_uuid)
-            except ValueError as e:
+            except RuntimeError as e:
                 # If item not found or still being written, delegate to waiting logic
                 if "still being written" in str(e):
                     # Wait if timeout allows
