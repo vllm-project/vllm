@@ -62,17 +62,17 @@ def test_multi_node_assignment() -> None:
         for worker in workers:
             ray.kill(worker)
 
-        # Same teardown as production. Removal is async, so wait until this
-        # node has enough free GPUs for the next iteration (all workers are
-        # pinned here).
         ray.util.remove_placement_group(config.placement_group)
+
         gpus_needed = len(workers)
         deadline = time.monotonic() + 60
         node_id = ray.get_runtime_context().get_node_id()
+        wait_interval = 1
         while time.monotonic() < deadline:
             free_gpus = available_resources_per_node().get(node_id, {}).get("GPU", 0)
             if free_gpus >= gpus_needed:
                 break
-            time.sleep(0.05)
+            wait_interval *= 2
+            time.sleep(wait_interval)
         else:
             raise TimeoutError("placement group resources were not released")
