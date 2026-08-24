@@ -48,6 +48,13 @@ class ReqMeta:
         mm_hashes: list[str],
     ) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
+        if valid_num_tokens <= 0:
+            return ReqMeta(
+                token_ids=torch.empty(0, dtype=torch.long),
+                slot_mapping=torch.empty(0, dtype=torch.long),
+                is_store=is_store,
+                mm_hashes=mm_hashes,
+            )
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
@@ -391,9 +398,13 @@ class ExampleConnector(KVConnectorBase_V1):
         prompt_token_ids: list[int],
         mm_hashes: list[str],
     ) -> bool:
+        if not prompt_token_ids:
+            return False
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
         )
+        if num_tokens_to_check <= 0:
+            return False
         foldername = self._generate_foldername_debug(
             torch.tensor(prompt_token_ids)[:num_tokens_to_check],
             mm_hashes,
@@ -440,4 +451,6 @@ class ExampleConnector(KVConnectorBase_V1):
 
 def align_to_block_size(num_tokens: int, block_size) -> int:
     """Align the number of tokens to the block size."""
+    if num_tokens <= 0:
+        return 0
     return (num_tokens - 1) // block_size * block_size
