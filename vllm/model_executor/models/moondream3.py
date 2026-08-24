@@ -57,6 +57,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.moondream3 import (
@@ -945,7 +946,8 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     @cached_property
     def bos_image_placeholder_tokens(self) -> list[int]:
         tokenizer = self.info.get_tokenizer()
-        token_ids = tokenizer.encode(
+        token_ids = cached_encode(
+            tokenizer,
             self.bos_image_placeholder,
             add_special_tokens=False,
         )
