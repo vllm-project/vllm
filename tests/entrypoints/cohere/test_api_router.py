@@ -36,6 +36,10 @@ from vllm.entrypoints.serve.exception_handling.handlers.http import (
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
+from vllm.entrypoints.serve.exception_handling.handlers.vllm_error import (
+    vllm_error_handler,
+)
+from vllm.exceptions import VLLMError
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +87,7 @@ def _build_app(handler: _Handler | None) -> FastAPI:
 
 def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
     """Build a FastAPI app that mirrors the real vLLM setup by installing
-    ``validation_exception_handler`` and ``http_exception_handler``. The
+    validation, HTTP, and vLLM exception handlers. The
     :class:`CohereErrorEnvelopeMiddleware` registered by ``attach_router``
     is expected to translate any resulting vLLM ``ErrorResponse`` body
     into the ``CohereError`` wire shape.
@@ -96,6 +100,7 @@ def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
     app.state.args = Namespace(log_error_stack=False)
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(HTTPException)(http_exception_handler)
+    app.exception_handler(VLLMError)(vllm_error_handler)
     return app
 
 
@@ -333,8 +338,8 @@ class TestCohereErrorEnvelope:
 
     def test_validation_error_body_is_cohere_shaped(self):
         # ``model=""`` and ``messages=[]`` trip our custom field
-        # validators, which raise pydantic ValueErrors and are routed
-        # through ``validation_exception_handler`` in the real vLLM
+        # validators, which raise VLLMValidationError and are routed
+        # through ``vllm_error_handler`` in the real vLLM
         # server (producing the ``{"error": {...}}`` shape).
         app = _build_app_with_vllm_handlers(handler=None)
         with TestClient(app) as client:
