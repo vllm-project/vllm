@@ -34,8 +34,10 @@ from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp import (
+    cp_lse_ag_out_rs,
+    dcp_a2a_lse_reduce,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -62,7 +64,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
@@ -134,43 +135,6 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*D).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*D)) to the actual memory
-        # layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -286,8 +250,6 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool | torch.Tensor = True
-
-    sliding_window: tuple[int, int] | None = None
 
     # PrefixLM bidirectional range containing each scheduled query token.
     # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
@@ -713,13 +675,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
 
-        # Symmetrize the spec's sliding_window for non-causal attention
-        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
-        base_window = (
-            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
-        )
-        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
-
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -743,7 +698,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
-            sliding_window=effective_sliding_window,
         )
 
         # Compute mm_prefix range tensor if the batch contains
@@ -870,7 +824,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
-            requires_local_attention=sliding_window is not None,
             head_size=head_size,
             has_sinks=sinks is not None,
         )
@@ -1047,17 +1000,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                window = (
-                    attn_metadata.sliding_window
-                    if attn_metadata.sliding_window is not None
-                    else self.sliding_window
-                )
+                causal = attn_metadata.causal
+                is_dynamic_causal = isinstance(causal, torch.Tensor)
+
+                # The layer's own window wins over the group's: one KV cache
+                # group can hold both windowed and global layers (e.g. Gemma-3
+                # with the hybrid KV cache manager disabled), and the group spec
+                # cannot describe both.
+                window = _maybe_symmetrize_window(self.sliding_window, causal)
                 sliding_window_size: list[int] | None = (
                     list(window) if window is not None else None
                 )
-
-                causal = attn_metadata.causal
-                is_dynamic_causal = isinstance(causal, torch.Tensor)
 
                 mm_prefix_query_ranges = attn_metadata.mm_prefix_query_range_tensor
                 mm_mask_mod = None
@@ -1068,10 +1021,6 @@ class FlashAttentionImpl(AttentionImpl):
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
-                    # Use the layer impl's window, not attn_metadata's. The
-                    # metadata field comes from kv_cache_spec (model-wide, e.g.
-                    # Gemma4's 512), while the impl holds the per-layer window
-                    # the mask_mod must encode (e.g. a test override).
                     # Triton convention: 1 + window_size[0]. Global layers store
                     # (-1, -1) → sw stays None.
                     layer_window = self.sliding_window
