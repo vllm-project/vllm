@@ -17,6 +17,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
+    _get_open_port,
     get_distributed_init_method,
     get_open_port,
 )
@@ -259,6 +260,25 @@ class RayExecutorV2(MultiprocExecutor):
             return {"num_gpus": num_devices}
         return {"num_gpus": 0, "resources": {device_key: num_devices}}
 
+    @staticmethod
+    def _select_tcpstore_port(local_dp_rank: int | None, master_port: int) -> int:
+        """Pick the torch.distributed TCPStore port for this engine.
+
+        Co-located DP engines choosing this port with a shared random search
+        collide intermittently. Seeding by node-local DP rank gives each a
+        disjoint window. Non-DP engines and full windows fall back to a
+        random port.
+        """
+        if local_dp_rank is None:
+            return get_open_port()
+        # Offset past the DP master port reserved range, one window per rank.
+        window = 32
+        start_port = master_port + 100 + local_dp_rank * window
+        try:
+            return _get_open_port(start_port=start_port, max_attempts=window)
+        except RuntimeError:
+            return get_open_port()
+
     def _init_executor(self) -> None:
         """Initialize the RayExecutorV2 executor."""
         self._finalizer = weakref.finalize(self, self.shutdown)
@@ -308,7 +328,12 @@ class RayExecutorV2(MultiprocExecutor):
         # The TCPStore server runs on rank 0's node, so all workers
         # must be able to reach this address.
         dist_ip = bundle_assignments[0]["node_ip"]
-        distributed_init_method = get_distributed_init_method(dist_ip, get_open_port())
+        parallel_config = self.vllm_config.parallel_config
+        port = self._select_tcpstore_port(
+            parallel_config.data_parallel_rank_local,
+            parallel_config.data_parallel_master_port,
+        )
+        distributed_init_method = get_distributed_init_method(dist_ip, port)
 
         # Step 4: Create broadcast MessageQueue.
         # Workers on the driver node use shared memory; the rest use TCP.
@@ -336,6 +361,19 @@ class RayExecutorV2(MultiprocExecutor):
         runtime_env = self._build_runtime_env()
         resource_kwargs = self._get_actor_resource_kwargs()
 
+        # The sharded_rdt weight transfer backend pulls weights via Ray's tensor
+        # transport (@ray.method(tensor_transport=...)). Ray requires the
+        # *calling* actor (the vLLM worker) to opt in via enable_tensor_transport.
+        wt_cfg = self.vllm_config.weight_transfer_config
+        extra_actor_options: dict[str, object] = {}
+        if wt_cfg is not None and wt_cfg.backend == "sharded_rdt":
+            from vllm.distributed.weight_transfer.sharded_rdt_common import (
+                check_ray_rdt_version,
+            )
+
+            check_ray_rdt_version()
+            extra_actor_options["enable_tensor_transport"] = True
+
         for bundle_idx in range(self.world_size):
             bundle = bundle_assignments[bundle_idx]
             is_driver_worker = self._is_driver_worker(bundle["rank"])
@@ -358,6 +396,7 @@ class RayExecutorV2(MultiprocExecutor):
                     **resource_kwargs,
                     scheduling_strategy=scheduling_strategy,
                     runtime_env=runtime_env,
+                    **extra_actor_options,
                 )
                 .remote(
                     vllm_config=self.vllm_config,

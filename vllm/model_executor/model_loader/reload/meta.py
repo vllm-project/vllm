@@ -20,9 +20,11 @@ __all__ = [
     "get_numel_loaded",
 ]
 
+# Modules whose tensors are never moved to, or materialized from, the meta device.
 SKIP_MODULES: set[str] = {"HadamardTransform"}
 
-SKIP_TENSORS: set[str] = {
+# Tensors never loaded by a weight loader, so the layerwise trigger ignores them.
+SKIP_LOAD_TENSORS: set[str] = {
     "_expert_map",
     "expert_mask",
     "expert_global_to_physical",
@@ -30,6 +32,10 @@ SKIP_TENSORS: set[str] = {
     "expert_local_to_global",
     "e_score_correction_bias",
 }
+
+# Tensors which are never moved to, or materialized from, the meta device.
+# `bias` is built after create_weights(), so it is never on meta to begin with.
+SKIP_TENSORS: set[str] = SKIP_LOAD_TENSORS | {"bias"}
 
 
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -117,11 +123,15 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    for name in get_layer_tensors(layer):
-        if name not in SKIP_TENSORS:
+    non_persistent = set(layer._non_persistent_buffers_set)
+    restore_params, restore_buffers = info.restore_metadata
+    tensor_names = (
+        get_layer_tensors(layer).keys() | restore_params.keys() | restore_buffers.keys()
+    )
+    for name in tensor_names:
+        if name not in SKIP_TENSORS and hasattr(layer, name):
             delattr(layer, name)
 
-    restore_params, restore_buffers = info.restore_metadata
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
             param = restore_layer_refs(param, layer)
@@ -130,7 +140,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
             buffer = restore_layer_refs(buffer, layer)
-            layer.register_buffer(name, buffer)
+            layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):

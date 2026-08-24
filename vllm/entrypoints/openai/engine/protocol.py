@@ -3,9 +3,10 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
@@ -16,13 +17,20 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
+from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMServerError, VLLMValidationError
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
+
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -101,6 +109,7 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    created_cache_tokens: int | None = None
     multimodal_tokens: dict[str, int] | None = None
     """Prompt tokens contributed by each input modality, keyed by modality name
     (e.g. `image`, `audio`, `video`). A breakdown of the multimodal
@@ -108,11 +117,48 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     request has no multimodal input."""
 
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    completion_tokens_details: CompletionTokenUsageInfo | None = None
+
+
+class SpeculativeDecodingMetrics(OpenAIBaseModel):
+    """Per-request speculative-decoding acceptance metrics.
+
+    Experimental, subject to change. Only populated for single-sequence requests
+    (`n == 1`); `null` for `n > 1`, mirroring the timing metrics.
+    """
+
+    mean_acceptance_length: float
+    draft_acceptance_rate: float
+    # Dense histogram: index j holds the number of verify steps that accepted
+    # exactly j draft tokens (length num_spec_tokens + 1). Excludes the
+    # always-accepted bonus token.
+    acceptance_histogram: list[int]
+    num_spec_steps: int
+    num_accepted_draft_tokens: int
+    num_draft_tokens: int
+    num_spec_tokens: int
+    # Ordered per-verify-step arrays; populated only at the `detailed` level.
+    per_step_accepted: list[int] | None = None
+    per_step_drafted: list[int] | None = None
+
+
+class PerRequestMetrics(OpenAIBaseModel):
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    queue_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
+    # Experimental, subject to change.
+    speculative_decoding: SpeculativeDecodingMetrics | None = None
 
 
 class RequestResponseMetadata(BaseModel):
@@ -164,6 +210,39 @@ AnyResponseFormat: TypeAlias = (
 )
 
 
+def structured_outputs_from_response_format(
+    structured_outputs: StructuredOutputsParams | None,
+    response_format: AnyResponseFormat | None,
+) -> StructuredOutputsParams | None:
+    """Apply ``response_format`` overrides to ``structured_outputs``."""
+    if response_format is None or response_format.type == "text":
+        return structured_outputs
+
+    overrides: dict[str, Any]
+    if response_format.type == "json_object":
+        overrides = {"json_object": True}
+    elif response_format.type == "json_schema":
+        json_schema = response_format.json_schema
+        assert json_schema is not None
+        overrides = {"json": json_schema.json_schema}
+    else:
+        assert isinstance(
+            response_format,
+            (
+                LegacyStructuralTagResponseFormat,
+                StructuralTagResponseFormat,
+            ),
+        )
+        overrides = {
+            "structural_tag": json.dumps(response_format.model_dump(by_alias=True))
+        }
+
+    if structured_outputs is None:
+        return StructuredOutputsParams(**overrides)
+
+    return replace(structured_outputs, **overrides)
+
+
 def validate_structural_tag_response_format(
     response_format: AnyStructuralTagResponseFormat | dict[str, Any],
 ) -> None:
@@ -172,8 +251,6 @@ def validate_structural_tag_response_format(
     Engine-side validation reports malformed structural tags as generation
     failures. OpenAI request parsing should classify them as bad requests.
     """
-    import json
-
     from pydantic import TypeAdapter, ValidationError
 
     if isinstance(response_format, dict):
@@ -213,7 +290,7 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
             )
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",
             parameter=parameter,
@@ -253,6 +330,7 @@ class FunctionDefinition(OpenAIBaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
         if self.strict is None:
             data.pop("strict", None)
         if self.defer_loading is None:
@@ -361,7 +439,7 @@ class DeltaMessage(OpenAIBaseModel):
         return data
 
 
-class GenerationError(Exception):
+class GenerationError(VLLMServerError):
     """raised when finish_reason indicates internal server error (500)"""
 
     def __init__(self, message: str = "Internal server error"):

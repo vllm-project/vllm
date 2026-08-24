@@ -2,29 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import asyncio
-import signal
-import time
+import inspect
 
-import grpc
 import uvloop
-from grpc_reflection.v1alpha import reflection
-from starlette.datastructures import State
 
-from vllm import envs
-from vllm.config import VllmConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.grpc import (  # type: ignore[attr-defined]
-    vllm_render_pb2,
-    vllm_render_pb2_grpc,
-)
-from vllm.entrypoints.grpc.auth import build_auth_interceptors
-from vllm.entrypoints.grpc.render_servicer import RenderGrpcServicer
-from vllm.entrypoints.openai.api_server import (
-    build_and_serve_renderer,
-    init_render_app_state,
-    setup_server,
+from vllm.entrypoints.launchers.render.entry import (
+    run_launch_fastapi,
+    run_launch_grpc,
 )
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
@@ -48,9 +33,12 @@ class LaunchSubcommandBase(CLISubcommand):
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
         """Add the CLI arguments to the parser.
 
-        By default, adds the standard vLLM serving arguments.
+        By default, uses the subcommand's docstring as the description and adds
+        the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
+        if cls.__doc__:
+            parser.description = inspect.cleandoc(cls.__doc__)
         make_arg_parser(parser)
 
     @staticmethod
@@ -59,7 +47,17 @@ class LaunchSubcommandBase(CLISubcommand):
 
 
 class RenderSubcommand(LaunchSubcommandBase):
-    """The `render` subcommand for `vllm launch`."""
+    """`vllm launch render` starts a GPU-less rendering server for preprocessing
+    and postprocessing only.
+
+    ```bash
+    vllm launch render meta-llama/Llama-3.2-1B-Instruct --port 8100
+    ```
+
+    This command reuses the standard serving parser, so model, frontend,
+    networking, and related CLI options follow the same conventions as
+    [`vllm serve`](https://docs.vllm.ai/en/latest/cli/serve/).
+    """
 
     name = "render"
     help = "Launch a GPU-less rendering server (preprocessing and postprocessing only)."
@@ -78,7 +76,7 @@ class RenderSubcommand(LaunchSubcommandBase):
     def cmd(args: argparse.Namespace) -> None:
         server = getattr(args, "server", "http")
         if server == "http":
-            uvloop.run(run_launch_http(args))
+            uvloop.run(run_launch_fastapi(args))
         else:
             uvloop.run(run_launch_grpc(args))
 
@@ -119,7 +117,6 @@ class LaunchSubcommand(CLISubcommand):
             cmd_subparser = launch_subparsers.add_parser(
                 cmd_cls.name,
                 help=cmd_cls.help,
-                description=cmd_cls.help,
                 usage=f"vllm {self.name} {cmd_cls.name} [options]",
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
@@ -133,97 +130,3 @@ class LaunchSubcommand(CLISubcommand):
 
 def cmd_init() -> list[CLISubcommand]:
     return [LaunchSubcommand()]
-
-
-def _prepare_render_model_config(args: argparse.Namespace) -> VllmConfig:
-    """Build a VllmConfig suitable for a GPU-less render server.
-
-    Render servers preprocess data only — no inference, no quantized kernels,
-    and no KV cache — so clear quantization and silence the CPU KV cache
-    warning before constructing VllmConfig.
-    """
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    model_config = engine_args.create_model_config()
-    model_config.quantization = None
-    envs.VLLM_CPU_KVCACHE_SPACE = 0
-    return VllmConfig(model_config=model_config)
-
-
-async def run_launch_grpc(args: argparse.Namespace) -> None:
-    """Run the render serving layer with gRPC (no GPU inference)."""
-    # 1. Create VllmConfig
-    vllm_config = _prepare_render_model_config(args)
-
-    # 2. Initialize app state
-    state = State()
-    await init_render_app_state(vllm_config, state, args)
-
-    # 3. Create servicer and gRPC server
-    start_time = time.time()
-    servicer = RenderGrpcServicer(state, start_time)
-    server = grpc.aio.server(
-        # Enforce the same --api-key / VLLM_API_KEY auth as the HTTP server
-        # (no-op when no key is configured).
-        interceptors=build_auth_interceptors(args),
-        options=[
-            ("grpc.max_send_message_length", -1),
-            ("grpc.max_receive_message_length", -1),
-        ],
-    )
-    vllm_render_pb2_grpc.add_VllmRenderServicer_to_server(servicer, server)
-
-    # 4. Enable reflection
-    service_names = (
-        vllm_render_pb2.DESCRIPTOR.services_by_name["VllmRender"].full_name,
-        reflection.SERVICE_NAME,
-    )
-    reflection.enable_server_reflection(service_names, server)
-
-    # 5. Bind and start
-    host = args.host or "0.0.0.0"
-    port = args.port
-    address = f"{host}:{port}"
-    server.add_insecure_port(address)
-    await server.start()
-    logger.info("gRPC render server started on %s", address)
-
-    # 6. Wait for shutdown signal
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-
-    def signal_handler():
-        logger.info("Received shutdown signal")
-        stop_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    try:
-        await stop_event.wait()
-    finally:
-        await server.stop(grace=5.0)
-        logger.info("gRPC render server stopped")
-
-
-async def run_launch_http(args: argparse.Namespace) -> None:
-    """Run the online serving layer with FastAPI (no GPU inference)."""
-
-    # Interrupt initialization if SIGTERM arrives before uvicorn installs
-    # its own signal handlers. Once uvicorn is running it replaces this.
-    def _interrupt_init(*_) -> None:
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, _interrupt_init)
-
-    # 1. Socket binding
-    listen_address, sock = setup_server(args)
-
-    # 2. Build and serve the API server
-    vllm_config = _prepare_render_model_config(args)
-    shutdown_task = await build_and_serve_renderer(
-        vllm_config, listen_address, sock, args
-    )
-    try:
-        await shutdown_task
-    finally:
-        sock.close()

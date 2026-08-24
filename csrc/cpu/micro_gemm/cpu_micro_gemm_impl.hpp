@@ -21,12 +21,18 @@ class MicroGemm {
  public:
   static constexpr int32_t MaxMSize = 16;
   static constexpr int32_t NSize = 16;
+  static constexpr int32_t WeightOCGroupSize = 16;
+  // callers must pack A matrix before GEMM
+  static constexpr bool PackA = false;
 
  public:
   void gemm(DEFINE_CPU_MICRO_GEMM_PARAMS) {
     TORCH_CHECK(false, "Unimplemented MicroGemm.");
   }
 };
+
+template <cpu_utils::ISA isa, typename scalar_t>
+class MicroGemmINT8;
 
 template <int32_t n_size, typename scalar_t>
 FORCE_INLINE void default_epilogue(float* __restrict__ c_ptr,

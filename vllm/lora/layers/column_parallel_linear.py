@@ -22,10 +22,10 @@ from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
 def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
-    """
-    For `ColumnParallelLinearWithLoRA` or classes that inherit from
-    `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
-    """
+    """Fully-sharded (S-LoRA) apply path for column-parallel LoRA layers."""
+    assert layer.lora_config.fully_sharded_loras, (
+        "_mcp_apply is only used for fully sharded LoRA"
+    )
     assert (
         layer.n_slices
         == len(layer.lora_a_stacked)
@@ -265,17 +265,36 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     def expand_packed_lora(
         self,
-        lora_a: list[torch.Tensor],
-        lora_b: list[torch.Tensor],
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        lora_a: list[torch.Tensor | None],
+        lora_b: list[torch.Tensor | None],
+    ) -> tuple[list[torch.Tensor | None], list[torch.Tensor | None]]:
         """
         Expand packed adapter groups when they don't match n_slices.
-        E.g. in_proj_qkv (covers Q+K+V) + in_proj_z
+        E.g. in_proj_qkv (covers Q+K+V) + in_proj_z.
+
+        A None group member means that member was not adapted; the slice(s)
+        it covers are emitted as None placeholders so subsequent groups stay
+        aligned and those slices are left at base weights. This matches the
+        None-tolerance already present in slice_lora_b() and the set_lora()
+        stacking loop.
         """
-        expanded_a: list[torch.Tensor] = []
-        expanded_b: list[torch.Tensor] = []
+        expanded_a: list[torch.Tensor | None] = []
+        expanded_b: list[torch.Tensor | None] = []
         start_idx = 0
         for a_i, b_i in zip(lora_a, lora_b):
+            if b_i is None:
+                # Unadapted group member: its row count is unknown (the tensor
+                # is missing), so infer its coverage as the remaining slices.
+                # This is exact for the only layout that reaches this path,
+                # the fused GDN in_proj_qkvz group, whose sole multi-slice
+                # member (in_proj_qkv, Q+K+V) leads and whose only optional
+                # member (in_proj_z) trails.
+                covered = self.n_slices - start_idx
+                for _ in range(covered):
+                    expanded_a.append(None)
+                    expanded_b.append(None)
+                start_idx += covered
+                continue
             # Determine which output slices this b_i covers.
             b_rows, cu_rows, covered = b_i.shape[0], 0, 0
             for i in range(start_idx, self.n_slices):
@@ -341,7 +360,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             and base_forward is not merged_forward
         ):
             return self._apply_base_forward(x)
-        return _mcp_apply(x, bias, self)
+        return super().apply(x, bias)
 
     @classmethod
     def can_replace_layer(

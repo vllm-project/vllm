@@ -12,7 +12,10 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MLAAttentionSpec,
+)
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -36,6 +39,7 @@ msgpack = importlib.import_module("msgpack")
 
 ROLE = moriio_common.ROLE
 MoRIIOError = moriio_common.MoRIIOError
+MoRIIOTransferAck = moriio_common.MoRIIOTransferAck
 RemoteAllocInfo = moriio_common.RemoteAllocInfo
 WriteTask = moriio_common.WriteTask
 set_role = moriio_common.set_role
@@ -240,7 +244,7 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
             id="interleaved-kernel-axis-from-spec",
         ),
         pytest.param(
-            (8, 4, 3),
+            (8, 1, 4, 3),
             _mla_spec(),
             16,
             {
@@ -296,7 +300,7 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     kv_caches = {
         "separated": torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16),
         "interleaved": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
     }
     worker = _worker(
         kv_caches,
@@ -341,7 +345,7 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     kv_caches = {
         "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
         "dense1": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
     }
     calls: list[str] = []
 
@@ -440,9 +444,16 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
         def _mark_transfer_terminal_locked(self, transfer_id):
             self._terminal_transfer_ids[transfer_id] = None
 
-        def send_notify(self, transfer_id, remote_ip, remote_port, message_type=None):
+        def send_notify(
+            self,
+            transfer_id,
+            remote_ip,
+            remote_port,
+            message_type=None,
+            message_fields=None,
+        ):
             self.notifications.append(
-                (transfer_id, remote_ip, remote_port, message_type)
+                (transfer_id, remote_ip, remote_port, message_type, message_fields)
             )
 
     wrapper = FakeWrapper()
@@ -464,8 +475,8 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     writer._mark_write_done("xfer", request_info)
     writer._finalize_if_complete("xfer", request_info)
 
-    assert wrapper.notifications == [("xfer", "127.0.0.1", 7002, "write_done")]
-    assert wrapper.done_req_ids == ["xfer"]
+    assert wrapper.notifications == [("xfer", "127.0.0.1", 7002, "write_done", None)]
+    assert wrapper.done_req_ids == [MoRIIOTransferAck("xfer")]
     assert wrapper.done_remote_allocate_req_dict == {}
     assert wrapper.wait_count == 1
     assert wrapper.waited_statuses == [["status-a", "status-b"]]
@@ -509,7 +520,7 @@ def test_write_failure_marks_terminal_and_clears_scheduled_state():
 
     writer._mark_request_done("xfer")
 
-    assert wrapper.done_req_ids == ["xfer"]
+    assert wrapper.done_req_ids == [MoRIIOTransferAck("xfer")]
     assert wrapper.done_remote_allocate_req_dict == {}
     assert wrapper._is_transfer_terminal_locked("xfer")
     assert "xfer" not in writer._scheduled_writes
@@ -581,8 +592,20 @@ def test_late_remote_blocks_message_is_ignored_after_transfer_done():
         pytest.param(
             ROLE.PRODUCER,
             msgpack.dumps({"type": "release", "transfer_id": "xfer"}),
-            "release",
+            MoRIIOTransferAck("xfer"),
             id="release",
+        ),
+        pytest.param(
+            ROLE.PRODUCER,
+            msgpack.dumps(
+                {
+                    "type": "release",
+                    "transfer_id": "xfer",
+                    "consumer_tp_size": 8,
+                }
+            ),
+            MoRIIOTransferAck("xfer", 8),
+            id="release-consumer-tp-size",
         ),
         pytest.param(None, b"xfer", "plain", id="plain-string"),
     ],
@@ -603,11 +626,11 @@ def test_moriio_wrapper_routes_valid_messages(role, payload, expected):
         assert request_info.decode_dp_rank == 3
     elif expected == "write_done":
         assert wrapper.done_write_cache_req_ids == ["xfer"]
-    elif expected == "release":
-        assert wrapper.done_req_ids == ["xfer"]
-        assert wrapper._is_transfer_terminal_locked("xfer")
-    else:
+    elif expected == "plain":
         assert completions == ["xfer"]
+    else:
+        assert wrapper.done_req_ids == [expected]
+        assert wrapper._is_transfer_terminal_locked("xfer")
 
 
 @pytest.mark.parametrize(
@@ -650,20 +673,29 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_block_id_length_mismatch_raises_value_error():
+def test_local_block_ids_longer_than_remote_raises_value_error():
     cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
-    with pytest.raises(ValueError, match="must have the same length"):
+    with pytest.raises(ValueError, match="longer than remote_block_ids"):
         moriio_layout.compute_block_transfer_offsets(
             "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
         )
 
 
+def test_empty_local_block_ids_is_free_only_noop():
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [], [4, 5], _remote_meta().num_blocks
+    ) == ([], [], [])
+
+
 def test_registration_regions_do_not_split_interleaved_or_mla_cache():
     separated = torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16)
     interleaved = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
-    indexer = torch.empty((8, 4, 3), dtype=torch.bfloat16)
+    indexer = torch.empty((8, 1, 4, 3), dtype=torch.bfloat16)
     worker = _worker(
         {
             "separated": separated,
@@ -716,7 +748,9 @@ def test_registration_regions_use_layer_num_blocks():
 
 
 def test_unsupported_shape_raises_value_error():
-    cache = torch.empty((8, 4, 2, 3), dtype=torch.bfloat16)
+    # A 4-D view whose head/state/content dims all disagree with the spec (a
+    # standardized [B, H, N, C] view for _full_spec would be (8, 2, 4, 6)).
+    cache = torch.empty((8, 3, 5, 7), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):

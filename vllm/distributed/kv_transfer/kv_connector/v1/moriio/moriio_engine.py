@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConstants,
     MoRIIOError,
+    MoRIIOTransferAck,
     RemoteAllocInfo,
     TransferError,
     TransferId,
@@ -261,7 +262,7 @@ class MoRIIOWriter:
         """Mark a request done so its blocks are freed, even on transfer failure."""
         wrapper = self.worker.moriio_wrapper
         with wrapper.lock:
-            wrapper.done_req_ids.append(transfer_id)
+            wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
             wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
             wrapper._mark_transfer_terminal_locked(transfer_id)
         self._clear_transfer_state(transfer_id)
@@ -310,7 +311,17 @@ class MoRIIOWriter:
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
             request_info.completion_remote_notify_port = task.remote_notify_port
-            request_info.completion_remote_ip = task.remote_ip
+            # Wide-EP multi-pod: task.remote_ip addresses only the first pod,
+            # so resolve the per-rank host from multi_pod_hosts (falls back to
+            # task.remote_ip for single-pod or on any indexing miss).
+            _remote_ip = task.remote_ip
+            _hosts = list(getattr(self.worker, "multi_pod_hosts", []) or [])
+            _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+            if _hosts and _dp_local > 0:
+                _pod_idx = int(request_info.decode_dp_rank) // _dp_local
+                if 0 <= _pod_idx < len(_hosts):
+                    _remote_ip = _hosts[_pod_idx]
+            request_info.completion_remote_ip = _remote_ip
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -453,8 +464,15 @@ class MoRIIOWriter:
         # Wait for this request's transfers to complete.
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
+        # The notify port offset must use the per-pod local rank
+        # (% dp_local), since each pod binds notify sockets only for its local
+        # ranks. Single-pod is bit-identical (modulus is a no-op).
+        _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+        _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
+        if _dp_local > 0:
+            _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
         remote_port = remote_notify_port + get_port_offset(
-            request_info.decode_dp_rank, self.worker.tp_rank
+            _decode_dp_rank_for_port, self.worker.tp_rank
         )
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
@@ -466,7 +484,9 @@ class MoRIIOWriter:
         )
         # mark request as done, then we can free the blocks
         with self.worker.moriio_wrapper.lock:
-            self.worker.moriio_wrapper.done_req_ids.append(transfer_id)
+            self.worker.moriio_wrapper.done_req_ids.append(
+                MoRIIOTransferAck(transfer_id)
+            )
             self.worker.moriio_wrapper.done_remote_allocate_req_dict.pop(
                 transfer_id, None
             )
@@ -508,7 +528,7 @@ class MoRIIOWrapper:
         self.remote_engine_ip: str | None = None
         self.notify_port: int | None = None
         self.lock = threading.Lock()
-        self.done_req_ids: list[str] = []
+        self.done_req_ids: list[MoRIIOTransferAck] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
@@ -784,15 +804,20 @@ class MoRIIOWrapper:
             "Only prefill can get transfer release messages"
         )
         transfer_id = data["transfer_id"]
+        consumer_tp_size = int(data.get("consumer_tp_size", 1))
+        if consumer_tp_size <= 0:
+            raise MoRIIOError(
+                f"Invalid consumer_tp_size in release message: {consumer_tp_size}"
+            )
         with self.lock:
-            self.done_req_ids.append(transfer_id)
+            self.done_req_ids.append(MoRIIOTransferAck(transfer_id, consumer_tp_size))
             self.done_remote_allocate_req_dict.pop(transfer_id, None)
             self._mark_transfer_terminal_locked(transfer_id)
 
     def _handle_completion_message(self, msg: str):
         with self.lock:
             if get_role() == ROLE.PRODUCER:
-                self.done_req_ids.append(msg)
+                self.done_req_ids.append(MoRIIOTransferAck(msg))
                 self.done_remote_allocate_req_dict.pop(msg, None)
                 self._mark_transfer_terminal_locked(msg)
             else:
@@ -808,7 +833,12 @@ class MoRIIOWrapper:
             self._terminal_transfer_ids.popitem(last=False)
 
     def send_notify(
-        self, req_ids, remote_ip, remote_port, message_type: str | None = None
+        self,
+        req_ids,
+        remote_ip,
+        remote_port,
+        message_type: str | None = None,
+        message_fields: dict[str, Any] | None = None,
     ):
         if not remote_ip or not remote_port:
             logger.warning("Missing remote_ip or remote_port for notification")
@@ -836,18 +866,21 @@ class MoRIIOWrapper:
                 if message_type is None:
                     sock.send(req_id.encode("utf-8"))
                 else:
-                    sock.send(
-                        msgpack.dumps({"type": message_type, "transfer_id": req_id})
-                    )
+                    payload = {"type": message_type, "transfer_id": req_id}
+                    if message_fields:
+                        payload.update(message_fields)
+                    sock.send(msgpack.dumps(payload))
         except Exception as e:
             logger.error("Failed to send notification to %s: %s", path, e)
             self.paths.pop(path, None)
             raise
 
     def pop_finished_req_ids(self):
-        # producer invocation: get the set of completed requests at the decode
+        # Producer invocation: return every completion message since the last
+        # call. Do not dedupe: heterogeneous TP can produce multiple release
+        # ACKs for the same transfer_id and the caller must count each one.
         with self.lock:
-            done_send = set(self.done_req_ids)
+            done_send = list(self.done_req_ids)
             self.done_req_ids = []
         return done_send
 

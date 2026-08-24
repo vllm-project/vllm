@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -26,7 +27,6 @@ __all__ = ["CompressedTensorsW4A8Int"]
 W4A8_SUPPORTED_TYPES_MAP = {
     4: scalar_types.int4,
 }
-W4A8_SUPPORTED_BITS = list(W4A8_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsW4A8Int(CompressedTensorsScheme):
@@ -79,9 +79,8 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
             effective_group_size = self.group_size
 
         # Ensure group_size divides input_size_per_partition
-        assert input_size_per_partition % effective_group_size == 0, (
-            f"input_size_per_partition {input_size_per_partition}"
-            f" not divisible by group_size {effective_group_size}"
+        verify_group_size_divides_partition(
+            input_size_per_partition, effective_group_size
         )
 
         # Determine scale partitioning

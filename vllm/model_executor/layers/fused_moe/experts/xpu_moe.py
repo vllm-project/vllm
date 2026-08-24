@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
+    kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -62,17 +63,18 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = False
-        self.is_int4 = False
-        self.is_mxfp4 = False
-        self.is_block_fp8 = False
-        self.is_mxfp8 = False
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
+        is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
+        if not is_xe2_or_xe3:
+            raise NotImplementedError(
+                "XPUExperts is only supported on Intel Xe2/Xe3 GPUs"
+            )
+        self._expects_unquantized_inputs = is_xe2_or_xe3
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return True
+        return self._expects_unquantized_inputs
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -149,17 +151,14 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        # The kernel takes is_fp8/is_int4/is_mxfp4 as independent booleans.
-        # In this hierarchy each subclass flips exactly one to True; assert
-        # the invariant so a future subclass that sets two doesn't silently
-        # miscompute (kernel-side priority is undocumented).
-        assert sum([self.is_fp8, self.is_int4, self.is_mxfp4]) <= 1, (
-            "XPUExperts: at most one of is_fp8, is_int4, is_mxfp4 may be True; "
-            f"got is_fp8={self.is_fp8}, is_int4={self.is_int4}, "
-            f"is_mxfp4={self.is_mxfp4}."
-        )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
+            if (
+                self.quant_config is not None
+                and self.quant_config.weight_quant_dtype == "mxfp4"
+            ):
+                w1 = w1.view(torch.float4_e2m1fn_x2)
+                w2 = w2.view(torch.float4_e2m1fn_x2)
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
@@ -172,11 +171,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_local_experts,
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
-                is_fp8=self.is_fp8,
-                is_int4=self.is_int4,
-                is_mxfp4=self.is_mxfp4,
-                is_mxfp8=self.is_mxfp8,
-                is_block_fp8=self.is_block_fp8,
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
@@ -185,6 +179,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            a1q_scale=a1q_scale,
         )
 
 
@@ -202,7 +197,6 @@ class XPUExpertsFp8(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -231,7 +225,6 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
             num_dispatchers,
         )
         assert quant_config.quant_dtype == "mxfp8"
-        self.is_mxfp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -259,7 +252,6 @@ class XPUExpertsBlockFp8(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_block_fp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -298,7 +290,6 @@ class XPUExpertsWNA16(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_int4 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -325,7 +316,24 @@ class XPUExpertsMxFp4(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_mxfp4 = True
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # K = a1q.size(-1). When activations are pre-quantized packed mxfp4,
+        # K is the packed hidden_size (= logical / 2); the kernel output is at
+        # logical hidden_size (2 * K). When unquantized (bf16), K is already
+        # the logical size.
+        logical_K = K if self.expects_unquantized_inputs else 2 * K
+        return (0,), (0,), (M, logical_K)
 
     @staticmethod
     def _supports_quant_scheme(
@@ -334,5 +342,6 @@ class XPUExpertsMxFp4(XPUExperts):
     ) -> bool:
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A

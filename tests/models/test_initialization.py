@@ -8,13 +8,14 @@ import pytest
 
 from vllm import LLM
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
 )
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
@@ -82,6 +83,12 @@ def can_initialize(
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layout = resolve_kv_cache_layout(
+            vllm_config,
+            self.model_executor.get_supported_kv_cache_layouts(),
+            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+        )
+        self.model_executor.set_kv_cache_layout(layout.name)
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
@@ -129,6 +136,12 @@ def can_initialize(
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
+        if requires_spawn_multiprocessing():
+            # The EngineCore subprocess re-imports the class and does not
+            # inherit the KV-cache patch above, so it OOMs. Run in-process
+            # so the patch applies.
+            m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
         # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
         # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
         # L4 supports FA3.
