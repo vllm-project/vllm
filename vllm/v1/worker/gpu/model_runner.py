@@ -89,7 +89,7 @@ from vllm.v1.worker.gpu.buffer_utils import (
     async_copy_to_gpu,
     set_default_max_concurrency,
 )
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens_for_batch
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
@@ -1514,7 +1514,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
-            prepare_dcp_local_seq_lens_for_batch(
+            maybe_prepare_dcp_local_seq_lens(
                 input_batch,
                 self.input_buffers,
                 self.dcp_size,

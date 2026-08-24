@@ -54,7 +54,7 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     )
 
 
-def test_prepare_dcp_local_seq_lens_for_batch(monkeypatch: pytest.MonkeyPatch):
+def test_maybe_prepare_dcp_local_seq_lens(monkeypatch: pytest.MonkeyPatch):
     buffers = InputBuffers(max_num_reqs=4, max_num_tokens=4, device=torch.device("cpu"))
     batch = InputBatch.make_dummy(2, 4, buffers)
     batch.num_reqs_after_padding = 4
@@ -76,18 +76,18 @@ def test_prepare_dcp_local_seq_lens_for_batch(monkeypatch: pytest.MonkeyPatch):
         cp_utils, "prepare_dcp_local_seq_lens", prepare_dcp_local_seq_lens
     )
 
-    cp_utils.prepare_dcp_local_seq_lens_for_batch(batch, buffers, 4, 1, 16)
+    cp_utils.maybe_prepare_dcp_local_seq_lens(batch, buffers, 4, 1, 16)
 
     assert batch.dcp_local_seq_lens is not None
     assert batch.dcp_local_seq_lens.data_ptr() == buffers.dcp_local_seq_lens.data_ptr()
     assert batch.dcp_local_seq_lens.tolist() == [1, 2, 0, 0]
 
 
-def test_prepare_dcp_local_seq_lens_for_batch_without_dcp():
+def test_maybe_prepare_dcp_local_seq_lens_without_dcp():
     buffers = InputBuffers(max_num_reqs=2, max_num_tokens=2, device=torch.device("cpu"))
     batch = InputBatch.make_dummy(1, 1, buffers)
     batch.dcp_local_seq_lens = buffers.dcp_local_seq_lens[:1]
 
-    cp_utils.prepare_dcp_local_seq_lens_for_batch(batch, buffers, 1, 0, 1)
+    cp_utils.maybe_prepare_dcp_local_seq_lens(batch, buffers, 1, 0, 1)
 
     assert batch.dcp_local_seq_lens is None

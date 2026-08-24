@@ -34,7 +34,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens_for_batch
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -649,7 +649,7 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    prepare_dcp_local_seq_lens_for_batch(
+    maybe_prepare_dcp_local_seq_lens(
         input_batch,
         input_buffers,
         block_tables.cp_size,
