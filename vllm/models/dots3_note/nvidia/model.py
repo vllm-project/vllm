@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -569,6 +570,7 @@ class Dots3NoteDecoderLayer(DeepseekV32DecoderLayer):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
 
+@support_torch_compile
 class Dots3NoteModel(DeepseekV32Model):
     """DeepSeek-V3.2 runtime shell with NOTE-local decoder layers."""
 

@@ -7,6 +7,7 @@ from collections.abc import Iterable, Iterator
 import torch
 import torch.nn as nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
@@ -154,6 +155,7 @@ class Dots3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
         )
 
 
+@support_torch_compile
 class Dots3NoteMTP(DeepseekV32MTP):
     has_own_embed_tokens = True
     has_own_lm_head = False
