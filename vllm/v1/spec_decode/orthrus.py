@@ -157,6 +157,25 @@ class OrthrusProposer(SpecDecodeBaseProposer):
     def load_model(self, target_model: torch.nn.Module) -> None:
         super().load_model(target_model)
         self._setup_orthrus_kv_sharing(target_model)
+        logger.info(
+            "OrthrusProposer: discovered %d draft attention layers: %s",
+            len(self._draft_attn_layer_names),
+            sorted(self._draft_attn_layer_names),
+        )
+
+    @override
+    def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
+        super().initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+        logger.info(
+            "OrthrusProposer: built %d draft attention group(s); "
+            "layers with metadata: %s",
+            len(self.draft_attn_groups),
+            sorted(
+                name
+                for group in self.draft_attn_groups
+                for name in group.layer_names
+            ),
+        )
 
     def _setup_orthrus_kv_sharing(self, target_model: torch.nn.Module) -> None:
         """Map each draft layer's diffusion attention to its same-index
