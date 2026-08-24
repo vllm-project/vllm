@@ -624,6 +624,8 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
     where block size is typically 128 for both dims.
 
     vLLM executes it as FP8 GEMM with *dynamic per-token* activation quant.
+    Output widths that are not block-aligned are padded and restored
+    to their logical width before returning to the model.
     """
 
     _WEIGHT_BLOCK_SIZE: tuple[int, int] = (128, 128)
@@ -670,6 +672,12 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         # element-space -> block-space for BlockQuantScaleParameter.
         layer.weight_block_size = self.weight_block_size
 
+        block_n, block_k = self._WEIGHT_BLOCK_SIZE
+        remainder = output_size_per_partition % block_n
+        self.output_padding = 0 if remainder == 0 else block_n - remainder
+        self.logical_output_size = output_size_per_partition
+        physical_output_size = output_size_per_partition + self.output_padding
+
         weight = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
@@ -682,19 +690,13 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
-        block_n, block_k = self._WEIGHT_BLOCK_SIZE
-        if output_size_per_partition % block_n != 0:
-            raise ValueError(
-                "ModelOpt FP8_PB_WO requires out_features divisible by "
-                f"{block_n}, got {output_size_per_partition}."
-            )
         if input_size_per_partition % block_k != 0:
             raise ValueError(
                 "ModelOpt FP8_PB_WO requires in_features divisible by "
                 f"{block_k}, got {input_size_per_partition}."
             )
 
-        out_blks = output_size_per_partition // block_n
+        out_blks = physical_output_size // block_n
         in_blks = input_size_per_partition // block_k
 
         # Match ModelOpt's exported shape so weight loading works without a
@@ -711,7 +713,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
+            weight_shape=(physical_output_size, input_size_per_partition),
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
@@ -719,7 +721,15 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Keep weight in [out, in] layout for Fp8BlockScaledMMLinearKernel.
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+        weight = layer.weight.data
+        if self.output_padding:
+            padded_weight = weight.new_zeros(
+                self.logical_output_size + self.output_padding,
+                weight.shape[1],
+            )
+            padded_weight[: self.logical_output_size].copy_(weight)
+            weight = padded_weight
+        layer.weight = Parameter(weight, requires_grad=False)
 
         scale = layer.weight_scale
         if scale.dim() == 4:
@@ -733,8 +743,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
 
-        if hasattr(self, "fp8_linear"):
-            self.fp8_linear.process_weights_after_loading(layer)
+        self.w8a8_block_fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -742,7 +751,15 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.w8a8_block_fp8_linear.apply_weights(layer, x, bias)
+        kernel_bias = None if self.output_padding else bias
+        output = self.w8a8_block_fp8_linear.apply_weights(layer, x, kernel_bias)
+        if not self.output_padding:
+            return output
+
+        output = output[..., : self.logical_output_size].contiguous()
+        if bias is not None:
+            output.add_(bias)
+        return output
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):
@@ -1557,6 +1574,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            use_a16=self.use_a16,
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1593,6 +1611,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
+            use_a16=self.use_a16,
         )
 
     @property
@@ -2390,6 +2409,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if quant_algo == "FP8":
                 return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "FP8_PB_WO":
+                return ModelOptFp8PbWoLinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             if quant_algo == "W4A16_NVFP4":
