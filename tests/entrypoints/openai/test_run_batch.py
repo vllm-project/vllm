@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.run_batch import (
     BatchTranscriptionRequest,
     download_bytes_from_url,
     make_transcription_wrapper,
+    upload_data,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
@@ -1052,3 +1053,60 @@ async def test_transcription_wrapper_rejects_oversized_http_before_handler(
     assert isinstance(response, ErrorResponse)
     assert "Maximum file size exceeded" in response.error.message
     handler.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for upload_data retry behavior
+# ---------------------------------------------------------------------------
+
+
+def _make_aiohttp_put_session(status: int = 200, body_text: str = ""):
+    """Mock an aiohttp.ClientSession whose PUT returns the given status."""
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.text = AsyncMock(return_value=body_text)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.put = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    return mock_session
+
+
+@pytest.mark.asyncio
+async def test_upload_data_uploads_once_on_success():
+    """A successful upload must not be retried (regression guard)."""
+    session = _make_aiohttp_put_session(status=200)
+    with patch(
+        "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+        return_value=session,
+    ):
+        await upload_data(
+            "https://example.com/output.jsonl", "payload", from_file=False
+        )
+    assert session.put.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_data_error_includes_awaited_response_body():
+    """A failed upload must surface the awaited response body, not a coroutine."""
+    session = _make_aiohttp_put_session(status=500, body_text="server-error-detail")
+    with (
+        patch(
+            "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+            return_value=session,
+        ),
+        patch(
+            "vllm.entrypoints.openai.run_batch.asyncio.sleep",
+            AsyncMock(),
+        ),
+        pytest.raises(Exception) as exc_info,
+    ):
+        await upload_data(
+            "https://example.com/output.jsonl", "payload", from_file=False
+        )
+    message = str(exc_info.value)
+    assert "server-error-detail" in message
+    assert "coroutine" not in message
