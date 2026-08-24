@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
+from vllm.connections import MediaDownloadSizeExceededError
 from vllm.entrypoints.serve import create_error_response
 from vllm.exceptions import VLLMClientError, VLLMUnprocessableEntityError
 from vllm.multimodal.media import MediaConnector
@@ -133,6 +134,19 @@ class TestMediaConnectorErrorHandling:
                 connector.fetch_image("https://example.com/image.jpg")
 
             assert isinstance(exc_info.value, aiohttp.ClientConnectionError)
+
+    def test_fetch_image_download_size_limit_error(self):
+        connector = MediaConnector()
+
+        with patch.object(
+            connector.connection, "get_bytes", new_callable=MagicMock
+        ) as mock_get:
+            mock_get.side_effect = MediaDownloadSizeExceededError(256 * 1024 * 1024)
+
+            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+                connector.fetch_image("https://example.com/image.jpg")
+
+            assert "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB=256" in str(exc_info.value)
 
 
 class TestErrorResponse:
