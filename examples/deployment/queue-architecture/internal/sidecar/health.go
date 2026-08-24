@@ -134,14 +134,20 @@ func currentLoad(ctx context.Context, client *http.Client, target string) (float
 // immediately) -- useful for local/dev environments without a real vLLM
 // /metrics endpoint, or if an operator wants to opt out.
 //
-// If the metrics endpoint is temporarily unreachable or its response can't
-// be parsed, this fails OPEN (proceeds without blocking) after logging,
-// rather than fail closed -- a flaky /metrics scrape should never be able
-// to silently wedge all job processing indefinitely.
+// A single metrics-scrape failure is tolerated (retried after pollInterval)
+// -- a flaky one-off scrape should never permanently wedge job processing.
+// But if failures are SUSTAINED (maxConsecutiveFailures in a row), vLLM
+// itself is treated as unhealthy rather than blindly claiming work it
+// can't handle: this re-enters the same WaitForHealthy loop used at
+// startup and blocks until vLLM genuinely recovers (or ctx is cancelled).
 func waitForCapacity(ctx context.Context, client *http.Client, target string, maxConcurrent int, pollInterval time.Duration) error {
 	if maxConcurrent <= 0 {
 		return nil
 	}
+
+	const maxConsecutiveFailures = 3
+	consecutiveFailures := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -151,9 +157,26 @@ func waitForCapacity(ctx context.Context, client *http.Client, target string, ma
 
 		load, err := currentLoad(ctx, client, target)
 		if err != nil {
-			log.Printf("WARNING: failed to check vLLM capacity, proceeding anyway (fail-open): %v", err)
-			return nil
+			consecutiveFailures++
+			if consecutiveFailures < maxConsecutiveFailures {
+				log.Printf("WARNING: failed to check vLLM capacity (%d/%d consecutive failures), retrying shortly: %v", consecutiveFailures, maxConsecutiveFailures, err)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(pollInterval):
+				}
+				continue
+			}
+
+			log.Printf("vLLM capacity check failed %d times in a row (%v) -- treating vLLM as unhealthy, waiting for it to recover before claiming more work", consecutiveFailures, err)
+			if err := WaitForHealthy(ctx, client, target, pollInterval); err != nil {
+				return err
+			}
+			consecutiveFailures = 0
+			continue
 		}
+		consecutiveFailures = 0
+
 		if load < float64(maxConcurrent) {
 			return nil
 		}

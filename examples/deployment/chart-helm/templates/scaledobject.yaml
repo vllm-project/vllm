@@ -43,6 +43,30 @@ spec:
   {{- if .Values.keda.initialCooldownPeriod }}
   initialCooldownPeriod: {{ .Values.keda.initialCooldownPeriod }}
   {{- end }}
+  {{- if .Values.keda.scaleDown.stabilizationWindowSeconds }}
+  # Anti-thrashing: a newly-scaled-up GPU replica needs real time to
+  # become useful (node boot + image pull + vLLM's own multi-minute cold
+  # start, easily 6-10+ minutes) and then real time to prove it's needed
+  # (a few completed jobs). Without this, HPA's own reactive scale-down
+  # can (and did, in a live test) remove a brand-new replica within ~1-2
+  # minutes -- before it ever processed a single job -- purely because the
+  # ALREADY-existing replica had, on its own, drained the backlog back
+  # below target in the meantime. stabilizationWindowSeconds forces HPA to
+  # look back over this whole window and use the HIGHEST recommended
+  # replica count seen in it, so a brief dip can't trigger an immediate
+  # scale-down. The policy below additionally rate-limits HOW FAST replicas
+  # can be removed even once the window has genuinely passed, preventing an
+  # instant top-to-bottom collapse.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ .Values.keda.scaleDown.stabilizationWindowSeconds }}
+          policies:
+            - type: Percent
+              value: {{ .Values.keda.scaleDown.policyPercent | default 33 }}
+              periodSeconds: {{ .Values.keda.scaleDown.policyPeriodSeconds | default 60 }}
+  {{- end }}
   triggers:
     {{- if .Values.keda.cron.enabled }}
     - type: cron

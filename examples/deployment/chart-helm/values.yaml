@@ -81,6 +81,25 @@ keda:
   cooldownPeriod: 120
   # -- Optional: seconds after ScaledObject creation before the first scale-down is allowed
   initialCooldownPeriod: 0
+  # -- Optional advanced HPA scale-down behavior (anti-thrashing). Unset by
+  # default (stabilizationWindowSeconds: null) so existing users see no
+  # behavior change -- the underlying HPA controller's own default applies.
+  # When set, this is passed through to the HPA's
+  # advanced.horizontalPodAutoscalerConfig.behavior.scaleDown block. See
+  # templates/scaledobject.yaml for the full rationale on why this matters
+  # for GPU-backed replicas that take real time (node boot + image pull +
+  # model cold start) to become useful.
+  scaleDown:
+    # -- How far back (seconds) HPA looks when deciding to scale down; the
+    # HIGHEST recommended replica count seen in this window is used, so a
+    # brief metric dip can't trigger an immediate scale-down. Recommend
+    # setting this to at least (time for a new replica to become useful) +
+    # (time to complete a few real jobs).
+    stabilizationWindowSeconds: null
+    # -- Once the stabilization window has passed, the max percent of
+    # current replicas that can be removed per policyPeriodSeconds.
+    policyPercent: 33
+    policyPeriodSeconds: 60
   # -- Prometheus server address to query, e.g. http://prometheus-server.vllm.svc.cluster.local:9090
   prometheusServerAddress: ""
   # -- PromQL query; must return a single vector/scalar element. sum() is
@@ -158,6 +177,17 @@ podAnnotations: {}
 # -- Image pull secrets for pulling from private registries (e.g. GHCR).
 # List of secret references in the format: [{name: "secret-name"}, ...]
 imagePullSecrets: []
+
+# -- How long Kubernetes waits after sending SIGTERM before force-killing
+# the pod (SIGKILL). Left unset by default (Kubernetes' own built-in
+# default of 30s applies) to avoid changing behavior for existing users.
+# If the sidecar is enabled and expected to hold long-running in-flight
+# requests (e.g. large-context LLM inference that can take several
+# minutes), this MUST be raised well above the realistic worst-case job
+# duration -- otherwise Kubernetes will SIGKILL the pod mid-job during a
+# scale-down/node-drain before the sidecar's own graceful-drain logic
+# (see cmd/sidecar/main.go's MAX_DRAIN_TIMEOUT) has a chance to finish.
+terminationGracePeriodSeconds: null
 
 # -- Configmap
 configs: {}

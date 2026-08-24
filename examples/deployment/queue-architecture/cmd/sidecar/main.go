@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -100,6 +101,23 @@ func main() {
 		log.Fatalf("Invalid HEALTH_CHECK_INTERVAL: %v", err)
 	}
 
+	// Parse MAX_DRAIN_TIMEOUT (default 660s / 11m) -- on shutdown, the
+	// maximum time to wait for in-flight jobs to finish naturally before
+	// exiting anyway. Should be set comfortably BELOW the pod's
+	// terminationGracePeriodSeconds so this process can log a warning and
+	// exit(1) voluntarily instead of being SIGKILLed with no chance to log
+	// anything. A job still in flight when this timeout fires is not lost
+	// -- it was never acked, so another replica's ReclaimLoop will pick it
+	// up after IDLE_THRESHOLD, same as any other crash.
+	maxDrainTimeoutStr := os.Getenv("MAX_DRAIN_TIMEOUT")
+	if maxDrainTimeoutStr == "" {
+		maxDrainTimeoutStr = "660s"
+	}
+	maxDrainTimeout, err := time.ParseDuration(maxDrainTimeoutStr)
+	if err != nil {
+		log.Fatalf("Invalid MAX_DRAIN_TIMEOUT: %v", err)
+	}
+
 	// Construct Redis client
 	rdb := redis.NewClient(&redis.Options{
 		Addr: redisAddr,
@@ -115,13 +133,25 @@ func main() {
 	resultExpiry := 24 * time.Hour
 
 	// Log startup configuration
-	log.Printf("Starting sidecar consumer: REDIS_ADDR=%s, STREAM_NAME=%s, CONSUMER_GROUP=%s, CONSUMER_NAME=%s, VLLM_TARGET=%s, RESULT_EXPIRY=%v, IDLE_THRESHOLD=%v, RECLAIM_INTERVAL=%v, MAX_CONCURRENT_REQUESTS=%d, CAPACITY_POLL_INTERVAL=%v, HEALTH_CHECK_INTERVAL=%v",
-		redisAddr, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, maxConcurrent, capacityPollInterval, healthCheckInterval)
+	log.Printf("Starting sidecar consumer: REDIS_ADDR=%s, STREAM_NAME=%s, CONSUMER_GROUP=%s, CONSUMER_NAME=%s, VLLM_TARGET=%s, RESULT_EXPIRY=%v, IDLE_THRESHOLD=%v, RECLAIM_INTERVAL=%v, MAX_CONCURRENT_REQUESTS=%d, CAPACITY_POLL_INTERVAL=%v, HEALTH_CHECK_INTERVAL=%v, MAX_DRAIN_TIMEOUT=%v",
+		redisAddr, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, maxConcurrent, capacityPollInterval, healthCheckInterval, maxDrainTimeout)
 
-	// Ensure consumer group exists before starting consumer loop
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// shutdownCtx is cancelled on SIGINT/SIGTERM (e.g. KEDA scale-down,
+	// node drain/consolidation). It gates every CLAIM decision in both
+	// loops -- a hard stop on taking any NEW work.
+	//
+	// workCtx is deliberately NOT derived from shutdownCtx and is never
+	// cancelled by the shutdown signal. It's used only once a job has
+	// actually been claimed, so in-flight work (already consuming real
+	// GPU time) always runs to completion instead of being aborted
+	// mid-request when the pod is asked to terminate. See
+	// internal/sidecar/consumer.go's ConsumerLoop/ReclaimLoop doc comments
+	// for the full rationale.
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := queue.EnsureConsumerGroup(ctx, rdb, streamName, consumerGroup); err != nil {
+	workCtx := context.Background()
+
+	if err := queue.EnsureConsumerGroup(shutdownCtx, rdb, streamName, consumerGroup); err != nil {
 		log.Fatalf("Failed to ensure consumer group: %v", err)
 	}
 
@@ -131,32 +161,60 @@ func main() {
 	// starting -- with no gate, the sidecar would otherwise start reading
 	// jobs and failing to forward them for that entire window.
 	log.Printf("Waiting for VLLM_TARGET=%s to become healthy before consuming from the queue...", vllmTarget)
-	if err := sidecar.WaitForHealthy(ctx, probeClient, vllmTarget, healthCheckInterval); err != nil {
+	if err := sidecar.WaitForHealthy(shutdownCtx, probeClient, vllmTarget, healthCheckInterval); err != nil {
 		log.Fatalf("Gave up waiting for vLLM to become healthy: %v", err)
 	}
 
 	// Create error channel to collect errors from both loops
 	errChan := make(chan error, 2)
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	// Launch ConsumerLoop in a goroutine
 	go func() {
-		if err := sidecar.ConsumerLoop(ctx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, probeClient, maxConcurrent, capacityPollInterval); err != nil {
+		defer wg.Done()
+		if err := sidecar.ConsumerLoop(shutdownCtx, workCtx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, probeClient, maxConcurrent, capacityPollInterval); err != nil {
 			errChan <- fmt.Errorf("consumer loop: %w", err)
 		}
 	}()
 
 	// Launch ReclaimLoop in a goroutine
 	go func() {
-		if err := sidecar.ReclaimLoop(ctx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, probeClient, maxConcurrent, capacityPollInterval); err != nil {
+		defer wg.Done()
+		if err := sidecar.ReclaimLoop(shutdownCtx, workCtx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, probeClient, maxConcurrent, capacityPollInterval); err != nil {
 			errChan <- fmt.Errorf("reclaim loop: %w", err)
 		}
 	}()
 
-	// Wait for either loop to return an error or context to be cancelled
+	// Wait for either loop to return a fatal (non-shutdown) error, or for a
+	// shutdown signal to arrive.
 	select {
 	case err := <-errChan:
 		log.Fatalf("Loop error: %v", err)
-	case <-ctx.Done():
-		log.Printf("Shutdown signal received, stopping loops")
+	case <-shutdownCtx.Done():
+		log.Printf("Shutdown signal received: no longer claiming new messages, draining in-flight work...")
+	}
+
+	// Block here until both loops have actually finished draining -- they
+	// stop claiming new messages immediately (shutdownCtx is cancelled),
+	// but anything already claimed keeps running on workCtx until it
+	// genuinely completes. maxDrainTimeout is a safety net only: it should
+	// be set below terminationGracePeriodSeconds so this process can log
+	// and exit(1) voluntarily rather than being SIGKILLed silently. A job
+	// still in flight when the timeout fires is not lost -- it's simply
+	// unacked, and another replica's ReclaimLoop will pick it up later.
+	drained := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+		log.Printf("All in-flight work finished, exiting cleanly")
+	case <-time.After(maxDrainTimeout):
+		log.Printf("WARNING: drain timeout (%v) exceeded with work still in flight -- exiting anyway. Any unfinished job was never acked, so another replica will reclaim it after IDLE_THRESHOLD.", maxDrainTimeout)
+		os.Exit(1)
 	}
 }

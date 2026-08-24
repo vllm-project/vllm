@@ -124,16 +124,37 @@ func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, 
 // leaves un-claimed backlog visible to KEDA's stream-lag scaling metric
 // instead of hidden behind claimed-but-blocked workers.
 //
+// GRACEFUL SHUTDOWN / SCALE-DOWN: this takes two separate contexts, not one.
+//   - shutdownCtx is cancelled on SIGTERM (pod being terminated -- scale-down,
+//     node drain, etc). It gates every CLAIM decision: checked explicitly
+//     before each read attempt, and threaded into waitForCapacity/queue.Read
+//     so a worker blocked waiting for capacity or for a new message unblocks
+//     and stops immediately when shutdown begins. This is a hard gate --
+//     once shutdownCtx is cancelled, no worker will claim another message.
+//   - workCtx is NOT cancelled by shutdown. Once a message has actually been
+//     claimed (queue.Read succeeded), processJob runs on workCtx, so an
+//     in-flight job (already consuming GPU time) always runs to completion
+//     -- forwarded, result written, acked -- regardless of a shutdown
+//     signal arriving mid-flight. Only after processJob returns does the
+//     worker loop back and check the shutdown gate again.
+//   - ConsumerLoop itself does not return until every worker has both (a)
+//     stopped claiming new work and (b) finished whatever it had already
+//     claimed. Callers (main.go) should wait for this function to return
+//     before exiting the process, so in-flight work is never killed by the
+//     process dying out from under it.
+//
 // Error handling:
-//   - Infrastructure errors (queue.Read failures) cancel all sibling workers
-//     and are returned from the loop.
+//   - Infrastructure errors (queue.Read failures) cancel all sibling workers'
+//     claiming (not their in-flight work) and are returned from the loop.
 //   - Per-job errors (idempotency check, forwarding, marshaling, result write, ack) are
 //     logged with the job ID by processJob, which returns nil so that worker continues to
 //     the next job. Failed jobs remain un-acked and stay in the Pending Entries List for
 //     later reclaim/retry.
 //
 // Parameters:
-//   - ctx: context for cancellation
+//   - shutdownCtx: cancelled on shutdown signal; gates claiming new work (hard gate)
+//   - workCtx: NOT cancelled by shutdown; used for in-flight job processing so it always
+//     runs to completion
 //   - rdb: Redis client
 //   - streamName: name of the Redis stream to read from
 //   - groupName: consumer group name
@@ -146,14 +167,16 @@ func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, 
 //     least one worker; the capacity gate itself is separately disabled by health.go's
 //     own <=0 check on this same value)
 //   - capacityPollInterval: how often to re-check vLLM's load while waiting for capacity
-func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
+func ConsumerLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
 	workers := maxConcurrent
 	if workers <= 0 {
 		workers = 1
 	}
 
-	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Derived from shutdownCtx: a real infra error (not a shutdown) also
+	// stops sibling workers from claiming further work, same as before.
+	claimCtx, cancelClaim := context.WithCancel(shutdownCtx)
+	defer cancelClaim()
 
 	var wg sync.WaitGroup
 	var firstErrOnce sync.Once
@@ -165,40 +188,53 @@ func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName,
 		}
 		firstErrOnce.Do(func() {
 			firstErr = err
-			cancel() // stop sibling workers on a real infrastructure error
+			cancelClaim() // stop sibling workers from claiming on a real infrastructure error
 		})
 	}
 
 	runWorker := func(workerID int) {
 		defer wg.Done()
 		for {
+			// Hard gate: stop claiming new work the instant shutdown
+			// begins (or a sibling hits a fatal error). Checked BEFORE
+			// every claim attempt.
 			select {
-			case <-workerCtx.Done():
+			case <-claimCtx.Done():
 				return
 			default:
 			}
 
-			// Gate on vLLM's real-time load before claiming the next message.
-			if err := waitForCapacity(workerCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
-				if ctx.Err() == nil {
+			// Gate on vLLM's real-time load before claiming the next
+			// message. Uses claimCtx so this wait is itself interruptible
+			// by shutdown -- no point checking capacity if we're about to
+			// stop claiming anyway.
+			if err := waitForCapacity(claimCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+				if shutdownCtx.Err() == nil {
 					recordFatal(err)
 				}
 				return
 			}
 
-			// Read a job from the queue.
-			job, entryID, err := queue.Read(workerCtx, rdb, streamName, groupName, consumerName)
+			// Read a job from the queue. Also uses claimCtx: if no
+			// message is available yet and shutdown arrives while
+			// blocked here, this unblocks immediately -- nothing has
+			// been claimed yet, so there is nothing to drain.
+			job, entryID, err := queue.Read(claimCtx, rdb, streamName, groupName, consumerName)
 			if err != nil {
-				if ctx.Err() == nil {
+				if shutdownCtx.Err() == nil {
 					recordFatal(fmt.Errorf("read job (worker %d): %w", workerID, err))
 				}
 				return
 			}
 
-			// Process the job using the shared helper. processJob itself
-			// never returns a non-nil error for per-job failures (only
-			// infrastructure errors), so this worker keeps going.
-			if err := processJob(workerCtx, rdb, job, entryID, streamName, groupName, target, resultExpiry); err != nil {
+			// The job is now claimed. From here on we use workCtx, NOT
+			// claimCtx/shutdownCtx -- a shutdown signal arriving now must
+			// NOT abort in-flight work. The job runs to completion
+			// (forward to vLLM, write result, ack) regardless of
+			// shutdown, so already-spent GPU compute is never wasted.
+			// Only after this call returns does the worker loop back and
+			// check the shutdown gate again.
+			if err := processJob(workCtx, rdb, job, entryID, streamName, groupName, target, resultExpiry); err != nil {
 				recordFatal(err)
 				return
 			}
@@ -214,7 +250,7 @@ func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName,
 	if firstErr != nil {
 		return firstErr
 	}
-	return ctx.Err()
+	return shutdownCtx.Err()
 }
 
 // ReclaimLoop periodically claims idle jobs from the consumer group and processes them.
@@ -233,8 +269,17 @@ func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName,
 // reclaimed jobs after a crash is drained with the same real-time
 // vLLM-capacity awareness as fresh reads, not one at a time.
 //
+// GRACEFUL SHUTDOWN / SCALE-DOWN: same shutdownCtx/workCtx split as
+// ConsumerLoop (see its doc comment for the full rationale). shutdownCtx
+// gates whether a new reclaim tick even attempts to claim more idle jobs
+// (hard gate, checked before every queue.Claim call); workCtx is used once
+// a job is actually claimed, so an in-flight reclaimed job also always
+// runs to completion regardless of a shutdown signal arriving mid-flight.
+//
 // Parameters:
-//   - ctx: context for cancellation
+//   - shutdownCtx: cancelled on shutdown signal; gates claiming new work (hard gate)
+//   - workCtx: NOT cancelled by shutdown; used for in-flight job processing so it always
+//     runs to completion
 //   - rdb: Redis client
 //   - streamName: name of the Redis stream
 //   - groupName: consumer group name
@@ -247,7 +292,7 @@ func ConsumerLoop(ctx context.Context, rdb *redis.Client, streamName, groupName,
 //   - maxConcurrent: number of concurrent worker goroutines per batch, and the vLLM
 //     running+waiting threshold each worker gates on (<=0 is treated as 1 worker)
 //   - capacityPollInterval: how often to re-check vLLM's load while waiting for capacity
-func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, idleThreshold, reclaimInterval time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
+func ReclaimLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, idleThreshold, reclaimInterval time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
 	ticker := time.NewTicker(reclaimInterval)
 	defer ticker.Stop()
 
@@ -258,11 +303,19 @@ func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, 
 
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-shutdownCtx.Done():
+			return shutdownCtx.Err()
 		case <-ticker.C:
+			// Hard gate: don't even attempt to claim more idle jobs once
+			// shutdown has begun.
+			select {
+			case <-shutdownCtx.Done():
+				return shutdownCtx.Err()
+			default:
+			}
+
 			// Claim idle jobs
-			claimedJobs, err := queue.Claim(ctx, rdb, streamName, groupName, consumerName, idleThreshold)
+			claimedJobs, err := queue.Claim(shutdownCtx, rdb, streamName, groupName, consumerName, idleThreshold)
 			if err != nil {
 				log.Printf("ERROR: claim idle jobs: %v", err)
 				// Don't return; continue trying on the next tick
@@ -278,7 +331,7 @@ func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, 
 			}
 			close(jobCh)
 
-			batchCtx, cancelBatch := context.WithCancel(ctx)
+			claimCtx, cancelClaim := context.WithCancel(shutdownCtx)
 			var wg sync.WaitGroup
 			var firstErrOnce sync.Once
 			var firstErr error
@@ -289,7 +342,7 @@ func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, 
 				}
 				firstErrOnce.Do(func() {
 					firstErr = e
-					cancelBatch()
+					cancelClaim()
 				})
 			}
 
@@ -299,17 +352,20 @@ func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, 
 					defer wg.Done()
 					for cj := range jobCh {
 						select {
-						case <-batchCtx.Done():
+						case <-claimCtx.Done():
 							return
 						default:
 						}
-						if err := waitForCapacity(batchCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
-							if ctx.Err() == nil {
+						if err := waitForCapacity(claimCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+							if shutdownCtx.Err() == nil {
 								recordFatal(err)
 							}
 							return
 						}
-						if err := processJob(batchCtx, rdb, cj.Job, cj.EntryID, streamName, groupName, target, resultExpiry); err != nil {
+						// Claimed -- process on workCtx, NOT
+						// claimCtx/shutdownCtx, so shutdown never aborts
+						// in-flight reclaimed work either.
+						if err := processJob(workCtx, rdb, cj.Job, cj.EntryID, streamName, groupName, target, resultExpiry); err != nil {
 							recordFatal(err)
 							return
 						}
@@ -317,7 +373,7 @@ func ReclaimLoop(ctx context.Context, rdb *redis.Client, streamName, groupName, 
 				}()
 			}
 			wg.Wait()
-			cancelBatch()
+			cancelClaim()
 
 			if firstErr != nil {
 				return firstErr
