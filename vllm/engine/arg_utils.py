@@ -496,6 +496,9 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_batch_sharded_sampling: bool | None = (
+        ParallelConfig.enable_batch_sharded_sampling
+    )
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
@@ -1155,6 +1158,10 @@ class EngineArgs:
             "--enable-expert-parallel",
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
+        )
+        parallel_group.add_argument(
+            "--enable-batch-sharded-sampling",
+            **parallel_kwargs["enable_batch_sharded_sampling"],
         )
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
@@ -2279,6 +2286,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
