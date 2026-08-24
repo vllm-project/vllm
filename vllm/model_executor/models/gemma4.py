@@ -466,7 +466,7 @@ class Gemma4Attention(nn.Module):
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
         if num_kv_shared_layers > 0:
             first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
-            if layer_idx >= first_kv_shared_layer_idx:
+            if layer_idx >= first_kv_shared_layer_idx > 0:
                 self.is_kv_shared_layer = True
                 # Find the last non-shared layer of the same attention type
                 prev_layers = config.layer_types[:first_kv_shared_layer_idx]
