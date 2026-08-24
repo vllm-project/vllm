@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -1001,6 +1002,8 @@ class RoutedExperts(PluggableLayer):
         See `build_expert_params_mapping` for the returned tuple format.
         """
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
+        prefix = "base_layer." if has_base_layer else ""
+        # These loaders index ``params_dict[full_name]``, so both sides get it.
         return RoutedExperts.build_expert_params_mapping(
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
@@ -1008,7 +1011,8 @@ class RoutedExperts(PluggableLayer):
             num_experts,
             num_redundant_experts,
             routed_experts_prefix,
-            "base_layer." if has_base_layer else "",
+            lora_base_layer_prefix=prefix,
+            lora_base_layer_prefix_on_param_name=prefix,
         )
 
     @staticmethod
@@ -1020,6 +1024,7 @@ class RoutedExperts(PluggableLayer):
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
         lora_base_layer_prefix: str = "",
+        lora_base_layer_prefix_on_param_name: str = "",
         include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         """
@@ -1034,7 +1039,14 @@ class RoutedExperts(PluggableLayer):
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
-            lora_base_layer_prefix: Prefix to add if this layer is a LoRA base layer
+            lora_base_layer_prefix: LoRA ``base_layer.`` prefix for the
+              ``weight_name`` (checkpoint) side
+            lora_base_layer_prefix_on_param_name: same, for the ``param_name``
+              side. Independent because ``get_expert_mapping`` resolves
+              ``param_name`` via ``getattr`` against this layer's bare
+              ``w13_weight``/``w2_weight`` (no prefix), while
+              ``make_expert_params_mapping`` indexes the model-wide
+              ``params_dict`` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
 
         Returns:
@@ -1060,8 +1072,10 @@ class RoutedExperts(PluggableLayer):
         if routed_experts_prefix != "":
             routed_experts_prefix = f"{routed_experts_prefix}."
 
-        w13 = f"experts.{lora_base_layer_prefix}{routed_experts_prefix}w13_"
-        w2 = f"experts.{lora_base_layer_prefix}{routed_experts_prefix}w2_"
+        w13 = (
+            f"experts.{lora_base_layer_prefix_on_param_name}{routed_experts_prefix}w13_"
+        )
+        w2 = f"experts.{lora_base_layer_prefix_on_param_name}{routed_experts_prefix}w2_"
 
         fused_mapping = []
         if include_fused:
@@ -1216,7 +1230,7 @@ class RoutedExperts(PluggableLayer):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts
+            Output tensor from routed experts.
         """
         assert not self.quant_method.is_monolithic
 
@@ -1235,7 +1249,7 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Execute routed experts using the quantization method's apply function.
 
@@ -1250,7 +1264,7 @@ class RoutedExperts(PluggableLayer):
             input_ids: input ids for DeepSeek V4
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
         """
         assert self.quant_method.is_monolithic
 

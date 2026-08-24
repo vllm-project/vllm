@@ -947,11 +947,12 @@ def _make_deepseek_v4_weights_mapper(
     # When shared experts are fused into the routed MXFP4 grouped GEMM, the
     # shared_experts tensors are redirected to routed expert slots ; leave
     # their names untouched here.
-    substr_map = (
+    orig_to_new_substr: dict[str, str | None] = (
         {}
         if fuse_shared_experts
         else {".shared_experts.w2": ".shared_experts.down_proj"}
     )
+    orig_to_new_substr["mtp."] = None
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
@@ -967,7 +968,7 @@ def _make_deepseek_v4_weights_mapper(
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
             ".input_scale": ".input_scale_2",
         },
-        orig_to_new_substr=substr_map,
+        orig_to_new_substr=orig_to_new_substr,
     )
 
 
@@ -1038,7 +1039,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
