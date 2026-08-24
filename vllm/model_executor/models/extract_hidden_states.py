@@ -231,7 +231,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         head_size: int,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
+        attn_type: AttentionType = AttentionType.DECODER,
     ):
         super().__init__()
 
@@ -329,7 +329,9 @@ class ExtractHiddenStatesModel(nn.Module):
         super().__init__()
 
         self.vllm_config = vllm_config
-        self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.hf_config = speculative_config.draft_model_config.hf_config
         self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.target_num_hidden_layers = (
             vllm_config.model_config.get_total_num_hidden_layers()
