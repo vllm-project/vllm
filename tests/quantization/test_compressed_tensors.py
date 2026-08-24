@@ -5,7 +5,6 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
-from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
@@ -402,27 +401,6 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
-@contextmanager
-def _nvfp4_marlin_error_context(model, capfd):
-    is_rocm_and_unsupported = (
-        model == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
-        and current_platform.is_rocm()
-    )
-
-    if is_rocm_and_unsupported:
-        expected_error = (
-            "ValueError: Forced NVFP4 kernel MarlinNvFp4LinearKernel is not "
-            "supported: Marlin FP4 not available"
-        )
-        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
-            yield
-
-        captured = capfd.readouterr()
-        assert expected_error in captured.out + captured.err
-    else:
-        yield
-
-
 @pytest.mark.parametrize(
     "args",
     [
@@ -430,10 +408,24 @@ def _nvfp4_marlin_error_context(model, capfd):
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
-def test_compressed_tensors_nvfp4(args, capfd, dist_init, workspace_init):
+def test_compressed_tensors_nvfp4(args, dist_init, workspace_init):
     model_path, use_a16 = args
-    with _nvfp4_marlin_error_context(model_path, capfd):
+    is_rocm_and_unsupported = (
+        model_path == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
+        and current_platform.is_rocm()
+    )
+    if is_rocm_and_unsupported:
+        with pytest.raises(
+            ValueError,
+            match="Forced NVFP4 kernel MarlinNvFp4LinearKernel is not supported",
+        ):
+            load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+        return
+
+    try:
         model, _ = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+    except ValueError as exc:
+        pytest.fail(f"Unexpected NVFP4 loading failure: {exc}")
 
     qkv_proj = model.model.layers[0].self_attn.qkv_proj
     assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
