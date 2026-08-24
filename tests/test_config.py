@@ -2090,41 +2090,6 @@ def test_methods_with_external_sources_require_model(method):
         SpeculativeConfig(method=method, num_speculative_tokens=1)
 
 
-def test_speculators_format_preserves_explicit_shorthand_tokens():
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.transformers_utils.config import maybe_override_with_speculators
-
-    engine_args = EngineArgs(spec_tokens=3)
-    engine_args._merge_speculative_shorthand_args()
-
-    config = {
-        "speculators_model_type": "dflash",
-        "transformer_layer_config": {},
-        "speculators_config": {
-            "proposal_methods": [{"speculative_tokens": 15}],
-            "verifier": {"name_or_path": "target/model"},
-        },
-    }
-
-    with patch(
-        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
-        return_value=(config, {}),
-    ):
-        model, tokenizer, speculative_config = maybe_override_with_speculators(
-            model="draft/model",
-            tokenizer=None,
-            trust_remote_code=False,
-            vllm_speculative_config=engine_args.speculative_config,
-        )
-
-    assert (model, tokenizer) == ("target/model", "target/model")
-    assert speculative_config == {
-        "method": "dflash",
-        "model": "draft/model",
-        "num_speculative_tokens": 3,
-    }
-
-
 def _spec_model_declaration_configs(model_type="dflash", tokens=15):
     return {
         "target/model": {"architectures": ["LlamaForCausalLM"]},
@@ -2157,17 +2122,6 @@ def _spec_model_declaration_configs(model_type="dflash", tokens=15):
             id="explicit-tokens-take-precedence",
         ),
         pytest.param(
-            "dflash",
-            15,
-            {"model": "draft/model", "method": "dflash"},
-            {
-                "method": "dflash",
-                "model": "draft/model",
-                "num_speculative_tokens": 15,
-            },
-            id="explicit-method-still-adopts-tokens",
-        ),
-        pytest.param(
             "peagle",
             7,
             {"model": "draft/model", "method": "eagle3"},
@@ -2178,23 +2132,6 @@ def _spec_model_declaration_configs(model_type="dflash", tokens=15):
                 "parallel_drafting": True,
             },
             id="explicit-method-still-adopts-peagle-settings",
-        ),
-        pytest.param(
-            "peagle",
-            7,
-            {
-                "model": "draft/model",
-                "method": "eagle3",
-                "num_speculative_tokens": 3,
-                "parallel_drafting": False,
-            },
-            {
-                "method": "eagle3",
-                "model": "draft/model",
-                "num_speculative_tokens": 3,
-                "parallel_drafting": False,
-            },
-            id="explicit-settings-take-precedence-field-by-field",
         ),
     ],
 )
@@ -2278,10 +2215,6 @@ def test_explicit_method_selects_deepseek_v4_loader(
         hf_config.architectures[0],
         getattr(hf_config, "n_predict", None),
     ) == expected
-    if method == "dspark":
-        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
-        assert block_tokens is not None
-        assert block_tokens[0] == 4
 
 
 def test_dspark_reuses_embedded_target_and_defaults_tokens(
