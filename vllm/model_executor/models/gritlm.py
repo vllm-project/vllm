@@ -183,12 +183,15 @@ class GritLMPooler(SequencePooler):
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
 
+        seq_pooling_type = pooler_config.seq_pooling_type
+        if seq_pooling_type == "MEAN":
+            pooling = GritLMMeanPool(model_config)
+        else:
+            assert seq_pooling_type is not None
+            pooling = get_seq_pooling_method(seq_pooling_type)
+
         super().__init__(
-            pooling=(
-                GritLMMeanPool(model_config)
-                if pooler_config.seq_pooling_type == "MEAN"
-                else get_seq_pooling_method(pooler_config.seq_pooling_type)
-            ),
+            pooling=pooling,
             head=EmbeddingPoolerHead(
                 head_dtype=model_config.head_dtype,
                 activation=PoolerNormalize(),
