@@ -47,9 +47,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
-    PartialHitBoundary,
     PoolKey,
     ReqMeta,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -1184,12 +1184,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         # Skip chunks the consumer's per-group spec wouldn't populate
         # locally (e.g. SWA pre-window) even if the producer stored them.
         load_mask_per_group = self.coord.load_mask(req_meta.block_hashes, token_len)
-        # Groups whose tail chunk is keyed at a boundary other than the one
-        # process_tokens derives from token_len (see PartialHitBoundary).
-        partial_hit_boundaries = {
+        tail_key_boundaries = {
             boundary.group_id: boundary.num_tokens
             for boundary in (
-                req_meta.load_spec.partial_hit_boundaries  # type: ignore[union-attr]
+                req_meta.load_spec.tail_key_boundaries  # type: ignore[union-attr]
             )
         }
 
@@ -1206,10 +1204,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
-                # ``end == token_len`` identifies the tail chunk, the only one
-                # whose key can differ.
                 boundary_tokens = (
-                    partial_hit_boundaries.get(g_idx) if end == token_len else None
+                    tail_key_boundaries.get(g_idx) if end == token_len else None
                 )
                 if boundary_tokens is not None:
                     block_hash = req_meta.block_hashes[
@@ -1993,7 +1989,7 @@ class MooncakeStoreWorker:
             self.hash_block_size,
             exists_set,
         )
-        hit_masks, hit_length = self.coord.find_longest_cache_hit(
+        _, hit_length = self.coord.find_longest_cache_hit(
             block_hashes,
             token_len,
             cached_block_pool,
@@ -2002,63 +1998,52 @@ class MooncakeStoreWorker:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
             if usable_length <= 0:
                 return MooncakeLookupResult(0)
-            hit_masks, hit_length = self.coord.find_longest_cache_hit(
+            _, hit_length = self.coord.find_longest_cache_hit(
                 block_hashes,
                 usable_length,
                 cached_block_pool,
             )
         return MooncakeLookupResult(
             hit_length,
-            self._partial_hit_boundaries(
+            self._tail_key_boundaries(
                 block_hashes,
-                hit_masks,
                 hit_length,
                 cached_block_pool,
             ),
         )
 
-    def _partial_hit_boundaries(
+    def _tail_key_boundaries(
         self,
         block_hashes: Sequence[BlockHash],
-        hit_masks: tuple[list[bool], ...],
         hit_length: int,
         cached_block_pool: ExternalCachedBlockPool,
-    ) -> tuple[PartialHitBoundary, ...]:
-        """Return stored-key overrides for partially reused physical blocks.
+    ) -> tuple[TailKeyBoundary, ...]:
+        """Return the hash boundary used to store each group's tail block.
 
         With fine-grained prefix matching, ``hit_length`` may fall within a
-        physical cache block and may not align with the hash boundary used to
-        store that block. For each affected KV-cache group, return the token
-        boundary whose hash was used as the store key.
+        physical cache block whose store key uses a later hash boundary. Exact
+        matches are recorded too, so every nonzero hit has one entry per group.
         """
-        if not self.coord.enable_partial_hash_hits or hit_length <= 0:
+        if hit_length <= 0:
             return ()
 
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
             chunk_id = cdiv(hit_length, db.block_size) - 1
-            mask = hit_masks[group_id]
-            if chunk_id < 0 or chunk_id >= len(mask) or not mask[chunk_id]:
-                continue
-            if cached_block_pool.contains(
+            boundary_tokens = hit_length
+            if self.coord.enable_partial_hash_hits and not cached_block_pool.contains(
                 group_id, block_hashes[hit_boundary_hash_idx]
             ):
-                continue
-            next_chunk_hash_idx = min(
-                (chunk_id + 1) * db.block_size // self.hash_block_size,
-                len(block_hashes),
-            )
-            # Search the remaining hash boundaries in this physical cache block.
-            for hash_idx in range(hit_boundary_hash_idx + 1, next_chunk_hash_idx):
-                if cached_block_pool.contains(group_id, block_hashes[hash_idx]):
-                    boundaries.append(
-                        PartialHitBoundary(
-                            group_id,
-                            (hash_idx + 1) * self.hash_block_size,
-                        )
-                    )
-                    break
+                next_chunk_hash_idx = min(
+                    (chunk_id + 1) * db.block_size // self.hash_block_size,
+                    len(block_hashes),
+                )
+                for hash_idx in range(hit_boundary_hash_idx + 1, next_chunk_hash_idx):
+                    if cached_block_pool.contains(group_id, block_hashes[hash_idx]):
+                        boundary_tokens = (hash_idx + 1) * self.hash_block_size
+                        break
+            boundaries.append(TailKeyBoundary(group_id, boundary_tokens))
         return tuple(boundaries)
 
     def get_kv_events(self) -> list[BlockStored]:
