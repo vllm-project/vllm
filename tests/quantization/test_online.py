@@ -17,7 +17,11 @@ from tests.quantization.utils import (
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -112,7 +116,10 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize(
-    "quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls",
+    (
+        "quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls,"
+        "extra_runner_kwargs"
+    ),
     [
         # simple case - quantization='fp8_per_tensor'
         (
@@ -120,6 +127,43 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             None,
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
+        ),
+        # FP8 KV cache with the fp8_per_tensor shorthand.
+        (
+            "fp8_per_tensor",
+            None,
+            Fp8PerTensorOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {"kv_cache_dtype": "fp8"},
+        ),
+        pytest.param(
+            "fp8_per_tensor",
+            None,
+            Fp8PerTensorOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {"linear_backend": "marlin", "moe_backend": "marlin"},
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Marlin online FP8 coverage is CUDA-only.",
+            ),
+            id="fp8_per_tensor-marlin",
+        ),
+        pytest.param(
+            "fp8_per_tensor",
+            None,
+            Fp8PerTensorOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {
+                "kv_cache_dtype": "fp8",
+                "linear_backend": "marlin",
+                "moe_backend": "marlin",
+            },
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Marlin online FP8 coverage is CUDA-only.",
+            ),
+            id="fp8_per_tensor-fp8-kv-cache-marlin",
         ),
         # simple case - quantization='fp8_per_block'
         (
@@ -127,6 +171,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             None,
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
+            {},
         ),
         # quantization='online' with per-layer-kind overrides
         (
@@ -137,6 +182,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
         ),
         # ignore with direct layer name
         (
@@ -147,12 +193,14 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             {"ignore": ["model.layers.1.self_attn.o_proj", "re:.*[qkv]_proj"]},
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
         ),
         (
             "mxfp4",
             None,
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
+            {},
         ),
     ],
 )
@@ -165,6 +213,7 @@ def test_online_quantization(
     online_quant_args: dict | None,
     expected_linear_cls,
     expected_moe_cls,
+    extra_runner_kwargs: dict,
     use_rocm_aiter: bool,
     monkeypatch,
 ) -> None:
@@ -198,8 +247,15 @@ def test_online_quantization(
         quantization=quant_scheme,
         enforce_eager=True,
     )
+    runner_kwargs.update(extra_runner_kwargs)
     if online_quant_args is not None:
         runner_kwargs["quantization_config"] = online_quant_args
+
+    kv_cache_dtype = runner_kwargs.get("kv_cache_dtype", "auto")
+    force_marlin = runner_kwargs.get("linear_backend") == "marlin"
+    if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
+        # FA3 requires BF16 output when the query input is FP8.
+        runner_kwargs["dtype"] = "bfloat16"
 
     with vllm_runner(
         model_name,
@@ -224,11 +280,26 @@ def test_online_quantization(
                 # Packed e2m1 values, two per byte.
                 assert o_proj.weight.dtype == torch.uint8
             elif current_platform.is_cuda() or current_platform.is_xpu():
-                assert o_proj.weight.dtype == torch.float8_e4m3fn
+                if current_platform.supports_fp8() and not force_marlin:
+                    assert o_proj.weight.dtype == torch.float8_e4m3fn
+                    assert not isinstance(
+                        o_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                    )
+                else:
+                    assert o_proj.weight.dtype == torch.int32
+                    assert isinstance(
+                        o_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                    )
             elif current_platform.is_rocm():
                 assert o_proj.weight.dtype == current_platform.fp8_dtype()
             else:
                 pytest.skip("Only runs on CUDA and ROCm.")
+
+            if kv_cache_dtype == "fp8":
+                attn = model.model.layers[0].self_attn.attn
+                assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+                assert attn._k_scale == 1.0
+                assert attn._v_scale == 1.0
 
             # Verify ignored layers are unquantized.
             if isinstance(online_quant_args, dict) and "ignore" in online_quant_args:

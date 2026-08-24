@@ -94,15 +94,12 @@ class Fp8Config(QuantizationConfig):
 
     def __init__(
         self,
-        is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
         store_dtype: str | None = None,
     ) -> None:
         super().__init__()
-
-        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
 
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
@@ -113,11 +110,6 @@ class Fp8Config(QuantizationConfig):
         )
         self.store_dtype = store_dtype
         if weight_block_size is not None:
-            if not is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "The block-wise quantization only supports fp8-serialized "
-                    "checkpoint for now."
-                )
             if len(weight_block_size) != 2:
                 raise ValueError(
                     "The quantization block size of weight must have 2 "
@@ -155,7 +147,6 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_checkpoint_fp8_serialized = "fp8" in quant_method
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
@@ -164,8 +155,9 @@ class Fp8Config(QuantizationConfig):
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
             )
+        assert "fp8" in quant_method
+
         return cls(
-            is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
@@ -183,18 +175,9 @@ class Fp8Config(QuantizationConfig):
                 match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
-            if not self.is_checkpoint_fp8_serialized:
-                from vllm.model_executor.layers.quantization.online.fp8 import (
-                    Fp8PerTensorOnlineLinearMethod,
-                )
-
-                online_method = Fp8PerTensorOnlineLinearMethod()
-                online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-                return online_method
-            else:
-                offline_method = Fp8LinearMethod(self)
-                offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-                return offline_method
+            offline_method = Fp8LinearMethod(self)
+            offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return offline_method
         elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
@@ -209,14 +192,7 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
-            if self.is_checkpoint_fp8_serialized:
-                return Fp8MoEMethod(self, layer)
-            else:
-                from vllm.model_executor.layers.quantization.online.fp8 import (
-                    Fp8PerTensorOnlineMoEMethod,
-                )
-
-                return Fp8PerTensorOnlineMoEMethod(layer=layer)
+            return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -516,7 +492,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        assert self.quant_config.is_checkpoint_fp8_serialized
         params_dtype = torch.float8_e4m3fn
 
         if self.block_quant:
