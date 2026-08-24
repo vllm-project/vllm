@@ -46,6 +46,7 @@ impl ControlServiceImpl {
             data_parallel_size: self.client().data_parallel_size().min(u32::MAX as usize) as u32,
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
+            world_size: ready.world_size,
         }
     }
 
