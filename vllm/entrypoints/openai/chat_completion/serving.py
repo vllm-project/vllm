@@ -402,6 +402,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 request_metadata,
                 chat_template_kwargs=chat_template_kwargs,
                 mm_token_counts=mm_token_counts,
+                raw_request=raw_request,
             )
 
         return await self.chat_completion_full_generator(
@@ -414,6 +415,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request_metadata,
             parser=parser,
             mm_token_counts=mm_token_counts,
+            raw_request=raw_request,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -460,6 +462,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
+        raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -902,6 +905,19 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
+            if last_res is not None:
+                hook_outcome = await self.apply_post_generation_hooks(
+                    raw_request, last_res, request.vllm_xargs
+                )
+                refusal = self.post_generation_refusal_response(hook_outcome)
+                if refusal is not None:
+                    err_chunk = self.create_streaming_error_response(
+                        refusal.error.message,
+                        err_type=refusal.error.type or "RefusalError",
+                        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    )
+                    yield f"data: {err_chunk}\n\n"
+
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
@@ -922,6 +938,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
         parser: Parser | None = None,
         mm_token_counts: dict[str, int] | None = None,
+        raw_request: Request | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -938,6 +955,13 @@ class OpenAIServingChat(GenerateBaseServing):
                 err_type="InternalServerError",
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+        hook_outcome = await self.apply_post_generation_hooks(
+            raw_request, final_res, request.vllm_xargs
+        )
+        refusal = self.post_generation_refusal_response(hook_outcome)
+        if refusal is not None:
+            return refusal
 
         choices: list[ChatCompletionResponseChoice] = []
         total_reasoning_tokens = 0

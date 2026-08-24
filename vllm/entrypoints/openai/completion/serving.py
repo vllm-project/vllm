@@ -5,6 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import cast
 
 from fastapi import Request
@@ -237,6 +238,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
+                raw_request=raw_request,
             )
 
         # Non-streaming response
@@ -253,6 +255,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # with the inputs token IDs
                 if final_res.prompt is None:
                     final_res.prompt = self._extract_prompt_text(engine_inputs[i])
+
+                hook_outcome = await self.apply_post_generation_hooks(
+                    raw_request, final_res, request.vllm_xargs
+                )
+                refusal = self.post_generation_refusal_response(hook_outcome)
+                if refusal is not None:
+                    return refusal
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -292,6 +301,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         num_prompts: int,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -494,6 +504,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
+
+            if last_res is not None:
+                hook_outcome = await self.apply_post_generation_hooks(
+                    raw_request, last_res, request.vllm_xargs
+                )
+                refusal = self.post_generation_refusal_response(hook_outcome)
+                if refusal is not None:
+                    err_chunk = self.create_streaming_error_response(
+                        refusal.error.message,
+                        err_type=refusal.error.type or "RefusalError",
+                        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    )
+                    yield f"data: {err_chunk}\n\n"
 
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"

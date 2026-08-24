@@ -27,6 +27,15 @@ class EndpointPlugin(Protocol):
 - `attach_router`: registers routes on `app`
 - `init_state`: initializes per app state the routes read at request time
 
+Plugins may also implement an **optional** `post_generation` hook (not part of the
+runtime-checkable protocol, so existing route-only plugins keep working). The
+OpenAI chat and completion serving paths call it once at end-of-sequence with a
+[`ScoringContext`][vllm.plugins.endpoint_plugins.post_generation.ScoringContext]
+and merge returned scores onto `RequestOutput.metadata["external_scores"]`.
+Set `blocking = True` and return `{"block": true, "replacement": "..."}` (or omit
+`replacement` to refuse) to replace or reject the response. See [Post-generation
+hooks](#post-generation-hooks).
+
 ## The two phase lifecycle
 
 Routes are registered before the engine exists. This means the interface has to expose two hooks that run at two different points in server startup:
@@ -123,6 +132,40 @@ my_admin_api = "my_pkg.endpoints:MyAdminEndpointPlugin"  # adds the HTTP route
 ```
 
 Do not expect a single endpoint plugin to also mutate engine/worker state. If your route needs a worker side method that doesn't already exist then add it via a paired `general_plugins` entry point.
+
+## Post-generation hooks
+
+Safety, grounding, and audit classifiers need the **detokenized** completion. They
+should not run as logits processors. Implement `async def post_generation(self, ctx)`
+on the same `EndpointPlugin` instance:
+
+```python
+class GroundingPlugin:
+    name = "grounding"
+    required_tasks = ("generate",)
+    blocking = True
+    timeout_ms = 1000
+
+    def attach_router(self, app):
+        return  # HTTP routes optional
+
+    async def init_state(self, engine_client, state, args):
+        return
+
+    async def post_generation(self, ctx):
+        # ctx.generated_text, ctx.prompt_token_ids, ctx.vllm_xargs, ...
+        if "forbidden" in ctx.generated_text:
+            return {"block": True, "replacement": "I can't help with that."}
+        return {"score": 0.01}
+```
+
+The hook is invoked from `GenerateBaseServing` after the final `RequestOutput`
+(`finished=True`) and before OpenAI serialization. Streaming still flushes tokens
+as they are produced; a blocking refusal can only replace the last SSE chunk /
+final response. Mid-stream mutation is out of scope.
+
+Allowlist the plugin with `VLLM_PLUGINS` like any other endpoint plugin. Nothing
+loads in engine-core or GPU workers.
 
 ## Path-prefix convention
 

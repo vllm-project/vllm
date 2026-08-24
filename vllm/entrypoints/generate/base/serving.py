@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -308,6 +308,42 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                         request.request_id,
                         exc_info=True,
                     )
+
+    async def apply_post_generation_hooks(
+        self,
+        raw_request: Request | None,
+        request_output: "RequestOutput",
+        vllm_xargs: dict[str, Any] | None,
+    ):
+        """Run optional EndpointPlugin.post_generation hooks (RFC #43999).
+
+        No-ops when ``raw_request`` is missing or no endpoint plugins are
+        loaded. Mutates ``request_output`` in place (text replacement and
+        ``metadata["external_scores"]``).
+        """
+        from vllm.plugins.endpoint_plugins.post_generation import (
+            PostGenerationOutcome,
+            apply_post_generation_hooks as run_post_generation_hooks,
+        )
+
+        if raw_request is None:
+            return PostGenerationOutcome()
+        plugins = getattr(raw_request.app.state, "endpoint_plugins", None) or []
+        if not plugins:
+            return PostGenerationOutcome()
+        return await run_post_generation_hooks(
+            plugins, request_output, vllm_xargs
+        )
+
+    def post_generation_refusal_response(self, outcome) -> ErrorResponse | None:
+        if outcome.blocked and outcome.replacement is None:
+            return self.create_error_response(
+                outcome.error_message
+                or "Request blocked by post-generation hook",
+                err_type="RefusalError",
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+        return None
 
     @staticmethod
     def _get_decoded_token(
