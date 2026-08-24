@@ -1036,8 +1036,8 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                   }
                 }
 #endif
-                const int num_warps = std::min(num_groups, 32);
-                dim3 block(num_warps * 32);
+                const int num_warps = std::min(num_groups, 1024 / WARP_SIZE);
+                dim3 block(num_warps * WARP_SIZE);
                 vllm::situ_and_mul_quant_group_scalar_kernel<scalar_t, fp8_t,
                                                              128>
                     <<<grid, block, 0, stream>>>(
