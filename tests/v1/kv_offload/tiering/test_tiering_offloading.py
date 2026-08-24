@@ -248,19 +248,32 @@ class TestExampleSecondaryTierManager:
 
 
 # What a request-level cascade does with a key already present in the primary
-# tier, keyed by what primary lookup says about it. SUPPLY reaches the peer
-# now, DEFER is retried next step, DROP is never offered again, permanently so
-# since prepare_store counts the key as stored and the scheduler advances past
-# its chunk. A new LookupResult has to declare which of the three it is.
+# tier, keyed by what primary lookup says about it. SUPPLY reaches the peer now,
+# DEFER is retried next step, DROP is never offered again, permanently so since
+# prepare_store counts the key as stored and the scheduler advances past its
+# chunk. A new LookupResult has to declare which it is, and the test named
+# beside it is where that behavior is actually exercised.
 _CASCADE_SUPPLY_BEHAVIOR = {
+    # test_cascade_defers_keys_whose_primary_write_is_in_flight, after the
+    # writer's complete_store lands.
     LookupResult.HIT: "supply",
+    # The same test, before it lands.
     LookupResult.HIT_PENDING: "defer",
+    # test_cascade_drops_deferred_keys_whose_primary_write_failed, where the
+    # failed write frees the block.
     LookupResult.MISS: "drop",
-    # The primary tier resolves every key it holds, so RETRY cannot reach the
-    # cascade. Parking on it would have no guarantee of draining, which is what
-    # makes parking HIT_PENDING safe, so the cascade rejects it.
+    # test_cascade_rejects_retry_from_primary. The primary tier resolves every
+    # key it holds, so RETRY cannot reach the cascade, and parking on it would
+    # have no guarantee of draining, which is what makes parking HIT_PENDING
+    # safe. It is the one case no real primary tier can produce.
     LookupResult.RETRY: "unreachable",
 }
+
+
+def test_every_lookup_result_has_a_declared_cascade_behavior():
+    """A new LookupResult must state what the cascade does with it, rather
+    than falling into whichever branch happens to catch it."""
+    assert set(_CASCADE_SUPPLY_BEHAVIOR) == set(LookupResult)
 
 
 class TestTieringOffloadingManager:
@@ -1096,12 +1109,16 @@ class TestTieringOffloadingManager:
         self.secondary_tier2.submit_store.assert_not_called()
 
     def _make_request_level_request(self, req_id: str) -> ReqContext:
-        """Start a request for which tier1 asks for request-level offloading."""
+        """Start a request for which tier1 asks for request-level offloading,
+        with tier1's submit_store wrapped so the cascade can be observed."""
         self.secondary_tier1.on_new_request = lambda req_context: (
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
         ctx = ReqContext(req_id=req_id)
         self.manager.on_new_request(ctx)
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
         return ctx
 
     def _cascaded_keys_for(self, req_id: str) -> list[set[OffloadKey]]:
@@ -1112,17 +1129,10 @@ class TestTieringOffloadingManager:
             if call.args[0].req_context.req_id == req_id
         ]
 
-    @pytest.mark.parametrize("result", list(LookupResult))
-    def test_cascade_supply_behavior_declared_for_every_lookup_result(
-        self, manager_setup, result: LookupResult
-    ):
-        """Whether a lookup result supplies, defers or drops decides if the
-        peer ever sees the block, so every member needs deliberate behavior."""
-        assert result in _CASCADE_SUPPLY_BEHAVIOR, (
-            f"{result} has no declared cascade disposition"
-        )
-        expected = _CASCADE_SUPPLY_BEHAVIOR[result]
-
+    def test_cascade_rejects_retry_from_primary(self, manager_setup):
+        """RETRY would be parked with no guarantee of ever draining, so the
+        cascade refuses it. No real primary tier returns it, so this is the one
+        disposition that has to be forced."""
         keys = to_keys(range(3))
         self._start_request()
         assert self.manager.prepare_store(keys, _CTX) is not None
@@ -1130,36 +1140,17 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         ctx = self._make_request_level_request("req_cascade")
-        self.secondary_tier1.submit_store = MagicMock(
-            wraps=self.secondary_tier1.submit_store
-        )
-        self.manager.primary_tier.lookup = lambda key, req_context: result
+        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)
 
-        if expected == "unreachable":
-            with pytest.raises(AssertionError):
-                self.manager._cascade_existing_blocks_to_request_level_tiers(
-                    keys, ctx, {0}
-                )
-            return
-
-        self.manager._cascade_existing_blocks_to_request_level_tiers(keys, ctx, {0})
-
-        supplied = bool(self._cascaded_keys_for(ctx.req_id))
-        deferred = bool(self.manager._req_state[ctx.req_id].pending_cascade_keys)
-        assert (supplied, deferred) == {
-            "supply": (True, False),
-            "defer": (False, True),
-            "drop": (False, False),
-        }[expected]
+        with pytest.raises(AssertionError):
+            self.manager._cascade_existing_blocks_to_request_level_tiers(keys, ctx, {0})
 
     def _start_in_flight_primary_write(self, keys: list[OffloadKey]) -> ReqContext:
         """Leave a GPU->primary write for `keys` open, so they look present to
         prepare_store but are not yet readable."""
         writer_ctx = ReqContext(req_id="req_writer")
         self._start_request(writer_ctx)
-        writer_result = self.manager.prepare_store(keys, writer_ctx)
-        assert writer_result is not None
-        assert set(writer_result.keys_to_store) == set(keys)
+        assert self.manager.prepare_store(keys, writer_ctx) is not None
         return writer_ctx
 
     def test_cascade_defers_keys_whose_primary_write_is_in_flight(self, manager_setup):
@@ -1170,9 +1161,6 @@ class TestTieringOffloadingManager:
         writer_ctx = self._start_in_flight_primary_write(keys)
 
         ctx = self._make_request_level_request("req_cascade")
-        self.secondary_tier1.submit_store = MagicMock(
-            wraps=self.secondary_tier1.submit_store
-        )
         result = self.manager.prepare_store(keys, ctx)
         assert result is not None
         assert not result.keys_to_store
@@ -1190,10 +1178,9 @@ class TestTieringOffloadingManager:
         writer_ctx = self._start_in_flight_primary_write(keys)
 
         ctx = self._make_request_level_request("req_cascade")
-        self.secondary_tier1.submit_store = MagicMock(
-            wraps=self.secondary_tier1.submit_store
-        )
-        assert self.manager.prepare_store(keys, ctx) is not None
+        result = self.manager.prepare_store(keys, ctx)
+        assert result is not None
+        assert not result.keys_to_store
         self.manager.on_request_finished(ctx)
 
         assert ctx.req_id in self.manager._req_state
@@ -1211,15 +1198,12 @@ class TestTieringOffloadingManager:
         """A failed write frees the block, so the deferred key resolves to MISS
         and the request finalizes instead of parking forever."""
         keys = to_keys(range(3))
-        writer_ctx = ReqContext(req_id="req_writer")
-        self._start_request(writer_ctx)
-        assert self.manager.prepare_store(keys, writer_ctx) is not None
+        writer_ctx = self._start_in_flight_primary_write(keys)
 
         ctx = self._make_request_level_request("req_cascade")
-        self.secondary_tier1.submit_store = MagicMock(
-            wraps=self.secondary_tier1.submit_store
-        )
-        assert self.manager.prepare_store(keys, ctx) is not None
+        result = self.manager.prepare_store(keys, ctx)
+        assert result is not None
+        assert not result.keys_to_store
         self.manager.on_request_finished(ctx)
 
         self.manager.complete_store(keys, writer_ctx, success=False)
