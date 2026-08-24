@@ -246,8 +246,6 @@ class ModelConfig:
 
     NOTE: This disables both `torch.compile` and CUDA graphs, and is
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
-    enable_return_routed_experts: bool = False
-    """Whether to return routed experts."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
