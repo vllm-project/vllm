@@ -267,7 +267,8 @@ class Qwen3_5Model(Qwen3NextModel):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = Qwen3_5RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -351,7 +352,8 @@ class Qwen3_5ForCausalLMBase(
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -435,6 +437,9 @@ class Qwen3_5ForCausalLMBase(
     ) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
@@ -498,10 +503,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             multimodal_config.is_multimodal_pruning_enabled()
         )
         self.video_pruning_rate = self.multimodal_config.video_pruning_rate
-        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+        self._tokenizer = cached_tokenizer_from_config(
+            vllm_config.model_config)
 
         # attributes needed by EVS-related functions inherited from Qwen3-VL
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.use_deepstack = hasattr(
+            config.vision_config, "deepstack_visual_indexes")
         self.deepstack_num_level = (
             len(config.vision_config.deepstack_visual_indexes)
             if self.use_deepstack
@@ -520,7 +527,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+                vllm_config=vllm_config, prefix=maybe_prefix(
+                    prefix, "language_model")
             )
 
         self.make_empty_intermediate_tensors = (
@@ -597,8 +605,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
         return hidden_states
 
+
     def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.language_model.compute_logits_local(hidden_states)
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.language_model.get_top_tokens(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -717,10 +729,12 @@ class Qwen3_5MoeForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
         self.video_pruning_rate = self.multimodal_config.video_pruning_rate
-        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+        self._tokenizer = cached_tokenizer_from_config(
+            vllm_config.model_config)
 
         # attributes needed by EVS-related functions inherited from Qwen3-VL
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.use_deepstack = hasattr(
+            config.vision_config, "deepstack_visual_indexes")
         self.deepstack_num_level = (
             len(config.vision_config.deepstack_visual_indexes)
             if self.use_deepstack
@@ -739,7 +753,8 @@ class Qwen3_5MoeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+                vllm_config=vllm_config, prefix=maybe_prefix(
+                    prefix, "language_model")
             )
 
         self.make_empty_intermediate_tensors = (
