@@ -195,7 +195,7 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_i
     assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
     assert len(qkv_proj.weight_scale.shape) == 0
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
     positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
     with (
@@ -218,7 +218,7 @@ def test_quark_fp8_w_per_channel_a_per_token(monkeypatch, dist_init, workspace_i
     assert qkv_proj.weight_scale.shape[0] == qkv_proj.weight.shape[1]
     assert qkv_proj.weight_scale.shape[1] == 1
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
     positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
     with (
@@ -238,7 +238,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
         assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
         assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
         input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
         positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
         with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
@@ -260,7 +260,7 @@ def test_quark_int8_w8a8_moe(monkeypatch, dist_init, workspace_init):
     qkv_proj = layer.self_attn.qkv_proj
     assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
     positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
     with (
@@ -293,7 +293,7 @@ def test_quark_w4a8_fp8_moe(monkeypatch, dist_init, workspace_init):
             f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
         )
 
-        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+        monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
         input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
         positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
         with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):

@@ -334,7 +334,7 @@ def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
         assert qkv_proj.weight_scale.dtype is torch.float32
         assert len(qkv_proj.weight_scale.shape) == 0
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
     positions = torch.arange(input_ids.numel(), device=target_device)
     with (

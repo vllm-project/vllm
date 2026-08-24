@@ -55,7 +55,7 @@ def test_auto_gptq_quantization_method(
     assert isinstance(qkv_proj.quant_method, AutoGPTQLinearMethod)
 
     target_device = torch.device(current_platform.device_type)
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
     positions = torch.arange(input_ids.numel(), device=target_device)
     with (

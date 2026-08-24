@@ -222,7 +222,7 @@ def test_auto_awq_quantization_method(
         f"got {type(qkv_proj.quant_method)}"
     )
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
     positions = torch.arange(input_ids.numel(), device=target_device)
     with (

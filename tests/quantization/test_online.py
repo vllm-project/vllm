@@ -231,7 +231,7 @@ def test_online_quantization(
         model_loader_cls=DummyModelLoader,
     )
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
 
     o_proj = model.model.layers[0].self_attn.o_proj
     moe = model.model.layers[0].block_sparse_moe.experts

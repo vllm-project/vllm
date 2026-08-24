@@ -101,7 +101,7 @@ def test_model_load_and_run(
         LlamaForCausalLM,
         vllm_config_kwargs={"kernel_config": kernel_config},
     )
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
     positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
     with (
