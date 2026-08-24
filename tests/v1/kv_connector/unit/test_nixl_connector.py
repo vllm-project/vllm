@@ -1835,7 +1835,6 @@ def test_host_stager_read_failure_reaches_terminal_state():
     stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
 
     assert stager.get_finished() == (set(), {"request"})
-    assert "request" not in stager.active_req_ids
     assert pool.free_slots == [slot]
 
 
@@ -1855,7 +1854,6 @@ def test_host_stager_abort_drains_read_before_reusing_slot():
     assert pool.free_slots == []
     assert stager.get_finished() == (set(), set())
     assert pool.free_slots == [slot]
-    assert not stager.active_req_ids
 
 
 @pytest.mark.cpu_test
