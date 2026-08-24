@@ -26,8 +26,8 @@ def _has_triton_for_backends(**drivers: bool) -> bool:
     triton_mod = types.ModuleType("triton")
     triton_mod.__spec__ = importlib.machinery.ModuleSpec("triton", None)
     backends_mod = types.ModuleType("triton.backends")
-    backends_mod.backends = backends
-    triton_mod.backends = backends_mod
+    backends_mod.__dict__["backends"] = backends
+    triton_mod.__dict__["backends"] = backends_mod
 
     patched_modules = {"triton": triton_mod, "triton.backends": backends_mod}
     try:
