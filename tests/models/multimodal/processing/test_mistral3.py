@@ -5,7 +5,7 @@
 import pytest
 import torch
 from PIL import Image
-from transformers import BatchFeature
+from transformers import AutoProcessor, BatchFeature
 
 from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
 from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
@@ -22,24 +22,41 @@ _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
 
 
-def _processed_pixel_values(
+def _process_images_with_hf(
     hf_processor,
     images: list[Image.Image],
     mm_processor_kwargs: dict[str, object],
-) -> list[torch.Tensor]:
-    """Resize via the full HF processor and un-pad to per-image H×W."""
-    hf_out, _ = hf_processor._process_images(images, **mm_processor_kwargs)
+) -> tuple[list[torch.Tensor], list[int]]:
+    """Process images and placeholders through the public HF processor."""
+    hf_out = hf_processor(
+        text=hf_processor.image_token * len(images),
+        images=images,
+        return_tensors="pt",
+        **mm_processor_kwargs,
+    )
     pixel_values = hf_out["pixel_values"]
     image_sizes = hf_out["image_sizes"]
-    return [p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)]
+    unpadded = [p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)]
+
+    special_token_ids = {
+        hf_processor.image_token_id,
+        hf_processor.image_break_token_id,
+        hf_processor.image_end_token_id,
+    }
+    placeholder_tokens = [
+        token_id
+        for token_id in hf_out["input_ids"][0].tolist()
+        if token_id in special_token_ids
+    ]
+    return unpadded, placeholder_tokens
 
 
-def _placeholder_count_from_prompt_updates(
+def _placeholder_tokens_from_prompt_updates(
     processor,
     images: list[Image.Image],
     pixel_values: list[torch.Tensor],
     mm_processor_kwargs: dict[str, object],
-) -> int:
+) -> list[int]:
     hf_inputs = BatchFeature({"pixel_values": pixel_values})
     fields_config = processor._get_mm_fields_config(hf_inputs, mm_processor_kwargs)
     out_mm_kwargs = MultiModalKwargsItems.from_hf_inputs(hf_inputs, fields_config)
@@ -48,13 +65,11 @@ def _placeholder_count_from_prompt_updates(
     updates = processor._get_prompt_updates(
         mm_items, mm_processor_kwargs, out_mm_kwargs
     )
-    image_token_id = processor.info.get_hf_config().image_token_index
-
-    total = 0
+    placeholder_tokens: list[int] = []
     for item_idx in range(len(images)):
         details = updates[0].resolve(item_idx).content
-        total += details.full.count(image_token_id)
-    return total
+        placeholder_tokens.extend(details.full)
+    return placeholder_tokens
 
 
 def _expected_placeholder_tokens_per_image(
@@ -108,21 +123,29 @@ def test_processor_size_override(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
-    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    hf_processor = AutoProcessor.from_pretrained(
+        model_id,
+        fix_mistral_regex=True,
+    )
 
     dummy_image = Image.new("RGB", image_size, color=(127, 127, 127))
     images = [dummy_image] * num_imgs
     merged_mm_kwargs = processor.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
-    pixel_values = _processed_pixel_values(hf_processor, images, merged_mm_kwargs)
+    pixel_values, hf_placeholder_tokens = _process_images_with_hf(
+        hf_processor, images, merged_mm_kwargs
+    )
 
-    image_token_count = _placeholder_count_from_prompt_updates(
+    prompt_update_tokens = _placeholder_tokens_from_prompt_updates(
         processor, images, pixel_values, hf_processor_mm_kwargs
     )
     expected_from_pixel_values = _expected_placeholder_tokens_per_image(
         hf_processor, pixel_values[0]
     )
     assert expected_from_pixel_values == expected_toks_per_img
-    assert image_token_count == expected_from_pixel_values * num_imgs
+    assert hf_placeholder_tokens.count(hf_processor.image_token_id) == (
+        expected_from_pixel_values * num_imgs
+    )
+    assert prompt_update_tokens == hf_placeholder_tokens
 
 
 def test_lightonocr_keeps_vision_config_image_size():
