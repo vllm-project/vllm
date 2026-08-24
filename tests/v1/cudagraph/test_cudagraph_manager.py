@@ -46,12 +46,16 @@ def _create_vllm_config() -> MagicMock:
     return vllm_config
 
 
-def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
+@pytest.mark.parametrize("is_rocm", [False, True])
+def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch, is_rocm):
     """FULL capture must set graph_pool_id before entering torch.cuda.graph().
 
     NCCL symmetric memory checks this global during graph capture; without
     it, capture fails with:
     AssertionError: graph_pool_id is not set under graph capture
+
+    ROCm also records onto graph_capture()'s stream; CUDA leaves stream=
+    unset so PyTorch keeps its default capture stream.
     """
     graph_pool = object()
     monkeypatch.setattr(
@@ -63,6 +67,11 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         gpu_cudagraph_utils.current_platform,
         "get_global_graph_pool",
         lambda: graph_pool,
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "is_rocm",
+        lambda: is_rocm,
     )
 
     manager = gpu_cudagraph_utils.CudaGraphManager(
@@ -83,9 +92,11 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     def create_forward_fn(desc, warmup):
         return lambda _mode: None
 
+    capture_stream = MagicMock(name="graph_capture_stream")
+
     @contextmanager
     def fake_graph_capture(*args, **kwargs):
-        yield SimpleNamespace(stream=MagicMock())
+        yield SimpleNamespace(stream=capture_stream)
 
     fake_offloader = MagicMock()
 
@@ -109,3 +120,8 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+    _args, kwargs = mock_cuda_graph.call_args
+    if is_rocm:
+        assert kwargs["stream"] is capture_stream
+    else:
+        assert kwargs.get("stream") is None

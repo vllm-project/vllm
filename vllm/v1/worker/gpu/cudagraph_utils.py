@@ -318,7 +318,7 @@ class CudaGraphManager:
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
         """
-        with graph_capture(device=self.device):
+        with graph_capture(device=self.device) as cap_ctx:
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
             # buffers in the graph pool.
@@ -362,7 +362,13 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        with torch.cuda.graph(graph, self.pool):
+                        # ROCm: record on graph_capture()'s stream so TP
+                        # allreduce is captured in the communicator context.
+                        # CUDA keeps PyTorch's default capture stream.
+                        capture_stream = (
+                            cap_ctx.stream if current_platform.is_rocm() else None
+                        )
+                        with torch.cuda.graph(graph, self.pool, stream=capture_stream):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
