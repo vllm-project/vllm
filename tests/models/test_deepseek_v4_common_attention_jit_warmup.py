@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import torch
 
 from vllm.platforms import current_platform
 
@@ -27,6 +26,7 @@ from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     SavePartialStatesKernel,
 )
+
 
 def test_deepseek_v4_c128a_topk_metadata_warmup_keys() -> None:
     from vllm.models.deepseek_v4.sparse_mla import (
