@@ -1285,13 +1285,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
         )
         input_batch = pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
-        prepare_dcp_local_seq_lens_for_batch(
-            input_batch,
-            self.input_buffers,
-            self.dcp_size,
-            self.dcp_rank,
-            self.cp_interleave,
-        )
         return input_batch
 
     def prepare_attn(
@@ -1510,13 +1503,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.kv_cache_config.num_blocks,
                         self.max_model_len,
                     )
-                prepare_dcp_local_seq_lens_for_batch(
-                    input_batch,
-                    self.input_buffers,
-                    self.dcp_size,
-                    self.dcp_rank,
-                    self.cp_interleave,
-                )
             else:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
@@ -1528,6 +1514,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
+            prepare_dcp_local_seq_lens_for_batch(
+                input_batch,
+                self.input_buffers,
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
