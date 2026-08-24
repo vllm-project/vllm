@@ -4404,10 +4404,14 @@ def test_mamba_align_keeps_an_async_step_boundary_write():
     request.num_computed_tokens = block_size
     manager.allocate_slots(request, block_size, 0, None, delay_cache_blocks=True)
 
-    request.append_output_token_ids([7] * block_size)
-    mamba.cache_blocks(request, request.num_tokens)
+    request.append_output_token_ids([7] * (2 * block_size))
+    mamba.cache_blocks(request, block_size)
 
     assert 0 in _hashed_mamba_blocks(mamba, request)
+    assert list(mamba._state_write_tokens[request.request_id]) == [2 * block_size]
+
+    mamba.cache_blocks(request, 2 * block_size)
+    assert 1 in _hashed_mamba_blocks(mamba, request)
 
 
 def test_mamba_align_prunes_a_rejected_boundary_write():

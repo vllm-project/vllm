@@ -1811,8 +1811,14 @@ class MambaManager(SingleTypeKVCacheManager):
         mask = [False] * max(end_block - start_block, 0)
         if pending_writes is None:
             return mask
-        while pending_writes and pending_writes[0] <= request.num_tokens:
-            num_state_tokens = pending_writes.popleft()
+        while pending_writes:
+            num_state_tokens = pending_writes[0]
+            if (
+                num_state_tokens > request.num_tokens
+                or num_state_tokens > end_block * self.block_size
+            ):
+                break
+            pending_writes.popleft()
             if num_state_tokens % self.block_size != 0:
                 continue
             boundary_block = num_state_tokens // self.block_size - 1
