@@ -339,7 +339,7 @@ class AsyncLLM(EngineClient):
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
                 "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.29. You should instead pass "
+                "is deprecated and will be removed in the future. You should instead pass "
                 "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
             )
 
