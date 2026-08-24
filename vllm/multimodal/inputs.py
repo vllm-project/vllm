@@ -240,8 +240,8 @@ def nested_tensors_equal(
 
     If `check_dtype` is `True`, the tensors must have the same dtype.
     """
-    check_dtype_func = (
-        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    check_dtype_func = lambda a, b, check_dtype: (
+        a.dtype == b.dtype if check_dtype else True
     )
     if isinstance(a, torch.Tensor):
         return (
@@ -302,9 +302,11 @@ def _nested_tensors_h2d(
 
     return json_map_leaves(
         (
-            lambda x: x.to(device=device, non_blocking=True)
-            if isinstance(x, torch.Tensor)
-            else x
+            lambda x: (
+                x.to(device=device, non_blocking=True)
+                if isinstance(x, torch.Tensor)
+                else x
+            )
         ),
         tensors,
     )

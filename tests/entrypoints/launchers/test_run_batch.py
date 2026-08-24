@@ -1080,7 +1080,7 @@ async def test_upload_data_uploads_once_on_success():
     """A successful upload must not be retried (regression guard)."""
     session = _make_aiohttp_put_session(status=200)
     with patch(
-        "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+        "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
         return_value=session,
     ):
         await upload_data(
@@ -1095,11 +1095,11 @@ async def test_upload_data_error_includes_awaited_response_body():
     session = _make_aiohttp_put_session(status=500, body_text="server-error-detail")
     with (
         patch(
-            "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+            "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
             return_value=session,
         ),
         patch(
-            "vllm.entrypoints.openai.run_batch.asyncio.sleep",
+            "vllm.entrypoints.launchers.run_batch.asyncio.sleep",
             AsyncMock(),
         ),
         pytest.raises(Exception) as exc_info,
