@@ -356,10 +356,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.utils.import_utils import has_cutedsl
 
-            if (
-                has_cutedsl()
-                and self.backend_cls.get_name() == "FLASHMLA_SPARSE_DSV4"
-            ):
+            if has_cutedsl() and self.backend_cls.get_name() == "FLASHMLA_SPARSE_DSV4":
                 from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
                     _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
                 )

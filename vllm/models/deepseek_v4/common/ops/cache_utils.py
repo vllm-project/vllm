@@ -412,11 +412,17 @@ def dequantize_and_gather_k_cache(
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
-            dequantize_and_gather_k_cache_cutedsl,
+            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
         )
 
-        dequantize_and_gather_k_cache_cutedsl(
-            out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
+            out=out,
+            k_cache=k_cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=block_table,
+            block_size=block_size,
+            offset=offset,
         )
         return
 

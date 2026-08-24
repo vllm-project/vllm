@@ -359,19 +359,19 @@ def fused_indexer_q_rope_quant(
         if has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
-                fused_indexer_q_rope_quant_mxfp4_cutedsl,
+                _INDEXER_Q_MXFP4_KERNEL,
             )
 
-            fused_indexer_q_rope_quant_mxfp4_cutedsl(
-                positions,
-                index_q,
-                index_q_cos_sin_cache,
-                index_weights,
-                index_weights_softmax_scale,
-                index_weights_head_scale,
-                index_q_packed,
-                index_q_scale,
-                index_weights_out,
+            _INDEXER_Q_MXFP4_KERNEL(
+                positions=positions,
+                q=index_q,
+                cos_sin_cache=index_q_cos_sin_cache,
+                weights=index_weights,
+                weights_softmax_scale=index_weights_softmax_scale,
+                weights_head_scale=index_weights_head_scale,
+                q_packed=index_q_packed,
+                q_scale=index_q_scale,
+                weights_out=index_weights_out,
             )
         elif current_platform.is_xpu():
             torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_mxfp4(
@@ -428,18 +428,18 @@ def fused_indexer_q_rope_quant(
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
-            fused_indexer_q_rope_quant_fp8_cutedsl,
+            _INDEXER_Q_FP8_KERNEL,
         )
 
-        fused_indexer_q_rope_quant_fp8_cutedsl(
-            positions,
-            index_q,
-            index_q_cos_sin_cache,
-            index_weights,
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_q_fp8,
-            index_weights_out,
+        _INDEXER_Q_FP8_KERNEL(
+            positions=positions,
+            q=index_q,
+            cos_sin_cache=index_q_cos_sin_cache,
+            weights=index_weights,
+            weights_softmax_scale=index_weights_softmax_scale,
+            weights_head_scale=index_weights_head_scale,
+            q_fp8=index_q_fp8.view(torch.uint8),
+            weights_out=index_weights_out,
         )
     elif current_platform.is_xpu():
         torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_fp8(
