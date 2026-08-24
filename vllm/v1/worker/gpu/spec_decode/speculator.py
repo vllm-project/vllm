@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, final
 
 import numpy as np
 import torch
@@ -26,6 +26,9 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    OnlineAcceptanceEstimator,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
@@ -148,6 +151,20 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
+
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
+        )
+        self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
+        if self.enable_adaptive_verification:
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                device,
+            )
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -355,11 +372,26 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
-    def _greedy_sample_draft(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    @property
+    def skip_adaptive_verification(self) -> bool:
+        """True while the acceptance estimator is still fitting."""
+        return (
+            self.acceptance_estimator is not None
+            and self.acceptance_estimator.needs_full_verification
+        )
+
+    def _greedy_sample(
+        self,
+        hidden_states: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
+    ) -> torch.Tensor:
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         logits = self.model.compute_logits(hidden_states)
-        return logits.argmax(dim=-1)
+        draft_tokens = logits.argmax(dim=-1)
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step, draft_tokens)
+        return draft_tokens
 
     def sample_draft(
         self,
@@ -373,7 +405,7 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            return gumbel_sample(
+            draft_tokens = gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -385,7 +417,96 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-        return self._greedy_sample_draft(hidden_states)
+            self._maybe_predict_acceptance(
+                logits, idx_mapping, draft_step, draft_tokens
+            )
+            return draft_tokens
+        return self._greedy_sample(hidden_states, idx_mapping, draft_step)
+
+    def _maybe_predict_acceptance(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
+        draft_tokens: torch.Tensor,
+    ) -> None:
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.predict(
+                logits,
+                idx_mapping,
+                draft_step,
+                self.draft_token_confidence_probs,
+                draft_tokens,
+                self.temperature,
+            )
+
+    @final
+    def propose(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        dp_sync: DPSyncState | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
+    ) -> torch.Tensor:
+        if not dummy_run and not is_profile and self.acceptance_estimator is not None:
+            self.acceptance_estimator.step(
+                input_batch.idx_mapping,
+                num_sampled,
+                num_rejected,
+            )
+
+        return self._propose(
+            input_batch,
+            attn_metadata,
+            slot_mappings,
+            last_hidden_states,
+            aux_hidden_states,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            temperature,
+            seeds,
+            dp_sync=dp_sync,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            mm_inputs=mm_inputs,
+            is_profile=is_profile,
+        )
+
+    @abstractmethod
+    def _propose(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        dp_sync: DPSyncState | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
+    ) -> torch.Tensor:
+        raise NotImplementedError
 
     def _copy_request_inputs(
         self,
