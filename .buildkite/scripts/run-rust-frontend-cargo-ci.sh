@@ -21,7 +21,6 @@ export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 
-PROTOC_VERSION="${PROTOC_VERSION:-31.1}"
 CARGO_BINSTALL_VERSION="${CARGO_BINSTALL_VERSION:-1.20.1}"
 UV_VERSION="${UV_VERSION:-0.11.28}"
 PYO3_PYTHON_VERSION="${PYO3_PYTHON_VERSION:-3.12}"
@@ -32,34 +31,6 @@ CARGO_NEXTEST_VERSION_REQ="${CARGO_NEXTEST_VERSION_REQ:-0.9}"
 
 log_section() {
   echo "--- $*"
-}
-
-install_protoc() {
-  local arch
-  case "$(uname -m)" in
-    x86_64)
-      arch="x86_64"
-      ;;
-    aarch64|arm64)
-      arch="aarch_64"
-      ;;
-    *)
-      echo "Unsupported protoc architecture: $(uname -m)" >&2
-      return 1
-      ;;
-  esac
-
-  local url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${arch}.zip"
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-
-  log_section "Installing protoc ${PROTOC_VERSION}"
-  curl -L --proto '=https' --tlsv1.2 -sSf "$url" -o "$tmp_dir/protoc.zip"
-  mkdir -p "$CARGO_HOME/bin"
-  unzip -q "$tmp_dir/protoc.zip" bin/protoc 'include/*' -d "$CARGO_HOME"
-  chmod +x "$CARGO_HOME/bin/protoc"
-  rm -rf "$tmp_dir"
-  protoc --version
 }
 
 rust_toolchain() {
@@ -186,7 +157,6 @@ run_tests() {
     --no-fail-fast
 }
 
-install_protoc
 install_rust_toolchain
 
 case "$MODE" in
