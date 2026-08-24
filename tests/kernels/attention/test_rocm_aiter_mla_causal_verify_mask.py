@@ -231,8 +231,7 @@ def test_verify_mtp_uses_native_4d_gluon_entry():
     page_table = captured["page_table"]
     seq_info = captured["seq_info"]
     assert page_table.dim() == 1, (
-        f"verify MTP passes the 1-D paged_kv_indices buffer, got "
-        f"{page_table.dim()}-D"
+        f"verify MTP passes the 1-D paged_kv_indices buffer, got {page_table.dim()}-D"
     )
     assert seq_info.dim() == 1 and seq_info.numel() == num_reqs + 1, (
         f"verify MTP passes paged_kv_indptr [num_reqs + 1], got shape "
@@ -240,4 +239,7 @@ def test_verify_mtp_uses_native_4d_gluon_entry():
     )
     assert decode is not None and decode.paged_kv_indptr is not None
     assert torch.equal(seq_info, decode.paged_kv_indptr[: num_reqs + 1])
-    assert torch.equal(page_table[: int(seq_info[-1].item())], decode.paged_kv_indices[: int(seq_info[-1].item())])
+    assert torch.equal(
+        page_table[: int(seq_info[-1].item())],
+        decode.paged_kv_indices[: int(seq_info[-1].item())],
+    )
