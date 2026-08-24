@@ -587,6 +587,37 @@ Scope the salt to the isolation boundary you need:
 - **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
 - Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
 
+## Multimodal Media UUID Security
+
+### Background
+
+Multimodal content parts (`image_url`, `input_audio`, `video`, `image_embeds`, `audio_embeds`, `vision_chunk`) accept an optional `uuid` field. When provided, vLLM uses this value as the cache identity for the media item instead of hashing the raw media bytes. This avoids re-hashing large media payloads on repeated requests and is the primary mechanism for client-side cache control of multimodal inputs.
+
+### Client Responsibility
+
+**It is the client's responsibility to generate UUIDs that cannot be guessed by others.** Use cryptographically random values — for example, UUIDv4 via Python's `uuid.uuid4()` — rather than sequential counters, short strings, or predictable identifiers such as filenames or user IDs.
+
+### Multi-Tenant Risk
+
+In multi-tenant deployments where multiple callers share the same vLLM server, two callers who present the same `uuid` for different media will share a single cache entry. The media from whichever request arrives first is served to both, which means:
+
+- **Integrity**: A later caller's media is silently discarded and replaced by the earlier caller's cached output.
+- **Confidentiality**: A caller who deliberately reuses another caller's UUID receives output derived from that caller's media.
+
+This applies to the multimodal processor cache, the encoder output cache, and the prefix cache block hashes. Clients must ensure UUID uniqueness across all callers on the same server.
+
+### Extra Protection with `cache_salt`
+
+For additional cross-tenant isolation, set `cache_salt` on each request (see [Prefix Cache Timing Side-Channel Mitigation](#prefix-cache-timing-side-channel-mitigation-cache-salting) above). The salt is mixed into the prefix cache block hashes, so requests with different salts cannot share cached prefix blocks even if UUIDs collide.
+
+`cache_salt` is opt-in and not passed by default.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
+- **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
+- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
+
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).
