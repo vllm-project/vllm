@@ -167,6 +167,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     `multimodal_config.mm_device_do_normalize`.
     """
 
+    supports_tower_connector_lora: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `lora_config.enable_tower_connector_lora`.
+    """
+
     requires_raw_input_tokens: ClassVar[bool] = False
     """
     A flag that indicates this model processes input id tokens
@@ -1150,7 +1156,7 @@ class SupportsLateInteraction(Protocol):
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
+    hf_to_vllm_mapper: "WeightsMapper | None" = None
     packed_modules_mapping: ClassVar[dict[str, list[str]]]
     quant_config: QuantizationConfig | None = None
 
@@ -1184,8 +1190,7 @@ class SupportsQuant:
         if self.quant_config is None:
             return
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
-            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
-            self.quant_config.apply_vllm_mapper(unstacked_mapper)
+            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
             self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 

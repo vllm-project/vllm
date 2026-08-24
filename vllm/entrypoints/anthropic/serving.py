@@ -489,6 +489,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
+            vllm_xargs=anthropic_request.vllm_xargs,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
@@ -631,7 +632,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
-            result.stop_reason = "end_turn"
+            # vLLM reports the matched stop string in stop_reason (a str);
+            # an int stop-token-id or None (natural EOS) maps to end_turn.
+            if isinstance(choice.stop_reason, str):
+                result.stop_reason = "stop_sequence"
+                result.stop_sequence = choice.stop_reason
+            else:
+                result.stop_reason = "end_turn"
         elif choice.finish_reason == "length":
             result.stop_reason = "max_tokens"
         elif choice.finish_reason == "tool_calls":
@@ -715,6 +722,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             first_item = True
             finish_reason = None
+            # Matched stop string, when generation stopped on one (a str);
+            # int stop-token-id / None are not stop sequences.
+            stop_sequence: int | str | None = None
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
@@ -824,12 +834,20 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if len(origin_chunk.choices) == 0:
                             for event in stop_and_flush():
                                 yield event
-                            stop_reason = self.stop_reason_map.get(
-                                finish_reason or "stop"
-                            )
+                            if isinstance(stop_sequence, str):
+                                stop_delta = AnthropicDelta(
+                                    stop_reason="stop_sequence",
+                                    stop_sequence=stop_sequence,
+                                )
+                            else:
+                                stop_delta = AnthropicDelta(
+                                    stop_reason=self.stop_reason_map.get(
+                                        finish_reason or "stop"
+                                    )
+                                )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
-                                delta=AnthropicDelta(stop_reason=stop_reason),
+                                delta=stop_delta,
                                 usage=_build_anthropic_usage(origin_chunk.usage),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
@@ -838,6 +856,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                         if origin_chunk.choices[0].finish_reason is not None:
                             finish_reason = origin_chunk.choices[0].finish_reason
+                            stop_sequence = origin_chunk.choices[0].stop_reason
                             # continue
 
                         # thinking / text content

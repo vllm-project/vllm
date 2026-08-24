@@ -135,36 +135,16 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
 
 
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if not mm_data:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        # ChameleonProcessor requires text corresponding to the images
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        sep_token_id = tokenizer.get_vocab()[tokenizer.sep_token]  # type: ignore
 
-        sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
-
-        return prompt_tokens + [sep_token_id]
+        return [*prompt, sep_token_id]
 
     def _get_mm_fields_config(
         self,
@@ -1059,6 +1039,5 @@ class ChameleonForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
