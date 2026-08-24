@@ -87,8 +87,8 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
-    SupportsLoRA,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
