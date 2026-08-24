@@ -1304,6 +1304,46 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
 
 
+def test_multi_module_mtp_prefill_lookahead_chunk_accounting():
+    """A multi-module MTP drafter reads num_speculative_tokens ahead at a
+    chunk boundary, so the scheduler must never end a prefill chunk with
+    fewer than that many tokens left (see `_reserve_prefill_lookahead`).
+    Regression test for issue #53488: verify the shortened first chunk and
+    the resulting second chunk together cover the whole prompt exactly once,
+    with no gap or double-counted token.
+    """
+    scheduler = create_scheduler(max_num_seqs=1, max_num_batched_tokens=12)
+    scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 3
+
+    request = create_requests(num_requests=1, num_tokens=14, prompt_logprobs=0)[0]
+    scheduler.add_request(request)
+
+    # remaining = 14 - 0 - min(14, 12) = 2, which is < lookahead (3), so the
+    # first chunk is shrunk by (3 - 2) to leave exactly 3 tokens for the next.
+    output = scheduler.schedule()
+    first_chunk = output.num_scheduled_tokens[request.request_id]
+    assert first_chunk == 11
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert request.num_computed_tokens == first_chunk
+
+    output = scheduler.schedule()
+    second_chunk = output.num_scheduled_tokens[request.request_id]
+
+    assert first_chunk + second_chunk == request.num_prompt_tokens
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected,expected_per_req",
