@@ -7,13 +7,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
-    make_wna16_moe_quant_config,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.moe_wna16 import (
@@ -49,7 +43,6 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         has_moe_kernel = (
             is_available
             and ark is not None
-            and hasattr(ark, "moe")
             and hasattr(ark, "MoeSymmetricGemm")
             and xpu_lib is not None
         )
@@ -59,23 +52,14 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
 
         assert ark is not None
         self.ark = ark
-        self.ark_moe_op = ark.moe
-        self.weight_bits = quant_config.weight_bits
         self.remap_hidden_states_op = None
         self.moe_gather_op = None
-        self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.group_size: int | None = None
         self.local_num_experts: int | None = None
         self.global_num_experts: int | None = None
         self.expert_map: torch.Tensor | None = None
-        self.w13_weight: torch.Tensor | None = None
-        self.w13_scales: torch.Tensor | None = None
-        self.w2_weight: torch.Tensor | None = None
-        self.w2_scales: torch.Tensor | None = None
         self.rows_per_expert: torch.Tensor | None = None
         self.unpermuted_row_to_permuted_row: torch.Tensor | None = None
         self.router_weight_ones: torch.Tensor | None = None
-        self.apply_router_weight_on_input: bool | None = None
         self.router_weights_fn = self._keep_router_weights
         self.activation = None
         self.inter_size: int = 0
@@ -105,17 +89,10 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
 
         layer.w13_weight = layer.w13_qweight
         layer.w2_weight = layer.w2_qweight
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
         num_local_experts = layer.w13_weight.shape[0]
-        self.group_size = layer.group_size
         self.local_num_experts = num_local_experts
         self.global_num_experts = layer.global_num_experts
         self.expert_map = layer.expert_map
-        self.w13_weight = layer.w13_weight
-        self.w13_scales = layer.w13_scales
-        self.w2_weight = layer.w2_weight
-        self.w2_scales = layer.w2_scales
         self.rows_per_expert = torch.empty(
             (num_local_experts,),
             dtype=torch.int32,
@@ -123,8 +100,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         )
         self.unpermuted_row_to_permuted_row = None
         self.router_weight_ones = None
-        self.apply_router_weight_on_input = layer.apply_router_weight_on_input
-        if self.apply_router_weight_on_input:
+        if layer.apply_router_weight_on_input:
             if layer.top_k != 1:
                 raise NotImplementedError(
                     "apply_router_weight_on_input is only supported for topk=1."
@@ -152,17 +128,6 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             weight_bits=4,
             group_size=layer.group_size,
             activation_dtype=layer.w2_scales.dtype,
-        )
-
-    def get_fused_moe_quant_config(
-        self,
-        layer,
-    ) -> FusedMoEQuantConfig | None:
-        return make_wna16_moe_quant_config(
-            w1_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            group_size=layer.group_size,
-            num_bits=self.quant_config.weight_bits,
         )
 
     def _get_rows_per_expert(
@@ -277,6 +242,14 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         if num_moe_inputs == 0:
             return output
 
+        assert self.local_num_experts is not None
+        assert self.global_num_experts is not None
+        assert self.remap_hidden_states_op is not None
+        assert self.moe_gather_op is not None
+        assert self.w13_moe is not None
+        assert self.w2_moe is not None
+        assert self.activation is not None
+
         remapped_hidden_states = torch.empty(
             (num_moe_inputs, hidden_size),
             dtype=x.dtype,
@@ -309,7 +282,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         act_output = gemm1_output.new_empty(
             (gemm1_output.shape[0], self.inter_size * self.inter_size_scale)
         )
-        
+
         apply_moe_activation(
             self.activation,
             act_output,
