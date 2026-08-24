@@ -154,6 +154,10 @@ ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (
     "online",
 )
 
+# These names are also checkpoint quantization methods. Their online configs
+# are resolved only when checkpoint quantization metadata is absent.
+_DEFERRED_ONLINE_SHORTHANDS = frozenset(("mxfp4", "mxfp8"))
+
 
 def resolve_quantization_config(
     quantization: str | None,
@@ -185,6 +189,8 @@ def resolve_quantization_config(
     base = _ONLINE_SHORTHANDS.get(quantization) if quantization else None
 
     if quantization_config is None:
+        if quantization in _DEFERRED_ONLINE_SHORTHANDS:
+            return None
         return base
 
     if isinstance(quantization_config, dict):

@@ -79,6 +79,12 @@ def test_resolve_shorthand_only_populates_both_slots():
     assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
 
 
+@pytest.mark.parametrize("quantization", ["mxfp4", "mxfp8"])
+def test_resolve_colliding_shorthand_is_deferred(quantization: str):
+    """Checkpoint metadata determines whether an MXFP shorthand is online."""
+    assert resolve_quantization_config(quantization, None) is None
+
+
 def test_resolve_int8_shorthand_leaves_linear_unset():
     # int8_per_channel_weight_only is MoE-only; linear stays None so that
     # OnlineQuantizationConfig leaves Linear layers in full precision.

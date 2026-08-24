@@ -35,7 +35,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptMxFp8Config,
+)
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
 )
@@ -380,6 +383,58 @@ def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -
     assert loaded_configs == [{}]
     assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
     assert result.online_quantization_config.args is model_config.quantization_config
+
+
+@pytest.mark.parametrize(
+    "quantization,checkpoint_quantization_config,is_sidecar",
+    [
+        pytest.param("fp8_per_block", None, False, id="fp8-per-block-online"),
+        pytest.param("mxfp4", None, False, id="mxfp4-online"),
+        pytest.param("mxfp8", None, False, id="mxfp8-online"),
+        pytest.param(
+            "mxfp8",
+            {"quant_method": "mxfp8", "ignored_layers": []},
+            False,
+            id="mxfp8-inline-checkpoint-config",
+        ),
+        pytest.param(
+            "mxfp8",
+            {"quant_method": "mxfp8", "ignored_layers": []},
+            True,
+            id="mxfp8-sidecar-checkpoint-config",
+        ),
+    ],
+)
+def test_online_shorthand_selects_checkpoint_or_online_config(
+    tmp_path, quantization, checkpoint_quantization_config, is_sidecar
+) -> None:
+    """Online shorthands defer to checkpoint metadata when available."""
+
+    if is_sidecar:
+        (tmp_path / "hf_quant_config.json").write_text(
+            '{"quant_method": "mxfp8", "ignored_layers": []}'
+        )
+
+    model_config = Mock()
+    model_config.quantization = quantization
+    model_config.quantization_config = None
+    model_config.hf_config = Mock(
+        quantization_config=(None if is_sidecar else checkpoint_quantization_config),
+        compression_config=None,
+        text_config=None,
+    )
+    model_config.hf_overrides = {}
+    model_config.model = str(tmp_path)
+    model_config.revision = None
+
+    result = weight_utils.get_quant_config(model_config, Mock(download_dir=None))
+
+    if checkpoint_quantization_config is not None:
+        assert isinstance(result, ModelOptMxFp8Config)
+        assert result.online_quantization_config is None
+    else:
+        assert isinstance(result, OnlineQuantizationConfig)
+        assert result.online_quantization_config is None
 
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
