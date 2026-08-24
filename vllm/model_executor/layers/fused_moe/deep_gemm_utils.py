@@ -5,10 +5,9 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any
-
-import math
 
 import torch
 
@@ -481,9 +480,7 @@ class DeepGemmEPScatterCopyKernel(
         )
         expert_map = int32_ptr if compile_key.has_expert_map else None
         hidden_stride = triton_scalar_specialization_rep(compile_key.hidden_size)
-        scale_stride = triton_scalar_specialization_rep(
-            compile_key.scale_hidden_size
-        )
+        scale_stride = triton_scalar_specialization_rep(compile_key.scale_hidden_size)
         topk_stride = triton_scalar_specialization_rep(compile_key.topk_num)
         output_scale_stride0, output_scale_stride1 = (
             (1, 16) if compile_key.pack_ue8m0 else (scale_stride, 1)

@@ -354,8 +354,6 @@ def test_eplb_map_and_record_dispatch_matches_legacy_meta(
     )
 
 
-
-
 def test_dsv4_topk_dispatch_matches_legacy_meta() -> None:
     kernel = DSV4TopKKernel()
 
