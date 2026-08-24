@@ -39,10 +39,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
+    BaseDummyInputsBuilder,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
+    cached_encode,
 )
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -205,7 +206,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n<|im_start|>assistant\n"
         )
 
-        prompt_token_ids = tokenizer.encode(prompt_template)
+        prompt_token_ids = cached_encode(tokenizer, prompt_template)
 
         async for audio_chunk in audio_stream:
             buffer.write_audio(audio_chunk)

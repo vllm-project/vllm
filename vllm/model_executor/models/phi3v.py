@@ -535,7 +535,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
         # Keep the behavior in line with HF processor
         if len(mm_prompt_updates) and (
-            token_ids[:2] == tokenizer.encode("<s> <|image|>", add_special_tokens=False)
+            token_ids[:2]
+            == cached_encode(tokenizer, "<s> <|image|>", add_special_tokens=False)
         ):
             token_ids = [token_ids[0], *token_ids[2:]]
             placeholders = {
