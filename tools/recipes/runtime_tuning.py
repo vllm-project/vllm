@@ -19,6 +19,7 @@ from math import ceil
 from typing import Any
 
 from hardware_detection import HardwareInfo
+
 from vllm.config.scheduler import SchedulerConfig
 
 
@@ -74,7 +75,11 @@ def _get_active_sequence_count(
         return workload.concurrency
 
     configured = config.get("max-num-seqs")
-    if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and configured > 0
+    ):
         return configured
 
     return SchedulerConfig.DEFAULT_MAX_NUM_SEQS
