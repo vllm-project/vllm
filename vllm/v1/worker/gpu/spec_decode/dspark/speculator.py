@@ -84,6 +84,7 @@ class DSparkSpeculator(DFlashSpeculator):
         )
         self.enable_adaptive_verification = (
             self.speculative_config.enable_adaptive_verification
+            and not self.speculative_config.is_dspark_prefill_only()
         )
 
     def load_draft_model(

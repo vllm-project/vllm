@@ -69,6 +69,25 @@ class BaseSpeculator(ABC):
     ) -> torch.Tensor:
         pass
 
+    def materialize_context_kv(
+        self,
+        input_batch: InputBatch,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+    ) -> None:
+        """Materialize draft context KV without generating draft tokens."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support context-KV materialization."
+        )
+
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -131,7 +150,10 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
+        if (
+            self.speculative_config.draft_sample_method == "probabilistic"
+            and not self.speculative_config.is_dspark_prefill_only()
+        ):
             # Pre-temperature logits, cached from the previous decode step.
             dtype, fill = self.draft_logits_spec(vllm_config)
             self.draft_logits = torch.full(

@@ -36,6 +36,29 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
 
+    pp_group = get_pp_group()
+    if pp_group.world_size != 1 and not speculative_config.is_dspark_prefill_only():
+        raise NotImplementedError("DSpark does not support pipeline parallelism.")
+
+    target_language_model = (
+        target_model.get_language_model()
+        if hasattr(target_model, "get_language_model")
+        else target_model
+    )
+    target_inner = target_language_model.model
+    if pp_group.world_size != 1:
+        start_layer = target_inner.start_layer
+        end_layer = target_inner.end_layer
+        aux_layers = tuple(
+            layer + 1 for layer in draft_model_config.hf_config.dspark_target_layer_ids
+        )
+        if any(layer <= start_layer or layer > end_layer for layer in aux_layers):
+            raise ValueError(
+                "DSpark prefill materialization requires every auxiliary hidden "
+                "state on the last pipeline stage. "
+                f"Stage owns ({start_layer}, {end_layer}], requested {aux_layers}."
+            )
+
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
@@ -76,44 +99,38 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config=draft_vllm_config, model_config=draft_model_config
         )
 
-    if get_pp_group().world_size != 1:
-        raise NotImplementedError("DSpark does not support pipeline parallelism.")
-
-    target_language_model = (
-        target_model.get_language_model()
-        if hasattr(target_model, "get_language_model")
-        else target_model
-    )
-    target_inner = target_language_model.model
     draft_inner = draft_model.model
     target_vocab_size = vllm_config.model_config.get_vocab_size()
 
-    target_embed = getattr(target_inner, "embed_tokens", None)
-    draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if (
-        target_embed is not None
-        and draft_model_config.get_vocab_size() <= target_vocab_size
-        and _should_share(
-            draft_model, "has_own_embed_tokens", draft_embed, target_embed
-        )
-    ):
-        if draft_embed is not None:
-            del draft_inner.embed_tokens
-        draft_inner.embed_tokens = target_embed
+    if not speculative_config.is_dspark_prefill_only():
+        target_embed = getattr(target_inner, "embed_tokens", None)
+        draft_embed = getattr(draft_inner, "embed_tokens", None)
+        if (
+            target_embed is not None
+            and draft_model_config.get_vocab_size() <= target_vocab_size
+            and _should_share(
+                draft_model, "has_own_embed_tokens", draft_embed, target_embed
+            )
+        ):
+            if draft_embed is not None:
+                del draft_inner.embed_tokens
+            draft_inner.embed_tokens = target_embed
 
-    target_lm_head = get_target_lm_head(target_model, target_language_model)
-    draft_lm_head = getattr(draft_model, "lm_head", None)
-    draft_output_vocab_size = (
-        getattr(draft_model_config.hf_config, "draft_vocab_size", None)
-        or draft_model_config.get_vocab_size()
-    )
-    if (
-        target_lm_head is not None
-        and draft_output_vocab_size == target_vocab_size
-        and _should_share(draft_model, "has_own_lm_head", draft_lm_head, target_lm_head)
-    ):
-        if draft_lm_head is not None:
-            del draft_model.lm_head
-        draft_model.lm_head = target_lm_head
+        target_lm_head = get_target_lm_head(target_model, target_language_model)
+        draft_lm_head = getattr(draft_model, "lm_head", None)
+        draft_output_vocab_size = (
+            getattr(draft_model_config.hf_config, "draft_vocab_size", None)
+            or draft_model_config.get_vocab_size()
+        )
+        if (
+            target_lm_head is not None
+            and draft_output_vocab_size == target_vocab_size
+            and _should_share(
+                draft_model, "has_own_lm_head", draft_lm_head, target_lm_head
+            )
+        ):
+            if draft_lm_head is not None:
+                del draft_model.lm_head
+            draft_model.lm_head = target_lm_head
 
     return draft_model

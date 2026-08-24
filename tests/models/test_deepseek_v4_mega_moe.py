@@ -503,10 +503,25 @@ def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
     mtp = SimpleNamespace(finalize_mega_moe_weights=lambda: calls.append("mtp"))
     DeepSeekV4MTP.process_weights_after_loading(mtp)
 
-    dspark = SimpleNamespace(_finalize_moe=lambda: calls.append("dspark"))
+    dspark = SimpleNamespace(
+        model=SimpleNamespace(context_kv_only=False),
+        _finalize_moe=lambda: calls.append("dspark"),
+    )
     DSparkDeepseekV4ForCausalLM.process_weights_after_loading(dspark)
 
     assert calls == ["mtp", "dspark"]
+
+
+def test_dspark_context_materializer_skips_absent_confidence_head():
+    """The context-only P model omits decode-only heads entirely."""
+    dspark = object.__new__(DSparkDeepseekV4ForCausalLM)
+    dspark.model = SimpleNamespace()
+
+    assert dspark._remap_dspark_name("mtp.2.confidence_head.weight") is None
+
+    dspark.model.context_kv_only = True
+    dspark._finalize_moe = lambda: pytest.fail("context-only model has no MoE")
+    dspark.process_weights_after_loading()
 
 
 @pytest.mark.skipif(

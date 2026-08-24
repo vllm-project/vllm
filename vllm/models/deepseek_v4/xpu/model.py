@@ -1050,8 +1050,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.hc_head_op = HCHeadOp()
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        needs_mtp_hidden_states = (
+            spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
+            and not spec_config.is_dspark_prefill_only()
         )
         if get_pp_group().is_last_rank and needs_mtp_hidden_states:
             self._mtp_hidden_buffer = torch.empty(

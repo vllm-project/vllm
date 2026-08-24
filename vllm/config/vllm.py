@@ -605,6 +605,8 @@ class VllmConfig:
             self.speculative_config is not None
             and self.speculative_config.num_speculative_tokens is not None
         ):
+            if self.speculative_config.is_dspark_prefill_only():
+                return 0
             return self.speculative_config.num_speculative_tokens
         if (
             self.diffusion_config is not None

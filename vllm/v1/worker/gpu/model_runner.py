@@ -174,6 +174,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
+        self.dspark_prefill_only = bool(
+            self.speculative_config is not None
+            and self.speculative_config.is_dspark_prefill_only()
+        )
         self._draft_workspace_lane = int(
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
@@ -261,7 +265,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
-                if self.use_pp:
+                if self.use_pp and not self.dspark_prefill_only:
                     raise ValueError(
                         f"{self.speculative_config.method} with pipeline parallel "
                         "is not supported."
@@ -388,9 +392,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
-                    eplb_models_added = self.eplb.maybe_register_speculator(
-                        self.speculator, self.speculative_config, load_dummy_weights
-                    )
+                    if not self.dspark_prefill_only:
+                        eplb_models_added = self.eplb.maybe_register_speculator(
+                            self.speculator,
+                            self.speculative_config,
+                            load_dummy_weights,
+                        )
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -443,7 +450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if custom:
                 self.sampler, self.rejection_sampler = custom
-            elif self.speculative_config is not None:
+            elif self.speculative_config is not None and not self.dspark_prefill_only:
                 self.rejection_sampler = RejectionSampler(
                     self.sampler,
                     self.speculative_config,
@@ -577,8 +584,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
-            enable_adaptive_verification=getattr(
-                self.speculator, "enable_adaptive_verification", False
+            enable_adaptive_verification=(
+                not self.dspark_prefill_only
+                and getattr(self.speculator, "enable_adaptive_verification", False)
             ),
             attn_groups=self.attn_groups,
             attn_cg_support=attn_cg_support,
@@ -643,7 +651,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 self.attn_groups,
             )
-        if self.speculator is not None:
+        if self.speculator is not None and not self.dspark_prefill_only:
             # After set_attn, so the speculator can size its cudagraph mode
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
@@ -760,6 +768,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
+            assert hidden_states is not None
             self.step_timing.drafter_start()
             mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
@@ -779,30 +788,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                if pre_hc_hidden_states is not None:
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             with use_workspace_lane(self._draft_workspace_lane):
-                self.speculator.propose(
-                    input_batch=input_batch,
-                    attn_metadata=attn_metadata,
-                    slot_mappings=slot_mappings_by_layer,
-                    last_hidden_states=spec_hidden_states,
-                    aux_hidden_states=aux_hidden_states,
-                    num_sampled=torch.ones(
-                        input_batch.num_reqs, dtype=torch.int32, device=self.device
-                    ),
-                    num_rejected=torch.zeros(
-                        input_batch.num_reqs, dtype=torch.int32, device=self.device
-                    ),
-                    last_sampled=self.req_states.last_sampled_tokens,
-                    next_prefill_tokens=self.req_states.next_prefill_tokens,
-                    temperature=self.sampler.sampling_states.temperature.gpu,
-                    seeds=self.sampler.sampling_states.seeds.gpu,
-                    dp_sync=dp_sync,
-                    dummy_run=True,
-                    skip_attn_for_dummy_run=skip_attn,
-                    mm_inputs=mm_inputs,
-                    is_profile=is_profile,
+                num_sampled = torch.ones(
+                    input_batch.num_reqs, dtype=torch.int32, device=self.device
                 )
+                num_rejected = torch.zeros_like(num_sampled)
+                if self.dspark_prefill_only:
+                    self.speculator.materialize_context_kv(
+                        input_batch=input_batch,
+                        last_hidden_states=spec_hidden_states,
+                        aux_hidden_states=aux_hidden_states,
+                        num_sampled=num_sampled,
+                        num_rejected=num_rejected,
+                        last_sampled=self.req_states.last_sampled_tokens,
+                        next_prefill_tokens=self.req_states.next_prefill_tokens,
+                        temperature=self.sampler.sampling_states.temperature.gpu,
+                        seeds=self.sampler.sampling_states.seeds.gpu,
+                        dummy_run=True,
+                        skip_attn_for_dummy_run=skip_attn,
+                    )
+                else:
+                    self.speculator.propose(
+                        input_batch=input_batch,
+                        attn_metadata=attn_metadata,
+                        slot_mappings=slot_mappings_by_layer,
+                        last_hidden_states=spec_hidden_states,
+                        aux_hidden_states=aux_hidden_states,
+                        num_sampled=num_sampled,
+                        num_rejected=num_rejected,
+                        last_sampled=self.req_states.last_sampled_tokens,
+                        next_prefill_tokens=self.req_states.next_prefill_tokens,
+                        temperature=self.sampler.sampling_states.temperature.gpu,
+                        seeds=self.sampler.sampling_states.seeds.gpu,
+                        dp_sync=dp_sync,
+                        dummy_run=True,
+                        skip_attn_for_dummy_run=skip_attn,
+                        mm_inputs=mm_inputs,
+                        is_profile=is_profile,
+                    )
             self.step_timing.drafter_end()
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
@@ -924,7 +949,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
                 )
-                if self.speculator is not None:
+                if self.speculator is not None and not self.dspark_prefill_only:
                     with use_workspace_lane(self._draft_workspace_lane):
                         self.speculator.capture()
                 if self.adaptive_verification is not None:
@@ -1914,30 +1939,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                if pre_hc_hidden_states is not None:
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             with use_workspace_lane(self._draft_workspace_lane):
-                draft_tokens = self.speculator.propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.next_prefill_tokens,
-                    self.sampler.sampling_states.temperature.gpu,
-                    self.sampler.sampling_states.seeds.gpu,
-                    dp_sync=dp_sync,
-                    mm_inputs=mm_inputs,
-                )
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if self.adaptive_verification is not None:
+                if self.dspark_prefill_only:
+                    self.speculator.materialize_context_kv(
+                        input_batch,
+                        spec_hidden_states,
+                        aux_hidden_states,
+                        num_sampled,
+                        num_rejected,
+                        self.req_states.last_sampled_tokens,
+                        self.req_states.next_prefill_tokens,
+                        self.sampler.sampling_states.temperature.gpu,
+                        self.sampler.sampling_states.seeds.gpu,
+                    )
+                    draft_tokens = None
+                else:
+                    draft_tokens = self.speculator.propose(
+                        input_batch,
+                        attn_metadata,
+                        slot_mappings_by_layer,
+                        spec_hidden_states,
+                        aux_hidden_states,
+                        num_sampled,
+                        num_rejected,
+                        self.req_states.last_sampled_tokens,
+                        self.req_states.next_prefill_tokens,
+                        self.sampler.sampling_states.temperature.gpu,
+                        self.sampler.sampling_states.seeds.gpu,
+                        dp_sync=dp_sync,
+                        mm_inputs=mm_inputs,
+                    )
+            if draft_tokens is not None:
+                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            if draft_tokens is not None and self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
 
-        if self.num_speculative_steps > 0:
+        if self.num_speculative_steps > 0 and not self.dspark_prefill_only:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
             self.draft_tokens_handler.set_draft_tokens(

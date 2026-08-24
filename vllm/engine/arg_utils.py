@@ -1895,6 +1895,7 @@ class EngineArgs:
             {
                 "target_model_config": target_model_config,
                 "target_parallel_config": target_parallel_config,
+                "target_kv_transfer_config": self.kv_transfer_config,
             }
         )
         return SpeculativeConfig(**self.speculative_config)

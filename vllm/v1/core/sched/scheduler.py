@@ -271,7 +271,10 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
-            self.use_eagle = speculative_config.use_eagle()
+            self.use_eagle = (
+                speculative_config.use_eagle()
+                and not speculative_config.is_dspark_prefill_only()
+            )
             if self.use_eagle:
                 self.num_prefill_lookahead = (
                     self.num_spec_tokens

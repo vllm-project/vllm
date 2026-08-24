@@ -12,6 +12,7 @@ from typing_extensions import Self
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -463,6 +464,8 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
+    target_kv_transfer_config: SkipValidation[KVTransferConfig] = None  # type: ignore
+    """The KV transfer configuration for the target model."""
 
     # dynamic speculative decoding control
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
@@ -1449,12 +1452,28 @@ class SpeculativeConfig:
 
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config, self.draft_tensor_parallel_size
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        pipeline_parallel_size=(
+                            1 if self.is_dspark_prefill_only() else None
+                        ),
                     )
                 )
 
         if self.method != "dspark" and self.enable_adaptive_verification:
             raise ValueError("Adaptive verification only supported with DSpark")
+
+        if self.is_dspark_prefill_only():
+            # is_dspark_prefill_only() implies target_kv_transfer_config is set.
+            assert self.target_kv_transfer_config is not None
+            connector = self.target_kv_transfer_config.kv_connector
+            if connector is not None and "Nixl" in connector:
+                raise NotImplementedError(
+                    "DSpark prefill materialization with pipeline parallelism "
+                    "requires a connector that transfers named per-layer KV "
+                    "regions (e.g. MooncakeConnector). The NIXL connector does "
+                    "not describe packed KV regions per producer stage yet."
+                )
 
         return self
 
@@ -1630,13 +1649,18 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
+        pipeline_parallel_size: int | None = None,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.pipeline_parallel_size,
+            pipeline_parallel_size=(
+                target_parallel_config.pipeline_parallel_size
+                if pipeline_parallel_size is None
+                else pipeline_parallel_size
+            ),
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
@@ -1646,6 +1670,16 @@ class SpeculativeConfig:
         )
 
         return draft_parallel_config
+
+    def is_dspark_prefill_only(self) -> bool:
+        kv_transfer_config = self.target_kv_transfer_config
+        return (
+            self.method == "dspark"
+            and self.target_parallel_config is not None
+            and self.target_parallel_config.pipeline_parallel_size > 1
+            and kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_producer"
+        )
 
     @field_validator("attention_backend", mode="before")
     @classmethod
