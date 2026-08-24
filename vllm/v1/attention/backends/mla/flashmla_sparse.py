@@ -371,10 +371,10 @@ class FlashMLASparseMetadataBuilder(
         self,
         chunk_num_tokens: int,
         padded_heads: int,
-        full_chunk_fp8_metadata: "FlashMLASparseMetadata.FP8KernelMetadata",
+        full_chunk_fp8_metadata: FlashMLASparseMetadata.FP8KernelMetadata | None,
     ) -> tuple[
-        "FlashMLASparseMetadata.FP8KernelMetadata",
-        "FlashMLASparseMetadata.FP8KernelMetadata",
+        FlashMLASparseMetadata.FP8KernelMetadata,
+        FlashMLASparseMetadata.FP8KernelMetadata | None,
     ]:
         is_full_chunk = chunk_num_tokens == MAX_SCRATCH_CHUNK_TOKENS
         if full_chunk_fp8_metadata is not None and is_full_chunk:
@@ -399,7 +399,7 @@ class FlashMLASparseMetadataBuilder(
 
     def _build_fp8_mixed_batch_chunks(
         self, num_tokens: int, padded_heads: int
-    ) -> list[tuple[slice, "FlashMLASparseMetadata.FP8KernelMetadata"]]:
+    ) -> list[tuple[slice, FlashMLASparseMetadata.FP8KernelMetadata]]:
         chunks = []
         full_chunk_fp8_metadata = None
         for start in range(0, num_tokens, MAX_SCRATCH_CHUNK_TOKENS):
@@ -414,7 +414,7 @@ class FlashMLASparseMetadataBuilder(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         metadata: FlashMLASparseMetadata,
-    ) -> list[tuple[slice, "FlashMLASparseMetadata.FP8KernelMetadata"]]:
+    ) -> list[tuple[slice, FlashMLASparseMetadata.FP8KernelMetadata]]:
         """Build FP8 metadata treating MQA tokens as one batch.
 
         The scheduler initializes lazily from the runtime query shape, which may
