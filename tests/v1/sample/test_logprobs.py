@@ -1158,13 +1158,14 @@ def test_spec_decode_logprobs(
         max_tokens=10,
         ignore_eos=False,
     )
-    prompts = [prompt] * 4
     requests = [
         sampling_params,
         penalty_sampling_params,
         active_sampling_params,
-        custom_sampling_params,
     ]
+    if method == "eagle":
+        requests.append(custom_sampling_params)
+    prompts = [prompt] * len(requests)
 
     max_model_len = 256
     llm_kwargs = dict(

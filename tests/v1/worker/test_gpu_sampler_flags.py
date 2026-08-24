@@ -101,11 +101,14 @@ def test_logits_processing_cache_only_checks_active_requests():
 
 @pytest.mark.parametrize(
     "sampling_params",
-    [SamplingParams(temperature=0.7), SamplingParams(temperature=0.7, top_p=0.9)],
+    [
+        SamplingParams(temperature=0.7),
+        SamplingParams(temperature=0.7, top_p=0.9),
+        SamplingParams(frequency_penalty=0.1),
+    ],
+    ids=["temperature-only", "top-p", "penalty"],
 )
-def test_head_dtype_processing_reuses_input(
-    sampling_params: SamplingParams,
-):
+def test_head_dtype_processing_reuses_input(sampling_params: SamplingParams):
     sampler = _make_sampler()
     sampler.add_request(0, 1, sampling_params)
     sampler.apply_staged_writes()
