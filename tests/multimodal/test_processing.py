@@ -1082,7 +1082,7 @@ class _FakeTokenizer:
     _MERGES = {"food": (1000,), "foo": (101, 111, 111)}
     _INVERSE = {ids: text for text, ids in _MERGES.items()}
 
-    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+    def encode(self, text: str, **kwargs) -> list[int]:
         token_ids = list[int]()
         pos = 0
         while pos < len(text):
@@ -1097,11 +1097,7 @@ class _FakeTokenizer:
                 pos += 1
         return token_ids
 
-    def decode(
-        self,
-        token_ids: list[int],
-        skip_special_tokens: bool = False,
-    ) -> str:
+    def decode(self, token_ids: list[int], **kwargs) -> str:
         chars = list[str]()
         pos = 0
         while pos < len(token_ids):
