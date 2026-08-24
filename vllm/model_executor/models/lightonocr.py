@@ -50,9 +50,6 @@ class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
 
 
 class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],

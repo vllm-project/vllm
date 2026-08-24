@@ -452,9 +452,6 @@ class FireRedLIDMultiModalProcessor(
         # Dummy encoder prompt for profiling (encoder only processes audio).
         return [0]
 
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
     def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
