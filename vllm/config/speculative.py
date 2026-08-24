@@ -487,7 +487,10 @@ class SpeculativeConfig:
     drafter's acceptance collapsed non-recovering after unsynced K=0
     steps, at every tested K. Safety is drafter-architecture dependent
     and validated only on the checkpoints named in issue #53420; EAGLE-family
-    methods are refused. Default off.
+    methods are refused. For dflash, skipped steps leave the drafter's
+    context-KV stale (its hidden-state buffer is per-step), so resume
+    acceptance after a K=0 phase is checkpoint-dependent and must be
+    validated. Default off.
     """
 
     # params generated in the post-init stage
@@ -1486,13 +1489,36 @@ class SpeculativeConfig:
         if self.method != "dspark" and self.enable_adaptive_verification:
             raise ValueError("Adaptive verification only supported with DSpark")
 
+        if self.method == "dflash":
+            self._validate_dflash_dynamic_schedule()
+
         self._validate_skip_draft_when_k0(warn_without_dynamic_schedule=True)
 
         return self
 
+    def _validate_dflash_dynamic_schedule(self) -> None:
+        """DFlash propose() drafts its fixed ``num_speculative_tokens``
+        block width regardless of the per-step schedule, so tier rungs
+        must resolve to that width or skip drafting entirely.
+        """
+        if not self.num_speculative_tokens_per_batch_size:
+            return
+        for start, end, k in self.num_speculative_tokens_per_batch_size:
+            if k == 0 and self.skip_draft_when_k0:
+                continue
+            # The scheduler clamps each rung: resolved_k = min(k, max_k).
+            if min(k, self.num_speculative_tokens) != self.num_speculative_tokens:
+                raise ValueError(
+                    "num_speculative_tokens_per_batch_size for dflash only "
+                    f"supports rungs resolving to {self.num_speculative_tokens} "
+                    "(values below it draft a block width the DFlash "
+                    "speculator cannot honor), or 0 with "
+                    f"skip_draft_when_k0=true (got ({start}, {end}, {k}))"
+                )
+
     # Methods whose speculators override propose() without the K=0
     # skip: the flag there would be silently ignored.
-    _SKIP_K0_UNSUPPORTED_SPECULATORS = frozenset({"dflash", "dspark"})
+    _SKIP_K0_UNSUPPORTED_SPECULATORS = frozenset({"dspark"})
 
     def _validate_skip_draft_when_k0(
         self,
@@ -1520,28 +1546,30 @@ class SpeculativeConfig:
                 "proposal path without the K=0 skip, so the option "
                 "would be silently ignored."
             )
-        if self.method != "mtp":
+        if self.method not in ("mtp", "dflash"):
             raise ValueError(
-                "skip_draft_when_k0 is validated only for method 'mtp' "
-                f"(got '{self.method}'); see issue #53420."
+                "skip_draft_when_k0 is validated only for methods "
+                f"'mtp' and 'dflash' (got '{self.method}'); see "
+                "issue #53420."
             )
-        # method == "mtp": the speculator is still selected by the
-        # DRAFT ARCHITECTURE, not the method string — resolve the same
-        # predicates init_speculator uses and reject the variants the
-        # skip does not cover (gemma4: unmeasured; multi-module: own
-        # propose() override — the flag would be silently ignored).
-        if self.use_gemma4_mtp():
-            raise ValueError(
-                "skip_draft_when_k0 is not validated for gemma4 MTP "
-                "drafters (unmeasured); see issue #53420."
-            )
-        if self.use_multi_module_mtp():
-            raise ValueError(
-                "skip_draft_when_k0 is not implemented for multi-module"
-                " MTP drafters: their speculator overrides the proposal"
-                " path without the K=0 skip, so the option would be "
-                "silently ignored; see issue #53420."
-            )
+        if self.method == "mtp":
+            # The speculator is still selected by the DRAFT ARCHITECTURE,
+            # not the method string — resolve the same predicates
+            # init_speculator uses and reject the variants the skip does
+            # not cover (gemma4: unmeasured; multi-module: own propose()
+            # override — the flag would be silently ignored).
+            if self.use_gemma4_mtp():
+                raise ValueError(
+                    "skip_draft_when_k0 is not validated for gemma4 MTP "
+                    "drafters (unmeasured); see issue #53420."
+                )
+            if self.use_multi_module_mtp():
+                raise ValueError(
+                    "skip_draft_when_k0 is not implemented for multi-module"
+                    " MTP drafters: their speculator overrides the proposal"
+                    " path without the K=0 skip, so the option would be "
+                    "silently ignored; see issue #53420."
+                )
         if warn_without_dynamic_schedule and (
             not self.uses_dynamic_speculative_decoding()
         ):

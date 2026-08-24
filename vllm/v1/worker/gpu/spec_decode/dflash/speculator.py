@@ -41,6 +41,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
 
+        # K=0 skip mirrors AutoRegressiveSpeculator; see
+        # SpeculativeConfig.skip_draft_when_k0 for the resume caveat.
+        self.skip_draft_when_k0 = bool(
+            vllm_config.speculative_config.skip_draft_when_k0
+        )
+
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
 
@@ -339,6 +345,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
         )
+
+        # The forward below also syncs draft context-KV for a later K>0
+        # resume; operators can opt out (drafter-dependent, issue #53420).
+        if self.skip_draft_when_k0 and num_speculative_tokens == 0:
+            return self.draft_tokens[:num_reqs, :0]
 
         # NOTE: To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of input_ids and

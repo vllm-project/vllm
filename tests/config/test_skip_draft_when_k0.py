@@ -22,6 +22,9 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
+from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
+    DFlash2Speculator,
+)
 
 MODEL = "facebook/opt-125m"
 DYNAMIC_SCHEDULE = [(1, 1, 0), (2, 16, 2)]
@@ -60,9 +63,47 @@ def test_validator_accepts_mtp():
 def test_rejected_for_unimplemented_speculators():
     """Methods whose speculators do not implement the skip (or are
     unmeasured) are rejected explicitly, not silently ignored."""
-    for method in ("dspark", "dflash"):
+    for method in ("dspark",):
         with pytest.raises(ValueError, match="not implemented"):
             _validator_target(method)._validate_skip_draft_when_k0()
+
+
+@pytest.mark.cpu_test
+def test_validator_accepts_dflash():
+    _validator_target("dflash")._validate_skip_draft_when_k0(
+        warn_without_dynamic_schedule=True
+    )  # must not raise
+
+
+@pytest.mark.cpu_test
+def test_dflash_tier_rungs_must_be_max_or_skipped_zero():
+    """DFlash proposes a fixed block width; tier rungs must resolve to
+    that width (the scheduler clamps rungs via min(k, max)) or skip
+    drafting entirely (the skip requires the flag)."""
+    _dflash_tiers(
+        [(1, 2, 7), (3, 16, 0)], skip=True
+    )._validate_dflash_dynamic_schedule()  # noqa: E501
+    # Over-max rungs clamp to the full width — scheduler-valid, accepted.
+    _dflash_tiers(
+        [(1, 2, 8), (3, 16, 0)], skip=True
+    )._validate_dflash_dynamic_schedule()  # noqa: E501
+    with pytest.raises(ValueError, match="rungs resolving to 7"):
+        _dflash_tiers(
+            [(1, 2, 7), (3, 16, 3)], skip=True
+        )._validate_dflash_dynamic_schedule()  # noqa: E501
+    with pytest.raises(ValueError, match="skip_draft_when_k0=true"):
+        _dflash_tiers(
+            [(1, 2, 7), (3, 16, 0)], skip=False
+        )._validate_dflash_dynamic_schedule()  # noqa: E501
+
+
+def _dflash_tiers(schedule, skip: bool):
+    config = SpeculativeConfig.__new__(SpeculativeConfig)
+    config.method = "dflash"
+    config.num_speculative_tokens = 7
+    config.skip_draft_when_k0 = skip
+    config.num_speculative_tokens_per_batch_size = schedule
+    return config
 
 
 @pytest.mark.cpu_test
@@ -199,6 +240,45 @@ class SentinelError(Exception):
     pass
 
 
+# --- DFlash speculator K=0 skip (mirrors the AutoRegressive tests above) ---
+
+
+def _bare_dflash(skip: bool) -> "DFlash2Speculator":
+    """Only the state propose() touches before the K=0 branch. The
+    hidden_states buffer is intentionally absent: propose() reaching the
+    forward path raises on it, proving the skip did (or did not) fire."""
+    spec = DFlash2Speculator.__new__(DFlash2Speculator)
+    spec.skip_draft_when_k0 = skip
+    spec.draft_tokens = torch.zeros(4, 7, dtype=torch.int64)
+    spec.num_query_per_req = 8
+    spec.max_model_len = 128
+    return spec
+
+
+@pytest.mark.cpu_test
+def test_dflash_skip_returns_zero_width_at_k0():
+    spec = _bare_dflash(skip=True)
+    out = _call_propose(spec, _k0_batch(num_reqs=2))  # must NOT raise
+    assert out.shape == (2, 0)
+    assert out.dtype == torch.int64
+
+
+@pytest.mark.cpu_test
+def test_dflash_flag_off_runs_forward_at_k0():
+    spec = _bare_dflash(skip=False)
+    with pytest.raises(AttributeError, match="hidden_states"):
+        _call_propose(spec, _k0_batch(num_reqs=2))
+
+
+@pytest.mark.cpu_test
+def test_dflash_skip_does_not_fire_when_k_unresolved_or_positive():
+    spec = _bare_dflash(skip=True)
+    with pytest.raises(AttributeError, match="hidden_states"):
+        _call_propose(spec, _k0_batch(num_reqs=2), num_speculative_tokens=None)
+    with pytest.raises(AttributeError, match="hidden_states"):
+        _call_propose(spec, _k0_batch(num_reqs=2), num_speculative_tokens=7)
+
+
 @pytest.mark.cpu_test
 def test_support_matrix_validator_level():
     """Every method boundary resolves to accept or a specific rejection
@@ -216,9 +296,13 @@ def test_support_matrix_validator_level():
     # skip -> would be silently ignored -> rejected explicitly. (Real
     # multi-module/gemma4 drafts route through method='mtp' + draft
     # architecture — covered by the test_real_routing_* tests below.)
-    for method in ("dflash", "dspark"):
+    for method in ("dspark",):
         with pytest.raises(ValueError, match="silently ignored"):
             _validator_target(method)._validate_skip_draft_when_k0()
+    # accepted since the DFlash propose() gained the K=0 skip
+    _validator_target("dflash")._validate_skip_draft_when_k0(
+        warn_without_dynamic_schedule=True
+    )  # must not raise
     # any other non-mtp method string (including impossible states)
     # -> rejected as out of scope
     for method in ("gemma4", "multi_module_mtp", "medusa", "ngram"):
@@ -248,7 +332,7 @@ def test_real_construction_unresolved_method_defers_then_rejects():
     call defers, construction proceeds, and the FINAL validation
     rejects with a clear message — no silent ignore, no early block of
     legitimate inference."""
-    with pytest.raises(ValueError, match="validated only for method 'mtp'"):
+    with pytest.raises(ValueError, match="validated only for methods"):
         _spec_config(skip_draft_when_k0=True)
 
 
@@ -269,7 +353,7 @@ def test_cli_json_plumbing_via_engine_args():
         ),
     )
     # hyphenated CLI key normalized + flag typed bool + final validation
-    with pytest.raises(ValueError, match="validated only for method 'mtp'"):
+    with pytest.raises(ValueError, match="validated only for methods"):
         ea.create_speculative_config(
             ModelConfig(model=MODEL),
             ParallelConfig(pipeline_parallel_size=1, tensor_parallel_size=1),
