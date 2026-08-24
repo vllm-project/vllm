@@ -29,6 +29,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
+from vllm.config.model import _get_and_verify_max_len
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
@@ -952,6 +953,32 @@ def test_get_and_verify_max_len(
     else:
         actual_max_len = model_config.get_and_verify_max_len(max_model_len)
         assert actual_max_len == expected_max_len
+
+
+@pytest.mark.parametrize("rope_type", ["yarn", "deepseek_yarn"])
+def test_get_and_verify_max_len_yarn_uses_original_context(rope_type):
+    resolved = _get_and_verify_max_len(
+        hf_config=SimpleNamespace(
+            model_type="deepseek_v3",
+            rope_parameters={
+                "rope_type": rope_type,
+                "factor": 32.0,
+                "original_max_position_embeddings": 32_768,
+            },
+        ),
+        model_arch_config=SimpleNamespace(
+            derived_max_model_len_and_key=(
+                1_048_576,
+                "max_position_embeddings",
+            )
+        ),
+        tokenizer_config=None,
+        max_model_len=None,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    assert resolved == 1_048_576
 
 
 class MockConfig:

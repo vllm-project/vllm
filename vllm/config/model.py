@@ -2398,7 +2398,7 @@ def _get_and_verify_max_len(
                 # NOTE: This assumes all layer types have the same scaling factor.
                 scaling_factor = rp.get("factor", scaling_factor)
 
-                if rope_type == "yarn":
+                if rope_type in ("yarn", "deepseek_yarn"):
                     derived_max_model_len = rp["original_max_position_embeddings"]
         if scaling_factor is None:
             # Fallback the factor to 1.0 if a user assigned `null`
