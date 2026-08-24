@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -439,6 +440,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         estimate = min(max_tokens_per_expert, estimate)
         return estimate
 
+    @eager_break_during_capture
     def apply(
         self,
         output: torch.Tensor,
