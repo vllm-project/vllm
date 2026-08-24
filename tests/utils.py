@@ -53,6 +53,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kMxfp4Dynamic,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
@@ -2455,7 +2456,7 @@ class TestMXFP4Layer(torch.nn.Module):
             dtype=torch.uint8,
             device=device,
         )
-        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
         self.kernel.process_weights_after_loading(self)
 
     def forward(
