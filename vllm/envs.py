@@ -294,6 +294,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_ENABLE_MOE_TAIL_FUSION: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -2018,6 +2019,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
+    ),
+    # Defers the MoE top-k reduction into the fused all-reduce + RMSNorm that
+    # follows it, instead of letting the MoE kernel finalize its own output.
+    "VLLM_ENABLE_MOE_TAIL_FUSION": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MOE_TAIL_FUSION", "0"))
     ),
     # Emergency rollback for the DeepSeek-V4 NVIDIA MegaMoE path. By default,
     # DeepGEMM computes replicated FP8 shared experts in the same persistent

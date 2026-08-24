@@ -6,6 +6,7 @@ import atexit
 import os
 import random
 import threading
+from functools import cache
 from typing import Any
 
 import torch
@@ -40,6 +41,9 @@ _fi_ar_workspace = None
 # allreduce backend or a fallback backend when the primary workspace is not
 # available on the current topology.
 _fi_ar_quant_workspace = None
+# Extra workspace for the MoE finalize fusion, which is trtllm-only and so
+# cannot ride on an mnnvl workspace.
+_fi_ar_moe_finalize_workspace = None
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
@@ -270,27 +274,278 @@ def get_fi_ar_quant_workspace(
     return _fi_ar_quant_workspace
 
 
+# CuTe DSL vector width for bf16 (flashinfer's VEC_BF16); the HT kernel shards
+# hidden across ``consumer_threads * _CUTEDSL_VEC * vectors_per_thread`` and
+# rejects a hidden it does not divide.
+_CUTEDSL_VEC = 8
+_CUDA_MAX_BLOCK_THREADS = 1024
+_WARP = 32
+
+
+def _ht_shard_threads(hidden_dim: int, base_preset) -> tuple[int, int] | None:
+    """consumer_threads/vectors_per_thread whose shard divides ``hidden_dim``.
+
+    The shipped profiles tile a whole row per shard (8192 = 512 * 8 * 2), so
+    keep the tuned vectors_per_thread and scale the thread count; fall back to
+    any warp-multiple pair that fits the block limit.
+    """
+    reserved = (2 + base_preset.reduction_warps) * _WARP
+    for vpt in (base_preset.vectors_per_thread, 1, 2, 3, 4):
+        threads, rem = divmod(hidden_dim, _CUTEDSL_VEC * vpt)
+        if rem or threads % _WARP or threads <= 0:
+            continue
+        if threads % base_preset.rms_token_groups:
+            continue
+        if threads + reserved <= _CUDA_MAX_BLOCK_THREADS:
+            return threads, vpt
+    return None
+
+
+def _moe_finalize_cutedsl_config(
+    tp_size: int, hidden_dim: int, top_k: int, dtype: torch.dtype
+):
+    """A CuTe DSL config covering this shape, or None if none can be built.
+
+    Profiles are keyed on ``(tp_size, hidden_size, top_k, dtype)`` and the
+    shipped ones only cover tp 8/16 with hidden 8192 and top_k 10, so anything
+    else is derived: the LL collective's cluster spans the TP group, and the HT
+    kernel's shard has to divide the hidden size.
+    """
+    import dataclasses
+
+    from flashinfer.comm.mnnvl_cutedsl_ar import DEFAULT_CONFIG, MNNVLCuteDSLConfig
+
+    for profile in DEFAULT_CONFIG.profiles:
+        if (
+            profile.tp_size == tp_size
+            and profile.hidden_size == hidden_dim
+            and profile.top_k == top_k
+            and profile.dtype == dtype
+        ):
+            return DEFAULT_CONFIG
+
+    base = min(
+        (p for p in DEFAULT_CONFIG.profiles if p.dtype == dtype),
+        key=lambda p: abs(p.tp_size - tp_size),
+        default=None,
+    )
+    if base is None:
+        return None
+
+    def retune(routes):
+        targets = []
+        for target in routes.targets:
+            preset = target.preset
+            collective = getattr(preset, "collective", None)
+            if collective is not None and hasattr(collective, "cluster_size"):
+                preset = dataclasses.replace(
+                    preset,
+                    collective=dataclasses.replace(collective, cluster_size=tp_size),
+                )
+            if hasattr(preset, "consumer_threads"):
+                shard = _ht_shard_threads(hidden_dim, preset)
+                if shard is None:
+                    return None
+                threads, vpt = shard
+                preset = dataclasses.replace(
+                    preset, consumer_threads=threads, vectors_per_thread=vpt
+                )
+            targets.append(dataclasses.replace(target, preset=preset))
+        return dataclasses.replace(routes, targets=tuple(targets))
+
+    finalize_routes = retune(base.finalize_routes)
+    all_reduce_routes = retune(base.all_reduce_routes)
+    if finalize_routes is None or all_reduce_routes is None:
+        logger.warning_once(
+            "No CuTe DSL HT shard divides hidden_size=%d; MoE tail fusion off.",
+            hidden_dim,
+        )
+        return None
+
+    logger.info_once(
+        "Derived a CuTe DSL profile for tp=%d hidden=%d top_k=%d %s from the "
+        "shipped tp=%d profile; its M-range boundaries are not tuned for this "
+        "shape.",
+        tp_size,
+        hidden_dim,
+        top_k,
+        dtype,
+        base.tp_size,
+    )
+    return MNNVLCuteDSLConfig(
+        profiles=(
+            dataclasses.replace(
+                base,
+                tp_size=tp_size,
+                hidden_size=hidden_dim,
+                top_k=top_k,
+                finalize_routes=finalize_routes,
+                all_reduce_routes=all_reduce_routes,
+            ),
+        )
+    )
+
+
+@cache
+def has_fi_ar_moe_finalize_backend() -> bool:
+    """Whether flashinfer ships the mnnvl CuTe DSL allreduce the fused tail needs.
+
+    A layer asks before declaring that its experts may leave the MoE output
+    unfinalized, so a build without the backend never gets that far.
+    """
+    try:
+        from flashinfer.comm.mnnvl_cutedsl_ar import (  # noqa: F401
+            MNNVLCuteDSLAllReduceFusionWorkspace,
+        )
+    except ImportError:
+        logger.warning_once(
+            "FlashInfer has no mnnvl CuTe DSL allreduce; MoE tail fusion needs "
+            "flashinfer >= 0.6.18."
+        )
+        return False
+    return True
+
+
+def _create_moe_finalize_cutedsl_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+    *,
+    top_k: int,
+    routed_scaling_factor: float,
+    rms_eps: float,
+    weight_bias: float,
+    include_shared_expert: bool,
+):
+    """Build the mnnvl CuTe DSL workspace, or None if the shape is unsupported.
+
+    Its config resolves a StaticProfile that has to match
+    ``(tp_size, hidden_size, top_k, dtype)`` exactly; the shipped profiles cover
+    tp 8/16 with hidden_size 8192, top_k 10, bf16, so anything else raises and
+    lands the caller back on finalizing inside the MoE kernel.
+    """
+    if not has_fi_ar_moe_finalize_backend():
+        return None
+    from flashinfer.comm.mnnvl_cutedsl_ar import MNNVLCuteDSLAllReduceFusionWorkspace
+
+    try:
+        config = _moe_finalize_cutedsl_config(world_size, hidden_dim, top_k, dtype)
+        if config is None:
+            return None
+        return MNNVLCuteDSLAllReduceFusionWorkspace(
+            world_size,
+            rank,
+            max_token_num,
+            hidden_dim,
+            dtype,
+            group=group,
+            top_k=top_k,
+            rms_eps=rms_eps,
+            routed_scaling_factor=routed_scaling_factor,
+            weight_bias=weight_bias,
+            include_shared_expert=include_shared_expert,
+            config=config,
+        )
+    except Exception as e:
+        logger.warning_once(
+            "No mnnvl CuTe DSL workspace for tp=%d hidden=%d top_k=%d %s: %s",
+            world_size,
+            hidden_dim,
+            top_k,
+            dtype,
+            e,
+        )
+        return None
+
+
+def get_fi_ar_moe_finalize_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+    *,
+    top_k: int,
+    routed_scaling_factor: float,
+    rms_eps: float,
+    weight_bias: float,
+    include_shared_expert: bool,
+):
+    """
+    Return the workspace for the MoE finalize + allreduce + norm fusion.
+
+    mnnvl CuTe DSL is the one supported backend, so this does not follow
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND and never reuses the general all-reduce
+    workspaces: theirs is a different class, compiled without the fusion's
+    semantics. Whether the fusion runs at all is VLLM_ENABLE_MOE_TAIL_FUSION's
+    call, checked by the caller.
+    """
+    global _fi_ar_moe_finalize_workspace
+    if _fi_ar_moe_finalize_workspace is not None:
+        return _fi_ar_moe_finalize_workspace
+
+    if not fi_ar_available:
+        return None
+
+    _fi_ar_moe_finalize_workspace = _create_moe_finalize_cutedsl_workspace(
+        world_size,
+        rank,
+        max_token_num,
+        hidden_dim,
+        dtype,
+        group,
+        top_k=top_k,
+        rms_eps=rms_eps,
+        routed_scaling_factor=routed_scaling_factor,
+        weight_bias=weight_bias,
+        include_shared_expert=include_shared_expert,
+    )
+    if _fi_ar_moe_finalize_workspace is not None:
+        logger.info_once(
+            "Initialized FlashInfer MoE finalize fusion workspace "
+            "(mnnvl-cutedsl, top_k=%d hidden=%d %s)",
+            top_k,
+            hidden_dim,
+            dtype,
+        )
+    return _fi_ar_moe_finalize_workspace
+
+
 _fi_ar_workspace_lock = threading.Lock()
 
 
 def destroy_fi_ar_workspace():
-    global _fi_ar_workspace, _fi_ar_quant_workspace
+    global _fi_ar_workspace, _fi_ar_quant_workspace, _fi_ar_moe_finalize_workspace
     with _fi_ar_workspace_lock:
-        is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
-
-        if _fi_ar_workspace is not None:
-            _fi_ar_workspace.destroy()
-        if _fi_ar_quant_workspace is not None and not is_alias:
-            _fi_ar_quant_workspace.destroy()
+        destroyed: list[int] = []
+        for workspace in (
+            _fi_ar_workspace,
+            _fi_ar_quant_workspace,
+            _fi_ar_moe_finalize_workspace,
+        ):
+            if workspace is None or id(workspace) in destroyed:
+                continue
+            workspace.destroy()
+            destroyed.append(id(workspace))
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_moe_finalize_workspace = None
         _fi_ar_workspace_groups.clear()
 
 
 def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
-    workspaces = [_fi_ar_workspace]
-    if _fi_ar_quant_workspace is not _fi_ar_workspace:
-        workspaces.append(_fi_ar_quant_workspace)
+    workspaces: list[Any] = []
+    for workspace in (
+        _fi_ar_workspace,
+        _fi_ar_quant_workspace,
+        _fi_ar_moe_finalize_workspace,
+    ):
+        if workspace is not None and not any(w is workspace for w in workspaces):
+            workspaces.append(workspace)
 
     group_workspaces = []
     for workspace in workspaces:

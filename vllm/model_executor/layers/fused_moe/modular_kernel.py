@@ -198,6 +198,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        """Whether ``finalize`` can be skipped for a deferring consumer.
+
+        An implementation opts in only if everything it does in ``finalize``
+        -- the top-k reduction, and any combine or reduce-scatter -- is work
+        the consumer takes over.
+        """
+        return False
+
     @property
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
@@ -425,9 +434,6 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above for the monolithic case.
     """
-
-    def supports_deferred_moe_finalize(self) -> bool:
-        return False
 
     @abstractmethod
     def prepare(
@@ -933,10 +939,14 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ) -> UnfinalizedMoEOutput | None:
         """
         This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
+
+        Writes into `output` and returns None, unless the implementation stopped
+        after GEMM2 and left the top-k reduction to a fused consumer, in which
+        case `output` is untouched and the unfinalized result is returned.
 
         Parameters:
         - output: (torch.Tensor): The unweighted, unreduced output tensor.
@@ -1295,7 +1305,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
         output_alias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
@@ -1343,7 +1353,7 @@ class FusedMoEKernelModularImpl:
         elif use_output_alias:
             fused_out = output_alias
 
-        self.fused_experts.apply(
+        unfinalized = self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
             w1=w1,
@@ -1360,6 +1370,11 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+        # Experts that stopped after GEMM2 wrote nothing into `fused_out`; the
+        # top-k reduction they left open belongs to whoever takes this.
+        if unfinalized is not None:
+            return unfinalized
 
         return fused_out
 
@@ -1514,6 +1529,17 @@ class FusedMoEKernelModularImpl:
 
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
+
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            # Nothing below can run on an unfinalized output: finalize is the
+            # local top-k reduction (and, for DP/EP, the combine) that the
+            # consumer takes over.
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
+            return fused_out
 
         return self._finalize(
             output,
@@ -1674,10 +1700,7 @@ class FusedMoEKernel:
         return self.prepare_finalize.output_is_reduced()
 
     def supports_deferred_moe_finalize(self) -> bool:
-        return (
-            isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
-            and self.prepare_finalize.supports_deferred_moe_finalize()
-        )
+        return self.prepare_finalize.supports_deferred_moe_finalize()
 
     def apply_monolithic(
         self,

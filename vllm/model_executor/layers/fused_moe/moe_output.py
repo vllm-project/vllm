@@ -148,3 +148,7 @@ class MoEOutput:
     # Applied to the routed sum before the shared add. Already folded into the
     # routing weights for methods that do so, in which case this is 1.0.
     routed_scaling_factor: float = 1.0
+    # Largest batch the layer can produce. The consumer's workspace compiles for
+    # a capacity, and it runs at forward time where the vLLM config context is
+    # gone, so the producer -- which has the MoE config -- passes it along.
+    max_num_tokens: int = 0

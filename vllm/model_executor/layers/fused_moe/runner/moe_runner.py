@@ -28,7 +28,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    MoEOutput,
+    UnfinalizedMoEOutput,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -676,7 +679,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | MoEOutput:
         """Invoke the fused moe layer.
 
         Input:
@@ -684,7 +687,8 @@ class MoERunner(MoERunnerInterface):
         - router_logits
 
         Output:
-        - The new hidden_states.
+        - The new hidden_states -- or, when the kernel left its output
+          unfinalized, the `MoEOutput` its consumer finalizes.
 
         Calling sequence
         - forward
@@ -720,16 +724,29 @@ class MoERunner(MoERunnerInterface):
             )
         )
 
-        result = self._forward_entry(
-            hidden_states,
-            router_logits,
-            shared_experts_input,
-            input_ids,
-            self._encode_layer_name(),
-            self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
-            else 0,
-        )
+        if self.moe_config.use_deferred_moe_finalize:
+            # No op schema can carry an UnfinalizedMoEOutput, so the deferred
+            # path runs the kernel outside the custom op. Eager models only.
+            self._assert_deferred_finalize_supported(
+                og_hidden_dim_pre_xform, og_hidden_dim_post_xform
+            )
+            result = self._forward_impl(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+            )
+        else:
+            result = self._forward_entry(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+                self._encode_layer_name(),
+                self.moe_config.hidden_dim_unpadded
+                if self._quant_method.has_unpadded_output
+                else 0,
+            )
 
         #
         # Note: there are two all-reduce points below. They are mutually
@@ -742,7 +759,17 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
-        fused_output = cast(torch.Tensor, fused_output)
+
+        if isinstance(fused_output, UnfinalizedMoEOutput):
+            # The kernel stopped after GEMM2, so everything below -- the top-k
+            # reduction, the shared-expert add, the all-reduce -- belongs to
+            # whoever takes this MoEOutput.
+            return MoEOutput(
+                routed=fused_output,
+                shared_output=shared_output,
+                routed_scaling_factor=self.routed_scaling_factor,
+                max_num_tokens=self.moe_config.max_num_tokens,
+            )
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
@@ -781,6 +808,38 @@ class MoERunner(MoERunnerInterface):
         )
 
         return self._maybe_add_zero_expert_output(result)
+
+    def _assert_deferred_finalize_supported(self, *trunc_sizes: int | None) -> None:
+        """Everything `forward` does after the kernel must be a no-op here.
+
+        The deferred path hands the routed output straight to the consumer, so
+        the top-k reduction, the shared-expert add and the all-reduce become
+        the consumer's. Whatever else used to run in between has nowhere left
+        to run, and must not be configured on a layer that defers.
+        """
+        moe_config = self.moe_config
+        assert moe_config.skip_final_all_reduce, (
+            "deferring the MoE finalize leaves the all-reduce to the consumer"
+        )
+        assert not moe_config.is_sequence_parallel, "SP re-gathers the MoE output"
+        assert moe_config.pcp_size == 1, "PCP reduce-scatters the MoE output"
+        assert not self.do_naive_dispatch_combine, "combine needs finalized states"
+        assert self.routed_input_transform is None, (
+            "unsupported with a routed input transform"
+        )
+        assert self.routed_output_transform is None, (
+            "unsupported with a routed output transform"
+        )
+        assert not isinstance(self.router, ZeroExpertRouter), (
+            "the zero expert's output has nowhere to be added"
+        )
+        assert not self._fused_output_is_reduced, "the kernel already reduced"
+        assert not self._quant_method.has_unpadded_output, (
+            "the consumer cannot truncate the kernel's padded output"
+        )
+        assert all(size is None for size in trunc_sizes), (
+            "the consumer cannot truncate a padded hidden dim"
+        )
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
