@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "has_zentorch_op",
+    "has_zentorch_op_arg",
     "is_zentorch_moe_config_supported",
     "is_zentorch_moe_supported",
     "_ZENTORCH_MOE_ACTIVATIONS",
@@ -42,6 +43,20 @@ def has_zentorch_op(op_names: list[str]) -> bool:
     if ns is None:
         return False
     return all(hasattr(ns, op_name) for op_name in op_names)
+
+
+def has_zentorch_op_arg(op_name: str, arg_name: str) -> bool:
+    """Return ``True`` when ``op_name`` is registered and accepts ``arg_name``.
+
+    An older zentorch can export an op without a newer argument.
+    """
+    if not has_zentorch_op([op_name]):
+        return False
+    op = getattr(torch.ops.zentorch, op_name)
+    overload = getattr(op, "default", None)
+    if overload is None:
+        return False
+    return any(a.name == arg_name for a in overload._schema.arguments)
 
 
 def is_zentorch_moe_config_supported(moe_config: FusedMoEConfig) -> bool:
