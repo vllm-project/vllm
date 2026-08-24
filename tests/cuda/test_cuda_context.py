@@ -192,5 +192,91 @@ def test_has_device_capability_comparisons(monkeypatch):
         NvmlCudaPlatform.get_device_capability.cache_clear()
 
 
+def _stub_nvml_uuids(monkeypatch, uuids: list[str]) -> None:
+    """Stub NVML to a fixed list of physical devices identified by full UUID."""
+    from vllm.platforms.cuda import pynvml
+
+    def get_handle_by_uuid(uuid: str) -> str:
+        if uuid in uuids:
+            return f"handle-{uuids.index(uuid)}"
+        raise pynvml.NVMLError_NotFound()
+
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByUUID", get_handle_by_uuid)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetIndex", lambda h: int(h.split("-")[-1]))
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: len(uuids))
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", lambda i: f"handle-{i}")
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetUUID", lambda h: uuids[int(h.split("-")[-1])]
+    )
+
+
+def test_device_control_id_accepts_full_uuid(monkeypatch):
+    """A full 36-char UUID resolves via `nvmlDeviceGetHandleByUUID` directly."""
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    uuids = [
+        "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
+        "GPU-bcd51234-1122-3344-5566-778899aabbcc",
+    ]
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    seen: list[str] = []
+    real_by_uuid = pynvml.nvmlDeviceGetHandleByUUID
+
+    def spy_by_uuid(u: str) -> str:
+        seen.append(u)
+        return real_by_uuid(u)
+
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByUUID", spy_by_uuid)
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(uuids[1]) == 1
+    assert seen == [uuids[1]]
+
+
+def test_device_control_id_accepts_integer(monkeypatch):
+    """A bare integer bypasses NVML entirely."""
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    _stub_nvml_uuids(monkeypatch, [])
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("3") == 3
+
+
+def test_device_control_id_resolves_short_form_uuid(monkeypatch):
+    """NVIDIA-documented short-form `GPU-<prefix>` must resolve to the matching
+    physical device instead of crashing.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/51677:
+    `pynvml.nvmlDeviceGetHandleByUUID` requires an exact 36-char UUID and has
+    no prefix fallback, so short forms (which NVIDIA documents as valid for
+    `CUDA_VISIBLE_DEVICES`) raised `NVMLError_NotFound` and crashed engine init.
+    """
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    uuids = [
+        "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
+        "GPU-bcd51234-1122-3344-5566-778899aabbcc",
+        "GPU-c0d51234-4444-5555-6666-777788889999",
+    ]
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-af7b61d8") == 0
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-c0d51234") == 2
+    # Even a single distinguishing character after `GPU-` should resolve
+    # unambiguously — matches nvidia-smi / CUDA runtime behaviour.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-b") == 1
+
+
+def test_device_control_id_unknown_uuid_still_raises(monkeypatch):
+    """An unknown UUID (no exact and no prefix match) still surfaces the NVML error."""
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    uuids = ["GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb"]
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    with pytest.raises(pynvml.NVMLError_NotFound):
+        NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-deadbeef")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

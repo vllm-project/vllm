@@ -735,8 +735,20 @@ class NvmlCudaPlatform(CudaPlatformBase):
         try:
             return int(device_id)
         except ValueError:
+            pass
+        try:
             handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
             return pynvml.nvmlDeviceGetIndex(handle)
+        except pynvml.NVMLError_NotFound:
+            # NVIDIA documents `CUDA_VISIBLE_DEVICES=GPU-<prefix>` as a valid
+            # short form (see https://docs.nvidia.com/deploy/topics/topic_5_2_1.html),
+            # but `nvmlDeviceGetHandleByUUID` requires an exact 36-char match.
+            # Fall back to a prefix scan so vLLM behaves like CUDA/PyTorch/nvidia-smi.
+            for i in range(pynvml.nvmlDeviceGetCount()):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                if pynvml.nvmlDeviceGetUUID(handle).startswith(device_id):
+                    return i
+            raise
 
     @classmethod
     @cache
