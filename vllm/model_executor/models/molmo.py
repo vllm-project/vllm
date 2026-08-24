@@ -61,6 +61,7 @@ from vllm.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -1123,17 +1124,44 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
 
 
 class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
-    def _call_hf_processor(
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        processor = self.info.get_hf_processor()
+
+        # The chat template is already applied to the prompt tokens
+        # Use message_format="none" to avoid applying it again
+        # Prepend an empty space if `always_start_with_space` is True
+        tokens = processor.get_tokens_input(
+            self.info.get_tokenizer().decode(prompt),
+            message_format="none",
+            always_start_with_space=True,
+        )
+
+        # Prepend a BOS token id to the tokens
+        return self.info.ctx.call_hf_processor(
+            processor.process,
+            dict(tokens=tokens),
+        )["input_ids"].tolist()
+
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        processed_outputs = self.info.ctx.call_hf_processor(
+        mm_counts = mm_items.get_all_counts()
+
+        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not processor_data:
+            return BatchFeature(dict(passthrough_data))
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
+
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor.process,
-            dict(text=prompt, **mm_data),
-            mm_kwargs,
+            dict(text=prompt_text, **processor_data),
+            hf_processor_mm_kwargs,
         )
 
         tokenizer = hf_processor.tokenizer
@@ -1141,17 +1169,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         image_processor = hf_processor.image_processor
 
-        input_ids: torch.Tensor = processed_outputs.pop("input_ids")
-        processed_outputs["input_ids"] = input_ids.unsqueeze(0)
+        processed_data.pop("input_ids")
 
-        if (images := mm_data.get("images")) is not None:
+        if (images := processor_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
 
-            feat_is_patch = processed_outputs["image_input_idx"] >= 0
+            feat_is_patch = processed_data["image_input_idx"] >= 0
 
             tilings = [
                 self.info.select_tiling(
@@ -1165,35 +1192,12 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             num_crops = torch.tensor(tilings).prod(-1) + 1
             assert num_crops.sum() == len(feat_is_patch)
 
-            processed_outputs["num_crops"] = num_crops
-            processed_outputs["img_patch_id"] = image_patch_id
+            processed_data["num_crops"] = num_crops
+            processed_data["img_patch_id"] = image_patch_id
 
-        return processed_outputs
+        processed_data.update(passthrough_data)
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        processor = self.info.get_hf_processor()
-
-        # The chat template is already applied to the prompt tokens
-        # Use message_format="none" to avoid applying it again
-        # Prepend an empty space if `always_start_with_space` is True
-        tokens = processor.get_tokens_input(
-            self.info.get_tokenizer().decode(prompt_tokens),
-            message_format="none",
-            always_start_with_space=True,
-        )
-
-        # Prepend a BOS token id to the tokens
-        processed_data = self.info.ctx.call_hf_processor(
-            processor.process,
-            dict(tokens=tokens),
-        )
-        prompt_ids = processed_data.pop("input_ids").tolist()
-        print(prompt_ids, len(prompt_ids))
-
-        return prompt_ids
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -1260,7 +1264,9 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         return [
             PromptInsertion(
                 modality="image",
-                target=PromptIndexTargets.prefix("<|endoftext|>"),
+                target=PromptIndexTargets.prefix(
+                    cached_encode(tokenizer, "<|endoftext|>", add_special_tokens=False),
+                ),
                 insertion=get_insertion_molmo,
             )
         ]

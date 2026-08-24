@@ -649,13 +649,8 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
         processor_data["videos"] = raw_videos
         return processor_data, passthrough_data
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
         self,
@@ -727,7 +722,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             image_end_id = vocab[IMAGE_END]
             merge_size = self.info.image_processor.merge_size  # type: ignore[union-attr]
 
-            def image_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+            def image_replacement(item_idx: int) -> PromptUpdateDetails:
                 grid = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
                 assert isinstance(grid, torch.Tensor)
                 num_tokens = int(grid.prod()) // merge_size**2
@@ -755,7 +750,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
                 * int(config.get("merge_factor", 1))
             )
 
-            def audio_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+            def audio_replacement(item_idx: int) -> PromptUpdateDetails:
                 length = out_mm_kwargs["audio"][item_idx]["audio_lengths"].data
                 assert isinstance(length, torch.Tensor)
                 num_tokens = math.ceil(int(length.item()) / stride)
@@ -773,7 +768,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             )
         if "video" in out_mm_kwargs:
 
-            def video_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+            def video_replacement(item_idx: int) -> PromptUpdateDetails:
                 item = out_mm_kwargs["video"][item_idx]
                 input_ids_data = item["video_input_ids"].data
                 embed_mask_data = item["video_embed_mask"].data
@@ -782,8 +777,8 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
                 input_ids = input_ids_data.tolist()
                 embed_mask = embed_mask_data.bool()
 
-                def select_video_embeds(tokenizer, full) -> torch.Tensor:
-                    del tokenizer, full
+                def select_video_embeds(full) -> torch.Tensor:
+                    del full
                     return embed_mask
 
                 return PromptUpdateDetails(
@@ -794,7 +789,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             updates.append(
                 PromptReplacement(
                     modality="video",
-                    target=VIDEO_PLACEHOLDER,
+                    target=[vocab[VIDEO_PLACEHOLDER]],
                     replacement=video_replacement,
                 )
             )
