@@ -3,6 +3,7 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -877,6 +878,35 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     assert q_lens == [3, 0, 0]
     assert q_cu_seq_lens is not None
     assert q_cu_seq_lens.tolist() == [0, 3, 3, 3]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_sm120_nvfp4_xqa_uses_model_dtype_for_decode(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.cache_dtype = "nvfp4"
+    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(disable_flashinfer_q_quantization=False)
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability",
+        lambda capability: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
+
+    assert builder.get_q_data_type(is_prefill=False) == torch.bfloat16
+    assert builder.get_q_data_type(is_prefill=True) == flashinfer_backend.FP8_DTYPE
 
 
 @pytest.mark.skipif(
