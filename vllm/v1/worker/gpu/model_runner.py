@@ -64,7 +64,6 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -94,6 +93,11 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    _init_minimal_kv_cache_for_profiling,
+    _teardown_profiling_state,
+)
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    profile_cudagraph_memory as _profile_cudagraph_memory,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
@@ -594,6 +598,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            is_profiling=is_profiling,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -604,8 +609,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             varlen_decode=self.adaptive_verification is not None,
         )
         check_attention_cp_compatibility(self.vllm_config)
-        if isinstance(self.speculator, DraftModelSpeculator) and not is_profiling:
+        if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
+            # Runs on the profiling path too: init_cudagraph_manager below
+            # sizes a speculator's cudagraph mode from what set_attn records
+            # (DFlash reads self.attn_cg_support), so skipping it here would
+            # leave that attribute unset.
             self.speculator.set_attn(
                 self.model_state,
                 self.kv_cache_config,
@@ -627,7 +636,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kernel_block_sizes,
             self.vllm_config,
         )
-        if not is_profiling:
+        if is_profiling:
+            self.kv_connector = NO_OP_KV_CONNECTOR
+        else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
@@ -841,74 +852,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
-
-    def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_utils import (
-            get_kv_cache_config_from_groups,
-            get_kv_cache_groups,
-        )
-
-        kv_cache_spec = self.get_kv_cache_spec()
-        KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-        min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
-
-        # Temporarily allocate just enough KV cache state to instantiate
-        # attention metadata builders for workspace sizing.
-        saved_override = self.cache_config.num_gpu_blocks_override
-        self.cache_config.num_gpu_blocks_override = min_blocks
-        try:
-            minimal_config = get_kv_cache_config_from_groups(
-                self.vllm_config,
-                kv_cache_groups,
-                available_memory=0,
-            )
-        finally:
-            self.cache_config.num_gpu_blocks_override = saved_override
-
-        self.initialize_kv_cache(minimal_config, is_profiling=True)
-        self.cache_config.num_gpu_blocks = minimal_config.num_blocks
-
-        logger.debug("Initialized minimal KV cache for CUDA graph profiling")
-
-    def _cleanup_profiling_kv_cache(self) -> None:
-        torch.accelerator.synchronize()
-
-        if hasattr(self, "kv_caches") and self.kv_caches:
-            for i in range(len(self.kv_caches)):
-                self.kv_caches[i] = None  # type: ignore[assignment]
-            self.kv_caches.clear()
-        if hasattr(self, "attn_groups"):
-            self.attn_groups.clear()
-        for attr in (
-            "attn_groups",
-            "kv_cache_config",
-            "block_tables",
-            "kernel_block_sizes",
-        ):
-            if hasattr(self, attr):
-                delattr(self, attr)
-        # Profile runs dispatch eagerly but still read this attribute.
-        self.cudagraph_manager = None
-        self.cache_config.num_gpu_blocks = None
-
-        for layer in self.compilation_config.static_forward_context.values():
-            if hasattr(layer, "kv_cache"):
-                kv_cache = layer.kv_cache
-                layer.kv_cache = (
-                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
-                )
-            # Clean up quantized KV cache scale views
-            # (int8_per_token_head, fp8_per_token_head).
-            if hasattr(layer, "impl"):
-                if hasattr(layer.impl, "_k_scale_cache"):
-                    layer.impl._k_scale_cache = None
-                if hasattr(layer.impl, "_v_scale_cache"):
-                    layer.impl._v_scale_cache = None
-
-        gc.collect()
-        torch.accelerator.empty_cache()
-        logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
     def _reserve_attention_workspace(self, *, memory_profiling: bool) -> int:
         if not getattr(self, "attn_groups", None):
@@ -1172,7 +1115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         lease: PersistentWorkspaceLease | None = None
         try:
             with set_current_vllm_config(self.vllm_config):
-                self._init_minimal_kv_cache_for_profiling()
+                _init_minimal_kv_cache_for_profiling(self)
 
             arena_after_init = manager.workspace_sizes_bytes()
             allocated_after_init = torch.accelerator.memory_allocated(self.device)
@@ -1189,12 +1132,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for builder in attn_group.metadata_builders
             ]
             lease = PersistentWorkspaceLease(owners)
-            self._cleanup_profiling_kv_cache()
+            _teardown_profiling_state(self)
         except Exception:
             if lease is not None:
                 lease.release()
             try:
-                self._cleanup_profiling_kv_cache()
+                _teardown_profiling_state(self)
             except Exception:
                 logger.exception(
                     "Failed to clean up profiling KV cache after persistent "
@@ -1237,55 +1180,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert lease is not None
         return lease
 
+    @torch.inference_mode()
     def profile_cudagraph_memory(
         self, *, persistent_workspace_profiled: bool = False
     ) -> int:
+        """Estimate the GPU memory required to capture CUDA graphs."""
         self.cudagraph_memory_persistent_estimate = 0
         self.cudagraph_memory_graph_pool_estimate = 0
 
-        arena_before_init = current_workspace_manager().workspace_sizes_bytes()
-        try:
-            with set_current_vllm_config(self.vllm_config):
-                self._init_minimal_kv_cache_for_profiling()
-            arena_after_init = current_workspace_manager().workspace_sizes_bytes()
-            if persistent_workspace_profiled and self._workspace_sizes_exceed(
-                arena_before_init, arena_after_init
-            ):
-                raise AssertionError(
-                    "Attention workspace arena grew while rebuilding CUDA graph "
-                    "profiling metadata after persistent workspace profiling: "
-                    f"{arena_before_init} -> {arena_after_init}."
-                )
-            arena_before_reserve = current_workspace_manager().workspace_sizes_bytes()
-            persistent_estimate = (
-                self._reserve_attention_workspace_for_cudagraph_capture()
-            )
-            arena_after_reserve = current_workspace_manager().workspace_sizes_bytes()
-            if persistent_workspace_profiled and self._workspace_sizes_exceed(
-                arena_before_init, arena_after_reserve
-            ):
+        # The profiling capture re-runs the workspace reservation. When the
+        # persistent workspace was already profiled, the arenas it needs are
+        # live, so re-reserving must be a no-op and the measured delta covers
+        # the graphs alone; growth here would double count against the
+        # activation peak that already includes the persistent workspace.
+        arena_before = (
+            current_workspace_manager().workspace_sizes_bytes()
+            if persistent_workspace_profiled
+            else ()
+        )
+        estimate = int(_profile_cudagraph_memory(self))
+        if persistent_workspace_profiled:
+            arena_after = current_workspace_manager().workspace_sizes_bytes()
+            if self._workspace_sizes_exceed(arena_before, arena_after):
                 raise AssertionError(
                     "Attention workspace arena grew during CUDA graph profiling "
                     "after persistent workspace profiling: "
-                    f"{arena_before_reserve} -> {arena_after_reserve}."
+                    f"{arena_before} -> {arena_after}."
                 )
-        finally:
-            self._cleanup_profiling_kv_cache()
-
-        if persistent_workspace_profiled:
-            logger.debug(
-                "V2 CUDA graph profiling added no persistent workspace "
-                "estimate; persistent workspace is included in the "
-                "activation peak."
-            )
-            persistent_estimate = 0
-        else:
-            logger.info(
-                "Estimated CUDA graph persistent workspace memory: %.2f GiB",
-                persistent_estimate / (1 << 30),
-            )
-        self.cudagraph_memory_persistent_estimate = int(persistent_estimate)
-        return int(persistent_estimate)
+        self.cudagraph_memory_graph_pool_estimate = estimate
+        return estimate
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -1975,12 +1898,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings, self.kv_cache_config
             )
             assert block_tables is not None
+            attn_groups = self.attn_groups
+            if dummy_run and is_profile:
+                # Mamba layers take a cheap warmup path with no metadata;
+                # attention metadata is still built so those kernels tune.
+                attn_groups = [
+                    [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
             attn_metadata = self.model_state.prepare_attn(
                 input_batch,
                 batch_desc.cg_mode,
                 block_tables,
                 slot_mappings,
-                self.attn_groups,
+                attn_groups,
                 self.kv_cache_config,
                 # FULL replay reads capture-time metadata buffers. Re-stage them
                 # from the zeroed dummy block tables instead of retaining state

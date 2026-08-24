@@ -562,10 +562,12 @@ def test_flashinfer_prefill_reservation_uses_runtime_dispatch_contract(
         "trtllm_decode",
         "non_causal",
         "is_mm_prefix_lm",
+        "dedicated_xqa",
         "expected",
     ),
     [
         pytest.param(
+            False,
             False,
             False,
             False,
@@ -578,6 +580,7 @@ def test_flashinfer_prefill_reservation_uses_runtime_dispatch_contract(
             True,
             False,
             False,
+            False,
             (False, True, False, True),
             id="all-trtllm",
         ),
@@ -586,6 +589,7 @@ def test_flashinfer_prefill_reservation_uses_runtime_dispatch_contract(
             True,
             False,
             True,
+            False,
             (True, True, False, True),
             id="mm-prefix-native-and-trtllm",
         ),
@@ -594,8 +598,18 @@ def test_flashinfer_prefill_reservation_uses_runtime_dispatch_contract(
             True,
             True,
             False,
+            False,
             (True, False, False, False),
             id="non-causal-native-only",
+        ),
+        pytest.param(
+            True,
+            True,
+            True,
+            False,
+            True,
+            (True, False, False, True),
+            id="non-causal-dedicated-xqa-decode",
         ),
     ],
 )
@@ -604,6 +618,7 @@ def test_flashinfer_workspace_routes_match_reachable_dispatches(
     trtllm_decode,
     non_causal,
     is_mm_prefix_lm,
+    dedicated_xqa,
     expected,
 ):
     pytest.importorskip("flashinfer")
@@ -612,6 +627,7 @@ def test_flashinfer_workspace_routes_match_reachable_dispatches(
     builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
     builder.use_trtllm_prefill_attention = trtllm_prefill
     builder.use_trtllm_decode_attention = trtllm_decode
+    builder.use_dedicated_xqa = dedicated_xqa
     builder.kv_cache_spec = SimpleNamespace(non_causal=non_causal)
     builder.model_config = SimpleNamespace(is_mm_prefix_lm=is_mm_prefix_lm)
 
@@ -1249,6 +1265,24 @@ def _load_gpu_model_runner(version: str):
     return module, GPUModelRunner
 
 
+def _patch_profiling_hooks(monkeypatch, module, version, runner, init_fn, cleanup_fn):
+    """Redirect the minimal-KV-cache bootstrap/teardown used by persistent
+    workspace profiling. V1 owns them as runner methods; V2 delegates to the
+    module-level helpers shared with ``cudagraph_utils`` graph profiling."""
+    if version == "v1":
+        runner._init_minimal_kv_cache_for_profiling = init_fn
+        runner._cleanup_profiling_kv_cache = cleanup_fn
+    else:
+        monkeypatch.setattr(
+            module,
+            "_init_minimal_kv_cache_for_profiling",
+            lambda _runner: init_fn(),
+        )
+        monkeypatch.setattr(
+            module, "_teardown_profiling_state", lambda _runner: cleanup_fn()
+        )
+
+
 @pytest.mark.parametrize("version", ["v1", "v2"])
 def test_persistent_workspace_lease_keeps_builder_allocations(monkeypatch, version):
     module, GPUModelRunner = _load_gpu_model_runner(version)
@@ -1288,8 +1322,14 @@ def test_persistent_workspace_lease_keeps_builder_allocations(monkeypatch, versi
         del runner.attn_groups
         gc.collect()
 
-    runner._init_minimal_kv_cache_for_profiling = init_minimal_kv_cache
-    runner._cleanup_profiling_kv_cache = cleanup_profiling_kv_cache
+    _patch_profiling_hooks(
+        monkeypatch,
+        module,
+        version,
+        runner,
+        init_minimal_kv_cache,
+        cleanup_profiling_kv_cache,
+    )
     if version == "v1":
         runner._attn_group_iterator = lambda: iter(runner.attn_groups[0])
 
@@ -1344,11 +1384,6 @@ def test_persistent_workspace_preparation_preserves_primary_error(monkeypatch, v
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = object()
     runner.device = torch.device("cpu")
-    runner._init_minimal_kv_cache_for_profiling = lambda: setattr(
-        runner,
-        "attn_groups",
-        [[SimpleNamespace(metadata_builders=[Builder()])]],
-    )
     if version == "v1":
         runner._attn_group_iterator = lambda: iter(runner.attn_groups[0])
 
@@ -1359,7 +1394,18 @@ def test_persistent_workspace_preparation_preserves_primary_error(monkeypatch, v
         del runner.attn_groups
         raise RuntimeError("secondary cleanup error")
 
-    runner._cleanup_profiling_kv_cache = failing_cleanup
+    _patch_profiling_hooks(
+        monkeypatch,
+        module,
+        version,
+        runner,
+        lambda: setattr(
+            runner,
+            "attn_groups",
+            [[SimpleNamespace(metadata_builders=[Builder()])]],
+        ),
+        failing_cleanup,
+    )
 
     monkeypatch.setattr(module, "set_current_vllm_config", null_context)
     monkeypatch.setattr(module.torch.accelerator, "memory_allocated", lambda device: 0)
@@ -1431,9 +1477,8 @@ def test_final_persistent_workspace_reserve_rejects_preexisting_growth(version):
         reset_workspace_manager()
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
-def test_cudagraph_profile_rejects_builder_init_workspace_growth(monkeypatch, version):
-    module, GPUModelRunner = _load_gpu_model_runner(version)
+def test_cudagraph_profile_rejects_builder_init_workspace_growth(monkeypatch):
+    module, GPUModelRunner = _load_gpu_model_runner("v1")
 
     @contextlib.contextmanager
     def null_context(*args, **kwargs):
@@ -1461,6 +1506,31 @@ def test_cudagraph_profile_rejects_builder_init_workspace_growth(monkeypatch, ve
         reset_workspace_manager()
 
     assert cleanup_calls == ["cleanup"]
+
+
+def test_v2_cudagraph_profile_rejects_workspace_growth(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+
+    def grow_arena(_runner):
+        current_workspace_manager().get_simultaneous(((2048,), torch.uint8))
+        return 4096
+
+    monkeypatch.setattr(gpu_model_runner_v2, "_profile_cudagraph_memory", grow_arena)
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        current_workspace_manager().get_simultaneous(((1024,), torch.uint8))
+        with pytest.raises(
+            AssertionError,
+            match="grew during CUDA graph profiling",
+        ):
+            runner.profile_cudagraph_memory(persistent_workspace_profiled=True)
+    finally:
+        reset_workspace_manager()
 
 
 @pytest.mark.parametrize(
@@ -1623,43 +1693,21 @@ def test_separate_profile_accounts_persistent_and_graph_pool(
         reset_workspace_manager()
 
 
-@pytest.mark.parametrize(
-    ("persistent_workspace_profiled", "expected_estimate"),
-    [
-        pytest.param(False, 4096, id="legacy-accounting"),
-        pytest.param(True, 0, id="persistent-already-profiled"),
-    ],
-)
-def test_v2_profile_attention_workspace_accounting(
-    monkeypatch, persistent_workspace_profiled, expected_estimate
+@pytest.mark.parametrize("persistent_workspace_profiled", [False, True])
+def test_v2_profile_cudagraph_memory_delegates(
+    monkeypatch, persistent_workspace_profiled
 ):
     from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-    @contextlib.contextmanager
-    def null_context(*args, **kwargs):
-        yield
-
     runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.vllm_config = object()
+    profiled = []
 
-    events = []
+    def fake_profile(runner_arg):
+        profiled.append(runner_arg)
+        return 6_500_000
 
-    monkeypatch.setattr(
-        gpu_model_runner_v2,
-        "set_current_vllm_config",
-        lambda *args, **kwargs: null_context(),
-    )
-
-    def reserve_attention_workspace():
-        events.append("reserve")
-        return 4096
-
-    runner._init_minimal_kv_cache_for_profiling = lambda: events.append("init")
-    runner._reserve_attention_workspace_for_cudagraph_capture = (
-        reserve_attention_workspace
-    )
-    runner._cleanup_profiling_kv_cache = lambda: events.append("cleanup")
+    monkeypatch.setattr(gpu_model_runner_v2, "_profile_cudagraph_memory", fake_profile)
 
     reset_workspace_manager()
     init_workspace_manager(torch.device("cpu"))
@@ -1667,18 +1715,19 @@ def test_v2_profile_attention_workspace_accounting(
         estimate = runner.profile_cudagraph_memory(
             persistent_workspace_profiled=persistent_workspace_profiled
         )
-
-        assert estimate == expected_estimate
-        assert runner.cudagraph_memory_persistent_estimate == expected_estimate
-        assert runner.cudagraph_memory_graph_pool_estimate == 0
-        assert events == ["init", "reserve", "cleanup"]
     finally:
         reset_workspace_manager()
 
+    assert profiled == [runner]
+    assert estimate == 6_500_000
+    assert runner.cudagraph_memory_graph_pool_estimate == 6_500_000
+    # The persistent workspace is either already inside the activation peak or
+    # inside the measured capture delta, so V2 never reports it separately.
+    assert runner.cudagraph_memory_persistent_estimate == 0
 
-def test_v2_cleanup_profiling_kv_cache_releases_builder_refs(monkeypatch):
-    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+def test_v2_teardown_profiling_state_releases_builder_refs(monkeypatch):
+    from vllm.v1.worker.gpu import cudagraph_utils
 
     class Builder:
         pass
@@ -1690,32 +1739,28 @@ def test_v2_cleanup_profiling_kv_cache_releases_builder_refs(monkeypatch):
         impl=SimpleNamespace(_k_scale_cache=object(), _v_scale_cache=object()),
     )
 
-    runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.cache_config = SimpleNamespace(num_gpu_blocks=4)
-    runner.kv_caches = [torch.empty(1)]
-    runner.attn_groups = [[SimpleNamespace(metadata_builders=[builder])]]
-    runner.kv_cache_config = object()
-    runner.block_tables = object()
-    runner.kernel_block_sizes = [16]
-    runner.cudagraph_manager = object()
-    runner.compilation_config = SimpleNamespace(static_forward_context={"layer": layer})
+    runner = SimpleNamespace(
+        cache_config=SimpleNamespace(num_gpu_blocks=4),
+        kv_caches=[torch.empty(1)],
+        attn_groups=[[SimpleNamespace(metadata_builders=[builder])]],
+        kv_cache_config=object(),
+        cudagraph_manager=object(),
+        compilation_config=SimpleNamespace(static_forward_context={"layer": layer}),
+        model_state=SimpleNamespace(supports_mm_inputs=False),
+        lora_config=None,
+        maybe_remove_all_loras=lambda lora_config: None,
+    )
     del builder
 
-    monkeypatch.setattr(
-        gpu_model_runner_v2.torch.accelerator, "synchronize", lambda: None
-    )
-    monkeypatch.setattr(
-        gpu_model_runner_v2.torch.accelerator, "empty_cache", lambda: None
-    )
+    monkeypatch.setattr(cudagraph_utils.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cudagraph_utils.torch.accelerator, "empty_cache", lambda: None)
 
-    runner._cleanup_profiling_kv_cache()
+    cudagraph_utils._teardown_profiling_state(runner)
     gc.collect()
 
     assert runner.kv_caches == []
-    assert not hasattr(runner, "attn_groups")
+    assert runner.attn_groups == []
     assert not hasattr(runner, "kv_cache_config")
-    assert not hasattr(runner, "block_tables")
-    assert not hasattr(runner, "kernel_block_sizes")
     assert runner.cudagraph_manager is None
     assert runner.cache_config.num_gpu_blocks is None
     assert isinstance(layer.kv_cache, torch.Tensor)
@@ -1772,7 +1817,8 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
     runner.lora_config = None
     runner.maybe_setup_dummy_loras = lambda lora_config: null_context()
     runner.model = object()
-    runner.model_state = object()
+    # capture_model() checks the encoder capture path before the decoder one.
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
     runner.input_buffers = object()
     runner.intermediate_tensors = None
     runner.block_tables = object()
@@ -1780,6 +1826,7 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
     runner.kv_cache_config = object()
     runner.use_aux_hidden_state_outputs = False
     runner.speculator = None
+    runner.adaptive_verification = None
 
     memory_reserved_values = iter([1_000, 1_000, 1_128, 1_128])
     memory_allocated_values = iter([500, 500, 628, 628])
