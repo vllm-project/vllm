@@ -70,20 +70,26 @@ def make_humming_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
     humming_configs: dict[str, "LayerConfig"] | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> HummingMoEQuantConfig:
     assert humming_configs is not None
-    if quant_dtype is None:
-        a_quant_desc = FusedMoEQuantDesc(dtype=None)
-    elif activation_group_shape is not None:
-        # Pre-dispatch quantization.
-        a_quant_desc = FusedMoEQuantDesc(
-            dtype=quant_dtype, shape=activation_group_shape
-        )
-    else:
-        # Deferred path: Humming quantizes the activation internally, so the
-        # descriptor only needs a non-None dtype to mark it as quantized.
-        shape = GroupShape(row=1, col=-1)
-        a_quant_desc = FusedMoEQuantDesc(dtype=quant_dtype, shape=shape)
+
+    def make_activation_desc(scale: torch.Tensor | None) -> FusedMoEQuantDesc:
+        if quant_dtype is None:
+            return FusedMoEQuantDesc(dtype=None)
+        if scale is not None:
+            return FusedMoEQuantDesc(
+                dtype=quant_dtype,
+                shape=GroupShape.PER_TENSOR,
+                scale=scale,
+            )
+        if activation_group_shape is not None:
+            return FusedMoEQuantDesc(dtype=quant_dtype, shape=activation_group_shape)
+        return FusedMoEQuantDesc(dtype=quant_dtype, shape=GroupShape.PER_TOKEN)
+
+    a1_quant_desc = make_activation_desc(a1_scale)
+    a2_quant_desc = make_activation_desc(a2_scale)
 
     w1_quant_desc = FusedMoEQuantDesc(
         dtype=weight_dtype,
@@ -104,8 +110,10 @@ def make_humming_moe_quant_config(
     )
 
     return HummingMoEQuantConfig(
-        _a1=a_quant_desc,
-        _a2=a_quant_desc,
+        w1_input_scale=a1_scale,
+        w2_input_scale=a2_scale,
+        _a1=a1_quant_desc,
+        _a2=a2_quant_desc,
         _w1=w1_quant_desc,
         _w2=w2_quant_desc,
         gemm1_alpha=gemm1_alpha,

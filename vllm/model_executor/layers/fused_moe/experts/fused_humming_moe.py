@@ -50,6 +50,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static128Bf16,
     kInt8DynamicTokenSym,
     kInt8Static,
     kInt8StaticChannelSym,
@@ -336,6 +337,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kFp8Static128BlockSym, kFp8DynamicTokenSym),
             (kInt4Static, None),
             (kInt4Static, kFp8DynamicTokenSym),
+            (kInt4Static128Bf16, kFp8StaticTensorSym),
             (kInt8Static, None),
             (kInt8Static, kFp8DynamicTokenSym),
             # Checkpoint-driven (weight, activation) pairs the dense/MoE oracles
