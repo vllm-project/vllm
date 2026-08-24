@@ -792,10 +792,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         # Use a generator (not a list comprehension) so the weights iterator is
         # consumed lazily by AutoWeightsLoader. Materializing it here would hold
         # the entire language-model checkpoint in host memory at once, which can

@@ -3,18 +3,11 @@
 
 import argparse
 import inspect
-import signal
 
 import uvloop
 
-from vllm import envs
-from vllm.config import VllmConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (
-    build_and_serve_renderer,
-    setup_server,
-)
+from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -120,38 +113,3 @@ class LaunchSubcommand(CLISubcommand):
 
 def cmd_init() -> list[CLISubcommand]:
     return [LaunchSubcommand()]
-
-
-async def run_launch_fastapi(args: argparse.Namespace) -> None:
-    """Run the online serving layer with FastAPI (no GPU inference)."""
-
-    # Interrupt initialization if SIGTERM arrives before uvicorn installs
-    # its own signal handlers. Once uvicorn is running it replaces this.
-    def _interrupt_init(*_) -> None:
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, _interrupt_init)
-
-    # 1. Socket binding
-    listen_address, sock = setup_server(args, reuse_port=False)
-
-    # 2. Build and serve the API server
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    model_config = engine_args.create_model_config()
-
-    # Render servers preprocess data only — no inference, no quantized kernels.
-    # Clear quantization so VllmConfig skips quant dtype/capability validation.
-    model_config.quantization = None
-
-    # Render servers never allocate KV cache; suppress the spurious CPU KV
-    # cache space warning from CpuPlatform.check_and_update_config.
-    envs.VLLM_CPU_KVCACHE_SPACE = 0
-
-    vllm_config = VllmConfig(model_config=model_config)
-    shutdown_task = await build_and_serve_renderer(
-        vllm_config, listen_address, sock, args
-    )
-    try:
-        await shutdown_task
-    finally:
-        sock.close()

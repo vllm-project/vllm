@@ -18,6 +18,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpe
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
+    _reinterpret_u64_as_i64,
+    batch_memcpy,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
     preprocess_mamba,
@@ -186,6 +188,94 @@ class _MockCpuGpuBuffer:
         if n is None:
             return self.gpu.copy_(self.cpu, non_blocking=True)
         return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+
+class _FakeDataPtrTensor:
+    """Tensor wrapper that exposes a controlled data_ptr for metadata tests."""
+
+    def __init__(self, tensor: torch.Tensor, data_ptr: int):
+        self._tensor = tensor
+        self._data_ptr = data_ptr
+        self.shape = tensor.shape
+
+    def data_ptr(self) -> int:
+        return self._data_ptr
+
+    def dim(self) -> int:
+        return self._tensor.dim()
+
+    def stride(self, *args):
+        return self._tensor.stride(*args)
+
+    def numel(self) -> int:
+        return self._tensor.numel()
+
+    def element_size(self) -> int:
+        return self._tensor.element_size()
+
+    def size(self, *args):
+        return self._tensor.size(*args)
+
+    def __getitem__(self, item):
+        return self._tensor[item]
+
+
+def test_reinterpret_u64_as_i64_preserves_pointer_bits():
+    ptrs = [
+        0,
+        1,
+        (1 << 63) - 1,
+        1 << 63,
+        (1 << 63) + 1234,
+        (1 << 64) - 1,
+    ]
+    ptr_tensor = torch.zeros(len(ptrs), dtype=torch.int64)
+
+    for idx, ptr in enumerate(ptrs):
+        ptr_tensor[idx] = _reinterpret_u64_as_i64(ptr)
+
+    assert ptr_tensor.numpy().view(np.uint64).tolist() == ptrs
+
+
+def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cpu")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+    conv_ptr = 1 << 63
+    temporal_ptr = (1 << 64) - 8
+    block_table_ptr = (1 << 63) + 42
+
+    conv_state = _FakeDataPtrTensor(
+        torch.empty(
+            cfg.num_blocks,
+            cfg.conv_width,
+            cfg.conv_inner_dim,
+            dtype=cfg.dtype,
+        ),
+        conv_ptr,
+    )
+    temporal_state = _FakeDataPtrTensor(
+        torch.empty(cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype),
+        temporal_ptr,
+    )
+    block_table = _FakeDataPtrTensor(
+        torch.empty(1, 4, dtype=torch.int32),
+        block_table_ptr,
+    )
+    forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+
+    gpu_ctx.initialize_from_forward_context(
+        kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
+    )
+
+    assert gpu_ctx.state_base_addrs.tolist() == [
+        _reinterpret_u64_as_i64(conv_ptr),
+        _reinterpret_u64_as_i64(temporal_ptr),
+    ]
+    assert gpu_ctx.block_table_ptrs.tolist() == [
+        _reinterpret_u64_as_i64(block_table_ptr)
+    ]
 
 
 def _make_postprocess_scheduler_output(
@@ -489,6 +579,42 @@ def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
         )
 
 
+def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
+    device = torch.device("cpu")
+    config = _TestConfig(num_layers=1)
+    layer_names = ["layer_0"]
+    kv_cache_config = _make_kv_cache_config(config, layer_names)
+    conv_state = torch.empty(
+        config.num_blocks,
+        config.conv_width,
+        config.conv_inner_dim,
+        dtype=config.dtype,
+    )
+    temporal_state = torch.empty(
+        config.num_blocks, config.temporal_state_dim, dtype=config.dtype
+    )
+    attention = MagicMock()
+    attention.kv_cache = [
+        conv_state,
+        temporal_state,
+        *(torch.empty(config.num_blocks, 1) for _ in range(4)),
+    ]
+    context = _make_gpu_ctx(config, kv_cache_config, device)
+
+    context.initialize_from_forward_context(
+        kv_cache_config,
+        {"layer_0": attention},
+        _COPY_FUNCS,
+        [torch.zeros(1, 1, dtype=torch.int32)],
+    )
+
+    assert context.is_initialized
+    assert context.state_base_addrs.tolist() == [
+        conv_state.data_ptr(),
+        temporal_state.data_ptr(),
+    ]
+
+
 def _run_gpu_postprocess(
     gpu_ctx: MambaSpecDecodeGPUContext,
     *,
@@ -535,6 +661,34 @@ class TestPostprocessMambaFusedKernel:
     @pytest.fixture
     def test_config(self):
         return _TestConfig()
+
+    def test_batch_memcpy_left_overlap_has_memmove_semantics(self, device):
+        batch = 128
+        row_bytes = 32 * 1024
+        shift = 16
+        copy_size = row_bytes - shift
+
+        pattern = (torch.arange(row_bytes, dtype=torch.int32, device=device) % 251).to(
+            torch.uint8
+        )
+        state = pattern.expand(batch, -1).clone()
+        snapshot = state.clone()
+
+        row_stride_bytes = state.stride(0) * state.element_size()
+        row_offsets = (
+            torch.arange(batch, dtype=torch.int64, device=device) * row_stride_bytes
+        )
+        dst_ptrs = (row_offsets + state.data_ptr()).to(torch.uint64)
+        src_ptrs = (row_offsets + state.data_ptr() + shift).to(torch.uint64)
+        sizes = torch.full((batch,), copy_size, dtype=torch.int32, device=device)
+
+        expected = snapshot.clone()
+        expected[:, :copy_size].copy_(snapshot[:, shift:])
+        for _ in range(10):
+            state.copy_(snapshot)
+            batch_memcpy(src_ptrs, dst_ptrs, sizes)
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """
@@ -1190,12 +1344,27 @@ class TestPostprocessMambaFusedKernel:
         # --- Verify Python behavior (ground truth) ---
         dest_block_id = block_ids_per_req[0][1]  # dest_block_idx = 1
 
-        # Conv state should be modified (shifted copy within block)
-        conv_changed = not torch.allclose(
-            conv_state_py[dest_block_id], conv_state_orig[dest_block_id]
+        # This is an overlapping in-place left shift, so comparing only the
+        # Python and fused paths can hide the same memcpy race in both. Build
+        # the memmove result from the untouched snapshot and check each path
+        # independently.
+        expected_conv_state = conv_state_orig.clone()
+        expected_conv_state[dest_block_id, :-1].copy_(
+            conv_state_orig[dest_block_id, 1:]
         )
-        assert conv_changed, (
-            "Python: Conv state should be modified when accept_token_bias > 0"
+        torch.testing.assert_close(
+            conv_state_py,
+            expected_conv_state,
+            rtol=0,
+            atol=0,
+            msg="Python: overlapping conv copy should have memmove semantics",
+        )
+        torch.testing.assert_close(
+            conv_state_gpu,
+            expected_conv_state,
+            rtol=0,
+            atol=0,
+            msg="GPU: overlapping conv copy should have memmove semantics",
         )
 
         # Temporal state should be modified (copy from different block)
@@ -2122,13 +2291,10 @@ class TestPostprocessMambaFusedKernel:
             actual_src_block_idx = src_block_idx + accept_token_bias
             actual_src_block_id = block_table[req, actual_src_block_idx]
 
-        All prior regression tests exercise only ``bias == 1``, i.e. they
-        only ever read one slot ahead of ``src_block_idx`` in the block
-        table. An off-by-one (or missing scale) in the address computation
-        on line 143 of ``mamba_utils.py`` would be invisible to every
-        existing test but would silently read the wrong physical block on
-        any speculative-decode cycle that accepts multiple tokens across a
-        block boundary, feeding a stale hidden state forward one step.
+        A ``bias == 1`` case only reads one slot ahead of ``src_block_idx``
+        in the block table. This test isolates the larger-stride case, where
+        an off-by-one would read the wrong physical block after multiple
+        tokens are accepted across a block boundary.
 
         Setup (block_size=16):
         - running   = 28 + 2 - 0 = 30
@@ -2141,8 +2307,7 @@ class TestPostprocessMambaFusedKernel:
 
         With identity block_ids = [0,1,2,3,...], an off-by-one that used
         bias=1 would copy from block_ids[2]=2 instead of block_ids[3]=3,
-        producing a clear state-value mismatch against the Python
-        reference.
+        producing a clear mismatch against the untouched snapshot.
         """
         cfg = test_config
         torch.manual_seed(7002)
@@ -2166,6 +2331,7 @@ class TestPostprocessMambaFusedKernel:
             fwd_py,
             fwd_gpu,
         ) = _make_dual_layer_state(cfg, device)
+        conv_state_orig = conv_state_py.clone()
         temporal_state_orig = temporal_state_py.clone()
 
         # --- Python reference ---
@@ -2212,12 +2378,22 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
 
-        # --- Ground truth: Python must have sourced temporal from block 3 ---
+        # --- Ground truth from untouched snapshots ---
         actual_src_block_id = block_ids_per_req[0][3]  # == 3
         dest_block_id = block_ids_per_req[0][1]  # == 1
+        expected_conv_state = conv_state_orig.clone()
+        expected_conv_state[dest_block_id, :-2].copy_(
+            conv_state_orig[dest_block_id, 2:]
+        )
+        torch.testing.assert_close(conv_state_py, expected_conv_state, rtol=0, atol=0)
+        torch.testing.assert_close(conv_state_gpu, expected_conv_state, rtol=0, atol=0)
+
+        # Python must have sourced temporal from block 3.
         torch.testing.assert_close(
             temporal_state_py[dest_block_id],
             temporal_state_orig[actual_src_block_id],
+            rtol=0,
+            atol=0,
             msg=(
                 "Python reference did not copy from block_ids[src+bias]=3; "
                 "test preconditions are wrong"
@@ -2251,21 +2427,44 @@ class TestPostprocessMambaFusedKernel:
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
 
-    def test_ds_conv_layout_bias_gt_0_byte_equal_to_sd(
-        self, device, test_config, monkeypatch
+    @pytest.mark.parametrize(
+        "same_physical_block", [True, False], ids=["same", "distinct"]
+    )
+    @pytest.mark.parametrize("accept_token_bias", [1, 2, 3])
+    @pytest.mark.parametrize(
+        "dtype",
+        [torch.float16, torch.float32, torch.float64],
+        ids=["fp16", "fp32", "fp64"],
+    )
+    def test_sd_and_ds_conv_layouts_match_snapshot(
+        self,
+        device,
+        test_config,
+        monkeypatch,
+        accept_token_bias,
+        same_physical_block,
+        dtype,
     ):
-        """DS conv postprocess should match SD when accept_token_bias > 0."""
+        """SD and DS copies should independently match memmove semantics."""
         from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
 
         cfg = test_config
+        cfg.dtype = dtype
         torch.manual_seed(38898)
 
         req_ids = ["req_0"]
-        num_computed_tokens = [30]
-        num_scheduled_tokens = {"req_0": 1}
+        # Keep new_num_computed on an aligned boundary while varying how far
+        # below it the running state starts. This makes the copy bias exactly
+        # ``accept_token_bias`` for each case. The 32 boundary keeps source and
+        # destination in logical block 1; the 64 boundary copies block 2 -> 3.
+        aligned_boundary = 32 if same_physical_block else 64
+        num_computed_tokens = [aligned_boundary - 2 * accept_token_bias]
+        num_scheduled_tokens = {"req_0": accept_token_bias}
         num_draft_tokens: dict[str, int] = {}
-        num_accepted_tokens = [2]  # Results in accept_token_bias = 1
-        mamba_state_idx = [1]  # src_block_idx = 1 = dest_block_idx
+        num_accepted_tokens = [accept_token_bias + 1]
+        dest_block_idx = aligned_boundary // cfg.block_size - 1
+        src_block_idx = dest_block_idx if same_physical_block else dest_block_idx - 1
+        mamba_state_idx = [src_block_idx]
         block_ids_per_req = [list(range(8))]
 
         layer_names = ["layer_0"]
@@ -2288,7 +2487,8 @@ class TestPostprocessMambaFusedKernel:
             cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
         )
 
-        # SD GPU path. Default layout is SD.
+        # SD GPU path.
+        monkeypatch.delenv("VLLM_SSM_CONV_STATE_LAYOUT", raising=False)
         model_mamba_utils.get_conv_state_layout.cache_clear()
         sd_conv = sd_source_conv.clone()
         sd_temporal = sd_source_temporal.clone()
@@ -2312,9 +2512,32 @@ class TestPostprocessMambaFusedKernel:
         )
         torch.accelerator.synchronize()
 
-        # Sanity: SD path actually modified the state (copy was performed).
-        assert not torch.equal(sd_conv, sd_source_conv), (
-            "SD baseline did not modify conv state; test setup is wrong"
+        src_block_id = block_ids_per_req[0][src_block_idx]
+        dest_block_id = block_ids_per_req[0][dest_block_idx]
+        expected_conv = sd_source_conv.clone()
+        expected_conv[dest_block_id, :-accept_token_bias].copy_(
+            sd_source_conv[src_block_id, accept_token_bias:]
+        )
+        torch.testing.assert_close(
+            sd_conv,
+            expected_conv,
+            rtol=0,
+            atol=0,
+            msg="SD conv copy did not match the untouched source snapshot",
+        )
+
+        actual_temporal_src_idx = src_block_idx + accept_token_bias
+        actual_temporal_src_id = block_ids_per_req[0][actual_temporal_src_idx]
+        expected_temporal = sd_source_temporal.clone()
+        expected_temporal[dest_block_id].copy_(
+            sd_source_temporal[actual_temporal_src_id]
+        )
+        torch.testing.assert_close(
+            sd_temporal,
+            expected_temporal,
+            rtol=0,
+            atol=0,
+            msg="SD temporal copy did not match the untouched source snapshot",
         )
 
         # DS GPU path on the DS twin.
@@ -2346,22 +2569,39 @@ class TestPostprocessMambaFusedKernel:
             # Reset the lru cache so other tests see the default layout again.
             model_mamba_utils.get_conv_state_layout.cache_clear()
 
-        # DS bytes, un-permuted, should match the SD result.
+        # Validate DS independently against the snapshot; otherwise a shared
+        # SD/DS bug would remain invisible.
+        ds_conv_sd_layout = ds_conv.permute(0, 2, 1).contiguous()
         torch.testing.assert_close(
-            ds_conv.permute(0, 2, 1).contiguous(),
-            sd_conv,
-            msg=(
-                "DS conv post-kernel does not match SD baseline; the DS "
-                "row-loop in postprocess_mamba_fused_kernel is wrong."
-            ),
+            ds_conv_sd_layout,
+            expected_conv,
+            rtol=0,
+            atol=0,
+            msg="DS conv copy did not match the untouched source snapshot",
         )
         torch.testing.assert_close(
             ds_temporal,
-            sd_temporal,
-            msg="DS temporal state diverged from SD",
+            expected_temporal,
+            rtol=0,
+            atol=0,
+            msg="DS temporal copy did not match the untouched source snapshot",
+        )
+
+        expected_accepted = 1 if same_physical_block else accept_token_bias + 1
+        expected_accepted_tensor = torch.tensor(
+            [expected_accepted], dtype=torch.int32, device=device
+        )
+        torch.testing.assert_close(
+            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
+            expected_accepted_tensor,
+            rtol=0,
+            atol=0,
+            msg="SD num_accepted_tokens result is wrong",
         )
         torch.testing.assert_close(
             gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
-            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
-            msg="DS num_accepted_tokens diverged from SD",
+            expected_accepted_tensor,
+            rtol=0,
+            atol=0,
+            msg="DS num_accepted_tokens result is wrong",
         )
