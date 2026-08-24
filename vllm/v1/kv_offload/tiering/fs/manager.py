@@ -196,6 +196,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool = DualQueueThreadPool(
             n_read_threads,
             n_write_threads,
+            self._block_size,
             thread_name_prefix="vllm_kv_py_fs",
         )
 
@@ -310,6 +311,8 @@ class FileSystemTierManager(SecondaryTierManager):
                 if failed_q is not None:
                     while not failed_q.empty():
                         failed.append(failed_q.get_nowait())
+                # load_keys ordering is not preserved. If needed, this is can be
+                # updated to filter successful keys in a for-loop.
                 successful = set(load_keys) - set(failed)
                 self._lookup_manager.mark_miss(failed)
                 results.append(

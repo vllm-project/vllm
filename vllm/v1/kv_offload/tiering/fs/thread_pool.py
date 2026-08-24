@@ -85,10 +85,12 @@ class DualQueueThreadPool:
         self,
         n_read_threads: int,
         n_write_threads: int,
+        block_size: int | None = None,
         thread_name_prefix: str = "fs_secondary_tier",
     ) -> None:
         self._n_read_threads = n_read_threads
         self._n_write_threads = n_write_threads
+        self._block_size = block_size
         self._load_q: deque = deque()
         self._store_q: deque = deque()
         self._condition = threading.Condition(threading.Lock())
@@ -96,6 +98,11 @@ class DualQueueThreadPool:
         self._threads: list[threading.Thread] = []
         self._finished_q: deque[tuple[JobId, bool, float]] = deque()
         self._inflight_jobs = 0  # guarded by _condition
+
+        # fanout_target_bytes is the number of bytes sufficient to saturate the
+        # device bandwidth with a single read/write call. This factors into
+        # how Job tasks are batched.
+        self._fanout_target_bytes = 32 * (2**20)  # 32MiB
 
         assert self.total_threads > 0, "ThreadPool needs at least one thread"
 
@@ -143,6 +150,24 @@ class DualQueueThreadPool:
             yield tasks[start : start + bs]
             start += bs
 
+    def _fanout_degree(self, n_tasks: int, n_threads: int) -> int:
+        """How many batches to split a job of ``n_tasks`` blocks into.
+
+        Splitting only pays while the device is not already saturated. A large
+        block keeps it busy on its own, and once enough jobs are in flight the
+        threads are busy regardless; in both regimes extra batches only add
+        queue entries, wake-ups and GIL round-trips without moving more bytes.
+
+        Callers must hold ``self._condition``.
+        """
+        if self._block_size is None:
+            return min(n_tasks, n_threads)
+        budget = -(-self._fanout_target_bytes // self._block_size)
+        # No more reads can be outstanding than there are workers to issue them.
+        budget = min(budget, self.total_threads)
+        jobs = max(1, self._inflight_jobs)
+        return max(1, min(-(-budget // jobs), n_tasks, n_threads))
+
     def _enqueue(
         self,
         queue: deque,
@@ -162,6 +187,7 @@ class DualQueueThreadPool:
         n_batches = 0
         with self._condition:
             self._inflight_jobs += 1
+            n_threads = self._fanout_degree(n_tasks, n_threads)
             for batch in self._batch_tasks(task_lst, n_threads):
                 queue.append((make_batch_fn(batch), len(batch), state))
                 n_batches += 1
