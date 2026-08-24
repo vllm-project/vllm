@@ -11,7 +11,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens_for_batch
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     AttentionState,
     BatchExecutionDescriptor,
@@ -42,7 +42,7 @@ def _prepare_dflash_inputs_to_capture(
     attn_metadata = None
     if not skip_attn:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        prepare_dcp_local_seq_lens_for_batch(
+        maybe_prepare_dcp_local_seq_lens(
             input_batch,
             input_buffers,
             block_tables.cp_size,

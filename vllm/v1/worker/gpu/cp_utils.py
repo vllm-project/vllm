@@ -37,7 +37,7 @@ def prepare_dcp_local_seq_lens(
     )
 
 
-def prepare_dcp_local_seq_lens_for_batch(
+def maybe_prepare_dcp_local_seq_lens(
     input_batch: "InputBatch",
     input_buffers: "InputBuffers",
     dcp_size: int,
