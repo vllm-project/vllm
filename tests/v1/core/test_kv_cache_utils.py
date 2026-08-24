@@ -3117,6 +3117,50 @@ def test_unify_kv_cache_page_size_scales_pre_padded_spec_from_natural_page():
     assert unified["large_attn_layer"] == large
 
 
+def test_unify_kv_cache_page_size_mla_alignment_padding_is_the_scaling_base():
+    """MLA scales from its aligned (padded) page, unlike plain attention.
+
+    MLA padding is the product of the spec's own ``alignment``, reapplied by
+    ``__post_init__`` on every ``replace``, so it is never stale: the aligned
+    page is the correct divisibility and ratio base, and clearing it would
+    simply be undone.
+    """
+    mla = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=96,
+        dtype=torch.float32,
+        alignment=512,
+    )
+    assert mla.unpadded_page_size_bytes == 384
+    assert mla.page_size_bytes == 512
+
+    # The aligned 512 B page divides the 1024 B maximum: ratio 1024 // 512
+    # doubles the block, and re-alignment lands exactly on the maximum
+    # (real 768 B rounds up to 1024 B). A natural-page ratio would reject
+    # this long-supported configuration outright.
+    large = new_kv_cache_spec(block_size=1)
+    assert large.page_size_bytes == 1024
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"mla_layer": mla, "large_attn_layer": large}
+    )
+    assert unified["mla_layer"].block_size == 2
+    assert unified["mla_layer"].page_size_bytes == 1024
+    assert unified["large_attn_layer"] == large
+
+    # When the aligned page does not divide the maximum, MLA must keep its
+    # NotImplementedError contract (callers fall back to full allocation);
+    # asserting mid-unify would break that.
+    odd = FullAttentionSpec(
+        block_size=3, num_kv_heads=1, head_size=32, dtype=torch.float32
+    )
+    assert odd.page_size_bytes == 768
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(
+            {"mla_layer": mla, "odd_attn_layer": odd}
+        )
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.

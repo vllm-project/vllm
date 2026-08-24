@@ -1099,18 +1099,26 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
         else:
-            # Both scaling paths work from the natural page: a pre-padded
-            # attention spec would otherwise pick its branch and ratio from
-            # the stale padding, under-scale, and trip the ``page_size_padded
-            # >= unpadded`` assertion once the grown natural page outruns it.
-            if isinstance(layer_spec, AttentionSpec):
+            # Both scaling paths work from the natural page for non-MLA
+            # attention: a pre-padded spec would otherwise pick its branch and
+            # ratio from the stale padding, under-scale, and trip the
+            # ``page_size_padded >= unpadded`` assertion once the grown
+            # natural page outruns it. MLA is excluded: its padding is not
+            # stale but the product of its own ``alignment``, reapplied by
+            # ``__post_init__`` on every ``replace``, so the padded page is
+            # the correct scaling base (and clearing it would be undone).
+            if isinstance(layer_spec, AttentionSpec) and not isinstance(
+                layer_spec, MLAAttentionSpec
+            ):
                 natural_page_size = layer_spec.unpadded_page_size_bytes
             else:
                 natural_page_size = layer_spec.page_size_bytes
             if max_page_size % natural_page_size == 0:
                 ratio = max_page_size // natural_page_size
                 new_block_size = layer_spec.block_size * ratio
-                if isinstance(layer_spec, AttentionSpec):
+                if isinstance(layer_spec, AttentionSpec) and not isinstance(
+                    layer_spec, MLAAttentionSpec
+                ):
                     new_spec = replace(
                         layer_spec,
                         block_size=new_block_size,
