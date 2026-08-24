@@ -22,7 +22,7 @@ _STREAM_CACHE: dict[tuple[int, int], list[torch.cuda.Stream]] = {}
 
 
 def _get_streams(num_buffers: int) -> list[torch.cuda.Stream]:
-    key = (torch.cuda.current_device(), num_buffers)
+    key = (torch.accelerator.current_device_index(), num_buffers)
     if key not in _STREAM_CACHE:
         _STREAM_CACHE[key] = [torch.cuda.Stream() for _ in range(num_buffers)]
     return _STREAM_CACHE[key]
