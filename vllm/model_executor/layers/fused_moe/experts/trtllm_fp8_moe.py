@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -495,19 +496,15 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
-        result = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=num_tokens,
+            top_k=self.topk,
+        )
         self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
-        if defer:
-            # flashinfer returns a flat permute map; the protocol wants
-            # [num_tokens, top_k] so consumers can read top_k from its shape.
-            return UnfinalizedMoEOutput(
-                gemm2_permuted=result[0],
-                expert_weights=result[1],
-                expanded_idx_to_permuted_idx=result[2]
-                .to(torch.int32)
-                .view(num_tokens, self.topk),
-            )
-        return result
+        return routed_output
 
     def _apply_per_tensor(
         self,

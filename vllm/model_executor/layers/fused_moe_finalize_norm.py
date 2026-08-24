@@ -35,12 +35,14 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 try:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        existing_fi_ar_moe_finalize_workspace,
         flashinfer_comm,
         get_fi_ar_moe_finalize_workspace,
         has_fi_ar_moe_finalize_backend,
     )
 except (ImportError, AttributeError):
     flashinfer_comm = None  # type: ignore[assignment]
+    existing_fi_ar_moe_finalize_workspace = None  # type: ignore[assignment]
     get_fi_ar_moe_finalize_workspace = None  # type: ignore[assignment]
     has_fi_ar_moe_finalize_backend = None  # type: ignore[assignment]
 
@@ -76,31 +78,42 @@ def moe_tail_fusion_available() -> bool:
     return True
 
 
-def _finalize_workspace(
-    num_tokens: int,
+def initialize_moe_tail_fusion(
+    *,
+    max_num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
-    *,
-    max_token_num: int,
     top_k: int,
-    routed_scaling_factor: float,
     rms_eps: float,
     weight_bias: float,
+    routed_scaling_factor: float,
     include_shared_expert: bool,
-):
-    """The (globally cached) fusion workspace for a batch, or None.
+) -> int:
+    """Build the fused tail for a layer, returning its token capacity or 0.
 
-    The mnnvl CuTe DSL workspace is compiled around ``top_k``, ``rms_eps``,
-    ``weight_bias`` and whether a shared expert is folded in; the kernel
-    rejects per-call values that disagree, so they are part of building it.
+    A layer calls this at construction to decide whether to ask its experts to
+    defer, and sets what comes back on ``FusedMoEConfig``:
+    ``defer_moe_finalize`` when it is positive and
+    ``defer_moe_finalize_max_num_tokens`` to the value, so the per-batch gate
+    stays ``FusedMoEConfig.should_defer_moe_finalize`` on the producer side.
+
+    Building here rather than at forward time is what makes that possible: the
+    mnnvl CuTe DSL workspace is compiled around ``top_k``, ``rms_eps``,
+    ``weight_bias``, ``routed_scaling_factor`` and whether a shared expert is
+    folded in -- the kernel rejects per-call values that disagree -- and it
+    takes a collective over the TP group, which the consumer's custom op cannot
+    run. 0 means no fused tail on this deployment, and the experts finalize as
+    they always did.
     """
-    if get_fi_ar_moe_finalize_workspace is None:
-        return None
-    tp_size = get_tensor_model_parallel_world_size()
+    if dtype not in _FI_SUPPORTED_DTYPES:
+        logger.debug_once("MoE tail fusion off: no %s kernel", dtype)
+        return 0
+    if not moe_tail_fusion_available() or get_fi_ar_moe_finalize_workspace is None:
+        return 0
     workspace = get_fi_ar_moe_finalize_workspace(
-        world_size=tp_size,
+        world_size=get_tensor_model_parallel_world_size(),
         rank=get_tensor_model_parallel_rank(),
-        max_token_num=max_token_num,
+        max_token_num=max_num_tokens,
         hidden_dim=hidden_size,
         dtype=dtype,
         group=get_tp_group().cpu_group,
@@ -110,23 +123,18 @@ def _finalize_workspace(
         weight_bias=weight_bias,
         include_shared_expert=include_shared_expert,
     )
-    if workspace is None or not workspace.is_buffer_size_sufficient(
-        tp_size, num_tokens, hidden_size, dtype
+    if workspace is None:
+        return 0
+    if not workspace.is_buffer_size_sufficient(
+        get_tensor_model_parallel_world_size(), max_num_tokens, hidden_size, dtype
     ):
-        return None
-    return workspace
-
-
-def moe_tail_fusion_applies(dtype: torch.dtype) -> bool:
-    """Whether this consumer can take unfinalized MoE output at all.
-
-    A layer calls this at build time to decide whether to ask its experts to
-    defer (``FusedMoEConfig.defer_moe_finalize``); the per-batch gate is
-    ``FusedMoEConfig.should_defer_moe_finalize``. There is no token ceiling to
-    declare -- the backend covers decode and prefill alike -- so this is the
-    switch, the hardware, and the dtype it has kernels for.
-    """
-    return dtype in _FI_SUPPORTED_DTYPES and moe_tail_fusion_available()
+        logger.warning_once(
+            "MoE tail fusion off: the workspace holds fewer than "
+            "max_num_tokens=%d tokens.",
+            max_num_tokens,
+        )
+        return 0
+    return max_num_tokens
 
 
 def _moe_finalize_allreduce_rms_norm(
@@ -139,25 +147,16 @@ def _moe_finalize_allreduce_rms_norm(
     rms_eps: float,
     weight_bias: float,
     routed_scaling_factor: float,
-    max_num_tokens: int,
 ) -> list[torch.Tensor]:
-    num_tokens, hidden_size = residual.shape
-    workspace = _finalize_workspace(
-        num_tokens,
-        hidden_size,
-        residual.dtype,
-        max_token_num=max(max_num_tokens, num_tokens),
-        top_k=expert_weights.shape[-1],
-        routed_scaling_factor=routed_scaling_factor,
-        rms_eps=rms_eps,
-        weight_bias=weight_bias,
-        include_shared_expert=shared_output is not None,
+    workspace = (
+        None
+        if existing_fi_ar_moe_finalize_workspace is None
+        else existing_fi_ar_moe_finalize_workspace()
     )
     assert workspace is not None, (
-        "no MoE finalize fusion workspace for this batch: the mnnvl CuTe DSL "
-        "backend has no kernel for this (tp_size, hidden_size, top_k, dtype). "
-        "Unset VLLM_ENABLE_MOE_TAIL_FUSION to fall back to finalizing in the "
-        "MoE kernel."
+        "no MoE finalize fusion workspace: an unfinalized MoE output only "
+        "reaches here when the consuming layer built one at construction, so "
+        "it was destroyed in between."
     )
 
     norm_out = torch.empty_like(residual)
@@ -195,7 +194,6 @@ def _moe_finalize_allreduce_rms_norm_fake(
     rms_eps: float,
     weight_bias: float,
     routed_scaling_factor: float,
-    max_num_tokens: int,
 ) -> list[torch.Tensor]:
     return [torch.empty_like(residual), torch.empty_like(residual)]
 
@@ -242,6 +240,5 @@ def fused_moe_finalize_allreduce_rms_norm(
         norm.variance_epsilon,
         rms_norm_weight_bias(norm),
         moe_output.routed_scaling_factor,
-        moe_output.max_num_tokens,
     )
     return norm_out, residual_out

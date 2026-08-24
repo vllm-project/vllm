@@ -376,7 +376,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
-        result = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=hidden_states,
@@ -412,19 +412,18 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
             ),
         )
-        if defer:
-            # The routed variant hands back [gemm2_output, expert_weights,
-            # expanded_idx_to_permuted_idx] instead of writing `output`. The
-            # permute map comes back flat; the protocol wants [num_tokens,
-            # top_k] so consumers can read top_k off its shape.
-            return UnfinalizedMoEOutput(
-                gemm2_permuted=result[0],
-                expert_weights=result[1],
-                expanded_idx_to_permuted_idx=result[2]
-                .to(torch.int32)
-                .view(hidden_states.shape[0], self.topk),
-            )
-        return None
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=hidden_states.shape[0],
+            top_k=self.topk,
+            finalized_output=None if defer else output,
+        )
+        if not defer:
+            # The finalized layout aliases `output`, which the caller owns.
+            return None
+        assert isinstance(routed_output, UnfinalizedMoEOutput)
+        return routed_output
 
     def apply(
         self,

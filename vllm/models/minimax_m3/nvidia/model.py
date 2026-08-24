@@ -38,7 +38,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 from vllm.model_executor.layers.fused_moe_finalize_norm import (
     fused_moe_finalize_allreduce_rms_norm,
-    moe_tail_fusion_applies,
+    initialize_moe_tail_fusion,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -279,16 +279,29 @@ class MiniMaxM3MoE(nn.Module):
         # The RMSNorm that takes this block's deferred all-reduce takes its
         # top-k reduction too, where the experts can leave it open -- and only
         # where the consumer can close it out: a hidden dim it need not
-        # truncate, and a fused tail that can actually run here. The kernel's
-        # own capability is not knowable yet; it resolves in
+        # truncate, and a fused tail that builds on this deployment. The
+        # kernel's own capability is not knowable yet; it resolves in
         # process_weights_after_loading, and every prepare/finalize reachable
         # under `use_deferred_moe_finalize` supports the deferred form.
+        #
+        # Build the tail here, where the vLLM config is in context, rather than
+        # in the consumer: it is the norm of the *next* layer that closes this
+        # block out, and every norm in the model is a MiniMAXGemmaRMSNorm over
+        # the same eps, so the tail built here is the one it reaches.
         moe_config = self.experts.moe_config
-        moe_config.defer_moe_finalize = (
-            defer_finalize
-            and moe_config.hidden_dim == moe_config.hidden_dim_unpadded
-            and moe_tail_fusion_applies(moe_config.in_dtype)
-        )
+        if defer_finalize and moe_config.hidden_dim == moe_config.hidden_dim_unpadded:
+            capacity = initialize_moe_tail_fusion(
+                max_num_tokens=moe_config.max_num_tokens,
+                hidden_size=moe_config.hidden_dim,
+                dtype=moe_config.in_dtype,
+                top_k=moe_config.experts_per_token,
+                rms_eps=config.rms_norm_eps,
+                weight_bias=MiniMAXGemmaRMSNorm.rms_weight_bias,
+                routed_scaling_factor=self.routed_scaling_factor,
+                include_shared_expert=self.shared_experts is not None,
+            )
+            moe_config.defer_moe_finalize = capacity > 0
+            moe_config.defer_moe_finalize_max_num_tokens = capacity
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:

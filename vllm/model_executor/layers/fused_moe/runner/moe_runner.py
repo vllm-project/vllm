@@ -768,7 +768,6 @@ class MoERunner(MoERunnerInterface):
                 routed=fused_output,
                 shared_output=shared_output,
                 routed_scaling_factor=self.routed_scaling_factor,
-                max_num_tokens=self.moe_config.max_num_tokens,
             )
 
         if og_hidden_dim_pre_xform is not None:

@@ -96,7 +96,26 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
         torch.manual_seed(1234 + local_rank)
 
         m.setenv("VLLM_ENABLE_MOE_TAIL_FUSION", "1")
-        if not fmfn.moe_tail_fusion_applies(dtype):
+
+        def build_tail(
+            weight_bias: float, include_shared: bool, routed_scaling_factor: float
+        ) -> bool:
+            """Build the tail a consuming layer would build at construction."""
+            return (
+                fmfn.initialize_moe_tail_fusion(
+                    max_num_tokens=MAX_NUM_TOKENS,
+                    hidden_size=HIDDEN_SIZE,
+                    dtype=dtype,
+                    top_k=TOP_K,
+                    rms_eps=RMS_EPS,
+                    weight_bias=weight_bias,
+                    routed_scaling_factor=routed_scaling_factor,
+                    include_shared_expert=include_shared,
+                )
+                > 0
+            )
+
+        if not build_tail(0.0, False, 1.0):
             q.put("MoE tail fusion is unsupported on this setup.")
             return
 
@@ -111,6 +130,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
             # model does, since its norms and its expert layout do not vary per
             # layer. Drop it so the next configuration builds its own.
             destroy_fi_ar_workspace()
+            assert build_tail(weight_bias, with_shared, 1.0)
 
             gemm2_permuted = torch.randn(num_permuted, HIDDEN_SIZE, dtype=dtype) * 0.1
             expert_weights = torch.rand(NUM_TOKENS, TOP_K, dtype=dtype)
@@ -144,7 +164,6 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
                 RMS_EPS,
                 weight_bias,
                 1.0,
-                MAX_NUM_TOKENS,
             )
             ref_norm, ref_residual = _reference_tail(
                 gemm2_permuted,
@@ -168,6 +187,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
         # closed out into a model's own Gemma-style norm, with a routed scale to
         # apply.
         destroy_fi_ar_workspace()
+        assert build_tail(1.0, True, 2.0)
         gemm2_permuted = torch.randn(num_permuted, HIDDEN_SIZE, dtype=dtype) * 0.1
         expert_weights = torch.rand(NUM_TOKENS, TOP_K, dtype=dtype)
         expanded_idx = (
@@ -197,7 +217,6 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
             ),
             shared_output=shared_output,
             routed_scaling_factor=2.0,
-            max_num_tokens=MAX_NUM_TOKENS,
         )
         ref_norm, ref_residual = _reference_tail(
             gemm2_permuted,

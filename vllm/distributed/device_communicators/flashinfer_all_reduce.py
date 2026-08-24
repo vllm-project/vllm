@@ -515,6 +515,16 @@ def get_fi_ar_moe_finalize_workspace(
     return _fi_ar_moe_finalize_workspace
 
 
+def existing_fi_ar_moe_finalize_workspace():
+    """The MoE finalize fusion workspace if one was built, else None.
+
+    Building it is a collective and needs the vLLM config; the fused tail runs
+    inside a custom op where neither is available, so it only ever looks up
+    what the consuming layer built at construction time.
+    """
+    return _fi_ar_moe_finalize_workspace
+
+
 _fi_ar_workspace_lock = threading.Lock()
 
 
