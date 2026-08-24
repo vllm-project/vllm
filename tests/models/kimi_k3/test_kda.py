@@ -20,6 +20,7 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
+from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
     _flashkda_prefill,
     _store_cache_checkpoints_kernel,
@@ -57,6 +58,19 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
+
+
+def test_kda_warmup_skips_missing_metadata(monkeypatch):
+    monkeypatch.setattr(
+        nvidia_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={}),
+    )
+    layer = object.__new__(nvidia_kda.KimiK3DeltaAttention)
+    object.__setattr__(layer, "prefix", "language_model.model.layers.0.self_attn")
+    empty = torch.empty(0, device=DEVICE)
+
+    assert layer._forward(empty, empty, empty, empty, empty) is None
 
 
 def test_kda_recoverssm_config_state_layout():
