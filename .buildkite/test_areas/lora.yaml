@@ -50,3 +50,25 @@ steps:
     - pytest -v -s -x lora/test_gptoss_tp.py
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - pytest -v -s -x lora/test_gemma4_tp.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) LoRA TP (Distributed)"
+      dind: false
+      device: mi300_4
+      working_dir: "/vllm-workspace/tests"
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/lora
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/platforms/rocm.py
+      - tests/lora
+      commands:
+      - pytest -v -s -x lora/test_chatglm3_tp.py
+      - pytest -v -s -x lora/test_llama_tp.py
+      - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
+      - pytest -v -s -x lora/test_olmoe_tp.py
+      - pytest -v -s -x lora/test_gptoss_tp.py
+      - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+      - pytest -v -s -x lora/test_gemma4_tp.py
