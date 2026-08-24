@@ -50,14 +50,14 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             is_available
             and ark is not None
             and hasattr(ark, "moe")
+            and hasattr(ark, "MoeSymmetricGemm")
             and xpu_lib is not None
-            and hasattr(xpu_lib, "moe_gemm_decode")
-            and hasattr(xpu_lib, "moe_gemm_prefill")
         )
         if not has_moe_kernel:
             reason = error_str or "ARK MoE kernels are unavailable."
             raise ImportError(f"Failed to initialize ARK WNA16 MoE. {reason}")
 
+        assert ark is not None
         self.ark = ark
         self.ark_moe_op = ark.moe
         self.weight_bits = quant_config.weight_bits
@@ -80,6 +80,8 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.activation = None
         self.inter_size: int = 0
         self.inter_size_scale: int = 1
+        self.w13_moe = None
+        self.w2_moe = None
 
         logger.info_once("Using ARK XPU WNA16 MoE kernel.")
 
@@ -136,7 +138,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.remap_hidden_states_op = torch.ops._moe_C.remap_hidden_states
         self.moe_gather_op = torch.ops._moe_C.moe_gather
 
-        self.w13_moe_plan = self.ark.prepare_moe_gemm_sym(
+        self.w13_moe = self.ark.MoeSymmetricGemm.prepare(
             layer.w13_weight,
             layer.w13_scales,
             weight_bits=4,
@@ -144,7 +146,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             activation_dtype=layer.w13_scales.dtype,
         )
 
-        self.w2_moe_plan = self.ark.prepare_moe_gemm_sym(
+        self.w2_moe = self.ark.MoeSymmetricGemm.prepare(
             layer.w2_weight,
             layer.w2_scales,
             weight_bits=4,
@@ -161,26 +163,6 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             w2_scale=layer.w2_scales,
             group_size=layer.group_size,
             num_bits=self.quant_config.weight_bits,
-        )
-
-    def _ark_moe(
-        self,
-        activations: torch.Tensor,
-        weights: torch.Tensor,
-        scales: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-        group_size: int,
-    ) -> torch.Tensor:
-        return self.ark_moe_op(
-            activations,
-            weights,
-            num_tokens_per_expert,
-            scales=scales,
-            zeros=None,
-            weight_bits=self.weight_bits,
-            group_size=group_size,
-            asym=False,
-            phase="auto",
         )
 
     def _get_rows_per_expert(
@@ -318,14 +300,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             local_experts_num=self.local_num_experts,
         )
 
-        # gemm1_output = self._ark_moe(
-        #     remapped_hidden_states,
-        #     self.w13_weight,
-        #     self.w13_scales,
-        #     rows_per_expert,
-        #     self.group_size,
-        # )
-        gemm1_output = self.w13_moe_plan.moe(
+        gemm1_output = self.w13_moe.apply(
             remapped_hidden_states,
             rows_per_expert,
             phase="auto",
@@ -334,24 +309,18 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         act_output = gemm1_output.new_empty(
             (gemm1_output.shape[0], self.inter_size * self.inter_size_scale)
         )
+        
         apply_moe_activation(
             self.activation,
             act_output,
             gemm1_output,
         )
 
-        gemm2_output = self.w2_moe_plan.moe(
+        gemm2_output = self.w2_moe.apply(
             act_output,
             rows_per_expert,
             phase="auto",
         )
-        # gemm2_output = self._ark_moe(
-        #     act_output,
-        #     self.w2_weight,
-        #     self.w2_scales,
-        #     rows_per_expert,
-        #     self.group_size,
-        # )
 
         self.moe_gather_op(
             output,
