@@ -255,8 +255,11 @@ class TestExampleSecondaryTierManager:
 _CASCADE_SUPPLY_BEHAVIOR = {
     LookupResult.HIT: "supply",
     LookupResult.HIT_PENDING: "defer",
-    LookupResult.RETRY: "drop",
     LookupResult.MISS: "drop",
+    # The primary tier resolves every key it holds, so RETRY cannot reach the
+    # cascade. Parking on it would have no guarantee of draining, which is what
+    # makes parking HIT_PENDING safe, so the cascade rejects it.
+    LookupResult.RETRY: "unreachable",
 }
 
 
@@ -1132,10 +1135,17 @@ class TestTieringOffloadingManager:
         )
         self.manager.primary_tier.lookup = lambda key, req_context: result
 
+        if expected == "unreachable":
+            with pytest.raises(AssertionError):
+                self.manager._cascade_existing_blocks_to_request_level_tiers(
+                    keys, ctx, {0}
+                )
+            return
+
         self.manager._cascade_existing_blocks_to_request_level_tiers(keys, ctx, {0})
 
         supplied = bool(self._cascaded_keys_for(ctx.req_id))
-        deferred = bool(self.manager._req_state[ctx.req_id].deferred_cascade_keys)
+        deferred = bool(self.manager._req_state[ctx.req_id].pending_cascade_keys)
         assert (supplied, deferred) == {
             "supply": (True, False),
             "defer": (False, True),
