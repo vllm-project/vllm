@@ -15,13 +15,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import ceil
 from typing import Any
 
 from hardware_detection import HardwareInfo
-
-_MIN_BATCHED_TOKENS = 2048
-_MAX_BATCHED_TOKENS = 32768
-_MAX_PARALLEL_PREFILLS = 8
+from vllm.config.scheduler import SchedulerConfig
 
 
 @dataclass(frozen=True)
@@ -67,10 +65,47 @@ def _record_override(
     result.notes.append(f"{key}={value!r}: {reason}")
 
 
-def _round_up_power_of_two(value: int) -> int:
-    if value <= 1:
-        return 1
-    return 1 << (value - 1).bit_length()
+def _get_active_sequence_count(
+    config: dict[str, Any],
+    workload: WorkloadHints,
+) -> int:
+    """Return the sequence count used to size one scheduler iteration."""
+    if workload.concurrency is not None:
+        return workload.concurrency
+
+    configured = config.get("max-num-seqs")
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        return configured
+
+    return SchedulerConfig.DEFAULT_MAX_NUM_SEQS
+
+
+def _estimate_prefills_per_step(
+    workload: WorkloadHints,
+    active_sequences: int,
+) -> float:
+    """Estimate steady-state prompt arrivals per decode scheduler step."""
+    # Reserve enough prefill budget for at least one representative prompt.
+    prefills_per_step = 1.0
+
+    # In steady state, active_sequences / output_tokens approximates how many
+    # requests finish and are replaced by new prefills per decode step.
+    if workload.output_tokens is not None:
+        prefills_per_step = max(
+            prefills_per_step,
+            active_sequences / workload.output_tokens,
+        )
+
+    # With target QPS + TPOT, approximate how many prompts arrive during one
+    # decode scheduler-step interval.
+    if workload.target_qps is not None and workload.tpot_sla_ms is not None:
+        prefills_per_step = max(
+            prefills_per_step,
+            workload.target_qps * workload.tpot_sla_ms / 1000.0,
+        )
+
+    # A step cannot replace more requests than are active.
+    return min(float(active_sequences), prefills_per_step)
 
 
 def _resolve_tensor_parallel_size(
@@ -159,24 +194,48 @@ def _resolve_max_num_batched_tokens(
     workload: WorkloadHints,
     result: TuningResult,
 ) -> None:
-    del config, hardware
-    if workload.input_tokens is None or workload.concurrency is None:
+    del hardware
+    if workload.input_tokens is None:
         return
 
-    # Draft workload heuristic. Keep this policy isolated because benchmarking
-    # may later replace the constants/formula without changing the CLI.
-    active_prefills = min(workload.concurrency, _MAX_PARALLEL_PREFILLS)
-    requested_budget = workload.input_tokens * active_prefills
-    candidate = _round_up_power_of_two(requested_budget)
-    candidate = max(_MIN_BATCHED_TOKENS, min(candidate, _MAX_BATCHED_TOKENS))
+    active_sequences = _get_active_sequence_count(config, workload)
+
+    # Decode requests consume roughly one token per active sequence in one
+    # scheduler iteration. Prefills share the remaining scheduler token budget.
+    decode_budget = active_sequences
+    prefills_per_step = _estimate_prefills_per_step(workload, active_sequences)
+    prefill_budget = ceil(workload.input_tokens * prefills_per_step)
+
+    # Use vLLM's scheduler defaults/constraints as floors rather than local
+    # recipe-specific magic constants.
+    candidate = max(
+        SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        active_sequences,
+        decode_budget + prefill_budget,
+    )
+
+    # Chunked prefill normally lets a prompt span scheduler iterations. If the
+    # recipe explicitly disables it, vLLM requires the token budget to cover
+    # max_model_len when max_model_len is known.
+    if config.get("enable-chunked-prefill") is False:
+        max_model_len = config.get("max-model-len")
+        if (
+            isinstance(max_model_len, int)
+            and not isinstance(max_model_len, bool)
+            and max_model_len > 0
+        ):
+            candidate = max(candidate, max_model_len)
 
     _record_override(
         result,
         "max-num-batched-tokens",
         candidate,
         (
-            "derived from input-token length and target concurrency "
-            f"(active_prefills={active_prefills})"
+            "workload-derived scheduler budget "
+            f"(active_sequences={active_sequences}, "
+            f"prefills_per_step={prefills_per_step:.2f}, "
+            f"decode_budget={decode_budget}, "
+            f"prefill_budget={prefill_budget})"
         ),
     )
 

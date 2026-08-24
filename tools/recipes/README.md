@@ -184,16 +184,139 @@ The parameters below may already exist in a recipe. They are candidates for
 deployment-time refinement when the recipe value is missing, generic, or based
 on a validation environment that differs from the user's target deployment.
 
-| Runtime parameter | Why it may need deployment-time refinement | Main decision input | Current draft policy |
+| Runtime parameter | Why it may need deployment-time refinement | Main decision input | Current policy |
 | --- | --- | --- | --- |
 | `tensor-parallel-size` | The effective CPU/NUMA topology available to a container or pod can differ from the system used to validate the recipe. | Hardware topology | Use the largest power-of-two TP value that does not exceed the effective NUMA-node count. |
-| `gpu-memory-utilization` | Available memory can differ by machine size, container limits, and other memory use. The vLLM option name is also used by the CPU backend. | Hardware memory + recipe baseline | Compute a conservative safe fraction, reserve 10%, cap at `0.90`, and never increase a smaller recipe value. If the recipe omits it, start from `0.80`. |
-| `max-num-seqs` | The useful scheduler concurrency depends on the number of requests expected to be active at the same time. | Workload concurrency | Set `max-num-seqs` to `--concurrency`. |
-| `max-num-batched-tokens` | The batching budget depends strongly on request input length and concurrency. | Workload token shape + concurrency | Compute `input_tokens * min(concurrency, 8)`, round up to a power of two, and clamp to `2048..32768`. |
-| `data-parallel-size` | The required replica count depends on the requested throughput and the capacity of one replica. | Capacity target | Keep the recipe value today. `--target-qps` is captured for a future capacity-based policy. |
+| `gpu-memory-utilization` | Available memory can differ by machine size, container limits, and other memory use. The vLLM option name is also used by the CPU backend. | Hardware memory + recipe baseline | Calculate a conservative fraction from the most constrained NUMA node. |
+| `max-num-seqs` | The useful scheduler concurrency depends on the number of requests expected to be active at the same time. | Workload concurrency | Set `max-num-seqs` to `--concurrency` when supplied. |
+| `max-num-batched-tokens` | Each scheduler iteration must share its token budget between active decodes and incoming prefills. | Input/output token shape, concurrency, and optional QPS/TPOT | Calculate decode budget + expected prefill demand, with vLLM scheduler constraints as floors. |
+| `data-parallel-size` | The required replica count depends on the requested throughput and the capacity of one replica. | Capacity target | Keep the recipe value today because per-replica SLA capacity is not known. |
 
-These policies are intentionally isolated in `runtime_tuning.py` so the
-decision rules can evolve as more benchmark data becomes available.
+### How Each Runtime Parameter Is Calculated
+
+#### `tensor-parallel-size`
+
+TP is derived from the effective NUMA topology reported by hardware detection:
+
+```text
+TP = largest power of two <= effective NUMA-node count
+```
+
+For example, 2 effective NUMA nodes produce TP=2, while 6 nodes currently
+produce TP=4. This is a topology-based starting point and avoids automatically
+selecting unusual non-power-of-two TP sizes before they are validated.
+
+#### `gpu-memory-utilization`
+
+For every effective NUMA memory node, the policy calculates:
+
+```text
+node_safe_fraction = available_memory / total_memory - 0.10
+safe_fraction = min(0.90, minimum node_safe_fraction)
+```
+
+The 10% reserve leaves memory for model/runtime overhead outside the vLLM cache
+budget. If the recipe already contains a smaller value, the policy preserves the
+smaller value. If it is absent, `0.80` is used as the initial ceiling:
+
+```text
+candidate = min(recipe value or 0.80, safe_fraction)
+```
+
+#### `max-num-seqs`
+
+When `--concurrency` is supplied, it directly represents the requested maximum
+number of simultaneously active requests:
+
+```text
+max-num-seqs = concurrency
+```
+
+If concurrency is not supplied, the converter does not override this parameter.
+
+#### `max-num-batched-tokens`
+
+The token budget is workload-derived and no longer assumes a fixed number of
+parallel prefills.
+
+First, the policy determines the active sequence count:
+
+```text
+active_sequences =
+    --concurrency
+    or recipe max-num-seqs
+    or vLLM default max_num_seqs (128)
+```
+
+Decode requests consume approximately one token per active sequence in a
+scheduler iteration:
+
+```text
+decode_budget = active_sequences
+```
+
+The policy then estimates how many new prompts need prefill work per scheduler
+step. It reserves capacity for at least one representative prompt, then increases
+the estimate when output length implies faster request turnover or when
+QPS/TPOT imply higher prompt arrival pressure:
+
+```text
+prefills_per_step = max(
+    1,
+    active_sequences / output_tokens,          # when output_tokens is supplied
+    target_qps * tpot_sla_ms / 1000            # when both are supplied
+)
+
+prefills_per_step = min(active_sequences, prefills_per_step)
+prefill_budget = ceil(input_tokens * prefills_per_step)
+```
+
+The final scheduler budget is:
+
+```text
+max-num-batched-tokens = max(
+    vLLM default max_num_batched_tokens (2048),
+    active_sequences,
+    decode_budget + prefill_budget
+)
+```
+
+The `2048` and `128` floors come from vLLM `SchedulerConfig`, rather than from
+recipe-specific constants. The `active_sequences` floor also satisfies vLLM's
+requirement that `max_num_batched_tokens >= max_num_seqs`.
+
+For example, with 2048 input tokens, 128 output tokens, and concurrency 32:
+
+```text
+decode_budget      = 32
+prefills_per_step  = max(1, 32 / 128) = 1
+prefill_budget     = 2048
+candidate          = max(2048, 32, 32 + 2048) = 2080
+```
+
+If chunked prefill is explicitly disabled and `max-model-len` is available, the
+policy also ensures:
+
+```text
+max-num-batched-tokens >= max-model-len
+```
+
+which matches vLLM scheduler validation.
+
+#### `data-parallel-size`
+
+`--target-qps` alone is not enough to choose DP safely. A correct capacity rule
+also needs measured per-replica throughput that still satisfies TTFT/TPOT:
+
+```text
+DP = ceil(target_qps / qps_per_replica_at_SLO)
+```
+
+Because the converter does not have that measured capacity yet, it intentionally
+keeps the recipe DP value rather than guessing.
+
+These policies are isolated in `runtime_tuning.py` so individual formulas can
+be replaced with benchmark-backed rules without changing the converter CLI.
 
 ### How Runtime Tuning Determines the Values
 
@@ -204,8 +327,8 @@ information. Different information sources are used for different parameters:
 | --- | --- | --- | --- |
 | vLLM Recipe | Recipes JSON API or direct recipe JSON | model ID, recipe hardware, strategy, existing `argv`, environment variables | Provides the baseline for all parameters and selects the applicable hardware tuning policy. |
 | Hardware (optional) | `--detect-hardware` | effective NUMA nodes, allowed CPUs, physical cores, per-NUMA total/available memory | `tensor-parallel-size`, `gpu-memory-utilization` |
-| Workload (optional) | User CLI inputs | `--input-tokens`, `--output-tokens`, `--concurrency` | `max-num-seqs`, `max-num-batched-tokens`; output length is also available for future KV-cache-aware policies. |
-| SLO / capacity (optional) | User CLI inputs | `--ttft-sla-ms`, `--tpot-sla-ms`, `--target-qps` | Future SLA-aware batching and `data-parallel-size` capacity decisions. |
+| Workload (optional) | User CLI inputs | `--input-tokens`, `--output-tokens`, `--concurrency` | `max-num-seqs` and the decode/prefill budget used for `max-num-batched-tokens`. |
+| SLO / capacity (optional) | User CLI inputs | `--ttft-sla-ms`, `--tpot-sla-ms`, `--target-qps` | `target-qps` + TPOT can increase expected prefill arrival pressure; TTFT and target QPS are also retained for future SLA/capacity policies. |
 
 All additional inputs are optional. If none are supplied, the converter keeps
 the normal Recipes conversion behavior.
@@ -244,11 +367,12 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --tpot-sla-ms 100
 ```
 
-`--output-tokens`, `--ttft-sla-ms`, and `--tpot-sla-ms` are accepted as policy
-inputs, but the current draft does not force them into an arbitrary formula.
-Output length affects KV-cache residency and request lifetime, while TTFT and
-TPOT constrain how aggressive scheduler batching can be. These inputs can be
-used once benchmark-derived or otherwise validated decision rules are available.
+`--output-tokens` is used to estimate steady-state request turnover for
+`max-num-batched-tokens`. When both `--target-qps` and `--tpot-sla-ms` are
+available, they are also used to estimate prompt arrival pressure per scheduler
+step. `--ttft-sla-ms` is collected but is not yet converted directly into a
+batch-size formula because the relationship between TTFT and scheduler budget is
+model- and hardware-dependent.
 
 ### Runtime-Tuning Hardware Scope
 
