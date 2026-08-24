@@ -45,6 +45,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
 validator.workspace = true
+vllm-build-info.workspace = true
 vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
@@ -52,6 +53,7 @@ vllm-metrics.workspace = true
 vllm-text.workspace = true
 
 [build-dependencies]
+protox.workspace = true
 tonic-prost-build.workspace = true
 
 [dev-dependencies]
