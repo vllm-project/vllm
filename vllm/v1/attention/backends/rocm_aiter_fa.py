@@ -35,7 +35,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _PA_GLUON_MAX_QUERY_LEN = 4
 _PA_GLUON_MAX_QUERY_GROUP_SIZE = 64
@@ -840,34 +840,22 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
         return AiterFlashAttentionMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Validate the block size the ROCm gather kernels require."""
+        # block_size == 1 is the per-token page-size probe (see
+        # Platform.get_page_size_bytes); real blocks must be gatherable in
+        # 16-token units by the ROCm kernel.
+        if spec.block_size != 1 and spec.block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        return spec
 
-        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-            return (num_blocks, 2, block_size, num_kv_heads, head_size)
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-            # Physical layout matches the logical packed shape.
-            raise NotImplementedError
-        if include_num_layers_dimension:
-            raise NotImplementedError
-        # Hoist the K/V dim out so kv_cache[:, 0] and kv_cache[:, 1] are each a
-        # contiguous (num_blocks, block_size, num_kv_heads, head_size) range.
-        return (1, 0, 2, 3, 4)
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # K and V come out of the content dim as transposed views rather than
+        # copies, so the head dim may sit on either side of the block dim, but
+        # the layer must stay outermost.
+        return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
