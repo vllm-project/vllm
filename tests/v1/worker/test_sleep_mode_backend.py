@@ -38,9 +38,9 @@ def test_new_backend_starts_in_running_state():
     assert CuMemBackend().state() == "RUNNING"
 
 
-@pytest.mark.parametrize("disable_nccl_comm_suspend", [False, True])
-def test_worker_drives_communicator_suspension(monkeypatch, disable_nccl_comm_suspend):
-    """Comm walkers run around sleep/wake unless explicitly disabled."""
+@pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
+def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_suspend):
+    """Comm walkers run around sleep/wake only when explicitly enabled."""
     from types import SimpleNamespace
 
     from vllm.v1.worker.gpu_worker import Worker
@@ -60,7 +60,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, disable_nccl_comm_su
     worker._sleep_saved_draft_buffers = {}
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            disable_nccl_comm_suspend=disable_nccl_comm_suspend
+            enable_nccl_comm_suspend=enable_nccl_comm_suspend
         )
     )
 
@@ -84,7 +84,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, disable_nccl_comm_su
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
     ]
-    if disable_nccl_comm_suspend:
+    if not enable_nccl_comm_suspend:
         expected = [c for c in expected if not c[0].startswith("comms.")]
     assert calls == expected
 

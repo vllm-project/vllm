@@ -221,7 +221,7 @@ class Worker(WorkerBase):
                 }
 
         self.sleep_mode_backend.suspend(level)
-        if not self.vllm_config.model_config.disable_nccl_comm_suspend:
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
         torch.accelerator.synchronize()
@@ -243,7 +243,7 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.sleep_mode_backend.resume(tags)
-        if not self.vllm_config.model_config.disable_nccl_comm_suspend:
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
         # Restore the buffers after level 2 sleep
