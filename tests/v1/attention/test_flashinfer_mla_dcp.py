@@ -15,7 +15,7 @@ requires_flashinfer_mla = pytest.mark.skipif(
 
 
 def test_mla_dcp_gathered_query_reserves_backend_head_storage():
-    from vllm.v1.attention.ops.dcp_utils import reserve_query_head_storage
+    from vllm.v1.attention.ops.dcp import reserve_query_head_storage
 
     query = torch.randn(3, 24, 576, dtype=torch.bfloat16)
 

@@ -159,6 +159,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
+            routed_experts_prompt_start: 1,
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
@@ -2680,6 +2681,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,
             extra_args: None,
+            routed_experts_prompt_start: 0,
         },
     );
 
@@ -2741,6 +2743,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
+                        spec_decode_metrics: None,
                     },
                 ],
                 scheduler_stats: None,

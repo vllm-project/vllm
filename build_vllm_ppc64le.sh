@@ -130,7 +130,7 @@ TEMP_BUILD_DIR=$(mktemp -d)
 cd "${TEMP_BUILD_DIR}"
 export BUILD_SOX=1 BUILD_KALDI=1 BUILD_RNNT=1 USE_FFMPEG=0 USE_ROCM=0 USE_CUDA=0
 export TORCHAUDIO_TEST_ALLOW_SKIP_IF_NO_FFMPEG=1
-git clone --recursive https://github.com/pytorch/audio.git -b v${TORCHAUDIO_VERSION}
+git clone --recursive https://github.com/pytorch/audio.git -b "v${TORCHAUDIO_VERSION}"
 cd audio
 #patching 
 sed -i '
