@@ -60,6 +60,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.parallel_config = SimpleNamespace(
         enable_eplb=True,
         enable_elastic_ep=False,
+        enable_batch_sharded_sampling=False,
         eplb_config=SimpleNamespace(log_balancedness=True),
     )
     runner.vllm_config = SimpleNamespace(
