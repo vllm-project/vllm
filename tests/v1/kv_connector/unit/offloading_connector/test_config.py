@@ -650,32 +650,6 @@ def test_parallelism_agnostic_for_single_full_attention_group():
     assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
 
 
-@pytest.mark.parametrize(
-    "kv_cache_groups",
-    [
-        [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))],
-        [
-            KVCacheGroupSpec(
-                ["l0"],
-                SlidingWindowSpec(
-                    block_size=16,
-                    num_kv_heads=4,
-                    head_size=128,
-                    dtype=torch.float32,
-                    sliding_window=128,
-                ),
-            )
-        ],
-        [
-            KVCacheGroupSpec(["l0"], _full_attention_spec()),
-            KVCacheGroupSpec(["l1"], _full_attention_spec()),
-        ],
-    ],
-)
-def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
-    assert not _parallelism_agnostic(kv_cache_groups)
-
-
 _SWA_SPEC = SlidingWindowSpec(
     block_size=16,
     num_kv_heads=4,
@@ -694,6 +668,18 @@ _SWA_MLA_SPEC = SlidingWindowMLASpec(
 
 def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
     return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
+
+
+@pytest.mark.parametrize(
+    "kv_cache_groups",
+    [
+        _groups(_mla_spec(head_size=576)),
+        _groups(_SWA_SPEC),
+        _groups(_full_attention_spec(), _full_attention_spec()),
+    ],
+)
+def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
+    assert not _parallelism_agnostic(kv_cache_groups)
 
 
 @pytest.mark.parametrize(
@@ -722,8 +708,7 @@ def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner
     version — the v2 runner is the case the canonical layout exists for."""
-    groups = [KVCacheGroupSpec(["l0"], _full_attention_spec())]
-    assert not _parallelism_agnostic(groups, v2=True)
+    groups = _groups(_full_attention_spec())
     assert _parallelism_agnostic(groups, canonical=True, v2=True)
 
 

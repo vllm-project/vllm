@@ -150,21 +150,22 @@ def build_offloading_config(
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
         def spec_certifiable(spec: KVCacheSpec) -> bool:
-            """Statically mirrors _layer_mapping's certifiable spec classes."""
+            """Conservative static mirror of _layer_mapping's per-layer checks."""
             if not isinstance(spec, AttentionSpec):
                 return False
             if spec.kv_quant_mode.is_per_token_head:
                 return False
-            if type(spec) is MLAAttentionSpec:
+            if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
                 return (
-                    spec.tokens_per_state == 1
+                    type(spec) is MLAAttentionSpec
+                    and spec.tokens_per_state == 1
                     and spec.real_page_size_bytes % spec.block_size == 0
                 )
-            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
-                return False
             if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
                 return False
-            return total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
+            return (
+                total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
+            ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
 
         is_parallelism_agnostic = (
             len(kv_cache_config.kv_cache_groups) > 0
