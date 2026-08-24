@@ -213,7 +213,7 @@ class PoolingIOProcessor:
             if param.task is None:
                 param.task = pooling_task
             elif pooling_task == "plugin":
-                # `plugin` task uses io_processor.parse_request to verify inputs.
+                # `plugin` task uses io_processor.parse_data to verify inputs.
                 # We actually allow plugin to overwrite pooling_task.
                 pass
             elif param.task != pooling_task:

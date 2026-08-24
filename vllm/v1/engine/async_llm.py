@@ -283,10 +283,7 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest
-        | PromptType
-        | EngineInput
-        | AsyncGenerator[StreamingInput, None],
+        prompt: PromptType | EngineInput | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -336,53 +333,38 @@ class AsyncLLM(EngineClient):
             )
 
         # Convert Input --> Request.
-        if isinstance(prompt, EngineCoreRequest):
-            logger.warning_once(
-                "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+        if isinstance(prompt, dict) and "type" in prompt:
+            # Rendered EngineInput; no blocking preprocessing needed.
+            request = self.input_processor.process_inputs(
+                request_id,
+                prompt,
+                params,
+                supported_tasks=await self.get_supported_tasks(),
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                session_id=session_id,
             )
-
-            request = prompt
-            if request_id != request.request_id:
-                logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
-                    "does not match the EngineCoreRequest.request_id attribute. The "
-                    "latter will be used, and the former will be ignored."
-                )
         else:
-            if isinstance(prompt, dict) and "type" in prompt:
-                # Rendered EngineInput; no blocking preprocessing needed.
-                request = self.input_processor.process_inputs(
-                    request_id,
-                    prompt,
-                    params,
-                    supported_tasks=await self.get_supported_tasks(),
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
-                )
-            else:
-                # Raw prompts require tokenization and possibly multimodal
-                # processing, which must not block the event loop.
-                request = await self.input_processor.process_inputs_async(
-                    request_id,
-                    prompt,
-                    params,
-                    supported_tasks=await self.get_supported_tasks(),
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
-                )
-            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+            # Raw prompts require tokenization and possibly multimodal
+            # processing, which must not block the event loop.
+            request = await self.input_processor.process_inputs_async(
+                request_id,
+                prompt,
+                params,
+                supported_tasks=await self.get_supported_tasks(),
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                session_id=session_id,
+            )
+        prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
@@ -549,10 +531,7 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest
-        | PromptType
-        | EngineInput
-        | AsyncGenerator[StreamingInput, None],
+        prompt: PromptType | EngineInput | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
