@@ -964,22 +964,21 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_config_from_groups,
-        get_kv_cache_groups,
-    )
+    from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
 
     kv_cache_spec = runner.get_kv_cache_spec()
-    kv_cache_groups = get_kv_cache_groups(runner.vllm_config, kv_cache_spec)
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
         min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
         or 1
     )
+    kv_cache_groups = KVCacheConfigBuilder.get_kv_cache_groups(
+        runner.vllm_config, kv_cache_spec
+    )
     saved_override = runner.cache_config.num_gpu_blocks_override
     runner.cache_config.num_gpu_blocks_override = min_blocks
     try:
-        minimal_config = get_kv_cache_config_from_groups(
+        minimal_config = KVCacheConfigBuilder.get_kv_cache_config_from_groups(
             runner.vllm_config, kv_cache_groups, available_memory=0
         )
     finally:

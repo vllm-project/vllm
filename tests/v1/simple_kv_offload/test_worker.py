@@ -29,11 +29,11 @@ from vllm.config import CacheConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
-from vllm.v1.core.kv_cache_utils import (
-    get_kv_cache_config_from_groups,
+from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
     is_kv_cache_spec_uniform,
-    resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -55,6 +55,8 @@ from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import allocate_kv_cache
+
+_default_builder = DefaultKVCacheConfigBuilder()
 
 NUM_BLOCKS = 64
 BLOCK_BYTES = 4096
@@ -502,7 +504,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     num_blocks = 4
-    kv_cache_config = get_kv_cache_config_from_groups(
+    kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
         vllm_config, [group], sum(pages) * num_blocks
     )
     assert kv_cache_config.num_blocks == num_blocks
@@ -561,7 +563,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
-    kv_cache_config = get_kv_cache_config_from_groups(
+    kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
         vllm_config, [group], sum(pages) * rank_blocks
     )
     assert kv_cache_config.num_blocks == rank_blocks
@@ -612,7 +614,9 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         vllm_config.kv_transfer_config = None
 
         page_bytes = sum(spec.page_size_bytes for spec in specs.values())
-        config = get_kv_cache_config_from_groups(vllm_config, [group], page_bytes * 4)
+        config = _default_builder.get_kv_cache_config_from_groups(
+            vllm_config, [group], page_bytes * 4
+        )
         scheduler_block_size, _ = resolve_kv_cache_block_sizes(config, vllm_config)
         assert scheduler_block_size == 128 * dcp_size
         placements.append(

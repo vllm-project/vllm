@@ -1275,6 +1275,31 @@ class Platform:
                         "Unknown vLLM environment variable detected: %s", env
                     )
 
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        """Resolve the fully-qualified class path of the active KV cache config
+        builder.
+
+        Receives the full vllm_config so vendors can make per-model
+        decisions based on architecture, HF config fields, quantization,
+        parallelism config, etc. Vendors may override this to customize the
+        resolution priority (e.g. platform builder first, per-model dispatch,
+        wrapping the model's builder).
+
+        The default priority is: the model's declaration
+        (``model_config.kv_cache_config_builder_cls``) if present, otherwise
+        the default builder in :mod:`vllm.v1.core.kv_cache_planning`.
+
+        Returns:
+            Fully-qualified class path of a
+            ``DefaultKVCacheConfigBuilder`` subclass.
+
+        """
+        model_cls_path = vllm_config.model_config.kv_cache_config_builder_cls
+        if model_cls_path:
+            return model_cls_path
+        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

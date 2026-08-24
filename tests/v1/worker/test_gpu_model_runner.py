@@ -41,7 +41,10 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
+from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+    estimate_max_model_len,
+)
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -63,6 +66,8 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
+
+_default_builder = DefaultKVCacheConfigBuilder()
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -1093,7 +1098,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     available_memory = 20 * GiB_bytes
     # page size for layer 0's kv_cache_spec is 32KB
     num_expected_blocks = 327680  # 20GB / 32KB / 2 (num layers)
-    kv_cache_config = get_kv_cache_configs(
+    kv_cache_config = _default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_spec], [available_memory]
     )[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -1165,7 +1170,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 655360  # 20GB / 32KB
-    kv_cache_config = get_kv_cache_configs(
+    kv_cache_config = _default_builder.get_kv_cache_configs(
         vllm_config, [kv_cache_spec], [available_memory]
     )[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -1299,7 +1304,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
         kv_cache_spec = runner.get_kv_cache_spec()
 
         available_memory = 5 * GiB_bytes
-        kv_cache_config = get_kv_cache_configs(
+        kv_cache_config = _default_builder.get_kv_cache_configs(
             vllm_config, [kv_cache_spec], [available_memory]
         )[0]
         runner.initialize_kv_cache(kv_cache_config)
@@ -1827,7 +1832,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
         kv_cache_spec = runner.get_kv_cache_spec()
 
         available_memory = 5 * GiB_bytes
-        kv_cache_config = get_kv_cache_configs(
+        kv_cache_config = _default_builder.get_kv_cache_configs(
             vllm_config, [kv_cache_spec], [available_memory]
         )[0]
         num_blocks = kv_cache_config.num_blocks
