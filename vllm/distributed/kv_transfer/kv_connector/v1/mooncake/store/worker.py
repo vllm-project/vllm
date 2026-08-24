@@ -2045,7 +2045,7 @@ class MooncakeStoreWorker:
             )
             if not self.coord.enable_partial_hash_hits:
                 assert contains_hit_boundary
-            elif not contains_hit_boundary:
+            if not contains_hit_boundary:
                 next_chunk_hash_idx = min(
                     (chunk_id + 1) * db.block_size // self.hash_block_size,
                     len(block_hashes),
