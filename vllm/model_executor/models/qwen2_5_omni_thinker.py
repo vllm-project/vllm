@@ -82,6 +82,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MultiModalProcessingResult,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
     PromptReplacement,
@@ -572,14 +573,16 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsItems,
-        mm_prompt_updates: MultiModalPromptUpdates,
+        mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
         mm_item_counts = mm_items.get_all_counts()
+        prompt_ids = mm_res.prompt_ids
+        mm_kwargs = mm_res.kwargs
+        mm_prompt_updates = mm_res.prompt_updates
+
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
@@ -797,14 +800,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
         mm_counts = mm_items.get_all_counts()
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
         if use_audio_in_video and "video" in mm_counts:
             if mm_counts.get("audio", 0) < mm_counts["video"]:
                 raise ValueError(
@@ -812,43 +815,39 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 )
             mm_counts["audio"] -= mm_counts["video"]
 
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        processor_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
 
         mm_data = dict(processor_data)
-        audios = mm_data.pop("audios", [])
+        audios = mm_data.pop("audio", [])
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
-            # NOTE: Qwen2.5-Omni processor accept "audio"
             mm_data["audio"] = audios
-            hf_processor_mm_kwargs = dict(
-                **hf_processor_mm_kwargs,
-            )
         elif (
-            hf_processor_mm_kwargs.get("use_audio_in_video")
+            hf_kwargs.get("use_audio_in_video")
             and "audio" not in mm_data
             and mm_data.get("videos")
         ):
-            # A subclass (e.g. Qwen3-Omni) may have already popped "audios"
-            # and populated mm_data["audio"] itself before delegating here,
-            # in which case this isn't a genuine "no audio" case. Likewise,
-            # mm_data can be empty on a multimodal-processor-cache hit, where
-            # there's nothing to (re-)process this call and the real result
-            # comes from the cache — not a genuine "no audio" case either.
+            # A subclass (e.g. Qwen3-Omni) may have already popped the audio
+            # data and populated mm_data["audio"] itself before delegating
+            # here, in which case this isn't a genuine "no audio" case.
+            # Likewise, mm_data can be empty on a multimodal-processor-cache
+            # hit, where there's nothing to (re-)process this call and the
+            # real result comes from the cache — not a genuine "no audio"
+            # case either.
             raise ValueError(
                 "Video doesn't have audio track with `audio_in_video=True`"
             )
 
-        merged = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        merged = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
         if mm_data.get("videos") and (
             merged.keys() & {"size", "min_pixels", "max_pixels"}
         ):
-            hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
+            hf_kwargs = dict(hf_kwargs)
             video_size = dict(self.info.get_hf_processor().video_processor.size)
             size_override = merged.get("size")
             if size_override is not None:
@@ -859,12 +858,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             max_pixels = merged.get("max_pixels")
             if max_pixels is not None:
                 video_size["longest_edge"] = max_pixels
-            hf_processor_mm_kwargs["size"] = video_size
+            hf_kwargs["size"] = video_size
 
         hf_inputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            self.info.get_hf_processor(**hf_kwargs),
             dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            hf_kwargs,
         )
 
         input_features = hf_inputs.pop("input_features", None)
@@ -885,14 +884,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         if video_second_per_grid is not None:
             hf_inputs["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
         hf_inputs["use_audio_in_video"] = torch.tensor(use_audio_in_video)
 
         processed_data = hf_inputs
         processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return processed_data
+        return self._postprocess_hf_mm_data(mm_data, hf_kwargs, processed_data)
 
 
 class Qwen2_5OmniConditionalGenerationMixin:

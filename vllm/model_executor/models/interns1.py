@@ -336,25 +336,23 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        mm_data = dict(mm_data)
         videos = mm_data.pop("videos", [])
         images = mm_data.pop("images", [])
         assert isinstance(videos, list)
         assert isinstance(images, list)
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = hf_processor.tokenizer
         vocab = tokenizer.get_vocab()
 
@@ -372,9 +370,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
             image_pixel_values = []
             for image in images:
                 processed_data = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                    self.info.get_hf_processor(**hf_kwargs),
                     dict(text=hf_processor.image_token, **{"images": image}),
-                    hf_processor_mm_kwargs,
+                    hf_kwargs,
                 )
                 image_pixel_values.append(processed_data.pop("pixel_values"))
 
@@ -396,9 +394,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
             video_pixel_values = []
             for video in videos:
                 processed_data = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                    self.info.get_hf_processor(**hf_kwargs),
                     dict(text=hf_processor.video_token, **{"videos": video}),
-                    hf_processor_mm_kwargs,
+                    hf_kwargs,
                 )
                 video_pixel_values.append(processed_data.pop("pixel_values"))
 

@@ -1551,20 +1551,19 @@ class LlavaOnevision2MultiModalProcessor(
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
         merged_kwargs.setdefault("return_tensors", "pt")
         call_kwargs = {
             k: v
@@ -1581,7 +1580,7 @@ class LlavaOnevision2MultiModalProcessor(
                 "codec_config",
             }
         }
-        mm_data = dict(mm_data)
+
         # Explicit None + length checks: ``mm_data[...]`` may be a list, numpy
         # array, or tensor, and ``and <array>`` would raise on the ambiguous
         # truth value of a multi-element array.
@@ -1638,11 +1637,9 @@ class LlavaOnevision2MultiModalProcessor(
             # ``video_backend="codec"`` via mm_kwargs so the wrapped processor
             # dispatches to its codec branch.
             output = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(
-                    **{**hf_processor_mm_kwargs, "video_backend": "codec"}
-                ),
+                self.info.get_hf_processor(**{**hf_kwargs, "video_backend": "codec"}),
                 dict(text=prompt_text, **mm_data),
-                {**hf_processor_mm_kwargs, "video_backend": "codec"},
+                {**hf_kwargs, "video_backend": "codec"},
             )
             data = dict(output)
             processed_data = BatchFeature(
@@ -1667,9 +1664,7 @@ class LlavaOnevision2MultiModalProcessor(
         # local-file gating is enforced by the connector before decoding.
         if videos_present:
             timestamp_decimals = int(
-                hf_processor_mm_kwargs.get(
-                    "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
-                )
+                hf_kwargs.get("timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS)
             )
 
             per_video_frames: list[list[Image.Image]] = []
@@ -1741,9 +1736,9 @@ class LlavaOnevision2MultiModalProcessor(
             # **kwargs to the image processor, so passing the full merged kwarg
             # set here is a no-op beyond return_tensors/padding.
             output = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                self.info.get_hf_processor(**hf_kwargs),
                 dict(text=new_prompt, **merged_mm_data),
-                hf_processor_mm_kwargs,
+                hf_kwargs,
             )
             data = dict(output)
 
@@ -1809,9 +1804,9 @@ class LlavaOnevision2MultiModalProcessor(
         # runs the wrapped processor over the (possibly empty) image set and
         # applies float-tensor dtype postprocessing automatically.
         processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            self.info.get_hf_processor(**hf_kwargs),
             dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            hf_kwargs,
         )
         processed_data.update(passthrough_data)
         return processed_data

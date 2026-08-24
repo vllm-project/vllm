@@ -438,7 +438,7 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
-        if (audios := mm_data.get("audios")) is None:
+        if (audios := mm_data.get("audio")) is None:
             return {}
 
         mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)

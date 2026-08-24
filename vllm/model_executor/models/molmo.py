@@ -1145,23 +1145,24 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_counts = mm_items.get_all_counts()
 
-        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        processor_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
 
         if not processor_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
         prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
 
         processed_data = self.info.ctx.call_hf_processor(
             hf_processor.process,
             dict(text=prompt_text, **processor_data),
-            hf_processor_mm_kwargs,
+            hf_kwargs,
         )
 
         tokenizer = hf_processor.tokenizer

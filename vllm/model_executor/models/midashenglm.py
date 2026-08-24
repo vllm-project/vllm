@@ -61,6 +61,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -583,34 +584,31 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
 class MiDashengLMMultiModalProcessor(
     BaseMultiModalProcessor[MiDashengLMProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        min_audio_len = self.info.get_min_audio_len()
-        processed_audios = [
-            np.pad(
-                audio,
-                (0, min_audio_len - audio.shape[-1]),
-                mode="constant",
-                constant_values=0,
-            )
-            if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
-            else audio
-            for audio in audios
-        ]
+        if audios := hf_inputs.hf_data.get("audio"):
+            min_audio_len = self.info.get_min_audio_len()
+            hf_inputs.hf_data["audio"] = [
+                np.pad(
+                    audio,
+                    (0, min_audio_len - audio.shape[-1]),
+                    mode="constant",
+                    constant_values=0,
+                )
+                if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
+                else audio
+                for audio in audios
+            ]
 
-        if processed_audios:
-            mm_data["audio"] = processed_audios
-
-        return mm_data, hf_processor_mm_kwargs
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,

@@ -41,6 +41,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
 from vllm.transformers_utils.processors.mimo_v2_omni import (
     MiMoOmniProcessor,
@@ -912,27 +913,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
-        Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
-        the singular form.
-        """
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        # Remap audios → audio (MiMoOmniProcessor uses singular param name)
-        if "audios" in mm_data:
-            mm_data = {**mm_data, "audio": mm_data["audios"]}
-            mm_data = {k: v for k, v in mm_data.items() if k != "audios"}
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        mm_data = hf_inputs.hf_data
 
         # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
         if "video_audio" in mm_data:
@@ -972,7 +960,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                             audio=va_item.audio,
                         )
                     )
-            mm_data = {**mm_data, "video_audio": va_converted}
+            mm_data["video_audio"] = va_converted
 
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -1004,15 +992,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
                     converted.append((frames, timestamps))
 
-            mm_data = {**mm_data, "videos": converted}
+            mm_data["videos"] = converted
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs
 
     def _get_prompt_updates(
         self,

@@ -199,7 +199,9 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
 
         with timing_ctx.record("apply_hf_processor"):
-            _, passthrough_data = self._get_hf_mm_data(mm_items)
+            passthrough_data = self._get_hf_mm_inputs(
+                mm_items, hf_processor_mm_kwargs
+            ).passthrough_data
             mm_processed_data = BatchFeature(
                 {
                     k: torch.as_tensor(v).unsqueeze(0)

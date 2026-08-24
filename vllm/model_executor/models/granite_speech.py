@@ -111,7 +111,7 @@ class GraniteSpeechAudioInputs(TensorSchema):
     """List of audio embedding sizes for each item in batch."""
 
 
-class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
+class GraniteSpeechProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         feature_extractor = self.get_hf_processor().audio_processor
 
@@ -136,7 +136,7 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
 ### Input Processing  & Multimodal utils
 class GraniteSpeechMultiModalProcessor(
-    BaseMultiModalProcessor[GraniteSpeechMultiModalProcessingInfo]
+    BaseMultiModalProcessor[GraniteSpeechProcessingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -180,22 +180,8 @@ class GraniteSpeechMultiModalProcessor(
             )
         ]
 
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
-
-    def _preprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
-
-        if audios:
-            # GraniteSpeechFeatureExtractor accepts "audio"
-            mm_data["audio"] = audios
-
-        return mm_data, hf_processor_mm_kwargs
 
     def _postprocess_hf_mm_data(
         self,
@@ -215,7 +201,7 @@ class GraniteSpeechMultiModalProcessor(
 
 
 class GraniteSpeechDummyInputsBuilder(
-    BaseDummyInputsBuilder[GraniteSpeechMultiModalProcessingInfo]
+    BaseDummyInputsBuilder[GraniteSpeechProcessingInfo]
 ):
     def get_dummy_mm_data(
         self,
@@ -562,7 +548,7 @@ class GraniteSpeechCTCEncoder(nn.Module):
 
 @MULTIMODAL_REGISTRY.register_processor(
     GraniteSpeechMultiModalProcessor,
-    info=GraniteSpeechMultiModalProcessingInfo,
+    info=GraniteSpeechProcessingInfo,
     dummy_inputs=GraniteSpeechDummyInputsBuilder,
 )
 class GraniteSpeechForConditionalGeneration(

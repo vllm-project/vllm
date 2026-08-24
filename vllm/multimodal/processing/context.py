@@ -271,12 +271,6 @@ class InputProcessingContext:
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
-        # vLLM needs the full untruncated sequence to keep multi-modal
-        # placeholder tokens aligned; note that the text inputs in
-        # call_hf_processor are just dummy text, not the original prompt.
-        # The original prompt is already tokenized by the renderer.
-        merged_kwargs.setdefault("truncation", False)
-
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
             merged_kwargs,
@@ -379,7 +373,7 @@ class BaseProcessingInfo:
         """
         Constructs a parser to preprocess multi-modal data items
         before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        [`_get_hf_mm_inputs`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
 
         You can support additional modalities by creating a subclass
         of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
@@ -462,7 +456,7 @@ class BaseProcessingInfo:
         Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        [`_get_hf_mm_inputs`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 

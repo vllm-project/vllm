@@ -12,8 +12,8 @@ from .granite_speech import (
     GraniteSpeechCTCEncoder,
     GraniteSpeechDummyInputsBuilder,
     GraniteSpeechForConditionalGeneration,
-    GraniteSpeechMultiModalProcessingInfo,
     GraniteSpeechMultiModalProcessor,
+    GraniteSpeechProcessingInfo,
 )
 
 ISO639_1_SUPPORTED_LANGS = {
@@ -60,7 +60,7 @@ class GraniteSpeechPlusCTCEncoder(GraniteSpeechCTCEncoder):
 
 @MULTIMODAL_REGISTRY.register_processor(
     GraniteSpeechMultiModalProcessor,
-    info=GraniteSpeechMultiModalProcessingInfo,
+    info=GraniteSpeechProcessingInfo,
     dummy_inputs=GraniteSpeechDummyInputsBuilder,
 )
 class GraniteSpeechPlusForConditionalGeneration(GraniteSpeechForConditionalGeneration):

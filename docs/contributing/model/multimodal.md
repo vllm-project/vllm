@@ -454,7 +454,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     ??? code
 
         ```python
-        def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
             # Mistral3Processor requires text corresponding to the images
             return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -486,14 +486,14 @@ return a schema of the tensors outputted by the HF processor that are related to
     calls the HF processor on the multi-modal data without passing any text.
     If the HF processor instead requires text corresponding to the multi-modal items,
     you should override
-    [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text]
+    [_get_hf_mm_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_text]
     to return the dummy text from
     [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]
     like in the example above. If the HF processor expects the multi-modal data
-    under different keys than those provided by the multi-modal items
-    (e.g. `audio` instead of `audios`), or requires additional keyword arguments
+    under different keys than those provided by the multi-modal items,
+    or requires additional keyword arguments
     (e.g. `sampling_rate`), you should override
-    [_preprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._preprocess_hf_mm_data].
+    [_get_hf_mm_inputs][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
     If you need to modify the output of the HF processor,
     you should override
     [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data].

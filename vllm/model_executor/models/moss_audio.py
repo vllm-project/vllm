@@ -1339,22 +1339,16 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
-        if audios:
-            mm_data["audio"] = audios
-        hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
-        processor_kwargs = _filter_moss_audio_processor_config(hf_processor_mm_kwargs)
+        processor_kwargs = _filter_moss_audio_processor_config(dict(hf_kwargs))
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**processor_kwargs),
             mm_data,

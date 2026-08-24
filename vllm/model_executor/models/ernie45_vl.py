@@ -1114,26 +1114,24 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if "images" not in mm_data and "videos" not in mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        mm_data = dict(mm_data)
         if "images" not in mm_data:
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
 
         # Check if HF processor supports video metadata
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
         supports_video_metadata = getattr(
             hf_processor, "supports_video_metadata", False
         )
@@ -1153,7 +1151,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             dict(
                 text=[prompt_text], images=mm_data["images"], videos=mm_data["videos"]
             ),
-            hf_processor_mm_kwargs,
+            hf_kwargs,
         )
 
         # Divide the processor_output into two modalities: image and video.
@@ -1161,7 +1159,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             pixel_values = processor_output["images"]
             if pixel_values is not None:
                 processor_output["images"] = self._pixel_values_norm(
-                    pixel_values, hf_processor_mm_kwargs
+                    pixel_values, hf_kwargs
                 )
             for key in list(processor_output.keys()):
                 if processor_output[key] is None:

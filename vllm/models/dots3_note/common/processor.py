@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .video import preprocess_dots3_note_video
@@ -630,13 +631,14 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
 
 
 class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingInfo]):
-    def _get_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
         if "video" not in mm_items:
-            return processor_data, passthrough_data
+            return hf_inputs
 
         videos = mm_items.get_items("video", VideoProcessorItems)
         raw_videos: list[object] = []
@@ -645,11 +647,10 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
                 raw_videos.append(item.original_bytes)
             else:
                 raw_videos.append(videos.get(index))
-        processor_data = dict(processor_data)
-        processor_data["videos"] = raw_videos
-        return processor_data, passthrough_data
+        hf_inputs.hf_data["videos"] = raw_videos
+        return hf_inputs
 
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(

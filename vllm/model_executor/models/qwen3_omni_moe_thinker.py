@@ -73,6 +73,8 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing.processor import (
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
     PromptReplacement,
@@ -1209,13 +1211,26 @@ Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
 class Qwen3OmniMoeThinkerMultiModalProcessor(
     Qwen2_5OmniThinkerMultiModalProcessor,
 ):
-    def _get_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        audios = processor_data.get("audios")
+        if mm_items.get_count("audio", strict=False):
+            # TODO(Isotr0py): Remove this patch after upstream fix PR
+            # released and Transformers version update:
+            # https://github.com/huggingface/transformers/pull/41473
+            hf_inputs = hf_inputs._replace(
+                hf_kwargs={
+                    **hf_inputs.hf_kwargs,
+                    "audio_kwargs": dict(hf_inputs.hf_kwargs.get("audio_kwargs") or {}),
+                    "text_kwargs": dict(hf_inputs.hf_kwargs.get("text_kwargs") or {}),
+                }
+            )
+
+        audios = hf_inputs.hf_data.get("audio")
         if audios:
             feature_extractor = self.info.get_feature_extractor()
             hop_length = feature_extractor.hop_length
@@ -1229,47 +1244,30 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
             # To make sure the cache works with padding=True, we pre-padded
             # the audio to a multiple of hop_length.
-            processor_data = dict(processor_data)
-            processor_data["audios"] = [
+            hf_inputs.hf_data["audio"] = [
                 pad_to_hop_length(audio)
                 if isinstance(audio, np.ndarray)
                 else (pad_to_hop_length(audio[0]), audio[1])
                 for audio in audios
             ]
 
-        return processor_data, passthrough_data
+        return hf_inputs
 
-    def _apply_hf_processor_main(
+    def _postprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        if mm_items.get_all_counts().get("audio", 0):
-            # TODO(Isotr0py): Remove this patch after upstream fix PR
-            # released and Transformers version update:
-            # https://github.com/huggingface/transformers/pull/41473
-            hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
-            hf_processor_mm_kwargs["audio_kwargs"] = dict(
-                hf_processor_mm_kwargs.get("audio_kwargs") or {}
-            )
-            hf_processor_mm_kwargs["text_kwargs"] = dict(
-                hf_processor_mm_kwargs.get("text_kwargs") or {}
-            )
-
-        processed_data = super()._apply_hf_processor_main(
-            mm_items,
-            hf_processor_mm_kwargs,
+        processed_data = super()._postprocess_hf_mm_data(
+            mm_data, hf_processor_mm_kwargs, processed_data
         )
 
         if (
             "audio_feature_lengths" in processed_data
             and "feature_attention_mask" in processed_data
         ):
-            valid_mm_items = mm_items.select(
-                {k for k, c in mm_items.get_all_counts().items() if c > 0}
-            )
-            processor_data, _ = self._get_hf_mm_data(valid_mm_items)
-            audios = processor_data.get("audios", [])
+            audios = mm_data.get("audio", [])
             if audios:
                 feature_extractor = self.info.get_feature_extractor(
                     **hf_processor_mm_kwargs
@@ -1302,14 +1300,16 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsItems,
-        mm_prompt_updates: MultiModalPromptUpdates,
+        mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
         """
         mm_item_counts = mm_items.get_all_counts()
+        prompt_ids = mm_res.prompt_ids
+        mm_kwargs = mm_res.kwargs
+        mm_prompt_updates = mm_res.prompt_updates
+
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
         use_audio_in_video = False

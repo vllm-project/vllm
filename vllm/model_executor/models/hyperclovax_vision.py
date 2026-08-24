@@ -193,15 +193,14 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
         for video_idx, video_arr in enumerate(mm_data.get("videos", [])):
             if video_arr.dtype != np.uint8:
@@ -212,7 +211,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
 
         # batchify input as a single item
         processed_data = self.info.ctx.call_hf_processor(
-            hf_processor=self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            hf_processor=self.info.get_hf_processor(**hf_kwargs),
             data=dict(
                 images=None if images is None else [images],
                 videos=None if videos is None else [videos],

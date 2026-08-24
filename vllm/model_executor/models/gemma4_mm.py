@@ -563,19 +563,18 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return BatchFeature(passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
         val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
@@ -583,8 +582,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 f"Unsupported max_soft_tokens value: {val}. "
                 f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
             )
-
-        mm_data = dict(mm_data)
 
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
@@ -620,7 +617,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 timestamps = [idx / fps for idx in frame_indices]
 
                 # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(hf_kwargs)
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
@@ -687,10 +684,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 "video_timestamps": video_timestamps_per_video,
             }
 
-        # The processor accepts 'audio' not 'audios'.
-        if "audios" in mm_data:
-            mm_data["audio"] = mm_data.pop("audios")
-
         # Warn if any audio waveform exceeds the model's max duration.
         if "audio" in mm_data:
             processor = self.info.get_hf_processor()
@@ -721,7 +714,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # NOTE: This requires a corresponding type annotation on the
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
-        patched_mm_kwargs = dict(hf_processor_mm_kwargs)
+        patched_mm_kwargs = dict(hf_kwargs)
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
