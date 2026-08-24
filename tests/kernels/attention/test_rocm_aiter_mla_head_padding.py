@@ -15,6 +15,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.attention.rocm_aiter_tolerances import MLA_H12_DECODE
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla import rocm_aiter_mla
@@ -350,6 +351,6 @@ def test_h12_aiter_mla_decode_matches_reference():
     torch.testing.assert_close(
         out.float(),
         out_ref.unsqueeze(0),
-        atol=1e-2,
-        rtol=1e-2,
+        atol=MLA_H12_DECODE.atol,
+        rtol=MLA_H12_DECODE.rtol,
     )

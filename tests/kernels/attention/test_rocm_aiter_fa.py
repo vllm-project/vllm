@@ -14,6 +14,13 @@ import importlib
 import pytest
 import torch
 
+from tests.kernels.attention.rocm_aiter_tolerances import (
+    FA_DECODE,
+    FA_DIRECT,
+    FA_FP8_KV,
+    FA_MULTI_BATCH,
+    FA_SINGLE_SEQ,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_mi3xx
 from vllm.utils.torch_utils import set_random_seed
@@ -474,8 +481,7 @@ def _run_single_seq_flash_attn_case(
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 def test_aiter_fa_head_sizes(head_size, dtype, num_heads, seq_lens):
     """AITER flash attention should stay accurate across supported head sizes."""
-    atol = 1.5e-2
-    rtol = 1e-2
+    tol = FA_SINGLE_SEQ[dtype]
     _assert_aiter_supported()
 
     output, ref = _run_single_seq_flash_attn_case(
@@ -491,10 +497,10 @@ def test_aiter_fa_head_sizes(head_size, dtype, num_heads, seq_lens):
         f"num_heads={num_heads} seq_lens={seq_lens}",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
@@ -507,8 +513,7 @@ def test_aiter_mha_varlen_paged_kv(head_size, num_heads, seq_lens, dtype):
 
     Exercises: VLLM_ROCM_USE_AITER, VLLM_ROCM_USE_AITER_MHA
     """
-    atol = 1.5e-2
-    rtol = 1e-2
+    tol = FA_SINGLE_SEQ[dtype]
     _assert_aiter_supported()
 
     output, ref = _run_single_seq_flash_attn_case(
@@ -524,10 +529,10 @@ def test_aiter_mha_varlen_paged_kv(head_size, num_heads, seq_lens, dtype):
         f"num_heads={num_heads} seq_lens={seq_lens}",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
@@ -536,8 +541,7 @@ def test_aiter_mha_varlen_paged_kv(head_size, num_heads, seq_lens, dtype):
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
     """Test AITER flash attention with multiple sequences in a batch."""
-    atol = 1.5e-2
-    rtol = 1e-2
+    tol = FA_MULTI_BATCH[dtype]
     _assert_aiter_supported()
     import aiter
 
@@ -635,10 +639,10 @@ def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
         f"num_heads={num_heads} seq_lens={seq_lens}",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
@@ -646,8 +650,7 @@ def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
 def test_aiter_fa_large_block_table_matches_reference(num_blocks):
     """The direct paged-KV path should stay stable for both normal and very
     large block tables."""
-    atol = 2e-2
-    rtol = 2e-2
+    tol = FA_DIRECT
     _assert_aiter_supported()
 
     output, ref = _run_direct_flash_attn_case(
@@ -658,18 +661,17 @@ def test_aiter_fa_large_block_table_matches_reference(num_blocks):
         f"direct_varlen_paged_kv num_blocks={num_blocks}",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 def test_aiter_fa_sliding_window_matches_reference():
     """The direct kernel should respect the same sliding-window causal mask as
     the naive reference implementation."""
-    atol = 2e-2
-    rtol = 2e-2
+    tol = FA_DIRECT
     _assert_aiter_supported()
 
     output, ref = _run_direct_flash_attn_case(
@@ -681,10 +683,10 @@ def test_aiter_fa_sliding_window_matches_reference():
         "sliding_window num_blocks=2048 window=256",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)
 
 
 # Decode path test --------------------------------------------------------
@@ -699,7 +701,8 @@ def test_aiter_fa_sliding_window_matches_reference():
                 reason=(
                     "aiter bug #2229: flash_attn_varlen_func currently "
                     "miscomputes FP16 single-token decode on MI3xx "
-                    "(validated on gfx950; max abs diff 1.95 vs atol 1.5e-2). "
+                    "(validated on gfx950; max abs diff 1.95 vs atol "
+                    f"{FA_DECODE.atol:g}). "
                     "Remove xfail when the AITER decode kernel is fixed. "
                     "https://github.com/ROCm/aiter/issues/2229"
                 ),
@@ -713,8 +716,7 @@ def test_aiter_mha_decode_single_token(dtype):
     BF16 is the working reference configuration here. FP16 remains xfail until
     the upstream AITER single-token decode bug is fixed.
     """
-    atol = 1.5e-2
-    rtol = 1e-2
+    tol = FA_DECODE
     _assert_aiter_supported()
     import aiter
 
@@ -793,10 +795,10 @@ def test_aiter_mha_decode_single_token(dtype):
         f"decode_single_token dtype={dtype} kv_len={kv_len}",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)
 
 
 # FP8 KV cache test -------------------------------------------------------
@@ -811,8 +813,7 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
 
     Exercises: VLLM_ROCM_USE_AITER, VLLM_ROCM_USE_AITER_MHA, FP8 KV path.
     """
-    atol = 0.15
-    rtol = 0.05
+    tol = FA_FP8_KV[dtype]
     _assert_aiter_supported()
     if not current_platform.supports_fp8():
         pytest.skip("FP8 not supported on this hardware")
@@ -905,7 +906,7 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         f"varlen_fp8_kv dtype={dtype} query_len={query_len} kv_len={kv_len}",
         output,
         ref,
-        atol=atol,
-        rtol=rtol,
+        atol=tol.atol,
+        rtol=tol.rtol,
     )
-    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref, atol=tol.atol, rtol=tol.rtol)

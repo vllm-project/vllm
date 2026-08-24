@@ -23,6 +23,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.attention.rocm_aiter_tolerances import MLA_FP8_PREFILL
 from vllm.platforms import current_platform
 
 
@@ -54,7 +55,7 @@ SCALE = 1.0 / math.sqrt(QK_HEAD_DIM)
 # Dominated by fp8 (e4m3) rounding of q/k/v. Measured on MI355: worst-element
 # abs error ~0.054, so atol=0.1 is ~2x that noise floor; rtol=0.05 bounds larger
 # elements.
-ATOL, RTOL = 1e-1, 5e-2
+ATOL, RTOL = MLA_FP8_PREFILL.atol, MLA_FP8_PREFILL.rtol
 
 
 @pytest.fixture(autouse=True)

@@ -11,6 +11,15 @@ from typing import Any, Literal
 import pytest
 import torch
 
+from tests.kernels.attention.rocm_aiter_tolerances import (
+    UNIFIED_DECODE,
+    UNIFIED_FP8_KV,
+    UNIFIED_FP8_QUERY,
+    UNIFIED_FP8_QUERY_KV,
+    UNIFIED_MIXED_BATCH,
+    UNIFIED_PREFILL,
+    Tol,
+)
 from tests.kernels.attention.test_triton_unified_attention import ref_paged_attn
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -49,13 +58,17 @@ PREFILL_SEQ_LENS = [
     [(256, 1024), (128, 2048)],
 ]
 
-DEFAULT_ATOL, DEFAULT_RTOL = 1.5e-2, 1e-2
-FP8_ATOL, FP8_RTOL = 1.5e-1, 1.5e-1
+Fp8Variant = Literal["fp8_kv", "fp8_query", "fp8_query_kv"]
+
+DEFAULT_ATOL, DEFAULT_RTOL = UNIFIED_MIXED_BATCH[torch.bfloat16].atol, UNIFIED_MIXED_BATCH[torch.bfloat16].rtol
+FP8_TOLS: dict[Fp8Variant, Tol] = {
+    "fp8_kv": UNIFIED_FP8_KV,
+    "fp8_query": UNIFIED_FP8_QUERY,
+    "fp8_query_kv": UNIFIED_FP8_QUERY_KV,
+}
 # Non-unity scale so q_descale handling is exercised explicitly.
 Q_SCALE = 0.75
 K_SCALE, V_SCALE = 0.5, 0.25
-
-Fp8Variant = Literal["fp8_kv", "fp8_query", "fp8_query_kv"]
 
 FP8_VARIANTS = [
     pytest.param("fp8_kv", id="fp8_kv"),
@@ -262,7 +275,8 @@ def test_aiter_unified_attn_mixed_batch(
         block_size=block_size,
         dtype=dtype,
     )
-    _assert_matches_reference(case)
+    tol = UNIFIED_MIXED_BATCH[dtype]
+    _assert_matches_reference(case, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.parametrize("seq_lens", DECODE_SEQ_LENS)
@@ -286,7 +300,8 @@ def test_aiter_unified_attn_decode(
         block_size=block_size,
         dtype=dtype,
     )
-    _assert_matches_reference(case)
+    tol = UNIFIED_DECODE
+    _assert_matches_reference(case, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
@@ -308,7 +323,8 @@ def test_aiter_unified_attn_prefill(
         block_size=block_size,
         dtype=torch.bfloat16,
     )
-    _assert_matches_reference(case)
+    tol = UNIFIED_PREFILL
+    _assert_matches_reference(case, atol=tol.atol, rtol=tol.rtol)
 
 
 @pytest.mark.skipif(
@@ -336,4 +352,5 @@ def test_aiter_unified_attn_fp8(
         block_size=block_size,
         variant=variant,
     )
-    _assert_matches_reference(case, atol=FP8_ATOL, rtol=FP8_RTOL)
+    tol = FP8_TOLS[variant]
+    _assert_matches_reference(case, atol=tol.atol, rtol=tol.rtol)

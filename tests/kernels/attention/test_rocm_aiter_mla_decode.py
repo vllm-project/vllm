@@ -10,6 +10,7 @@ head counts, and sequence lengths.
 import pytest
 import torch
 
+from tests.kernels.attention.rocm_aiter_tolerances import MLA_DECODE
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -33,7 +34,7 @@ NUM_HEADS = [16, 128]
 BATCH_SIZES = [1, 4, 16]
 KV_SEQ_LENS = [16, 256]
 
-ATOL, RTOL = 1.5e-2, 1e-2
+ATOL, RTOL = MLA_DECODE.atol, MLA_DECODE.rtol
 
 
 def _require_aiter():
