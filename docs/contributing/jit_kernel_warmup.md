@@ -43,7 +43,7 @@ class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
         return self.kernel(...)
 
 
-MY_KERNEL = MyKernel()
+_MY_KERNEL = MyKernel()
 ```
 
 `CompileKey`, `dispatch(...)`, and `get_warmup_keys(...)` are backend-agnostic. Backend-specific behavior belongs in `kernel(...)`, `compile(...)`, and `__call__(...)`.
@@ -81,7 +81,7 @@ Use independent ranges or alternatives for cartesian products, `zip_inputs(...)`
 Register the wrapper where the runtime implementation is selected:
 
 ```python
-MY_KERNEL.register_warmup()
+_MY_KERNEL.register_warmup()
 ```
 
 Registration records metadata only. It does not compile or launch the kernel. Repeated registrations from equivalent layers are allowed and deduplicated later.
@@ -264,7 +264,7 @@ def dispatch(
     )
 ```
 
-Unmatched dispatch arguments become compile-key fields and warmup inputs. Keep transformed inputs named and explicit. The unpacking must use the dispatch method's own `**kwargs` parameter directly and exactly once; arbitrary mappings, repeated unpacking, and helper-call `**kwargs` are rejected. The fully explicit form remains supported and is often clearer for non-trivial mappings.
+Unmatched dispatch arguments become compile-key fields and warmup inputs. Inputs used only by `_when` are filtered rather than forwarded. Keep transformed inputs named and explicit. The unpacking must use the dispatch method's own `**kwargs` parameter directly and exactly once; arbitrary mappings, repeated unpacking, and helper-call `**kwargs` are rejected. The fully explicit form remains supported and is often clearer for non-trivial mappings.
 
 #### Unsupported Syntax
 

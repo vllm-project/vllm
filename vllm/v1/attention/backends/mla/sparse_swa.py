@@ -659,20 +659,18 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.decode_swa_indices is not None
         assert metadata.decode_swa_lens is not None
 
-        _compute_swa_indices_and_lens_kernel[(metadata.num_decode_tokens,)](
+        _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
             metadata.decode_swa_indices,
-            metadata.decode_swa_indices.stride(0),
             metadata.decode_swa_lens,
-            metadata.decode_swa_indices.shape[-1],
+            self.window_size,
             metadata.query_start_loc,
             metadata.seq_lens,
             metadata.token_to_req_indices,
             metadata.is_valid_token,
             metadata.block_table,
-            metadata.block_table.stride(0),
             self.block_size,
+            num_tokens=metadata.num_decode_tokens,
             token_offset=0,
-            TRITON_BLOCK_SIZE=1024,
         )
         tile_sched = self.build_tile_scheduler(metadata.num_decode_tokens)
         metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
@@ -849,13 +847,10 @@ class ComputeSWAIndicesAndLensKernel(
 
     def dispatch(  # type: ignore[override]
         self,
-        *,
-        window_size: int,
-        block_size: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            window_size=window_size,
-            block_size=block_size,
+            **compile_key_fields,
             triton_block_size=1024,
         )
 

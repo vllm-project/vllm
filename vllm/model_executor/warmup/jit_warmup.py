@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Generic, TypeVar
 
 __all__ = [
@@ -597,6 +597,16 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             predicate_trace = (
                 _trace_warmup_predicate(_when) if _when is not None else None
             )
+            predicate_only_names: frozenset[str] = frozenset()
+            if predicate_trace is not None:
+                compile_key_fields = frozenset(
+                    field.name for field in fields(self.CompileKey)
+                )
+                predicate_only_names = (
+                    predicate_trace.input_names
+                    - compile_key_dispatch_trace.input_names
+                    - compile_key_fields
+                )
             # Unmatched **kwargs fields also belong to the expansion space.
             available_names = set(kwargs).union(
                 *(group.rows[0] for group in input_groups)
@@ -638,7 +648,12 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 ):
                     continue
                 compile_key = compile_key_dispatch_trace.compile_key(
-                    self.CompileKey, dispatch_values
+                    self.CompileKey,
+                    {
+                        name: value
+                        for name, value in dispatch_values.items()
+                        if name not in predicate_only_names
+                    },
                 )
                 compile_keys[compile_key] = None
             return list(compile_keys)
@@ -738,7 +753,11 @@ class JitWarmupRegistry:
             compile_keys: dict[Any, None] = {}
             for args, kwargs in registrations:
                 if not args and not kwargs:
-                    args = (self.vllm_config,)
+                    # Inject config only when the key method requires an argument.
+                    try:
+                        inspect.signature(kernel.get_warmup_keys).bind()
+                    except TypeError:
+                        args = (self.vllm_config,)
                 for compile_key in kernel.get_warmup_keys(*args, **kwargs):
                     compile_keys[compile_key] = None
             if compile_keys:
