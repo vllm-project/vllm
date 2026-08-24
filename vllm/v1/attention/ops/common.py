@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
-    WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
-    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 
