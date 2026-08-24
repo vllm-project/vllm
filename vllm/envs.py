@@ -1868,7 +1868,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
     ),
-    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``.
+    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``
+    # and its render endpoint at ``POST /cohere/v2/chat/render``.
     # Default off
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
