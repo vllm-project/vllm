@@ -8,6 +8,7 @@ import pytest
 
 from vllm import LLM
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
@@ -82,6 +83,12 @@ def can_initialize(
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layout = resolve_kv_cache_layout(
+            vllm_config,
+            self.model_executor.get_supported_kv_cache_layouts(),
+            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+        )
+        self.model_executor.set_kv_cache_layout(layout.name)
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,

@@ -1,48 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Padded-page handling in create_kv_cache_views.
 
+Guards that a page_size_padded spec strides the block dimension by the padded page
+while keeping per-block content compact, so padding bytes at the end of each page are
+never addressed by the logical view.
+"""
+
+import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheTensor,
-    KVQuantMode,
-    MambaSpec,
+    MLAAttentionSpec,
+    compute_layout_strides,
 )
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import (
+    allocate_kv_cache,
+    copy_kv_cache_blocks_inplace,
+)
 
 
-class FakeFlashAttentionBackend:
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        assert not include_num_layers_dimension
-        return (0, 1, 2, 3, 4)
-
-
-class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        assert not include_num_layers_dimension
-        return (0, 1, 3, 2, 4)
-
-
-def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
+def test_reshape_padded_kv_cache_strides_by_padded_page():
     num_blocks = 3
     spec = FullAttentionSpec(
         block_size=16,
@@ -53,292 +38,192 @@ def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
     )
     assert spec.real_page_size_bytes == 256
 
-    raw_tensors = {
-        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
-    }
-    attn_groups = [
-        AttentionGroup(
-            backend=FakeFlashAttentionBackend,
-            layer_names=["layer"],
-            kv_cache_spec=spec,
-            kv_cache_group_id=0,
-        )
-    ]
+    raw = torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    (kv_cache,) = dense_kv_cache_views(raw, spec, num_blocks, 1, KVCacheLayout.LBHNC)
 
-    kv_cache = _reshape_kv_cache(
-        attn_groups,
-        raw_tensors,
-        "auto",
-        [spec.block_size],
-        {},
-    )["layer"]
-
-    assert kv_cache.shape == (num_blocks, 2, 16, 1, 2)
-    assert kv_cache.stride(0) == spec.page_size_bytes // 4
-    assert kv_cache.stride(1) == spec.real_page_size_bytes // 2 // 4
-    assert kv_cache[1, 0].storage_offset() == spec.page_size_bytes // 4
-    assert (
-        kv_cache[1, 1].storage_offset()
-        == (spec.page_size_bytes + spec.real_page_size_bytes // 2) // 4
-    )
+    elem_size = 4  # float32
+    # Content dim packs K and V: 2 * head_size.
+    assert kv_cache.shape == (num_blocks, 1, 16, 2 * spec.head_size)
+    assert kv_cache.dtype == spec.dtype
+    assert kv_cache.stride(0) == spec.page_size_padded // elem_size
+    assert kv_cache[1].storage_offset() == spec.page_size_padded // elem_size
+    # Within one block the (unpadded) content stays compact.
+    assert kv_cache[0].is_contiguous()
 
 
-def test_reshape_padded_hnd_flash_attention_kv_cache_strides_by_page():
-    num_blocks = 3
-    spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=3,
-        head_size=2,
-        dtype=torch.float32,
-        page_size_padded=1024,
-    )
-    assert spec.real_page_size_bytes == 768
-
-    raw_tensors = {
-        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
-    }
-    attn_groups = [
-        AttentionGroup(
-            backend=FakeHNDFlashAttentionBackend,
-            layer_names=["layer"],
-            kv_cache_spec=spec,
-            kv_cache_group_id=0,
-        )
-    ]
-
-    kv_cache = _reshape_kv_cache(
-        attn_groups,
-        raw_tensors,
-        "auto",
-        [spec.block_size],
-        {},
-    )["layer"]
-
-    assert kv_cache.shape == (num_blocks, 2, 16, 3, 2)
-    assert kv_cache.stride(0) == spec.page_size_bytes // 4
-    assert kv_cache.stride(1) == spec.real_page_size_bytes // 2 // 4
-    assert kv_cache.stride(2) == 2
-    assert kv_cache.stride(3) == spec.block_size * spec.head_size
-    assert kv_cache[1, 0].storage_offset() == spec.page_size_bytes // 4
-    assert (
-        kv_cache[1, 1].storage_offset()
-        == (spec.page_size_bytes + spec.real_page_size_bytes // 2) // 4
-    )
-    assert (
-        kv_cache[1, 1, 3, 2].storage_offset()
-        == (
-            spec.page_size_bytes
-            + spec.real_page_size_bytes // 2
-            + 3 * spec.head_size * 4
-            + 2 * spec.block_size * spec.head_size * 4
-        )
-        // 4
-    )
-
-
-class FakeDiffKVBackend:
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads, head_size * 2)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        assert not include_num_layers_dimension
-        return (0, 1, 2, 3)
-
-
-def test_reshape_padded_diff_kv_cache_does_not_infer_kv_dim():
-    num_blocks = 3
-    spec = FullAttentionSpec(
-        block_size=16,
+@pytest.mark.parametrize(
+    ("kernel_block_sizes", "expected_num_blocks", "expected_num_states"),
+    [
+        (None, 4, 64),
+        ([256], 4, 64),
+        ([64], 16, 16),
+    ],
+)
+def test_allocate_compressed_mla_cache(
+    kernel_block_sizes: list[int] | None,
+    expected_num_blocks: int,
+    expected_num_states: int,
+):
+    spec = MLAAttentionSpec(
+        block_size=256,
         num_kv_heads=1,
-        head_size=2,
-        dtype=torch.float32,
-        page_size_padded=384,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
     )
-
-    raw_tensors = {
-        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
-    }
-    attn_groups = [
-        AttentionGroup(
-            backend=FakeDiffKVBackend,
-            layer_names=["layer"],
-            kv_cache_spec=spec,
-            kv_cache_group_id=0,
-        )
-    ]
-
-    kv_cache = _reshape_kv_cache(
-        attn_groups,
-        raw_tensors,
-        "auto",
-        [spec.block_size],
-        {},
-    )["layer"]
-
-    assert kv_cache.shape == (num_blocks, 16, 1, 4)
-    assert kv_cache.stride(0) == spec.page_size_bytes // 4
-    assert kv_cache.stride(1) == 4
-
-
-class FakePerTokenScaleBackend:
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size + 4)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        assert not include_num_layers_dimension
-        return (0, 1, 2, 3, 4)
-
-
-def test_reshape_padded_quantized_kv_cache_preserves_scale_stride():
-    num_blocks = 3
-    spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=4,
-        dtype=torch.int8,
-        kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
-        page_size_padded=384,
-    )
-    assert spec.real_page_size_bytes == 128
-    assert spec.page_size_bytes == 384
-
-    raw_tensors = {
-        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
-    }
-    attn_groups = [
-        AttentionGroup(
-            backend=FakePerTokenScaleBackend,
-            layer_names=["layer"],
-            kv_cache_spec=spec,
-            kv_cache_group_id=0,
-        )
-    ]
-
-    kv_cache = _reshape_kv_cache(
-        attn_groups,
-        raw_tensors,
-        "int8_per_token_head",
-        [spec.block_size],
-        {},
-    )["layer"]
-
-    assert kv_cache.shape == (num_blocks, 2, 16, 1, 8)
-    assert kv_cache.stride(0) == spec.page_size_bytes
-    assert kv_cache.stride(1) == 16 * 1 * 8
-    assert kv_cache[1, 1].storage_offset() == spec.page_size_bytes + 16 * 1 * 8
-
-
-class FakeKVFirstBackend:
-    """ROCm-style backend that puts K and V ahead of the block dim."""
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
-
-    @staticmethod
-    def get_kv_cache_block_dim(
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> int:
-        return 1
-
-
-def _kv_first_setup(shared_by: list[str]):
-    num_blocks = 3
-    attn_spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=2,
-        dtype=torch.float32,
-    )
-    mamba_spec = MambaSpec(
-        block_size=16,
-        shapes=((64,),),
-        dtypes=(torch.float32,),
-    )
-    assert attn_spec.page_size_bytes == mamba_spec.page_size_bytes == 256
-
-    raw_tensor = torch.zeros(attn_spec.page_size_bytes * num_blocks, dtype=torch.int8)
-    raw_tensors = {name: raw_tensor for name in shared_by}
-    attn_groups = [
-        AttentionGroup(
-            backend=FakeKVFirstBackend,
-            layer_names=["attn"],
-            kv_cache_spec=attn_spec,
-            kv_cache_group_id=0,
-        )
-    ]
-    if "mamba" in shared_by:
-        attn_groups.append(
-            AttentionGroup(
-                backend=FakeKVFirstBackend,
-                layer_names=["mamba"],
-                kv_cache_spec=mamba_spec,
-                kv_cache_group_id=1,
-            )
-        )
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
+    num_pages = 4
+    config = KVCacheConfig(
+        num_blocks=num_pages,
         kv_cache_tensors=[
-            KVCacheTensor(size=raw_tensor.numel(), shared_by=list(shared_by))
+            KVCacheTensor(
+                size=num_pages * spec.page_size_bytes,
+                layers=["layer.0"],
+                layer_stride=num_pages * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+            )
         ],
-        kv_cache_groups=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
     )
 
-    kv_caches = _reshape_kv_cache(
-        attn_groups,
-        raw_tensors,
-        "auto",
-        [attn_spec.block_size] * len(attn_groups),
-        {},
-        kv_cache_config,
+    caches = allocate_kv_cache(
+        config, torch.device("cpu"), KVCacheLayout.LBHNC, kernel_block_sizes
     )
-    return num_blocks, kv_caches["attn"]
+
+    assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
 
 
-def test_reshape_kv_first_kv_cache_pages_blocks_when_shared_with_mamba():
-    num_blocks, kv_cache = _kv_first_setup(["attn", "mamba"])
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
-    assert kv_cache.shape == (2, num_blocks, 16, 1, 2)
-    # Block b has to own page b, so its K and V sit side by side within it.
-    page = 16 * 1 * 2 * 2
-    for block in range(num_blocks):
-        assert kv_cache[0, block].storage_offset() == block * page
-        assert kv_cache[1, block].storage_offset() == block * page + page // 2
+    for layer_idx, cache in enumerate(caches):
+        for block_idx in range(num_blocks):
+            cache[block_idx].fill_(10 * layer_idx + block_idx)
+
+    expected = [[cache[i].clone() for i in range(num_blocks)] for cache in caches]
+    copies = [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
+
+    copy_kv_cache_blocks_inplace(caches, num_blocks, copies)
+
+    for layer_idx, cache in enumerate(caches):
+        torch.testing.assert_close(cache[2], expected[layer_idx][0])
+        torch.testing.assert_close(cache[1], expected[layer_idx][1])
 
 
-def test_reshape_kv_first_kv_cache_keeps_layout_without_mamba():
-    num_blocks, kv_cache = _kv_first_setup(["attn"])
+def test_fixed_block_stride_propagates_outward_in_lhbnc():
+    num_blocks = 3
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    natural = compute_layout_strides(spec, num_blocks, num_layers, KVCacheLayout.LHBNC)
+    block_stride = natural[1] + 8
 
-    assert kv_cache.shape == (2, num_blocks, 16, 1, 2)
-    # Nothing else indexes this allocation by page, so K and V stay split into
-    # one contiguous half each.
-    assert kv_cache[1, 0].storage_offset() == num_blocks * 16 * 1 * 2
+    strides = compute_layout_strides(
+        spec,
+        num_blocks,
+        num_layers,
+        KVCacheLayout.LHBNC,
+        fixed_strides=(None, block_stride, None, None, None),
+    )
+
+    assert strides[1] == block_stride
+    assert strides[2] == block_stride * num_blocks
+    assert strides[0] == strides[2] * spec.num_heads
+
+
+def test_copy_kv_cache_blocks_separate_head_groups():
+    # LHBNC stores each head group separately, so a block's bytes are scattered
+    # across L*H regions.
+    layout = KVCacheLayout.LHBNC
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+        num_head_slots=2,
+        state_content_bytes=2 * 2 * 4,
+    )
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+
+    for layer_idx, cache in enumerate(caches):
+        for block_idx in range(num_blocks):
+            for head_idx in range(cache.shape[1]):
+                cache[block_idx, head_idx].fill_(
+                    100 * layer_idx + 10 * head_idx + block_idx
+                )
+
+    expected = [[cache[i].clone() for i in range(num_blocks)] for cache in caches]
+    copy_kv_cache_blocks_inplace(
+        caches,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    for layer_idx, cache in enumerate(caches):
+        torch.testing.assert_close(cache[2], expected[layer_idx][0])
+        torch.testing.assert_close(cache[1], expected[layer_idx][1])
+
+
+@pytest.mark.parametrize(
+    "layout,num_layers",
+    [
+        (KVCacheLayout.LBHNC, 2),
+        # Splitting needs a manager block to be one dense page, which a
+        # block-outermost layout only gives when the block holds one layer.
+        (KVCacheLayout.BLHNC, 1),
+    ],
+)
+def test_copy_kv_cache_blocks_with_virtual_block_splitting(
+    layout: KVCacheLayout, num_layers: int
+):
+    num_blocks = 4
+    physical_per_logical = 2
+    spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    caches = dense_kv_cache_views(
+        raw,
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        kernel_block_size=spec.block_size // physical_per_logical,
+    )
+
+    for layer_idx, cache in enumerate(caches):
+        for block_idx in range(cache.shape[0]):
+            cache[block_idx].fill_(100 * layer_idx + block_idx)
+    expected = [[cache[i].clone() for i in range(cache.shape[0])] for cache in caches]
+
+    copy_kv_cache_blocks_inplace(
+        caches,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    dst_start = 2 * physical_per_logical
+    for layer_idx, cache in enumerate(caches):
+        for physical_idx in range(physical_per_logical):
+            torch.testing.assert_close(
+                cache[dst_start + physical_idx], expected[layer_idx][physical_idx]
+            )
