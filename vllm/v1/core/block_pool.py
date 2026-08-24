@@ -498,6 +498,13 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
+        # Note the direction of the comparison: this only retires hashes that
+        # cover *fewer* tokens than the entry being registered, i.e. a partial
+        # entry growing forward within its block. It deliberately does not fire
+        # when the block already carries a longer hash -- that case is a caller
+        # trying to register a boundary the block has already outgrown, and the
+        # caller is responsible for not making that call at all. See
+        # FullAttentionManager._cache_partial_tail_block.
         if (
             not already_cached
             and block.block_hash is not None

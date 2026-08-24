@@ -482,6 +482,11 @@ def test_cache_blocks_does_not_resurrect_stale_partial_hash_after_promotion(
     the now-superseded partial hash on every subsequent cache_blocks call,
     because boundary_tokens is derived from the fixed num_prompt_tokens and
     does not change across decode steps.
+
+    The cache map and the KV-cache event stream are both checked: a fix that
+    keeps get_cached_block clean but still emits BlockStored for the retired
+    partial hash would leave external KV-aware routers with the contradictory
+    view this bug is actually reported for.
     """
     hash_block_size = 2
     block_size = 6 * dcp_world_size
@@ -495,6 +500,7 @@ def test_cache_blocks_does_not_resurrect_stale_partial_hash_after_promotion(
         num_gpu_blocks=4,
         enable_caching=True,
         hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
     )
     spec = FullAttentionSpec(
         block_size=block_size,
@@ -511,17 +517,24 @@ def test_cache_blocks_does_not_resurrect_stale_partial_hash_after_promotion(
     )
     manager.req_to_blocks[req.request_id] = pool.get_new_blocks(2)
 
-    # Prefill: registers partial hash for the prompt boundary.
+    # Prefill: registers the partial hash for the prompt boundary and
+    # announces it to KV-cache-event subscribers.
     manager.cache_blocks(req, num_tokens=len(prompt_token_ids))
     partial_hash = boundary_hash(req, hash_block_size, len(prompt_token_ids))
+    stale_event_hash = kv_cache_utils.maybe_convert_block_hash(partial_hash)
     block1 = manager.req_to_blocks[req.request_id][1]
     assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) == [block1]
+    assert any(
+        isinstance(e, BlockStored) and stale_event_hash in e.block_hashes
+        for e in pool.take_events()
+    ), "prefill must announce the partial boundary hash"
 
     # Decode: fill block 1 to completion, triggering promotion.
     tokens_to_fill = block_size - (len(prompt_token_ids) % block_size)
     for i in range(tokens_to_fill):
         req.append_output_token_ids([100 + i])
         manager.cache_blocks(req, num_tokens=len(prompt_token_ids) + i + 1)
+    promotion_events = pool.take_events()
 
     # After promotion the stale partial hash must not be live in the cache.
     full_hashes = BlockHashListWithBlockSize(
@@ -535,10 +548,28 @@ def test_cache_blocks_does_not_resurrect_stale_partial_hash_after_promotion(
         "stale partial hash must not be resurrected after promotion"
     )
 
-    # Additional decode steps must not re-insert the stale entry either.
+    # ...and the event stream must agree with the cache map. Promotion
+    # announces the partial hash as removed, so nothing may re-announce it as
+    # stored afterwards.
+    removed_at = [
+        i
+        for i, e in enumerate(promotion_events)
+        if isinstance(e, BlockRemoved) and stale_event_hash in e.block_hashes
+    ]
+    assert removed_at, "promotion must announce the partial hash as removed"
+    assert not any(
+        isinstance(e, BlockStored) and stale_event_hash in e.block_hashes
+        for e in promotion_events[removed_at[-1] :]
+    ), "stale partial hash must not be re-announced as stored after promotion"
+
+    # Additional decode steps must not re-insert the stale entry either, in
+    # the cache map or on the event stream.
     for i in range(tokens_to_fill, tokens_to_fill + 3):
         req.append_output_token_ids([200 + i])
         manager.cache_blocks(req, num_tokens=len(prompt_token_ids) + i + 1)
     assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None, (
         "stale partial hash must stay absent on subsequent decode steps"
+    )
+    assert pool.take_events() == [], (
+        "decode inside an already-promoted block must emit no further events"
     )

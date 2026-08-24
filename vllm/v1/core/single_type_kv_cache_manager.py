@@ -847,7 +847,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             return
         self.block_pool.cache_partial_block(
             request=request,
-            block=blocks[block_idx],
+            block=target_block,
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
