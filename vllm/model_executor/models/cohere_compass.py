@@ -1311,7 +1311,7 @@ class CohereCompassMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="image",
-                target=hf_processor.image_token,
+                target=[hf_processor.image_token_id],
                 replacement=get_image_replacement_cohere_compass,
             ),
         ]
@@ -2225,7 +2225,12 @@ class CohereCompassDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = CohereMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.mlp = CohereMLP(
+            config,
+            quant_config=quant_config,
+            reduce_results=True,
+            prefix=f"{prefix}.mlp"
+        )
         self.input_layernorm = LayerNorm(
             param_shape=config.hidden_size,
             eps=config.layer_norm_eps,
