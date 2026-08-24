@@ -3943,6 +3943,14 @@ class GPUModelRunner(
         # This is required in the async scheduling case because
         # the CPU->GPU transfer happens async.
         self.prepare_inputs_event.synchronize()
+        # prepare_inputs_event is recorded when input prep ends, so it says
+        # nothing about the spec-decode postprocess that runs after the model.
+        # That postprocess reads the persistent block tables and staged index
+        # buffers and writes the accepted counts, all of which _update_states
+        # mutates as soon as this context is entered. Wait for it here; the
+        # later wait in _prepare_inputs is already past those mutations.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
         try:
             yield
         finally:

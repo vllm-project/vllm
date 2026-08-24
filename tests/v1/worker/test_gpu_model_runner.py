@@ -485,6 +485,102 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
 
 
+class _RecordingEvent:
+    """Stand-in for torch.Event that records the order it was waited on."""
+
+    def __init__(self, name: str, log: list[str]):
+        self.name = name
+        self.log = log
+
+    def synchronize(self):
+        self.log.append(f"wait:{self.name}")
+
+    def record(self):
+        self.log.append(f"record:{self.name}")
+
+
+def test_synchronize_input_prep_waits_for_spec_decode_postprocess():
+    """The persistent batch must not be mutated while the postprocess still runs.
+
+    prepare_inputs_event is recorded when input prep ends, so it orders nothing
+    against the spec-decode postprocess that runs after the model forward. That
+    postprocess reads the block tables and staged index buffers and writes the
+    accepted counts, all of which _update_states rewrites on entry to this
+    context, so its event has to be waited on before the body.
+    """
+    log: list[str] = []
+    runner = SimpleNamespace(
+        prepare_inputs_event=_RecordingEvent("prepare_inputs", log),
+        num_accepted_tokens_event=_RecordingEvent("accepted_counts", log),
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    # Order between the two waits does not matter; both preceding the body does.
+    assert log.index("wait:accepted_counts") < log.index("update_states")
+    assert log.index("wait:prepare_inputs") < log.index("update_states")
+    assert log[-1] == "record:prepare_inputs"
+
+
+def test_synchronize_input_prep_without_spec_decode_is_unchanged():
+    log: list[str] = []
+    runner = SimpleNamespace(
+        prepare_inputs_event=_RecordingEvent("prepare_inputs", log),
+        num_accepted_tokens_event=None,
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        log.append("update_states")
+
+    assert log == ["wait:prepare_inputs", "update_states", "record:prepare_inputs"]
+
+
+def test_synchronize_input_prep_is_a_noop_without_overlapped_steps():
+    runner = SimpleNamespace(
+        prepare_inputs_event=None, num_accepted_tokens_event=Mock()
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        pass
+
+    runner.num_accepted_tokens_event.synchronize.assert_not_called()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_synchronize_input_prep_lands_prior_d2h_before_batch_mutation():
+    """Same contract on real events: the postprocess D2H must have landed.
+
+    The postprocess copies accepted counts into a pinned tensor that condense()
+    then compacts on the host. Unordered, the DMA lands after those host writes
+    and silently overwrites them. torch.cuda._sleep holds the copy in flight so
+    the ordering is observable rather than dependent on bus timing.
+    """
+    counts_gpu = torch.tensor([4, 3, 2, 1], dtype=torch.int32, device="cuda")
+    pinned = torch.tensor([4, 3, 2, 1], dtype=torch.int32).pin_memory()
+
+    prepare_inputs_event = torch.cuda.Event()
+    prepare_inputs_event.record()  # previous step finished reading input buffers
+    torch.cuda._sleep(400_000_000)  # ... its model forward is still running
+    accepted_event = torch.cuda.Event()
+    pinned.copy_(counts_gpu, non_blocking=True)  # the postprocess D2H
+    accepted_event.record()
+
+    runner = SimpleNamespace(
+        prepare_inputs_event=prepare_inputs_event,
+        num_accepted_tokens_event=accepted_event,
+    )
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        # What condense()/_update_states do: compact a finished row away, then
+        # initialize the row of a newly admitted request.
+        pinned[0] = pinned[3]
+        pinned[3] = 1
+
+    torch.cuda.synchronize()
+    assert pinned.tolist() == [1, 3, 2, 1]
+
+
 def test_update_states_new_request(model_runner, dist_init):
     req_id = "req_0"
 
