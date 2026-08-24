@@ -244,6 +244,7 @@ class PagedShmTensorIPC:
 
                 # 1. Wait for the writer to complete and read the data.
                 # swap_blocks_batch needs to run on another stream.
+                current_stream = torch.cuda.current_stream()
                 stream = torch.cuda.Stream()
                 with stream:
                     tensor_gpu = self.client.read(
@@ -251,7 +252,6 @@ class PagedShmTensorIPC:
                         device=device,
                         timeout=self.read_timeout,
                     )
-                    current_stream = torch.cuda.current_stream()
                     current_stream.wait_stream(stream)
 
                     # 2. Replace the metadata with the actual tensor.
