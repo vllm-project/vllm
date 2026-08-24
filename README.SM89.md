@@ -59,9 +59,12 @@ checksum and license.
 uv pip install ./assets/flashinfer_python-0.6.14+sm89-py3-none-any.whl
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
-# Required. Without it the server starts, answers, and emits garbage from the
-# first token — no crash, no warning. See assets/README.md for the mechanism.
-python assets/patch-flashinfer-sm89-scale-clamp.py
+# Required. The 0.6.14 port emulates the block-scaled MMA incorrectly: it applies
+# one scale to all four accumulators (which belong to different rows/columns) and
+# does not range-handle degenerate E8M0 encodings. Both are silent — the first
+# degrades long-context quality, the second emits garbage from the first token.
+# This installs the 0.6.17+sm89.1 revision of the file. See assets/README.md.
+python assets/patch-flashinfer-sm89-mma-scales.py
 ```
 
 Verify before installing:
