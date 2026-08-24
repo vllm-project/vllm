@@ -493,8 +493,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
         *,
         weight_block_size: list[int] | None,
         layer: torch.nn.Module,
-        activation_key: "QuantKey | None",
         weight_key: "QuantKey",
+        activation_key: "QuantKey | None",
         allow_vllm_cutlass: bool = False,
     ):
         super().__init__(layer.moe_config)
