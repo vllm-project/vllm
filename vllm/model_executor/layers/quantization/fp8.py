@@ -101,6 +101,9 @@ class Fp8Config(QuantizationConfig):
     ) -> None:
         super().__init__()
 
+        # Not used anymore, kept for backward compatibility.
+        self.is_checkpoint_fp8_serialized = True
+
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
