@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helion ReplaySSM decode for Kimi Delta Attention.
 
 The public :func:`helion_fused_recurrent_kda_replayssm_decode` mirrors
@@ -359,7 +361,7 @@ def _helion_fused_recurrent_kda_replayssm_decode_body(
         state_index = ssm_state_indices[i_b].long()
         v_valid = tile_v.index < V
 
-        if state_index < 0:
+        if state_index <= 0:
             hl.store(
                 out,
                 [i_b, 0, i_hv, tile_v.index],
@@ -505,33 +507,32 @@ def _helion_fused_recurrent_kda_replayssm_decode_body(
                 state_q = state_q + (state * q_effective[None, :]).sum(-1)
                 state_k = state_k + (state * k_effective[None, :]).sum(-1)
 
-                if should_append:
-                    if tile_v.id == 0:
-                        if i_hv == i_h * heads_per_q:
-                            current_k_offsets = (
-                                state_index * k_strides[0]
-                                + i_h * k_strides[1]
-                                + cursor * k_strides[2]
-                                + tile_k.index * k_strides[3]
-                            )
-                            hl.store(
-                                k_storage,
-                                [current_k_offsets],
-                                k_value.to(k_cache.dtype),
-                                extra_mask=(cursor < cache_length) & k_valid,
-                            )
-                        current_g_offsets = (
-                            state_index * g_strides[0]
-                            + i_hv * g_strides[1]
-                            + cursor * g_strides[2]
-                            + tile_k.index * g_strides[3]
+                if should_append and tile_v.id == 0:
+                    if i_hv == i_h * heads_per_q:
+                        current_k_offsets = (
+                            state_index * k_strides[0]
+                            + i_h * k_strides[1]
+                            + cursor * k_strides[2]
+                            + tile_k.index * k_strides[3]
                         )
                         hl.store(
-                            g_storage,
-                            [current_g_offsets],
-                            current_gate,
+                            k_storage,
+                            [current_k_offsets],
+                            k_value.to(k_cache.dtype),
                             extra_mask=(cursor < cache_length) & k_valid,
                         )
+                    current_g_offsets = (
+                        state_index * g_strides[0]
+                        + i_hv * g_strides[1]
+                        + cursor * g_strides[2]
+                        + tile_k.index * g_strides[3]
+                    )
+                    hl.store(
+                        g_storage,
+                        [current_g_offsets],
+                        current_gate,
+                        extra_mask=(cursor < cache_length) & k_valid,
+                    )
 
             delta = beta * (value - state_k)
             output = state_q + delta * current_kq

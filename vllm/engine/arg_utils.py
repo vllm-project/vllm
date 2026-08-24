@@ -1718,7 +1718,11 @@ class EngineArgs:
             dest="kda_decode_backend",
             choices=["auto", "triton", "helion"],
             default=None,
-            help="Select KDA decode backend.",
+            help=(
+                "Select the KDA decode backend for the shared Kimi Linear "
+                "GDN layer. Kimi-K3 selects its fused decode backend "
+                "automatically."
+            ),
         )
         return parser
 

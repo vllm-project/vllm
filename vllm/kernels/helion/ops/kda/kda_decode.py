@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helion implementation of SGLang's packed KDA decode contract."""
 
 from __future__ import annotations
@@ -118,7 +120,7 @@ def _helion_fused_recurrent_kda_packed_decode_body(
         i_h = i_hv // heads_per_q
 
         state_index = ssm_state_indices[i_b].long()
-        if state_index < 0:
+        if state_index <= 0:
             out[i_b, 0, i_hv, tile_v] = 0.0
         else:
             q_offsets = i_h * K + k_offsets
@@ -210,6 +212,10 @@ def _select_decode_kernel(
     return _helion_fused_recurrent_kda_packed_decode
 
 
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and value & (value - 1) == 0
+
+
 def validate_packed_decode_inputs(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
@@ -280,6 +286,11 @@ def validate_packed_decode_inputs(
     if initial_state.stride(-1) != 1:
         raise ValueError("`initial_state` must be contiguous in the last dim.")
     HV, V, K = initial_state.shape[-3:]
+    if not _is_power_of_two(K) or not _is_power_of_two(V):
+        raise ValueError(
+            "Helion KDA decode requires power-of-two key and value head "
+            f"dimensions (got K={K}, V={V})."
+        )
     if a.shape[1] != HV * K:
         raise ValueError(
             f"`a` must have shape [B, HV*K] with HV={HV}, K={K} "
@@ -343,7 +354,7 @@ def helion_fused_recurrent_kda_packed_decode(
     * ``a`` and ``b`` are raw forget-gate and beta logits.
     * ``lower_bound`` selects the bounded sigmoid decay used by safe-gate KDA.
     * ``initial_state`` is ``[num_slots, HV, V, K]`` and is updated in place.
-    * ``ssm_state_indices == -1`` writes a zero output and leaves state untouched.
+    * ``ssm_state_indices <= 0`` writes a zero output and leaves state untouched.
     * ``out`` is ``[B, 1, HV, V]`` and is written in place.
     * The return is the same ``(out, initial_state)`` object pair supplied by the
       caller.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helion kernels for SGLang's Kimi Delta Attention prefill path.
 
 The public :func:`chunk_kda` entry point in this module is intended to match
@@ -14,6 +16,9 @@ import torch
 from vllm.third_party.flash_linear_attention.ops.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
+)
+from vllm.third_party.flash_linear_attention.ops.kda import (
+    fused_recurrent_kda as triton_fused_recurrent_kda,
 )
 
 CHUNK_SIZE = 64
@@ -1315,17 +1320,82 @@ def chunk_kda(
     output_intermediate_states: bool = False,
     **kwargs: object,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Match the public forward contract of SGLang's Triton ``chunk_kda``."""
+    """Run indexed KDA prefill against vLLM's recurrent-state pool."""
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if initial_state is None or initial_state_indices is None:
         raise ValueError("KDA prefill requires an indexed initial-state pool")
 
+    num_tokens = q.shape[1]
+    if g.shape[1] < num_tokens or beta.shape[1] < num_tokens:
+        raise ValueError("g and beta must cover every q token")
     q = q.contiguous()
     k = k.contiguous()
+    v = v.contiguous()
+    g = g[:, :num_tokens]
+    beta = beta[:, :num_tokens]
+    if num_tokens == 1:
+        # Tracing constant-folds size-one dimensions, but the resulting kernel
+        # can share a cache entry with longer inputs. Keep T=1 on Triton so a
+        # short first request cannot specialize later Helion calls incorrectly.
+        intermediate_states = None
+        if output_intermediate_states:
+            valid_state = initial_state_indices > 0
+            indexed_state = initial_state.index_select(
+                0, initial_state_indices.clamp_min(0).long()
+            ).to(v.dtype)
+            indexed_state.masked_fill_(~valid_state[:, None, None, None], 0)
+            intermediate_states = (
+                indexed_state.unsqueeze(0)
+                if cu_seqlens is not None
+                else indexed_state.unsqueeze(1)
+            )
+
+        recurrent_gate = g
+        if A_log is not None:
+            recurrent_gate = g.float()
+            if dt_bias is not None:
+                recurrent_gate = recurrent_gate + dt_bias.reshape(
+                    1, 1, q.size(2), q.size(3)
+                )
+            a = torch.exp(A_log.float()).reshape(1, 1, q.size(2), 1)
+            if lower_bound is not None:
+                recurrent_gate = lower_bound * torch.sigmoid(a * recurrent_gate)
+            else:
+                recurrent_gate = -a * torch.nn.functional.softplus(recurrent_gate)
+
+        output, _ = triton_fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=recurrent_gate,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=initial_state_indices,
+        )
+        valid_state = initial_state_indices > 0
+        if cu_seqlens is None:
+            output.masked_fill_(~valid_state[:, None, None, None], 0)
+        else:
+            token_sequences = torch.searchsorted(
+                cu_seqlens[1:],
+                torch.arange(num_tokens, device=q.device),
+                right=True,
+            )
+            valid_tokens = valid_state[token_sequences]
+            output.masked_fill_(~valid_tokens[None, :, None, None], 0)
+        v.copy_(output)
+        if output_intermediate_states:
+            assert intermediate_states is not None
+            return v, intermediate_states
+        return v
+
     if use_qk_l2norm_in_kernel:
         q, k = _l2norm_qk(q, k)
-    v = v.contiguous()
     g = g.contiguous()
     beta = beta.contiguous()
     chunk_indices = (

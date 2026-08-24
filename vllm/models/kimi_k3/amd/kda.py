@@ -205,6 +205,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.use_safe_gate = self.gate_lower_bound is not None
 
         additional_config = vllm_config.additional_config
+        decode_backend = (
+            additional_config.get("kda_decode_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
+        decode_backend = str(decode_backend).strip().lower()
+        if decode_backend != "auto":
+            raise ValueError(
+                "Kimi-K3 selects its fused KDA decode backend automatically; "
+                f"--kda-decode-backend={decode_backend} is unsupported."
+            )
         backend = (
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
