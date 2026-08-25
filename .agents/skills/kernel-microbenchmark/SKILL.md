@@ -8,68 +8,76 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
 ## Workflow
 
 1. Create an isolated repro or benchmark when the existing harness is noisy.
-2. Check correctness before timing and keep tolerances explicit.
-3. Time only the operation under study. Exclude allocation, compilation,
-   random input generation, logging, and host-device transfers unless they are
-   the target.
+2. Check correctness before timing. Keep tolerances explicit.
+3. Time only the operation under study. Exclude allocation, compilation, random
+   input generation, logging, and host-device transfers unless those are the
+   target.
 4. Compare against a baseline and report enough metadata to reproduce the
-   result: GPU, dtype, shape, command, branch or commit, and relevant env vars.
-5. Treat explanations as hypotheses until backed by an artifact such as an
-   ablation, generated PTX or SASS, profiler output, or controlled benchmark.
-6. Summarize experiments as `Question / Change / Correctness / Result /
-   Observation / Next` when a durable note is useful.
+   result: GPU, dtype, shape, command, branch/commit, and relevant env vars.
+5. Treat explanations as hypotheses until backed by an artifact: ablation,
+   generated PTX/SASS, profiler output, or controlled benchmark.
+6. If the result changes the conclusion, preserve the compact lesson in a note,
+   comment, benchmark table, or final summary. For experiments, a short
+   `Question / Change / Correctness / Result / Observation / Next` note is
+   usually enough.
 
 ## Benchmark Defaults
 
-- Prefer FlashInfer CUPTI timing with CUDA graph and cold L2 cache:
+- Use FlashInfer CUPTI timing by default, with CUDA graph and cold L2 cache:
   `from flashinfer.testing import bench_gpu_time_with_cupti`.
-- For compute-heavy kernels, report TFLOPS and show the FLOP formula. For
-  memory-heavy kernels, report estimated bytes moved and GB/s. For mixed
-  kernels, use the most honest metric available and state its caveats. Compute
-  theoretical work from the operation rather than a particular implementation.
-- Across shapes, use throughput metrics such as TFLOPS or GB/s as the primary
-  comparison and retain latency for absolute cost.
-- If a result exceeds expected peak or speed-of-light limits, inspect units,
-  FLOP or byte formulas, skipped work, sparsity, caching, and semantic parity
-  with the baseline.
-- Force compilation and autotuning before measuring compiled kernels.
+- For compute-heavy kernels, report TFLOPS with the FLOP formula in the
+  benchmark. For memory-heavy kernels, report estimated bytes moved and GB/s.
+  For mixed kernels, report the most honest metric available and call out the
+  caveats. TFLOPS and memory bandwidth should be computed from the theoretical
+  best for the operation, not from a particular kernel implementation. For
+  example, memory bandwidth should assume all data is read exactly once from
+  global memory.
+- When comparing across shapes, prefer throughput metrics such as TFLOPS or
+  GB/s as the primary table columns; keep latency for absolute cost.
+- If a result exceeds expected peak/SOL, first inspect units, FLOP/byte
+  formulas, skipped work, sparsity, caching, and whether the baseline is doing
+  the same operation.
+- Force compilation/autotuning before measuring compiled kernels.
 - Seed inputs when correctness comparisons matter.
 - Keep metadata setup, plan construction, allocation, random input generation,
   and logging outside the timed region unless that overhead is the experiment.
 
 ## Multi-GPU Benchmarks
 
-- Report whether the run is local or multi-node, plus GPU topology, world size,
-  GPUs per node, collective backend, and relevant library versions.
-- Compare like-for-like tensor-parallel configurations. Report per-rank and
-  global dimensions; normalize explicitly when comparing different TP sizes.
-- Define the timed operation boundary first. Include staging, flag resets,
-  required barriers, padding, and output copies for end-to-end comparisons;
-  label kernel-only timing as an ablation.
-- Check distributed correctness before timing. Seed ranks deliberately, match
-  the candidate's collective semantics in the reference, and synchronize
-  before reading outputs.
-- Put a device-side barrier immediately before each measured replay. Keep this
-  common synchronization outside the timed interval, but retain barriers that
-  the candidate implementation requires inside it.
+- State whether the run is local or multi-node and report the GPU topology,
+  world size, GPUs per node, collective backend, and relevant library versions.
+- Compare like-for-like TP configurations. Report both per-rank and global
+  dimensions, and do not compare results from different TP sizes without an
+  explicit normalization or scaling question.
+- Define the timed operation boundary before benchmarking. If the production
+  wrapper performs input staging, flag resets, generation barriers, padding,
+  or output copies, keep them in the timed region for an end-to-end comparison.
+  Use a separate, clearly labeled ablation for kernel-only timing.
+- Check distributed correctness before timing. Seed each rank deliberately,
+  form the reference with the same collective semantics, and synchronize before
+  reading or comparing outputs.
+- Use a device-side barrier immediately before each measured replay. Keep this
+  common synchronization outside the timed interval, but keep barriers required
+  by the candidate implementation inside it.
 - With CUDA graphs, warm up before capture, coordinate capture across ranks,
-  rotate pointer-distinct graphs when cache reuse matters, and issue every
-  collective in the same order on every rank.
-- Measure every rank, reduce each sample with `MAX`, and report the median of
-  those per-sample maxima. Rank-local event time is not distributed latency.
+  rotate pointer-distinct graphs when cache reuse matters, and ensure every
+  collective is issued in the same order on every rank.
+- Measure every rank and reduce each sample with `MAX`; report the median of
+  those per-sample maxima. A rank-local event time is not a distributed latency.
 - Reset reusable symmetric-memory flags before each invocation and establish a
   device-side generation barrier before peers may signal them. Otherwise a fast
   rank can signal before a slow rank resets its flags, causing a lost arrival
   and intermittent deadlock.
-- Preserve symmetric-memory handles, CUDA graphs, streams, and graph outputs
-  for the full measurement lifetime. Allocate and rendezvous symmetric buffers
-  in identical order and with identical shapes on all ranks.
+- Preserve symmetric-memory handles, CUDA graphs, streams, and graph outputs for
+  the full measurement lifetime. Allocate and rendezvous symmetric buffers in
+  identical order and with identical shapes on all ranks.
 - Treat hangs and isolated millisecond outliers as synchronization bugs or rank
   skew until disproven. Add stage markers, bounded synchronization checks, and
   per-rank diagnostics before blaming compilation or kernel performance.
-- For multi-node runs, record the scheduler allocation and verify that the
-  fabric supports required multicast or NVLink-domain assumptions.
-- Stabilize GPU clocks or run enough untimed work to reach steady state.
+- For multi-node runs, record the scheduler allocation and verify the fabric
+  supports the required multicast or NVLink-domain assumptions. Do not describe
+  a two-node TP run as equivalent to a local NVLink-domain run without checking.
+- Stabilize GPU clocks or run enough untimed work to reach a steady state.
   Alternate candidate order so clock, thermal, and rank-skew effects are shared.
 
 ## Included Examples
