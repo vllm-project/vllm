@@ -320,18 +320,6 @@ steps:
 
 #-----------------------------------------------------  mi250 · models / language  -----------------------------------------------------#
 
-- label: ":amd: (MI250) Language Models (MTEB)" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/language/pooling_mteb_test
-  commands:
-  - pytest -v -s models/language/pooling_mteb_test
-
 - label: ":amd: (MI250) Language Models (PPL)" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -1960,6 +1948,19 @@ steps:
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
+
+- label: ":amd: (MI300) Language Models (MTEB)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+  - pytest -v -s models/language/pooling_mteb_test
 
 - label: ":amd: (MI300) Language Models (Extended Pooling)" # TBD
   timeout_in_minutes: 180
