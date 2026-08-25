@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -253,6 +253,10 @@ class SchedulerOutput:
     free_encoder_mm_hashes: list[str]
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+
+    # Requests scheduled only to populate prompt KV. Workers must not return
+    # sampled output tokens for these requests in this scheduler step.
+    prefill_only_req_ids: set[str] = field(default_factory=set)
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.

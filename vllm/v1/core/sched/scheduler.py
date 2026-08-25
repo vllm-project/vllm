@@ -391,6 +391,25 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
+    @staticmethod
+    def _is_unfinalized_streaming_prompt(request: Request) -> bool:
+        return request.streaming_prompt and not request.streaming_prompt_finalized
+
+    @staticmethod
+    def _streaming_prompt_prefill_budget(
+        request: Request, num_computed_tokens: int
+    ) -> int | None:
+        """Return max schedulable prompt tokens before streaming-prompt finalize.
+
+        An unfinalized streaming-prompt request keeps the final prompt token
+        unscheduled. That preserves the normal first-token path after
+        finalize_streaming_prompt() while still allowing earlier prompt chunks to
+        populate KV cache.
+        """
+        if not Scheduler._is_unfinalized_streaming_prompt(request):
+            return None
+        return max(request.num_prompt_tokens - 1 - num_computed_tokens, 0)
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -609,6 +628,16 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
                 - self.num_sampled_tokens_per_step,
             )
+            streaming_prompt_budget = self._streaming_prompt_prefill_budget(
+                request, request.num_computed_tokens
+            )
+            if streaming_prompt_budget is not None:
+                num_new_tokens = min(num_new_tokens, streaming_prompt_budget)
+                if num_new_tokens == 0:
+                    request.status = RequestStatus.WAITING_FOR_STREAMING_PROMPT
+                    self.running.pop(req_index)
+                    self._enqueue_waiting_request(request)
+                    continue
 
             # Apply Mamba alignment before encoder caps.
             if self.need_mamba_block_aligned_split:
@@ -1005,6 +1034,16 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
+                    streaming_prompt_budget = self._streaming_prompt_prefill_budget(
+                        request, num_computed_tokens
+                    )
+                    if streaming_prompt_budget is not None:
+                        num_new_tokens = min(num_new_tokens, streaming_prompt_budget)
+                        if num_new_tokens == 0:
+                            request_queue.pop_request()
+                            request.status = RequestStatus.WAITING_FOR_STREAMING_PROMPT
+                            step_skipped_waiting.prepend_request(request)
+                            continue
                     assert num_new_tokens > 0
 
                     # Apply Mamba alignment before encoder caps.
@@ -1341,11 +1380,20 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        prefill_only_req_ids = {
+            req.request_id
+            for req in itertools.chain(
+                scheduled_new_reqs, scheduled_resumed_reqs, scheduled_running_reqs
+            )
+            if self._is_unfinalized_streaming_prompt(req)
+        }
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
+            prefill_only_req_ids=prefill_only_req_ids,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
@@ -2238,6 +2286,7 @@ class Scheduler(SchedulerInterface):
             RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
             RequestStatus.WAITING_FOR_REMOTE_KVS,
             RequestStatus.WAITING_FOR_STREAMING_REQ,
+            RequestStatus.WAITING_FOR_STREAMING_PROMPT,
         )
 
     def _enqueue_waiting_request(self, request: Request) -> None:
@@ -2422,6 +2471,52 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+    def add_streaming_prompt_request(self, request: Request) -> None:
+        """Add a request whose prompt may grow before decode starts."""
+        request.streaming_prompt = True
+        request.streaming_prompt_finalized = False
+        self.add_request(request)
+
+    def append_streaming_prompt_tokens(
+        self, request_id: str, token_ids: list[int]
+    ) -> None:
+        request = self.requests[request_id]
+        request.append_streaming_prompt_token_ids(token_ids)
+        if request.status == RequestStatus.WAITING_FOR_STREAMING_PROMPT:
+            request.status = RequestStatus.WAITING
+            self.skipped_waiting.remove_requests({request})
+            self.waiting.add_request(request)
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.QUEUED)
+
+    def finalize_streaming_prompt(self, request_id: str) -> None:
+        request = self.requests[request_id]
+        if not request.streaming_prompt:
+            raise RuntimeError(f"{request_id} is not a streaming-prompt request")
+        request.streaming_prompt_finalized = True
+        if request.status == RequestStatus.WAITING_FOR_STREAMING_PROMPT:
+            request.status = RequestStatus.WAITING
+            self.skipped_waiting.remove_requests({request})
+            self.waiting.add_request(request)
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.QUEUED)
+
+    def get_streaming_prompt_metrics(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        request = self.requests[request_id]
+        return {
+            "streaming_prompt": request.streaming_prompt,
+            "streaming_prompt_finalized": request.streaming_prompt_finalized,
+            "num_prompt_tokens": request.num_prompt_tokens,
+            "num_tokens": request.num_tokens,
+            "num_computed_tokens": request.num_computed_tokens,
+            "appended_tokens": request.streaming_prompt_appended_tokens,
+            "num_output_tokens": request.num_output_tokens,
+            "status": request.status.name,
+            "is_finished": request.is_finished(),
+        }
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -2913,6 +3008,14 @@ class Scheduler(SchedulerInterface):
 
         if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             assert not request.streaming_queue
+            return False
+
+        if request.status == RequestStatus.WAITING_FOR_STREAMING_PROMPT:
+            if request.streaming_prompt_finalized or (
+                request.num_computed_tokens < request.num_prompt_tokens - 1
+            ):
+                request.status = RequestStatus.WAITING
+                return True
             return False
 
         raise AssertionError(

@@ -506,6 +506,27 @@ class EngineCore:
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
 
+    def add_streaming_prompt_request(self, request: Request, request_wave: int = 0):
+        """Add a request whose prompt may grow before decode starts."""
+        request.streaming_prompt = True
+        request.streaming_prompt_finalized = False
+        self.add_request(request, request_wave)
+
+    def append_streaming_prompt_tokens(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        self.scheduler.append_streaming_prompt_tokens(request_id, token_ids)
+        return self.get_streaming_prompt_metrics(request_id)
+
+    def finalize_streaming_prompt(self, request_id: str) -> dict[str, int | bool | str]:
+        self.scheduler.finalize_streaming_prompt(request_id)
+        return self.get_streaming_prompt_metrics(request_id)
+
+    def get_streaming_prompt_metrics(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return self.scheduler.get_streaming_prompt_metrics(request_id)
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
@@ -1560,6 +1581,11 @@ class EngineCoreProc(EngineCore):
             if self._reject_add_in_shutdown(req):
                 return
             self.add_request(req, request_wave)
+        elif request_type == EngineCoreRequestType.ADD_STREAMING_PROMPT:
+            req, request_wave = request
+            if self._reject_add_in_shutdown(req):
+                return
+            self.add_streaming_prompt_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
@@ -1772,7 +1798,10 @@ class EngineCoreProc(EngineCore):
 
                     # Deserialize the request data.
                     request: Any
-                    if request_type == EngineCoreRequestType.ADD:
+                    if request_type in (
+                        EngineCoreRequestType.ADD,
+                        EngineCoreRequestType.ADD_STREAMING_PROMPT,
+                    ):
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
                         try:
                             request = self.preprocess_add_request(req)

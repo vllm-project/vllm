@@ -106,6 +106,92 @@ class TestStreamingScheduler(unittest.TestCase):
         assert next_request.status == RequestStatus.WAITING
         assert len(scheduler.requests["test_request"].streaming_queue) == 1
 
+    def test_streaming_prompt_append_finalize_lifecycle(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(
+            request_id="streaming_prompt",
+            resumable=False,
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        scheduler.add_streaming_prompt_request(request)
+
+        assert request.streaming_prompt
+        assert not request.streaming_prompt_finalized
+        assert request.status == RequestStatus.WAITING
+
+        scheduler.append_streaming_prompt_tokens("streaming_prompt", [4, 5])
+
+        assert request.prompt_token_ids == [1, 2, 3, 4, 5]
+        assert request.num_prompt_tokens == 5
+        assert request.streaming_prompt_appended_tokens == 2
+
+        scheduler.finalize_streaming_prompt("streaming_prompt")
+
+        assert request.streaming_prompt_finalized
+
+    def test_streaming_prompt_schedule_holds_final_prompt_token(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(
+            request_id="streaming_prompt",
+            resumable=False,
+            prompt_token_ids=[1, 2, 3, 4],
+        )
+        scheduler.add_streaming_prompt_request(request)
+
+        first = scheduler.schedule()
+
+        assert first.num_scheduled_tokens["streaming_prompt"] == 3
+        assert first.prefill_only_req_ids == {"streaming_prompt"}
+        assert request.status == RequestStatus.RUNNING
+        assert request.num_computed_tokens == 3
+
+        second = scheduler.schedule()
+
+        assert "streaming_prompt" not in second.num_scheduled_tokens
+        assert request.status == RequestStatus.WAITING_FOR_STREAMING_PROMPT
+
+        scheduler.finalize_streaming_prompt("streaming_prompt")
+        third = scheduler.schedule()
+
+        assert third.num_scheduled_tokens["streaming_prompt"] == 1
+        assert third.prefill_only_req_ids == set()
+
+    def test_streaming_prompt_append_requeues_waiting_request(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(
+            request_id="streaming_prompt",
+            resumable=False,
+            prompt_token_ids=[1, 2, 3, 4],
+        )
+        scheduler.add_streaming_prompt_request(request)
+
+        scheduler.schedule()
+        scheduler.schedule()
+
+        assert request.status == RequestStatus.WAITING_FOR_STREAMING_PROMPT
+
+        scheduler.append_streaming_prompt_tokens("streaming_prompt", [5, 6])
+        scheduled = scheduler.schedule()
+
+        assert request.status == RequestStatus.RUNNING
+        assert scheduled.num_scheduled_tokens["streaming_prompt"] == 2
+        assert scheduled.prefill_only_req_ids == {"streaming_prompt"}
+        assert request.num_computed_tokens == 5
+
+    def test_streaming_prompt_rejects_append_after_finalize(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(
+            request_id="streaming_prompt",
+            resumable=False,
+            prompt_token_ids=[1, 2, 3],
+        )
+        scheduler.add_streaming_prompt_request(request)
+        scheduler.finalize_streaming_prompt("streaming_prompt")
+
+        with self.assertRaises(RuntimeError):
+            scheduler.append_streaming_prompt_tokens("streaming_prompt", [4])
+
     def test_update_request_as_session_max_token(self):
         scheduler = create_scheduler()
 
