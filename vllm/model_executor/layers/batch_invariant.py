@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -10,10 +12,23 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+_ROUTER_GEMM_K = 2048
+_ROUTER_GEMM_N = 128
+_FULL_K_MAX_M = {
+    torch.bfloat16: 2048,
+    torch.float16: 2048,
+    # The FP32 one-row kernel deliberately trades weight reuse for a stable,
+    # non-TF32 per-row reduction. Past this decode-oriented range persistent
+    # is faster, so auto must fall back before a prefill regression.
+    torch.float32: 128,
+}
+_FP32_FULL_K_RTOL = 1e-5
+_FP32_FULL_K_ATOL = 1e-6
 
 
 def _matmul_launch_metadata(
@@ -212,6 +227,193 @@ def matmul_persistent(
         C_LARGE=c.numel() > 2**31,
         HAS_BIAS=bias is not None,
         **configs[dtype],
+    )
+    return c
+
+
+@triton.jit(launch_metadata=_matmul_launch_metadata)
+def matmul_kernel_full_k(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    FP32_INPUT: tl.constexpr,
+):
+    """One CTA per output tile, with a fixed, ascending full-K reduction."""
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    safe_m = tl.where(offs_m < M, offs_m, 0)
+    safe_n = tl.where(offs_n < N, offs_n, 0)
+    safe_m = tl.max_contiguous(tl.multiple_of(safe_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    safe_n = tl.max_contiguous(tl.multiple_of(safe_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for k_start in range(0, K, BLOCK_SIZE_K):
+        offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
+        a = tl.load(
+            a_ptr + safe_m[:, None] * stride_am + offs_k[None, :] * stride_ak,
+            mask=offs_k[None, :] < K,
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptr + offs_k[:, None] * stride_bk + safe_n[None, :] * stride_bn,
+            mask=offs_k[:, None] < K,
+            other=0.0,
+        )
+        if FP32_INPUT:
+            accumulator = tl.dot(a, b, accumulator, input_precision="ieee")
+        else:
+            accumulator = tl.dot(a, b, accumulator)
+
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(
+        c_ptrs,
+        accumulator.to(c_ptr.dtype.element_ty),
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
+
+
+_FULL_K_CONFIGS = {
+    torch.bfloat16: {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "num_stages": 4,
+        "num_warps": 2,
+    },
+    torch.float16: {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "num_stages": 4,
+        "num_warps": 2,
+    },
+}
+
+_FP32_FULL_K_ONE_ROW_CONFIG = {
+    # One CTA owns one logical row and a 32-column tile. Keeping this layout
+    # independent of M makes a row's FP32 reduction bitwise stable as batches
+    # grow or move the row to a different position.
+    "BLOCK_SIZE_N": 32,
+    "BLOCK_SIZE_K": 64,
+    "num_stages": 3,
+    "num_warps": 4,
+}
+
+
+@triton.jit(launch_metadata=_matmul_launch_metadata)
+def matmul_kernel_full_k_fp32_one_row(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    """One row per CTA with a fixed IEEE FP32 reduction over full K."""
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    accumulator = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
+
+    for k_start in range(0, K, BLOCK_SIZE_K):
+        offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
+        a = tl.load(
+            a_ptr + pid_m * stride_am + offs_k * stride_ak,
+            mask=offs_k < K,
+            other=0.0,
+        ).to(tl.float32)
+        b = tl.load(
+            b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn,
+            mask=(offs_k[:, None] < K) & (offs_n[None, :] < N),
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += tl.sum(a[:, None] * b, axis=0)
+
+    tl.store(
+        c_ptr + pid_m * stride_cm + offs_n * stride_cn,
+        accumulator,
+        mask=offs_n < N,
+    )
+
+
+def matmul_full_k(
+    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Deterministic GEMM with no split-K, atomics, or cross-CTA reduction."""
+    assert a.ndim == 2 and b.ndim == 2, "matmul_full_k expects 2D tensors"
+    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    assert a.dtype == b.dtype, "Incompatible dtypes"
+    assert bias is None, "matmul_full_k does not support bias"
+    M, K = a.shape
+    _, N = b.shape
+    assert K == _ROUTER_GEMM_K and N == _ROUTER_GEMM_N, (
+        "matmul_full_k is specialized for the M0 Router shape"
+    )
+    dtype = a.dtype
+    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    if dtype == torch.float32:
+        cfg = _FP32_FULL_K_ONE_ROW_CONFIG
+        grid = (M, triton.cdiv(N, cfg["BLOCK_SIZE_N"]))
+        matmul_kernel_full_k_fp32_one_row[grid](
+            a,
+            b,
+            c,
+            M,
+            N=N,
+            K=K,
+            stride_am=a.stride(0),
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            stride_bn=b.stride(1),
+            stride_cm=c.stride(0),
+            stride_cn=c.stride(1),
+            **cfg,
+        )
+        return c
+
+    cfg = _FULL_K_CONFIGS[dtype]
+    grid = (
+        triton.cdiv(M, cfg["BLOCK_SIZE_M"]),
+        triton.cdiv(N, cfg["BLOCK_SIZE_N"]),
+    )
+    matmul_kernel_full_k[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        FP32_INPUT=False,
+        **cfg,
     )
     return c
 
@@ -995,6 +1197,633 @@ def _read_vllm_batch_invariant() -> bool:
 
 
 VLLM_BATCH_INVARIANT: bool = _read_vllm_batch_invariant()
+
+_ROUTER_GEMM_CHOICES = ("auto", "persistent", "full_k", "deepgemm")
+
+
+def _read_router_gemm_choice() -> str:
+    # Auto remains opt-in until every end-to-end promotion gate passes.
+    value = os.getenv("VLLM_BATCH_INVARIANT_ROUTER_GEMM", "persistent").strip()
+    if value not in _ROUTER_GEMM_CHOICES:
+        raise ValueError(
+            "VLLM_BATCH_INVARIANT_ROUTER_GEMM must be one of "
+            f"{_ROUTER_GEMM_CHOICES}, got {value!r}"
+        )
+    return value
+
+
+VLLM_BATCH_INVARIANT_ROUTER_GEMM = _read_router_gemm_choice()
+
+
+@dataclass(frozen=True)
+class RouterGemmSignature:
+    device_type: str
+    device_index: int | None
+    weight_device_type: str
+    weight_device_index: int | None
+    input_dtype: torch.dtype
+    weight_dtype: torch.dtype
+    input_shape: tuple[int, ...]
+    weight_shape: tuple[int, ...]
+    input_stride: tuple[int, ...]
+    weight_stride: tuple[int, ...]
+    bias_shape: tuple[int, ...] | None
+    bias_device_type: str | None
+    bias_device_index: int | None
+    bias_dtype: torch.dtype | None
+    bias_stride: tuple[int, ...] | None
+
+
+@dataclass(frozen=True)
+class RouterGemmBackendDecision:
+    requested: str
+    selected: str | None
+    reason: str
+    signature: RouterGemmSignature
+    preflighted: bool
+
+
+_router_gemm_backend_cache: dict[
+    tuple[str, RouterGemmSignature], RouterGemmBackendDecision
+] = {}
+_router_gemm_backend_lock = threading.Lock()
+_router_deepgemm_load_lock = threading.Lock()
+_router_deepgemm_impl: Callable[..., Any] | None = None
+_router_deepgemm_load_error: str | None = None
+
+
+def _router_gemm_signature(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> RouterGemmSignature:
+    return RouterGemmSignature(
+        device_type=input.device.type,
+        device_index=input.device.index,
+        weight_device_type=weight.device.type,
+        weight_device_index=weight.device.index,
+        input_dtype=input.dtype,
+        weight_dtype=weight.dtype,
+        input_shape=tuple(input.shape),
+        weight_shape=tuple(weight.shape),
+        input_stride=tuple(input.stride()),
+        weight_stride=tuple(weight.stride()),
+        bias_shape=None if bias is None else tuple(bias.shape),
+        bias_device_type=None if bias is None else bias.device.type,
+        bias_device_index=None if bias is None else bias.device.index,
+        bias_dtype=None if bias is None else bias.dtype,
+        bias_stride=None if bias is None else tuple(bias.stride()),
+    )
+
+
+def _reset_router_gemm_backend_cache(*, reset_deepgemm: bool = False) -> None:
+    """Clear preflight decisions. Intended for tests and controlled benchmarks."""
+    with _router_gemm_backend_lock:
+        _router_gemm_backend_cache.clear()
+    if reset_deepgemm:
+        global _router_deepgemm_impl, _router_deepgemm_load_error
+        with _router_deepgemm_load_lock:
+            _router_deepgemm_impl = None
+            _router_deepgemm_load_error = None
+
+
+def _load_router_deepgemm_impl() -> Callable[..., Any]:
+    global _router_deepgemm_impl, _router_deepgemm_load_error
+    if _router_deepgemm_impl is not None:
+        return _router_deepgemm_impl
+    if _router_deepgemm_load_error is not None:
+        raise RuntimeError(_router_deepgemm_load_error)
+
+    with _router_deepgemm_load_lock:
+        if _router_deepgemm_impl is not None:
+            return _router_deepgemm_impl
+        if _router_deepgemm_load_error is not None:
+            raise RuntimeError(_router_deepgemm_load_error)
+        try:
+            import importlib
+
+            deep_gemm = importlib.import_module("deep_gemm")
+            impl = getattr(deep_gemm, "bf16_gemm_nt", None)
+            if not callable(impl):
+                raise AttributeError("deep_gemm.bf16_gemm_nt is not available")
+        except Exception as exc:
+            _router_deepgemm_load_error = f"{type(exc).__name__}: {exc}"
+            raise RuntimeError(_router_deepgemm_load_error) from exc
+        _router_deepgemm_impl = impl
+        return impl
+
+
+def _router_deepgemm_available() -> tuple[bool, str]:
+    try:
+        _load_router_deepgemm_impl()
+    except Exception as exc:
+        return False, str(exc)
+    return True, "deep_gemm.bf16_gemm_nt is available"
+
+
+def _router_deepgemm_op_impl(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    impl = _load_router_deepgemm_impl()
+    output = torch.empty(
+        (input.shape[0], weight.shape[0]),
+        device=input.device,
+        dtype=input.dtype,
+    )
+    impl(input, weight, output)
+    return output
+
+
+def _router_deepgemm_op_fake(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return input.new_empty((input.shape[0], weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="router_deepgemm",
+    op_func=_router_deepgemm_op_impl,
+    fake_impl=_router_deepgemm_op_fake,
+)
+
+
+def _router_common_fast_path_error(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> str | None:
+    if input.ndim != 2 or weight.ndim != 2:
+        return f"expected 2D input/weight, got {input.ndim}D/{weight.ndim}D"
+    if input.shape[0] == 0:
+        return "M must be positive"
+    if tuple(input.shape[1:]) != (_ROUTER_GEMM_K,):
+        return f"expected input K={_ROUTER_GEMM_K}, got shape {tuple(input.shape)}"
+    if tuple(weight.shape) != (_ROUTER_GEMM_N, _ROUTER_GEMM_K):
+        return (
+            f"expected weight shape ({_ROUTER_GEMM_N}, {_ROUTER_GEMM_K}), "
+            f"got {tuple(weight.shape)}"
+        )
+    if bias is not None:
+        return "bias is not supported by Router GEMM fast paths"
+    if input.device.type != "cuda" or weight.device.type != "cuda":
+        return f"expected CUDA tensors, got {input.device}/{weight.device}"
+    if input.device != weight.device:
+        return f"input/weight devices differ: {input.device}/{weight.device}"
+    if input.dtype != weight.dtype:
+        return f"input/weight dtypes differ: {input.dtype}/{weight.dtype}"
+    if input.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        return f"unsupported dtype {input.dtype}"
+    if not input.is_contiguous() or not weight.is_contiguous():
+        return "input and weight must use contiguous row-major layout"
+    try:
+        capability = torch.cuda.get_device_capability(input.device)
+    except Exception as exc:
+        return f"could not query CUDA capability: {type(exc).__name__}: {exc}"
+    if capability != (9, 0):
+        return f"expected SM90, got sm{capability[0]}{capability[1]}"
+    return None
+
+
+def _router_deepgemm_guard_error(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> str | None:
+    common_error = _router_common_fast_path_error(input, weight, bias)
+    if common_error is not None:
+        return common_error
+    if input.dtype != torch.bfloat16:
+        return f"DeepGEMM requires torch.bfloat16, got {input.dtype}"
+    available, reason = _router_deepgemm_available()
+    if not available:
+        return reason
+    return None
+
+
+def _router_full_k_guard_error(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> str | None:
+    common_error = _router_common_fast_path_error(input, weight, bias)
+    if common_error is not None:
+        return common_error
+    max_m = _FULL_K_MAX_M[input.dtype]
+    if input.shape[0] > max_m:
+        return f"M={input.shape[0]} exceeds full-K limit {max_m}"
+    return None
+
+
+def _auto_router_gemm_candidates(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> tuple[list[str], list[str]]:
+    common_error = _router_common_fast_path_error(input, weight, bias)
+    if common_error is not None:
+        return ["persistent"], [f"fast paths ineligible: {common_error}"]
+
+    candidates: list[str] = []
+    skipped: list[str] = []
+    if input.dtype == torch.bfloat16:
+        deepgemm_error = _router_deepgemm_guard_error(input, weight, bias)
+        if deepgemm_error is None:
+            candidates.append("deepgemm")
+        else:
+            skipped.append(f"deepgemm skipped: {deepgemm_error}")
+
+    full_k_error = _router_full_k_guard_error(input, weight, bias)
+    if full_k_error is None:
+        candidates.append("full_k")
+    else:
+        skipped.append(f"full_k skipped: {full_k_error}")
+    candidates.append("persistent")
+    return candidates, skipped
+
+
+def _select_router_gemm_backend(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    requested_mode: str | None = None,
+) -> RouterGemmBackendDecision:
+    """Return the first statically eligible backend without running a kernel."""
+    requested = (
+        VLLM_BATCH_INVARIANT_ROUTER_GEMM if requested_mode is None else requested_mode
+    )
+    if requested not in _ROUTER_GEMM_CHOICES:
+        raise ValueError(
+            f"requested_mode must be one of {_ROUTER_GEMM_CHOICES}, got {requested!r}"
+        )
+    signature = _router_gemm_signature(input, weight, bias)
+
+    if requested == "persistent":
+        selected = "persistent"
+        reason = "persistent explicitly requested"
+    elif requested == "deepgemm":
+        error = _router_deepgemm_guard_error(input, weight, bias)
+        if error is not None:
+            raise ValueError(f"forced deepgemm Router GEMM is ineligible: {error}")
+        selected = "deepgemm"
+        reason = "forced DeepGEMM passed static guards"
+    elif requested == "full_k":
+        error = _router_full_k_guard_error(input, weight, bias)
+        if error is not None:
+            raise ValueError(f"forced full_k Router GEMM is ineligible: {error}")
+        selected = "full_k"
+        reason = "forced full-K passed static guards"
+    else:
+        candidates, skipped = _auto_router_gemm_candidates(input, weight, bias)
+        selected = candidates[0]
+        reason_parts = skipped + [f"auto first eligible backend: {selected}"]
+        reason = "; ".join(reason_parts)
+
+    return RouterGemmBackendDecision(
+        requested=requested,
+        selected=selected,
+        reason=reason,
+        signature=signature,
+        preflighted=False,
+    )
+
+
+def _run_router_deepgemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    assert bias is None
+    return torch.ops.vllm.router_deepgemm(input, weight)
+
+
+def _run_router_full_k(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    assert bias is None
+    return matmul_full_k(input, weight.t())
+
+
+def _run_router_persistent(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    return linear_batch_invariant(input, weight, bias)
+
+
+def _validate_router_gemm_output(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+) -> None:
+    expected_shape = (*input.shape[:-1], weight.shape[0])
+    if tuple(output.shape) != expected_shape:
+        raise RuntimeError(
+            "Router GEMM returned shape "
+            f"{tuple(output.shape)}, expected {expected_shape}"
+        )
+    if output.dtype != input.dtype:
+        raise RuntimeError(
+            f"Router GEMM returned dtype {output.dtype}, expected {input.dtype}"
+        )
+    if output.device != input.device:
+        raise RuntimeError(
+            f"Router GEMM returned device {output.device}, expected {input.device}"
+        )
+
+
+def _validate_router_gemm_bitwise(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    comparison: str,
+) -> None:
+    if not torch.equal(actual, expected):
+        raise RuntimeError(f"Router GEMM failed bitwise {comparison} validation")
+
+
+def _validate_router_gemm_fp32_accuracy(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+) -> None:
+    """Reject an FP32 full-K result that is outside the FP64 error envelope.
+
+    The persistent Triton kernel intentionally remains an independent fallback
+    and uses its own arithmetic implementation, so it cannot be an exact FP32
+    oracle.  This preflight runs before Graph capture and compares the full
+    signature against a FP64 reference instead.
+    """
+    assert input.dtype == torch.float32
+    reference = input.to(torch.float64) @ weight.to(torch.float64).t()
+    actual = output.to(torch.float64)
+    if torch.allclose(
+        actual,
+        reference,
+        rtol=_FP32_FULL_K_RTOL,
+        atol=_FP32_FULL_K_ATOL,
+    ):
+        return
+
+    absolute_error = (actual - reference).abs()
+    relative_error = absolute_error / reference.abs().clamp_min(
+        torch.finfo(reference.dtype).eps
+    )
+    raise RuntimeError(
+        "Router GEMM failed full-K/FP64 accuracy validation: "
+        f"rtol={_FP32_FULL_K_RTOL:g}, atol={_FP32_FULL_K_ATOL:g}, "
+        f"max_abs={absolute_error.max().item():.6g}, "
+        f"max_rel={relative_error.max().item():.6g}"
+    )
+
+
+def _synchronize_router_gemm(input: torch.Tensor) -> None:
+    if input.device.type == "cuda":
+        torch.cuda.synchronize(input.device)
+
+
+def _cuda_graph_smoke_router_backend(
+    runner: Callable[[torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor],
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> None:
+    """Warm on a side stream, then capture and replay one isolated CUDA Graph."""
+    if input.device.type != "cuda":
+        return
+
+    current_stream = torch.cuda.current_stream(input.device)
+    warmup_stream = torch.cuda.Stream(device=input.device)
+    warmup_stream.wait_stream(current_stream)
+    with torch.cuda.stream(warmup_stream):
+        warmup_output = runner(input, weight, bias)
+    warmup_stream.synchronize()
+    current_stream.wait_stream(warmup_stream)
+    _validate_router_gemm_output(warmup_output, input, weight)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = runner(input, weight, bias)
+    graph.replay()
+    _synchronize_router_gemm(input)
+    _validate_router_gemm_output(graph_output, input, weight)
+    _validate_router_gemm_bitwise(
+        graph_output,
+        warmup_output,
+        comparison="CUDA Graph/eager",
+    )
+
+
+def _preflight_deepgemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> None:
+    output = _run_router_deepgemm(input, weight, bias)
+    _synchronize_router_gemm(input)
+    _validate_router_gemm_output(output, input, weight)
+    reference = _run_router_persistent(input, weight, bias)
+    _synchronize_router_gemm(input)
+    _validate_router_gemm_bitwise(
+        output,
+        reference,
+        comparison="DeepGEMM/persistent",
+    )
+    _cuda_graph_smoke_router_backend(_run_router_deepgemm, input, weight, bias)
+
+
+def _preflight_full_k(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> None:
+    output = _run_router_full_k(input, weight, bias)
+    _synchronize_router_gemm(input)
+    _validate_router_gemm_output(output, input, weight)
+    if input.dtype in (torch.bfloat16, torch.float16):
+        reference = _run_router_persistent(input, weight, bias)
+        _synchronize_router_gemm(input)
+        _validate_router_gemm_bitwise(
+            output,
+            reference,
+            comparison="full-K/persistent",
+        )
+    elif input.dtype == torch.float32:
+        _validate_router_gemm_fp32_accuracy(output, input, weight)
+    _cuda_graph_smoke_router_backend(_run_router_full_k, input, weight, bias)
+
+
+def _preflight_persistent(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> None:
+    output = _run_router_persistent(input, weight, bias)
+    _synchronize_router_gemm(input)
+    _validate_router_gemm_output(output, input, weight)
+
+
+def _preflight_router_backend(
+    backend: str,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> None:
+    if backend == "deepgemm":
+        _preflight_deepgemm(input, weight, bias)
+    elif backend == "full_k":
+        _preflight_full_k(input, weight, bias)
+    else:
+        _preflight_persistent(input, weight, bias)
+
+
+def _router_gemm_is_capturing_or_compiling(input: torch.Tensor) -> bool:
+    if torch.compiler.is_compiling():
+        return True
+    if input.device.type != "cuda":
+        return False
+    try:
+        return torch.cuda.is_current_stream_capturing()
+    except RuntimeError:
+        # Metadata-only policy tests and early process initialization may not
+        # have a CUDA context yet. The actual preflight will still fail safely
+        # before a decision is cached if CUDA is unavailable.
+        return False
+
+
+def prewarm_router_gemm_backend(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    requested_mode: str | None = None,
+) -> RouterGemmBackendDecision:
+    """Preflight and cache a Router GEMM decision before CUDA Graph capture."""
+    requested = (
+        VLLM_BATCH_INVARIANT_ROUTER_GEMM if requested_mode is None else requested_mode
+    )
+    signature = _router_gemm_signature(input, weight, bias)
+    key = (requested, signature)
+    cached = _router_gemm_backend_cache.get(key)
+    if cached is not None:
+        return cached
+    if _router_gemm_is_capturing_or_compiling(input):
+        raise RuntimeError(
+            "Router GEMM signature was not preflighted before CUDA Graph capture "
+            "or torch.compile; call prewarm_router_gemm_backend first"
+        )
+
+    with _router_gemm_backend_lock:
+        cached = _router_gemm_backend_cache.get(key)
+        if cached is not None:
+            return cached
+
+        failures: list[str] = []
+        if requested == "auto":
+            candidates, skipped = _auto_router_gemm_candidates(input, weight, bias)
+            failures.extend(skipped)
+        else:
+            static_decision = _select_router_gemm_backend(
+                input, weight, bias, requested_mode=requested
+            )
+            assert static_decision.selected is not None
+            candidates = [static_decision.selected]
+
+        selected: str | None = None
+        for candidate in candidates:
+            try:
+                _preflight_router_backend(candidate, input, weight, bias)
+            except Exception as exc:
+                failure = f"{candidate} preflight failed: {type(exc).__name__}: {exc}"
+                if requested != "auto" or candidate == "persistent":
+                    raise RuntimeError(failure) from exc
+                failures.append(failure)
+                continue
+            selected = candidate
+            break
+
+        assert selected is not None
+        failures.append(f"selected {selected} after synchronized preflight")
+        decision = RouterGemmBackendDecision(
+            requested=requested,
+            selected=selected,
+            reason="; ".join(failures),
+            signature=signature,
+            preflighted=True,
+        )
+        _router_gemm_backend_cache[key] = decision
+        logger.info(
+            "BI Router GEMM requested=%s selected=%s reason=%s signature=%s",
+            requested,
+            selected,
+            decision.reason,
+            signature,
+        )
+        return decision
+
+
+def get_router_gemm_backend_decision(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    requested_mode: str | None = None,
+) -> RouterGemmBackendDecision:
+    """Read a cached decision without importing, compiling, or running a backend."""
+    requested = (
+        VLLM_BATCH_INVARIANT_ROUTER_GEMM if requested_mode is None else requested_mode
+    )
+    if requested not in _ROUTER_GEMM_CHOICES:
+        raise ValueError(
+            f"requested_mode must be one of {_ROUTER_GEMM_CHOICES}, got {requested!r}"
+        )
+    signature = _router_gemm_signature(input, weight, bias)
+    cached = _router_gemm_backend_cache.get((requested, signature))
+    if cached is not None:
+        return cached
+    return RouterGemmBackendDecision(
+        requested=requested,
+        selected=None,
+        reason="not_preflighted",
+        signature=signature,
+        preflighted=False,
+    )
+
+
+def _router_gemm_batch_invariant_op_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    decision = get_router_gemm_backend_decision(input, weight, bias)
+    if not decision.preflighted:
+        decision = prewarm_router_gemm_backend(input, weight, bias)
+
+    if decision.selected == "deepgemm":
+        return _run_router_deepgemm(input, weight, bias)
+    if decision.selected == "full_k":
+        return _run_router_full_k(input, weight, bias)
+    return _run_router_persistent(input, weight, bias)
+
+
+def _router_gemm_batch_invariant_op_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return input.new_empty((*input.shape[:-1], weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="router_gemm_batch_invariant",
+    op_func=_router_gemm_batch_invariant_op_impl,
+    fake_impl=_router_gemm_batch_invariant_op_fake,
+)
+
+
+def router_gemm_batch_invariant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Opaque compile boundary around the preflighted Router dispatch."""
+    return torch.ops.vllm.router_gemm_batch_invariant(input, weight, bias)
 
 
 def vllm_is_batch_invariant() -> bool:

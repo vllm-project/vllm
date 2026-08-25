@@ -429,6 +429,23 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
+def test_fa3_sink_mode_flows_to_model_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--fa3-sink-mode",
+            "unfused",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.fa3_sink_mode == "unfused"
+
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.model_config.fa3_sink_mode == "unfused"
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])

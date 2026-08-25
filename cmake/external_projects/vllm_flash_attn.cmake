@@ -37,8 +37,11 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 5824e6e2008271063c3229ab3e7032bd74abbbc6
+          GIT_REPOSITORY https://gitlab-cn-beijing.siflow.cn/ubiq-kernels/inference/flash-attention.git
+          # fa/vllm contains the fused KV-sink implementation, including
+          # sliding-window/local attention support. Pin the integration commit
+          # so builds remain reproducible as the branch advances.
+          GIT_TAG eacd906d81a4e425c3c8f4376b8d6ab8c1d6255c
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

@@ -284,6 +284,10 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
+        if self.attn_backend.get_name() == "FLASH_ATTN":
+            extra_impl_args["fa3_sink_mode"] = getattr(
+                model_config, "fa3_sink_mode", "auto"
+            )
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
         use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
         if use_alibi_sqrt and not backend_supports_alibi_sqrt:

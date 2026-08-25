@@ -111,10 +111,10 @@ RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python vllm/docker/stamp_vllm_versio
     else echo "VLLM_VERSION_STAMP 未设置, 保持 setuptools_scm 生成的版本"; fi
 
 # 注: 内部 pretrain/transformers 已挪到 Dockerfile.update (与 lmcache 同层, 便于按需
-# 更新分支/commit 而不必重建 base)。base 内不再 clone 任何私有仓库, 故不需要 GITLAB_TOKEN。
+# 更新分支/commit 而不必重建 base)。hpc-ops 在 base 中从内部仓库按 commit 构建。
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 额外推理加速 / 调试组件: py-spy, instanttensor, DeepGEMM, DeepEP(+pplx)
+# 额外推理加速 / 调试组件: py-spy, instanttensor, hpc-ops, DeepGEMM, DeepEP(+pplx)
 # (lmcache 迭代频繁, 放在 Dockerfile.update 层按需切 ref, 不占 base 重编译层)
 # 此时 WORKDIR 仍是 /vllm-workspace, vLLM 源码在 vllm/ (含 tools/ 脚本)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,6 +122,15 @@ RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python vllm/docker/stamp_vllm_versio
 # py-spy: 采样式 profiler, 线上抓 Python 调用栈排查卡顿/死锁
 # instanttensor: pip 直接安装, 钉版 0.1.8
 RUN uv pip install --system --no-cache-dir py-spy instanttensor==0.1.8
+
+# hpc-ops (Tencent): 独立源码编译 wheel 并安装，不并入 vLLM 的 CMake 构建。
+# 固定 commit 保证 vLLM 的 HPC API 与 kernel 实现匹配；--no-deps 防止其未钉版的
+# torch 依赖替换镜像中已经对齐的 torch 2.10.0。默认使用内部仓库中已验证的 BF16 commit。
+ARG HPC_OPS_GIT_REPO=https://gitlab-cn-beijing.siflow.cn/inference/hpc-ops.git
+ARG HPC_OPS_GIT_REF=4e21449375d17d4a883dd1fb40a60e5f596c31b8
+RUN VLLM_DOCKER_BUILD_CONTEXT=1 bash vllm/tools/install_hpc_ops.sh \
+        --repo "${HPC_OPS_GIT_REPO}" \
+        --ref "${HPC_OPS_GIT_REF}"
 
 # deep* kernel 仅支持 Hopper/Blackwell, 编译 arch 覆盖为 9.0a/10.0a
 # (与官方 docker/Dockerfile 一致; base 默认的 "8.9 ..." 含 Ada, DeepEP 不支持)

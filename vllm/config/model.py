@@ -266,6 +266,16 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    disable_sink_attention: bool = False
+    """Ignore model-configured sink attention for baseline/ablation runs."""
+    fa3_sink_mode: Literal["auto", "fused", "unfused"] = "auto"
+    """Select the FA3 sink implementation while preserving sink-token semantics.
+
+    ``auto`` uses the fused FA3 sink kernel when supported and otherwise falls
+    back to two FA3 calls plus an LSE-aware merge. ``fused`` requires the fused
+    path and fails if it is unavailable. ``unfused`` always uses the existing
+    two-call path. This option does not disable model-configured sink tokens.
+    """
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -1323,9 +1333,13 @@ class ModelConfig:
 
     # NOTE(yxing): configuration for sink attention
     def get_num_sink_tokens(self) -> int:
+        if self.disable_sink_attention:
+            return 0
         return getattr(self.hf_text_config, "num_sink_tokens", 0)
 
     def get_enable_sink_attention(self) -> bool:
+        if self.disable_sink_attention:
+            return False
         return _get_iquest_attr(self.hf_text_config, "enable_sink_attention", False)
 
     def get_oe_vocab_size(self) -> int:

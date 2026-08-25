@@ -4,7 +4,7 @@
 
 import copy
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import numpy as np
 import torch
@@ -53,6 +53,26 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+
+def _select_fa3_sink_path(
+    requested_mode: Literal["auto", "fused", "unfused"],
+    fused_sink_supported: bool,
+) -> Literal["fused", "unfused"]:
+    if requested_mode not in ("auto", "fused", "unfused"):
+        raise ValueError(
+            "fa3_sink_mode must be one of ('auto', 'fused', 'unfused'), "
+            f"got {requested_mode!r}."
+        )
+    if requested_mode == "fused" and not fused_sink_supported:
+        raise RuntimeError(
+            "--fa3-sink-mode fused was requested, but the fused FA3 sink "
+            "path requires FA3, 1-8 sink tokens, no ALiBi, and a non-FP8 "
+            "KV cache."
+        )
+    if fused_sink_supported and requested_mode != "unfused":
+        return "fused"
+    return "unfused"
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -426,7 +446,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 )
             return None
 
-        use_cascade = common_prefix_len > 0
+        # KV-sink attention must see the complete KV sequence in one attention
+        # invocation. Cascade attention splits the shared prefix and suffix into
+        # two invocations and currently has no way to include the sink block, so
+        # disable it whenever KV-sink metadata is present.
+        use_cascade = (
+            common_prefix_len > 0 and common_attn_metadata.sink_seq_lens is None
+        )
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
 
@@ -563,6 +589,7 @@ class FlashAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
         enable_sinks_kv: bool = False,
+        fa3_sink_mode: Literal["auto", "fused", "unfused"] = "auto",
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -608,13 +635,28 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.supports_quant_query_input = True
         self.enable_sinks_kv = enable_sinks_kv
+        self.fa3_sink_mode = fa3_sink_mode
+        if self.enable_sinks_kv:
+            logger.info_once("FA3 sink execution mode: %s", self.fa3_sink_mode)
 
     def populate_sinks_kv(self, sinks_k: torch.Tensor, sinks_v: torch.Tensor):
+        assert sinks_k.ndim == 4
+        assert sinks_v.shape == sinks_k.shape
         assert sinks_k.shape[2] == self.num_kv_heads
         assert sinks_k.shape[3] == self.head_size
+        if self.fa3_sink_mode == "fused":
+            _select_fa3_sink_path("fused", self._fused_sink_supported(sinks_k.shape[1]))
 
         self.sinks_k = sinks_k
         self.sinks_v = sinks_v
+
+    def _fused_sink_supported(self, num_sink_tokens: int) -> bool:
+        return (
+            self.vllm_flash_attn_version == 3
+            and 1 <= num_sink_tokens <= 8
+            and self.alibi_slopes is None
+            and not self.kv_cache_dtype.startswith("fp8")
+        )
 
     def forward(
         self,
@@ -709,6 +751,10 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale = layer._v_scale.expand(descale_shape)
 
             if self.dcp_world_size > 1:
+                if self.enable_sinks_kv:
+                    raise NotImplementedError(
+                        "KV-sink attention is not supported with DCP"
+                    )
                 self._forward_with_dcp(
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
@@ -938,6 +984,42 @@ class FlashAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         scheduler_metadata = attn_metadata.scheduler_metadata
+
+        num_sink_tokens = self.sinks_k.shape[1]
+        fused_sink_supported = self._fused_sink_supported(num_sink_tokens)
+        sink_path = _select_fa3_sink_path(self.fa3_sink_mode, fused_sink_supported)
+        can_use_fused_sink = sink_path == "fused"
+
+        if can_use_fused_sink:
+            # FA3 folds the dense sink logits into the online softmax of the
+            # paged-KV attention. sink_v is part of the API for symmetry, but
+            # the fused kernel assumes it is identically zero and does not read
+            # it. iQuest models initialize sink_v with zeros.
+            flash_attn_varlen_func(
+                q=query,
+                k=key_cache,
+                v=value_cache,
+                out=output,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+                window_size=window_size,
+                block_table=attn_metadata.block_table,
+                softcap=self.logits_soft_cap,
+                scheduler_metadata=scheduler_metadata,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                num_splits=attn_metadata.max_num_splits,
+                sink_k=self.sinks_k[:num_seqs],
+                sink_v=self.sinks_v[:num_seqs],
+                num_sink_tokens=num_sink_tokens,
+            )
+            return
 
         # sink-related metadata
         sink_seqused_k = attn_metadata.sink_seq_lens

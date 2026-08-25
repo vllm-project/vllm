@@ -26,8 +26,7 @@
 #    unittest-*/base-*/release-* 加入 Protected tags, 否则 tag 流水线拿不到)
 #
 #   image-build (release/update) 需要 (从私有仓库 clone transformers + lmcache, 可编辑安装):
-#   base-image-build 不再需要以下变量 (base 内不 clone 任何私有仓库)。Dockerfile 无默认值,
-#   未配置直接构建失败:
+#   Dockerfile 无默认值, 未配置直接构建失败:
 #   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected);
 #                         image-build clone transformers 和 lmcache 都要用
 #   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git (必填)
@@ -44,6 +43,8 @@
 #   BUILD_BASE_IMAGE    base 镜像构建的起点镜像 (需自带 torch+CUDA+nvcc)
 #   BASE_IMAGE_TAG      日常构建基于的 base 镜像 tag (默认 base-latest)
 #   CUDA_ARCH_LIST      base 构建的目标 GPU 架构
+#   HPC_OPS_GIT_REPO    hpc-ops 内部仓库地址
+#   HPC_OPS_GIT_REF     hpc-ops commit/tag/branch/ref (默认使用已验证的 BF16 MoE commit)
 #   BUILD_IMAGE         手动触发镜像构建 (不打 tag): GitLab Build -> Pipelines -> Run pipeline,
 #                       选目标分支, 设 BUILD_IMAGE=base|release|unittest, 对应构建 job 会用该
 #                       分支代码构建 (设了它时 lint/unit-test 跳过)
@@ -92,6 +93,9 @@ variables:
   NVCC_THREADS: "8"
   # 目标 GPU 架构: 8.9=Ada, 9.0=Hopper, 10.0/12.0=Blackwell
   CUDA_ARCH_LIST: "8.9 9.0 10.0 12.0"
+  # 内部 hpc-ops main 当前包含已验证的 BF16 MoE commit；构建仍固定 commit，避免分支漂移。
+  HPC_OPS_GIT_REPO: https://gitlab-cn-beijing.siflow.cn/inference/hpc-ops.git
+  HPC_OPS_GIT_REF: 4e21449375d17d4a883dd1fb40a60e5f596c31b8
   # CPU 可跑的单元测试子集 (iquest parser + 轻量顶层测试)
   # TODO: tests/reasoning/test_iquest_reasoning_parser.py tests/tool_parsers/test_iquest_coder_tool_parser.py
   UNIT_TEST_PATHS: >-
@@ -344,6 +348,8 @@ base-image-build:
         --build-arg "max_jobs=${MAX_JOBS}" \
         --build-arg "nvcc_threads=${NVCC_THREADS}" \
         --build-arg "torch_cuda_arch_list=${CUDA_ARCH_LIST}" \
+        --build-arg "HPC_OPS_GIT_REPO=${HPC_OPS_GIT_REPO}" \
+        --build-arg "HPC_OPS_GIT_REF=${HPC_OPS_GIT_REF}" \
         --build-arg "VLLM_BUILD_VERSION=0.0.0.dev0+${SHORT_SHA}" \
         --build-arg "VLLM_VERSION_STAMP=base(${SHORT_SHA})" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \

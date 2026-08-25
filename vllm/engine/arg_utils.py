@@ -443,6 +443,8 @@ class EngineArgs:
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
+    disable_sink_attention: bool = ModelConfig.disable_sink_attention
+    fa3_sink_mode: Literal["auto", "fused", "unfused"] = ModelConfig.fa3_sink_mode
     swap_space: float = CacheConfig.swap_space
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
@@ -705,6 +707,10 @@ class EngineArgs:
         model_group.add_argument(
             "--disable-cascade-attn", **model_kwargs["disable_cascade_attn"]
         )
+        model_group.add_argument(
+            "--disable-sink-attention", **model_kwargs["disable_sink_attention"]
+        )
+        model_group.add_argument("--fa3-sink-mode", **model_kwargs["fa3_sink_mode"])
         model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
         )
@@ -1354,6 +1360,8 @@ class EngineArgs:
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
+            disable_sink_attention=self.disable_sink_attention,
+            fa3_sink_mode=self.fa3_sink_mode,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,

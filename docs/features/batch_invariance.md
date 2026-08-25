@@ -99,6 +99,40 @@ for output in outputs:
     print(f"Generated: {generated_text!r}\n")
 ```
 
+## MoE Router GEMM Backend
+
+Batch-invariant MoE Router gates use the existing deterministic persistent
+kernel by default. On supported Hopper GPUs, an opt-in selector can use faster
+deterministic backends after a dtype-specific correctness preflight:
+
+```bash
+export VLLM_BATCH_INVARIANT=1
+export VLLM_BATCH_INVARIANT_ROUTER_GEMM=auto
+```
+
+`VLLM_BATCH_INVARIANT_ROUTER_GEMM` accepts the following values:
+
+| Value | Behavior |
+|---|---|
+| `persistent` | Use the existing deterministic kernel. This is the default and rollback mode. |
+| `auto` | Use DeepGEMM for eligible BF16 inputs, deterministic full-K for eligible FP16/FP32 inputs, and fall back to `persistent`. |
+| `full_k` | Force deterministic Triton full-K. Unsupported signatures fail fast. Intended for testing. |
+| `deepgemm` | Force DeepGEMM. Unsupported signatures or a missing optional dependency fail fast. Intended for testing. |
+
+The optimized backends require SM90 CUDA tensors, contiguous two-dimensional
+input and weight, no bias, and the Router shape
+`A[M, 2048] @ W[128, 2048].T`. The BF16/FP16 full-K backend is limited to
+`M <= 2048`; the FP32 full-K backend uses one row per CTA and is limited to
+`M <= 128` to avoid a large-M regression. FP32 full-K preflight compares the
+output against an FP64 reference with `rtol=1e-5` and `atol=1e-6`; a failed
+precision, JIT, or Graph preflight falls back to `persistent` in `auto` mode.
+DeepGEMM remains an optional dependency.
+
+Backend selection is cached by the complete tensor signature. Import, JIT,
+output validation, and a CUDA Graph smoke test run before Graph capture.
+Failures in `auto` mode fall back during this preflight; errors during Graph
+replay remain fail-fast and never trigger a dynamic backend switch.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:

@@ -6,7 +6,7 @@ set -e
 
 # Default values
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-DEEPGEMM_GIT_REF="477618cd51baffca09c4b0b87e97c03fe827ef03"
+DEEPGEMM_GIT_REF="559d79fb6994a58b8a15b4b93bf13ccc16edf247"
 WHEEL_DIR=""
 
 # Parse command line arguments

@@ -26,11 +26,13 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutlass_fused_moe
+from vllm.utils.hpc import has_hpc
 
 logger = init_logger(__name__)
 
 
 class UnquantizedMoeBackend(Enum):
+    HPC = "HPC BF16"
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     AITER = "ROCm AITER"
@@ -59,6 +61,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
+        "hpc": UnquantizedMoeBackend.HPC,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -108,6 +111,12 @@ def select_unquantized_moe_backend(
     flashinfer_cutlass_moe_enabled = (
         flashinfer_cutlass_available and envs.VLLM_USE_FLASHINFER_MOE_FP16
     )
+    hpc_bf16_available = (
+        has_hpc()
+        and current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and not use_dp
+    )
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
     # Handle explicit moe_backend from user.
@@ -132,6 +141,8 @@ def select_unquantized_moe_backend(
             raise ValueError(
                 "ROCm AITer MoE backend is not available for this configuration."
             )
+        elif requested_backend == UnquantizedMoeBackend.HPC and not hpc_bf16_available:
+            raise ValueError("HPC BF16 MoE requires Hopper, hpc-ops, and DP disabled.")
         logger.info_once(_make_log_backend(requested_backend), scope="local")
         return requested_backend
 
@@ -221,6 +232,20 @@ def make_unquantized_moe_kernel(
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+
+    elif backend == UnquantizedMoeBackend.HPC:
+        from vllm.model_executor.layers.fused_moe.hpc_bf16_moe import (
+            HPCBf16Experts,
+        )
+
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            HPCBf16Experts(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),

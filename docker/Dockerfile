@@ -322,7 +322,7 @@ WORKDIR /workspace
 
 # Build DeepGEMM wheel
 # Default moved here from tools/install_deepgemm.sh for centralized version management
-ARG DEEPGEMM_GIT_REF=477618cd51baffca09c4b0b87e97c03fe827ef03
+ARG DEEPGEMM_GIT_REF=559d79fb6994a58b8a15b4b93bf13ccc16edf247
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \

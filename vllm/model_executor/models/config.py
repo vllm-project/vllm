@@ -626,12 +626,62 @@ class IquestMoeSinkAttentionConfig(VerifyAndUpdateConfig):
         the model runner caches ``cascade_attn_enabled`` before the model is
         built.
         """
-        hf_config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config
+        fa3_sink_mode = model_config.fa3_sink_mode
+        if fa3_sink_mode != "auto":
+            if model_config.disable_sink_attention:
+                raise ValueError(
+                    "--fa3-sink-mode controls how sink attention is computed "
+                    "and cannot be combined with --disable-sink-attention."
+                )
+            backend = vllm_config.attention_config.backend
+            if backend != AttentionBackendEnum.FLASH_ATTN:
+                backend_name = "auto" if backend is None else backend.name
+                raise ValueError(
+                    "--fa3-sink-mode requires explicitly selecting the "
+                    f"FLASH_ATTN backend, but got {backend_name}."
+                )
+            flash_attn_version = vllm_config.attention_config.flash_attn_version
+            if flash_attn_version != 3:
+                raise ValueError(
+                    "--fa3-sink-mode requires "
+                    "--attention-config.flash_attn_version=3, but got "
+                    f"{flash_attn_version}."
+                )
+            if not getattr(hf_config, "enable_sink_attention", False):
+                raise ValueError(
+                    "--fa3-sink-mode requires a model with sink attention enabled."
+                )
+            # enable_sink_attention is already verified True above. v1.1 carries
+            # an explicit num_sink_tokens field; v1.3 has no such field and the
+            # count is implicitly 1 (a single learned-key sink prepended per
+            # layer). Mirror gpu_model_runner's v1.3-aware default so the
+            # validator does not reject a valid v1.3 sink model.
+            num_sink_tokens = getattr(hf_config, "num_sink_tokens", None)
+            if num_sink_tokens is None:
+                num_sink_tokens = (
+                    1 if getattr(hf_config, "enable_sink_attention", False) else 0
+                )
+            if not isinstance(num_sink_tokens, int) or num_sink_tokens <= 0:
+                raise ValueError(
+                    "--fa3-sink-mode requires a positive model-configured "
+                    f"num_sink_tokens, but got {num_sink_tokens!r}."
+                )
+
+        if model_config.disable_sink_attention:
+            hf_text_config = model_config.hf_text_config
+            for config in (hf_config, hf_text_config):
+                config.enable_sink_attention = False
+                if hasattr(config, "num_sink_tokens"):
+                    config.num_sink_tokens = 0
+            logger.info("Sink attention disabled by --disable-sink-attention.")
+            return
+
         if not getattr(hf_config, "enable_sink_attention", False):
             return
 
-        # NOTE(yxing): check attention backend. Now the backend for sink
-        # attention is `flash attention`
+        # NOTE(yxing): check attention backend. Sink attention uses FA3.
         backend = vllm_config.attention_config.backend
         if backend is not None and backend != AttentionBackendEnum.FLASH_ATTN:
             raise ValueError(
@@ -639,7 +689,7 @@ class IquestMoeSinkAttentionConfig(VerifyAndUpdateConfig):
                 f"backend, but got {backend.name}. Pass "
                 f"--attention-backend FLASH_ATTN."
             )
-        vllm_config.model_config.disable_cascade_attn = True
+        model_config.disable_cascade_attn = True
         logger.info("Sink attention enabled: forcing FLASH_ATTN, disabling cascade.")
 
 
