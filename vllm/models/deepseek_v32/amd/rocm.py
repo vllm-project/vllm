@@ -169,6 +169,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        q_c, kv_c = self._prepare_aiter_norms(q_c, kv_c)
 
         if (active_indexer := self._active_indexer) is not None:
             kw = active_indexer.wk_weights_proj(hidden_states)[0]
@@ -368,21 +369,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
         return q_c, ql_nope, mqa_q, q_index_fp8, index_weights_out
 
-    def _prepare_attn_inputs_for_aiter(
-        self,
-        positions: torch.Tensor,
-        q_c: torch.Tensor,
-        kv_c: torch.Tensor,
-        k_pe: torch.Tensor,
-        index_k: torch.Tensor | None,
-        index_weights: torch.Tensor | None,
-        mla_slot: torch.Tensor | None,
-        attn_metadata,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """AITER path: dual RMSNorm, indexer QK RoPE/quant, fused QK RoPE + cache."""
-        assert self._rope_cos is not None, "set_aiter_rope was never called"
-        active_indexer = self._active_indexer
-        has_caches = attn_metadata is not None
+    def _prepare_aiter_norms(
+        self, q_c: torch.Tensor, kv_c: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Dual RMSNorm into model-owned buffers, hoisted so cudagraph captures it."""
+        if not self._use_aiter_qk_norm_rope:
+            return q_c, kv_c
 
         num_tokens = q_c.shape[0]
         q_c_normed = self._q_c_norm_buffer[:num_tokens]
@@ -397,7 +389,30 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             self.q_a_layernorm.variance_epsilon,
             self.kv_a_layernorm.variance_epsilon,
         )
-        q_c, kv_c = q_c_normed, kv_c_normed
+        if self._active_indexer is not None:
+            assert self.topk_indices_buffer is not None
+            # Seeded only on indexer layers; shared layers deliberately reuse the
+            # previous indexer layer's top-k.
+            self.topk_indices_buffer[:num_tokens].fill_(-1)
+        return q_c_normed, kv_c_normed
+
+    def _prepare_attn_inputs_for_aiter(
+        self,
+        positions: torch.Tensor,
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        mla_slot: torch.Tensor | None,
+        attn_metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """AITER path: projections, indexer QK RoPE/quant, fused QK RoPE + cache."""
+        assert self._rope_cos is not None, "set_aiter_rope was never called"
+        active_indexer = self._active_indexer
+        has_caches = attn_metadata is not None
+
+        num_tokens = q_c.shape[0]
         ql_nope, q_pe = self._compute_w_uk_absorbed_ql_nope_and_q_pe(q_c)
         q_index = self._project_q_index(q_c)
 
@@ -406,10 +421,6 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         index_weights_out = self._index_weights_buffer[:0]
         if active_indexer is not None:
             assert q_index is not None and index_weights is not None
-            assert self.topk_indices_buffer is not None
-            # fused_norm_rope seeds -1 only on indexer layers; shared layers
-            # deliberately reuse the previous indexer layer's top-k.
-            self.topk_indices_buffer[: positions.shape[0]].fill_(-1)
             q_index_fp8 = self._q_index_buffer[:num_tokens]
             index_weights_out = self._index_weights_buffer[:num_tokens]
             if has_caches:
