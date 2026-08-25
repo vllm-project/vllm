@@ -436,6 +436,11 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ),
             )
             self.bpre_shuffled = True
+            # Have this layer's activation-scale producer emit the kernel's
+            # column-major layout directly, so the GEMM op needs no transpose
+            # copy (the compile-time rms/allreduce/act quant fusions carry the
+            # flag through to the fused producer ops).
+            self.quant_fp8.transpose_scale = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -492,10 +497,16 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         out_dtype = self.config.out_dtype
         if self.bpre_shuffled:
-            # Row-major As; the custom-op impl converts to the kernel's
-            # column-major layout internally (torch.compile-safe).
+            # transpose_scale: the producer already emitted As in the kernel's
+            # column-major layout (the dtype conversion above preserves element
+            # order); otherwise the op impl transposes.
             return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-                A, B, As, Bs, output_dtype=out_dtype
+                A,
+                B,
+                As,
+                Bs,
+                output_dtype=out_dtype,
+                scale_transposed=self.quant_fp8.transpose_scale,
             )
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale

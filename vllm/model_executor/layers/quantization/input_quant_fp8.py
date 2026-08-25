@@ -44,6 +44,7 @@ class QuantFP8(CustomOp):
         tma_aligned_scales: bool = False,
         use_ue8m0: bool | None = None,  # for Torch compile
         compile_native: bool = True,
+        transpose_scale: bool = False,
     ):
         """
         Args:
@@ -65,6 +66,9 @@ class QuantFP8(CustomOp):
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
         self.tma_aligned_scales = tma_aligned_scales
+        # Group quant only: emit scales in the column-major-bytes layout the CK
+        # b-preshuffle blockscale GEMM consumes (shape stays [M, G]).
+        self.transpose_scale = transpose_scale
         self.use_ue8m0 = is_deep_gemm_e8m0_used() if use_ue8m0 is None else use_ue8m0
         self.use_deep_gemm_supported = is_deep_gemm_supported()
 
@@ -150,14 +154,19 @@ class QuantFP8(CustomOp):
         use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
 
         if use_aiter_per_group_quant:
-            return rocm_aiter_ops.group_fp8_quant(x, self.group_size)
+            return rocm_aiter_ops.group_fp8_quant(
+                x, self.group_size, self.transpose_scale
+            )
         if use_aiter_per_tensor_quant:
             return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
         # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        q, s = self.forward_cuda(x, scale, scale_ub)
+        if self.transpose_scale and self.is_group_quant:
+            s = s.transpose(0, 1).contiguous().view(s.shape)
+        return q, s
 
     def forward_xpu(
         self,
