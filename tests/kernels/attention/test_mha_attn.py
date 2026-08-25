@@ -27,9 +27,17 @@ from vllm.v1.attention.selector import _cached_get_attn_backend
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
-    """Clear lru cache to ensure each test case runs without caching."""
+def reset_test_state():
+    """Clear cached selectors and restore process-wide torch defaults."""
+    default_device = torch.get_default_device()
+    default_dtype = torch.get_default_dtype()
     _cached_get_attn_backend.cache_clear()
+    try:
+        yield
+    finally:
+        torch.set_default_device(default_device)
+        torch.set_default_dtype(default_dtype)
+        _cached_get_attn_backend.cache_clear()
 
 
 devices = ["cpu"]

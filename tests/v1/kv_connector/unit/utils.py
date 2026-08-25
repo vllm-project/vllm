@@ -130,6 +130,8 @@ def create_vllm_config(
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
+    # Connectors are constructed after layout resolution; mirror that here.
+    cache_config.kv_cache_layout = "LBNHC"
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
         kv_connector_module_path=kv_connector_module_path,

@@ -10,7 +10,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import partial
 
 import torch
@@ -73,7 +73,7 @@ class ImageEncoderViT(nn.Module):
         mlp_ratio: float = 4.0,
         out_chans: int = 256,
         qkv_bias: bool = True,
-        norm_layer: type[nn.Module] = nn.LayerNorm,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         act_layer: type[nn.Module] = nn.GELU,
         use_abs_pos: bool = True,
         use_rel_pos: bool = False,
@@ -205,7 +205,7 @@ class Block(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
-        norm_layer: type[nn.Module] = nn.LayerNorm,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         act_layer: type[nn.Module] = nn.GELU,
         use_rel_pos: bool = False,
         rel_pos_zero_init: bool = True,
@@ -326,6 +326,7 @@ class RelPosAttention(PluggableLayer):
         v = v.view(B, self.num_heads, H * W, -1)
 
         if self.use_rel_pos:
+            assert rel_h is not None and rel_w is not None
             rel_h = rel_h.view(
                 B, self.num_heads, rel_h.size(1), rel_h.size(2), rel_h.size(3)
             )

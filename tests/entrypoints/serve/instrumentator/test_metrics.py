@@ -450,7 +450,7 @@ def test_metrics_exist_run_batch():
             [
                 sys.executable,
                 "-m",
-                "vllm.entrypoints.openai.run_batch",
+                "vllm.entrypoints.launchers.run_batch",
                 "-i",
                 input_file.name,
                 "-o",

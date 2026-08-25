@@ -1,13 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Annotated, Literal
+
 import pytest
 import torch
 
 from vllm.model_executor.models.glm4_1v import Glm4vImageEmbeddingInputs
 from vllm.model_executor.models.granite_speech import GraniteSpeechAudioInputs
-from vllm.model_executor.models.hyperclovax_vision import HCXVisionVideoPixelInputs
 from vllm.model_executor.models.phi3v import Phi3VImagePixelInputs
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
+
+
+class _DoubleNestedVideoPixelInputs(TensorSchema):
+    """Minimal schema exercising doubly-nested list[list[torch.Tensor]] inputs.
+
+    Dimensions:
+        - n: Number of videos
+        - f: Number of frames
+        - g: Number of grids
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+    """
+
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+    pixel_values_videos: Annotated[
+        list[list[torch.Tensor]],
+        TensorShape("n", "f", "g", 3, "h", "w", dynamic_dims={"f", "g"}),
+    ]
 
 
 def test_tensor_schema_valid_tensor():
@@ -100,7 +121,7 @@ def test_tensor_schema_double_nested_tensors():
     x = torch.rand(4, 3, 32, 32)
     y = torch.rand(2, 3, 32, 32)
 
-    HCXVisionVideoPixelInputs(pixel_values_videos=([x, y, x], [y], [x, y]))
+    _DoubleNestedVideoPixelInputs(pixel_values_videos=([x, y, x], [y], [x, y]))
 
 
 def test_tensor_schema_inconsistent_shapes_in_list():

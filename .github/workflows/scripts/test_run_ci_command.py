@@ -11,8 +11,13 @@ from unittest.mock import patch
 from run_ci_command import (
     CANCELABLE_BUILD_STATES,
     CI_AUTHORIZED_COMMENT_MARKER,
+    COMMAND_CANCEL_AMD_CI,
     COMMAND_CANCEL_CI,
+    COMMAND_RETRY_AMD_FAILED,
     COMMAND_RETRY_FAILED,
+    COMMAND_RUN_AMD_CI,
+    COMMAND_RUN_AMD_CI_ALL,
+    COMMAND_RUN_AMD_CI_NIGHTLY,
     COMMAND_RUN_CI,
     COMMAND_RUN_CI_ALL,
     COMMAND_RUN_CI_NIGHTLY,
@@ -28,6 +33,7 @@ from run_ci_command import (
     notify_authorized,
     parse_command,
     parse_trusted_users,
+    pipeline_for_command,
     resolve_workflow_run_pr,
     run,
     select_latest_build,
@@ -137,6 +143,7 @@ class FakeBuildkite:
         self.failed_job_lists = failed_job_lists or []
         self.job_list_calls: list[int] = []
         self.list_calls: list[tuple[str | None, tuple[str, str] | None]] = []
+        self.list_requests: list[dict[str, Any]] = []
         self.retry_calls: list[tuple[int, str]] = []
         self.cancel_calls: list[int] = []
 
@@ -149,6 +156,14 @@ class FakeBuildkite:
         states: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         self.list_calls.append((commit, metadata))
+        self.list_requests.append(
+            {
+                "branch": branch,
+                "commit": commit,
+                "metadata": metadata,
+                "states": states,
+            }
+        )
         return self.build_lists.pop(0)
 
     def create_build(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -291,21 +306,52 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
 
     def test_only_exact_ci_commands_are_accepted(self) -> None:
-        self.assertEqual(parse_command(COMMAND_RUN_CI), COMMAND_RUN_CI)
-        self.assertEqual(parse_command(COMMAND_RUN_CI_ALL), COMMAND_RUN_CI_ALL)
-        self.assertEqual(
-            parse_command(COMMAND_RUN_CI_NIGHTLY),
+        commands = (
+            COMMAND_RUN_CI,
+            COMMAND_RUN_CI_ALL,
             COMMAND_RUN_CI_NIGHTLY,
-        )
-        self.assertEqual(
-            parse_command(COMMAND_RETRY_FAILED),
             COMMAND_RETRY_FAILED,
+            COMMAND_CANCEL_CI,
+            COMMAND_RUN_AMD_CI,
+            COMMAND_RUN_AMD_CI_ALL,
+            COMMAND_RUN_AMD_CI_NIGHTLY,
+            COMMAND_RETRY_AMD_FAILED,
+            COMMAND_CANCEL_AMD_CI,
         )
-        self.assertEqual(parse_command(COMMAND_CANCEL_CI), COMMAND_CANCEL_CI)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(parse_command(command), command)
+
         self.assertIsNone(parse_command("/ci run please"))
         self.assertIsNone(parse_command("/ci run all please"))
         self.assertIsNone(parse_command("/ci cancel please"))
         self.assertIsNone(parse_command(" /ci run"))
+        self.assertIsNone(parse_command("/amd-ci run please"))
+        self.assertIsNone(parse_command("/amd-ci retry "))
+        self.assertIsNone(parse_command("/AMD-CI run"))
+        self.assertIsNone(parse_command("/amdci run"))
+
+    def test_commands_select_only_their_configured_pipeline(self) -> None:
+        cases = (
+            (COMMAND_RUN_CI, "ci"),
+            (COMMAND_RUN_CI_ALL, "ci"),
+            (COMMAND_RUN_CI_NIGHTLY, "ci"),
+            (COMMAND_RETRY_FAILED, "ci"),
+            (COMMAND_CANCEL_CI, "ci"),
+            (COMMAND_RUN_AMD_CI, "amd-ci"),
+            (COMMAND_RUN_AMD_CI_ALL, "amd-ci"),
+            (COMMAND_RUN_AMD_CI_NIGHTLY, "amd-ci"),
+            (COMMAND_RETRY_AMD_FAILED, "amd-ci"),
+            (COMMAND_CANCEL_AMD_CI, "amd-ci"),
+        )
+        for command, expected_pipeline in cases:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    pipeline_for_command(command),
+                    expected_pipeline,
+                )
+        with self.assertRaisesRegex(ValueError, "Unsupported CI command"):
+            pipeline_for_command("/amd-ci run arbitrary-pipeline")
 
     def test_write_access_authorizes_reviewers_and_authors(self) -> None:
         allowed, _ = authorize(
@@ -466,6 +512,45 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
+    def test_amd_run_ignores_blocked_builds(self) -> None:
+        for metadata in ({}, {"github-comment-id": "98"}):
+            with self.subTest(metadata=metadata):
+                github = FakeGitHub()
+                blocked_build = {
+                    "blocked": True,
+                    "created_at": "2026-08-18T01:00:00Z",
+                    "meta_data": metadata,
+                    "number": 122,
+                    "pull_request": {"id": 42},
+                    "state": "blocked",
+                    "web_url": "https://buildkite.example/amd-ci/builds/122",
+                }
+                buildkite = FakeBuildkite([[], [blocked_build]])
+
+                run(make_event(COMMAND_RUN_AMD_CI_ALL), github, buildkite)
+
+                self.assertEqual(len(buildkite.created_builds), 1)
+                self.assertEqual(buildkite.created_builds[0]["env"]["RUN_ALL"], "1")
+
+    def test_amd_run_deduplicates_comment_triggered_active_build(self) -> None:
+        github = FakeGitHub()
+        command_build = {
+            "blocked": False,
+            "created_at": "2026-08-18T01:00:00Z",
+            "meta_data": {"github-comment-id": "98"},
+            "number": 122,
+            "pull_request": {"id": 42},
+            "source": "api",
+            "state": "running",
+            "web_url": "https://buildkite.example/amd-ci/builds/122",
+        }
+        buildkite = FakeBuildkite([[], [command_build]])
+
+        run(make_event(COMMAND_RUN_AMD_CI_ALL), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("AMD CI is already running", github.comments[0])
+
     def test_run_all_sets_buildkite_environment(self) -> None:
         github = FakeGitHub()
         buildkite = FakeBuildkite([[], []])
@@ -488,6 +573,32 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(payload["env"]["RUN_ALL"], "1")
         self.assertEqual(payload["env"]["NIGHTLY"], "1")
 
+    def test_amd_run_variants_set_buildkite_environment(self) -> None:
+        cases = (
+            (COMMAND_RUN_AMD_CI, {}),
+            (COMMAND_RUN_AMD_CI_ALL, {"RUN_ALL": "1"}),
+            (
+                COMMAND_RUN_AMD_CI_NIGHTLY,
+                {"RUN_ALL": "1", "NIGHTLY": "1"},
+            ),
+        )
+        for command, expected_env in cases:
+            with self.subTest(command=command):
+                github = FakeGitHub()
+                buildkite = FakeBuildkite([[], []])
+
+                run(make_event(command), github, buildkite)
+
+                payload = buildkite.created_builds[0]
+                self.assertEqual(payload["message"], f"PR #42 {command} by @reviewer")
+                command_env = {
+                    key: value
+                    for key, value in payload["env"].items()
+                    if key in {"RUN_ALL", "NIGHTLY"}
+                }
+                self.assertEqual(command_env, expected_env)
+                self.assertIn("Buildkite AMD CI #123", github.comments[0])
+
     def test_unapproved_authors_are_denied_without_buildkite(self) -> None:
         github = FakeGitHub(
             permission="read",
@@ -504,6 +615,20 @@ class RunCiCommandTest(unittest.TestCase):
 
         run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
         self.assertEqual(len(github.comments), 1)
+
+    def test_unapproved_author_gets_amd_specific_guidance(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(),
+            review_decision="REVIEW_REQUIRED",
+        )
+        buildkite = FakeBuildkite()
+
+        run(make_event(COMMAND_RUN_AMD_CI, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.list_calls, [])
+        self.assertIn("`/amd-ci run`", github.comments[0])
+        self.assertNotIn("`/ci run`", github.comments[0])
 
     def test_untrusted_approval_cannot_launch_ci(self) -> None:
         github = FakeGitHub(
@@ -540,9 +665,12 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(len(github.comments), 1)
         comment = github.comments[0]
         self.assertTrue(comment.startswith("✅ @author"))
-        self.assertIn("`/ci run` starts a CI build", comment)
+        self.assertIn("`/ci run` starts upstream CI", comment)
         self.assertIn("`/ci retry` retries failed jobs", comment)
         self.assertIn("`/ci cancel` cancels scheduled or running", comment)
+        self.assertIn("`/amd-ci run` starts AMD CI only", comment)
+        self.assertIn("`/amd-ci retry` retries failed jobs in AMD CI", comment)
+        self.assertIn("`/amd-ci cancel` does the same for AMD CI only", comment)
         self.assertIn("CI build for the current PR head", comment)
         self.assertIn("only jobs that failed in the latest earlier CI build", comment)
         self.assertNotIn(COMMAND_RUN_CI_ALL, comment)
@@ -722,6 +850,47 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(buildkite.retry_calls, [(123, RETRY_STATES)])
         self.assertIn("Queued 3 failed job", github.comments[0])
+
+    def test_amd_ci_retry_retries_only_the_current_head_build(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [
+                    {
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "number": 321,
+                        "pull_request": {"id": 42},
+                        "state": "failing",
+                        "web_url": "https://buildkite.example/amd-ci/builds/321",
+                    }
+                ]
+            ]
+        )
+
+        run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.retry_calls, [(321, RETRY_STATES)])
+        self.assertIn("Buildkite AMD CI #321", github.comments[0])
+
+    def test_amd_ci_retry_requires_a_build_for_the_current_head(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite([[]])
+
+        run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.list_calls, [("0123456789abcdef", None)])
+        self.assertEqual(buildkite.retry_calls, [])
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn(
+            "No AMD CI build exists for the current PR head", github.comments[0]
+        )
+        self.assertIn("Use `/amd-ci run`", github.comments[0])
 
     def test_ci_retry_creates_filtered_build_for_new_head(self) -> None:
         github = FakeGitHub(
@@ -925,6 +1094,48 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(buildkite.cancel_calls, [])
         self.assertIn("No cancelable CI build is running", github.comments[0])
+
+    def test_amd_ci_cancel_handles_command_and_fork_webhook_branches(self) -> None:
+        pr = make_pr()
+        pr["head"]["label"] = "contributor:feature"
+        github = FakeGitHub(pr=pr)
+        buildkite = FakeBuildkite(
+            [
+                [
+                    {
+                        "branch": "feature",
+                        "number": 321,
+                        "pull_request": {"id": 42},
+                        "state": "running",
+                        "web_url": "https://buildkite.example/amd-ci/builds/321",
+                    }
+                ],
+                [
+                    {
+                        "branch": "contributor:feature",
+                        "number": 322,
+                        "pull_request": {"id": 42},
+                        "state": "failing",
+                        "web_url": "https://buildkite.example/amd-ci/builds/322",
+                    }
+                ],
+            ]
+        )
+
+        run(make_event(COMMAND_CANCEL_AMD_CI), github, buildkite)
+
+        self.assertEqual(buildkite.cancel_calls, [321, 322])
+        self.assertEqual(
+            [request["branch"] for request in buildkite.list_requests],
+            ["feature", "contributor:feature"],
+        )
+        self.assertTrue(
+            all(
+                request["states"] == CANCELABLE_BUILD_STATES
+                for request in buildkite.list_requests
+            )
+        )
+        self.assertIn("cancellation of 2 AMD CI builds", github.comments[0])
 
     def test_buildkite_cancel_uses_cancel_build_endpoint(self) -> None:
         transport = FakeTransport({"number": 123, "state": "canceling"})

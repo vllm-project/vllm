@@ -441,6 +441,11 @@ impl UtilityRegistry {
         self.utility_calls.contains_key(&call_id)
     }
 
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.utility_calls.len()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }

@@ -104,7 +104,7 @@ def test_inkling_mapper_maps_modelopt_exclusions() -> None:
     )
 
     quant_config.apply_vllm_mapper(
-        _TmlForCausalLMBase.hf_to_vllm_mapper.get_unstacked_mapper()
+        _TmlForCausalLMBase.hf_to_vllm_mapper.get_rename_mapper()
     )
 
     assert quant_config.is_layer_excluded("model.layers.2.mlp.experts")

@@ -47,6 +47,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
+    routed_experts_prompt_start: int = 0
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
@@ -98,6 +99,7 @@ class EngineCoreOutput(
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
+    new_sampling_mask: object | None = None
 
 
 class EngineCoreOutputs(
@@ -134,6 +136,7 @@ request = EngineCoreRequest(
         stop_token_ids=[151643],
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},
+        routed_experts_prompt_start=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     ),
     pooling_params=None,
@@ -200,6 +203,29 @@ outputs = EngineCoreOutputs(
         )
     ],
     finished_requests={"req-1"},
+)
+
+sampling_mask_wire = [
+    [
+        "<i4",
+        [5],
+        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+    ],
+    [
+        "<i8",
+        [2],
+        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
+    ],
+    None,
+]
+outputs_with_sampling_mask = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-mask",
+            new_token_ids=[16],
+            new_sampling_mask=sampling_mask_wire,
+        )
+    ]
 )
 
 
@@ -385,9 +411,14 @@ class EngineCoreReadyResponse:
     max_num_seqs: int
     max_num_batched_tokens: int
     instance_id: str
+    supports_lora: bool
+    max_loras: int
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -406,6 +437,11 @@ ready_response = EngineCoreReadyResponse(
     max_num_seqs=256,
     max_num_batched_tokens=8192,
     instance_id="test-instance",
+    supports_lora=True,
+    max_loras=8,
+    weight_transfer_backend="nccl",
+    enable_sleep_mode=True,
+    supports_draft_weight_updates=True,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -422,6 +458,7 @@ print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(defaults_request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
 print(msgspec.msgpack.encode(outputs).hex())
+print(msgspec.msgpack.encode(outputs_with_sampling_mask).hex())
 print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
 print(
     " ".join(

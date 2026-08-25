@@ -21,8 +21,10 @@ from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
-    PyNvVideoCodecVideoBackend,
     VideoLoader,
+)
+from vllm.multimodal.video_decoders.pynvvideocodec import (
+    PyNvVideoCodecVideoBackendMixin,
     _pynvvc_frames_to_nhwc,
 )
 
@@ -381,13 +383,15 @@ def test_pynvvideocodec_unrelated_error_propagates(
         raise original_error
 
     monkeypatch.setattr(
-        PyNvVideoCodecVideoBackend,
+        PyNvVideoCodecVideoBackendMixin,
         "_read_source_metadata",
         classmethod(raise_unrelated_error),
     )
 
     with pytest.raises(RuntimeError) as exc_info:
-        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(b"video", None)
+        PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
+            None, b"video", None
+        )
 
     assert exc_info.value is original_error
 

@@ -8,7 +8,6 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
-import os
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -19,6 +18,7 @@ from typing_extensions import override
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
@@ -247,20 +247,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        # Block hashes chain from NONE_HASH, seeded from PYTHONHASHSEED
-        # (see init_none_hash in v1/core/kv_cache_utils.py). Peers with
-        # different seeds compute different hashes for identical content, so
-        # lookups silently miss and no KV crosses the wire. Require it here so
-        # a misconfigured P2P instance fails at startup rather than degrading
-        # silently; the value is also verified against each peer on handshake.
-        hash_seed = os.getenv("PYTHONHASHSEED")
-        if hash_seed is None:
-            raise ValueError(
-                "PYTHONHASHSEED must be set for P2P KV offload so that block "
-                "hashes match across instances. Set it to a fixed value (e.g. "
-                "PYTHONHASHSEED=0) on every P2P peer."
-            )
-        self._hash_seed = hash_seed
+        # Block hashes chain from NONE_HASH (see v1/core/kv_cache_utils.py).
+        # Peers whose seeds differ compute different hashes for identical
+        # content, so lookups silently miss and no KV crosses the wire. The
+        # seed is advertised and verified against each peer during the
+        # handshake, so a mismatch is rejected loudly instead of degrading
+        # silently. Resolved lazily in _get_hash_seed: this tier is built
+        # before init_none_hash runs, and a non-cryptographic hash algorithm
+        # seeds NONE_HASH randomly, so the value is only known afterwards.
+        self._hash_seed: str | None = None
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:
@@ -602,6 +597,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # Internal
     # ------------------------------------------------------------------
 
+    def _get_hash_seed(self) -> str:
+        """The seed NONE_HASH was derived from, resolved on first session."""
+        if self._hash_seed is None:
+            self._hash_seed = get_none_hash_seed()
+        return self._hash_seed
+
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
@@ -621,7 +622,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             local_id=self._local_id,
             transport=self._data,
             local_block_len=self._data.block_len,
-            local_hash_seed=self._hash_seed,
+            local_hash_seed=self._get_hash_seed(),
             conn=conn,
         )
         self._sessions[peer_id] = session
@@ -643,7 +644,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     local_id=self._local_id,
                     transport=self._data,
                     local_block_len=self._data.block_len,
-                    local_hash_seed=self._hash_seed,
+                    local_hash_seed=self._get_hash_seed(),
                     conn=conn,
                 )
                 logger.info(

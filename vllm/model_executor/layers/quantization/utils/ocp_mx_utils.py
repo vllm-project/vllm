@@ -16,7 +16,6 @@ OCP_MX_DTYPES = {
     "mxfp8_e5m2",
     "mxint8",
 }
-SUPPORTED_OCP_MX_DTYPES = {"mxfp4", "mxfp6_e3m2", "mxfp6_e2m3"}
 
 
 class OCP_MX_Scheme(str, Enum):

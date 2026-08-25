@@ -15,7 +15,7 @@ server_args: >-
   --block-size 256
   --gpu-memory-utilization 0.5
   --kv-cache-dtype fp8
-  --attention_config.use_fp4_indexer_cache=True
+  --attention_config.indexer_kv_dtype=mxfp4
   --max-num-batched-tokens 16384
   --max-num-seqs 128
   --speculative-config '{"method":"dspark",

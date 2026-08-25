@@ -266,6 +266,42 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             for mm_item, mm_hash in zip(mm_items, mm_hashes)
         ]
 
+    def cache_if_fits(
+        self,
+        cache: LRUCache[str, _V],
+        key: str,
+        value: _V,
+    ) -> bool:
+        """Insert `value` if it fits in `cache`.
+
+        `cachetools.Cache` raises `ValueError("value too large")` when a
+        single item exceeds `maxsize`. An item bigger than the whole
+        processor cache can never be a hit, so skip the insert and serve it
+        uncached instead of aborting engine startup.
+
+        LRU P0/P1 caches call this so they stay mirrored. SHM subclasses do
+        not use it; they already skip oversize items in `put()`.
+
+        Args:
+            cache: The LRU cache to update.
+            key: Cache key (typically the multi-modal item hash).
+            value: Value to insert.
+
+        Returns:
+            `True` if the item was cached, otherwise `False`.
+        """
+        if cache.put_if_fits(key, value):
+            return True
+        logger.warning_once(
+            "Skipping multi-modal processor cache insert for an item of "
+            "%s GiB because it exceeds --mm-processor-cache-gb=%s. "
+            "The item will be processed uncached; increase "
+            "--mm-processor-cache-gb to cache items of this size.",
+            format_gib(int(cache.getsizeof(value))),
+            format_gib(int(cache.maxsize)),
+        )
+        return False
+
     @abstractmethod
     def clear_cache(self) -> None:
         """Clear the underlying cache."""
@@ -389,8 +425,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItem(*mm_item)
-
+        self.cache_if_fits(self._cache, mm_hash, MultiModalProcessorCacheItem(*mm_item))
         return mm_item
 
     @override
@@ -447,8 +482,9 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItemMetadata(*mm_item)
-
+        self.cache_if_fits(
+            self._cache, mm_hash, MultiModalProcessorCacheItemMetadata(*mm_item)
+        )
         return mm_item
 
     @override
@@ -709,7 +745,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         if mm_item is None:
             raise MultiModalCacheMissError([mm_hash])
 
-        self._cache[mm_hash] = mm_item
+        self.cache_if_fits(self._cache, mm_hash, mm_item)
         return mm_item
 
     @override

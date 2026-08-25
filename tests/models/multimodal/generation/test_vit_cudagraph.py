@@ -286,6 +286,12 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<bos><start_of_turn>user\n<|video|>\nDescribe this video in one sentence."
             "<end_of_turn>\n<start_of_turn>model\n"
         ),
+        # The 16-frame test video produces 1056 vision tokens. Capture only
+        # the smallest supported bucket that covers it instead of all default
+        # buckets through max_model_len, which adds unrelated memory pressure.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1120],
+        },
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
@@ -307,7 +313,9 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
 
@@ -351,7 +359,9 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]
 

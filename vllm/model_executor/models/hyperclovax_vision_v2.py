@@ -209,11 +209,16 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         )
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
+        tokenizer = self.info.get_tokenizer()
+        prompt = tokenizer.encode(
+            prompt_text,
+            **self.info.default_tok_params.get_encode_kwargs(),
+        )
+
         return ProcessorInputs(
-            prompt=prompt_text,
+            prompt=prompt,
             mm_data_items=dummy_mm_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            tokenization_kwargs={"truncation": False},
         )
 
     def get_dummy_mm_data(
@@ -256,53 +261,44 @@ class HCXVisionV2MultiModalProcessor(
 ):
     """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         images = mm_data.get("images")
         videos = mm_data.get("videos")
 
         # Get the HF processor
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         # Build data dict for HF processor (images/videos only)
         # NOTE: We pass the prompt as-is without token normalization.
-        # Token expansion is handled by vLLM via _get_prompt_updates since
-        # _hf_processor_applies_updates returns False.
+        # Token expansion is handled by vLLM via _get_prompt_updates.
         data: dict[str, object] = dict(
-            text=prompt,
+            text=prompt_text,
             images=images,
             videos=videos,
         )
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor=hf_processor,
             data=data,
-            kwargs=dict(**mm_kwargs, **tok_kwargs),
+            kwargs=hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
 
-        return processed_outputs
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        # Match BaseMultiModalProcessor behavior:
-        # - raw multimodal inputs: HF processor applies updates
-        # - embedding inputs: vLLM applies updates
-        return super()._hf_processor_applies_updates(
-            prompt_text,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-        )
+        return processed_data
 
     def _get_prompt_updates(
         self,

@@ -193,5 +193,5 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 ### Ecosystem Projects
 
 - Ascend NPU: [@wangxiyuan](https://github.com/wangxiyuan) and [see more details](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html#maintainers)
-- Intel Gaudi HPU [@xuechendi](https://github.com/xuechendi) and [@kzawora-intel](https://github.com/kzawora-intel)
+- Intel Gaudi HPU [@xuechendi](https://github.com/xuechendi) and [@iboiko-habana](https://github.com/iboiko-habana)
 - Semantic Router: [@xunzhuo](https://github.com/xunzhuo), [@rootfs](https://github.com/rootfs) and [see more details](https://vllm-semantic-router.com/community/team)

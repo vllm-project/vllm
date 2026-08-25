@@ -15,7 +15,9 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
 use crate::config::{ApiServerOptions, CorsConfig};
-use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
+use crate::lora::{
+    LoadLoraError, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
+};
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -40,8 +42,6 @@ pub struct AppState {
     pub cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
-    /// Deployment-wide data-parallel size retained by the frontend.
-    data_parallel_size: usize,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
     api_key_hashes: Vec<ApiKeyHash>,
     /// Number of in-flight inference requests currently owned by this frontend.
@@ -71,14 +71,12 @@ impl AppState {
             !served_model_names.is_empty(),
             "served_model_names must not be empty"
         );
-        let data_parallel_size = chat.engine_core_client().engine_count();
         Self {
             served_model_names,
             chat,
             api_server_options: ApiServerOptions::default(),
             cors: CorsConfig::default(),
             server_info: None,
-            data_parallel_size,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
@@ -116,17 +114,6 @@ impl AppState {
     pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
         self.server_info = Some(server_info);
         self
-    }
-
-    /// Set the deployment-wide data-parallel size reported by frontend APIs.
-    pub(crate) fn with_data_parallel_size(mut self, size: usize) -> Self {
-        self.data_parallel_size = size;
-        self
-    }
-
-    /// Return the deployment-wide data-parallel size.
-    pub(crate) fn data_parallel_size(&self) -> usize {
-        self.data_parallel_size
     }
 
     /// Build a `/server_info` response payload.
@@ -176,12 +163,22 @@ impl AppState {
         self.lora_manager.served_lora_requests().await
     }
 
+    /// Snapshot loaded LoRA adapters for the lifecycle API.
+    ///
+    /// Returns error if the engine was started without LoRA support.
+    pub async fn list_loras(&self) -> Result<Vec<LoraRequest>, LoraDisabledError> {
+        self.ensure_lora_enabled()?;
+        Ok(self.lora_manager.served_lora_requests().await)
+    }
+
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
         self.lora_manager.resolve_model(&self.served_model_names, model_name).await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.
+    ///
+    /// Returns error if the engine was started without LoRA support.
     pub async fn load_lora(
         &self,
         lora_name: String,
@@ -189,6 +186,7 @@ impl AppState {
         load_inplace: bool,
         is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
+        self.ensure_lora_enabled()?;
         self.lora_manager
             .load_lora(
                 self.engine_core_client(),
@@ -203,14 +201,25 @@ impl AppState {
 
     /// Remove one dynamic LoRA adapter from the engine and public model
     /// registry.
+    ///
+    /// Returns error if the engine was started without LoRA support.
     pub async fn unload_lora(
         &self,
         lora_name: &str,
         lora_int_id: Option<u64>,
     ) -> Result<LoraRequest, UnloadLoraError> {
+        self.ensure_lora_enabled()?;
         self.lora_manager
             .unload_lora(self.engine_core_client(), lora_name, lora_int_id)
             .await
+    }
+
+    fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
+        self.engine_core_client()
+            .ready_response()
+            .supports_lora
+            .then_some(())
+            .ok_or(LoraDisabledError)
     }
 
     /// Return a reference to the underlying engine core client for utility

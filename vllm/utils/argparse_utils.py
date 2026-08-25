@@ -16,7 +16,7 @@ from argparse import (
     _ArgumentGroup,
 )
 from collections import defaultdict
-from typing import Any
+from typing import Any, NoReturn
 
 import regex as re
 import yaml
@@ -132,6 +132,22 @@ class FlexibleArgumentParser(ArgumentParser):
         # Pop kwarg "add_json_tip" to control whether to add the JSON tip
         self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
+        self._show_serve_task_hint = False
+
+    def error(self, message: str) -> NoReturn:
+        if (
+            (self.prog.endswith(" serve") or self._show_serve_task_hint)
+            and message.startswith("unrecognized arguments:")
+            and re.search(r"(^|\s)--task(=|\s|$)", message)
+        ):
+            message += (
+                "\n\nHint: --task is not a vllm serve option. "
+                "For embedding, reranking, or reward models, use "
+                "--runner pooling. To adapt a generative model for pooling, "
+                "also use --convert embed, --convert classify, or "
+                "--convert reward."
+            )
+        super().error(message)
 
     if sys.version_info < (3, 13):
         # Enable the deprecated kwarg for Python 3.12 and below
@@ -247,6 +263,9 @@ class FlexibleArgumentParser(ArgumentParser):
     ):
         if args is None:
             args = sys.argv[1:]
+        self._show_serve_task_hint = args[:1] == ["serve"] and any(
+            re.match(r"^--task(=.+|$)", arg) for arg in args[1:]
+        )
 
         if args and args[0] == "serve":
             # Check for --model in command line arguments first

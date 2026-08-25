@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -18,7 +18,8 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
+    SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -37,6 +38,9 @@ from vllm.tracing import (
 )
 from vllm.v1.metrics.stats import RequestStateStats
 
+if TYPE_CHECKING:
+    from vllm.outputs import RequestOutput
+
 logger = init_logger(__name__)
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
@@ -48,7 +52,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
-) -> PerRequestTimingMetrics:
+) -> PerRequestMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
     ``generation_time_ms`` is the decode interval only (first output token to
@@ -60,7 +64,7 @@ def build_per_request_timing_metrics(
     unavailable.
     """
     if metrics is None:
-        return PerRequestTimingMetrics()
+        return PerRequestMetrics()
 
     queued_ts = metrics.queued_ts
     scheduled_ts = metrics.scheduled_ts
@@ -91,13 +95,30 @@ def build_per_request_timing_metrics(
         if inference_time_ms > 0:
             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
 
-    return PerRequestTimingMetrics(
+    return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
     )
+
+
+def build_spec_decoding_metrics(
+    final_res: "RequestOutput | None",
+) -> SpeculativeDecodingMetrics | None:
+    """Build per-request spec-decode acceptance metrics from the single output
+    sequence, or ``None`` when unavailable (metrics disabled, or no sequence
+    yet).
+
+    Only meaningful for single-sequence requests; callers suppress it for n>1.
+    """
+    if final_res is None or not final_res.outputs:
+        return None
+    metrics = final_res.outputs[0].spec_decode_metrics
+    if metrics is None:
+        return None
+    return SpeculativeDecodingMetrics(**metrics.to_dict())
 
 
 @dataclass(kw_only=True)

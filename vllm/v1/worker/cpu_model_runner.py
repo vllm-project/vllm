@@ -74,7 +74,7 @@ class CPUModelRunner(GPUModelRunner):
 
         import vllm.v1.worker.block_table
 
-        vllm.v1.worker.block_table._compute_slot_mapping_kernel = (
+        vllm.v1.worker.block_table._COMPUTE_SLOT_MAPPING_KERNEL.kernel = (
             cpu_tl.compute_slot_mapping_kernel
         )
 

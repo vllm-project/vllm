@@ -65,10 +65,16 @@ def init_pooling_io_processors(
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
-    if has_io_processor(
+    if pooling_task == "embed&token_classify":
+        from .pooling.io_processor import UnsupportedCombinedTaskIOProcessor
+
+        processors[pooling_task] = UnsupportedCombinedTaskIOProcessor
+
+    has_plugin = has_io_processor(
         vllm_config,
         model_config.io_processor_plugin,
-    ):
+    )
+    if has_plugin:
         from .pooling.io_processor import PluginWithIOProcessorPlugins
 
         processors["plugin"] = PluginWithIOProcessorPlugins

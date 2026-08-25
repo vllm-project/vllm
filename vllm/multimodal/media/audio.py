@@ -10,6 +10,7 @@ import pybase64
 import torch
 
 import vllm.envs as envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
@@ -275,7 +276,20 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         # for flexible control.
         self.kwargs = kwargs
 
+    def get_max_bytes(self) -> int:
+        return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
+
+    def _validate_encoded_size(self, size: int) -> None:
+        max_bytes = self.get_max_bytes()
+        if size > max_bytes:
+            raise VLLMValidationError(
+                "Maximum file size exceeded",
+                parameter="audio_filesize_mb",
+                value=size / MiB_bytes,
+            )
+
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
+        self._validate_encoded_size(len(data))
         return load_audio(
             BytesIO(data),
             sr=None,
@@ -288,9 +302,17 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         media_type: str,
         data: str,
     ) -> tuple[npt.NDArray, float]:
-        return self.load_bytes(pybase64.b64decode(data))
+        max_encoded_chars = 4 * ((self.get_max_bytes() + 2) // 3)
+        if len(data) > max_encoded_chars:
+            raise VLLMValidationError(
+                "Maximum file size exceeded",
+                parameter="audio_filesize_mb",
+                value=(len(data) * 3 / 4) / MiB_bytes,
+            )
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
+        self._validate_encoded_size(filepath.stat().st_size)
         return load_audio(
             filepath,
             sr=None,

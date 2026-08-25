@@ -18,7 +18,7 @@ pub use self::config::{
     load_tokenizer_config,
 };
 pub use self::model_files::{ResolvedModelFiles, TokenizerSource};
-use crate::backend::{SamplingHints, TextBackend};
+use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
@@ -41,6 +41,7 @@ pub struct HfTextBackend {
     /// Generation-config for sampling defaults that may be inherited when the
     /// user does not explicitly override them.
     generation_config: GenerationConfig,
+    generation_config_mode: GenerationConfigMode,
     /// Model vocabulary size from the selected text config.
     model_vocab_size: usize,
     /// Model config (`config.json`).
@@ -48,14 +49,12 @@ pub struct HfTextBackend {
 }
 
 impl HfTextBackend {
-    /// Load the text backend with the given model id.
-    pub async fn from_model(model_id: &str) -> Result<Self> {
-        let files = ResolvedModelFiles::new(model_id).await?;
-        Self::from_resolved_model_files(files, model_id.to_string())
-    }
-
     /// Load the text backend from resolved Hugging Face model files.
-    pub fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
+    pub fn from_resolved_model_files(
+        files: ResolvedModelFiles,
+        model_id: String,
+        generation_config_mode: GenerationConfigMode,
+    ) -> Result<Self> {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
         let tokenizer = load_tokenizer(&files.tokenizer)?;
         let model_config = load_model_config(files.config_path.as_deref())?;
@@ -80,6 +79,7 @@ impl HfTextBackend {
             primary_eos_token_id,
             extra_eos_token_ids,
             generation_config,
+            generation_config_mode,
             model_vocab_size,
             model_config,
         })
@@ -146,16 +146,38 @@ impl TextBackend for HfTextBackend {
     }
 
     fn sampling_hints(&self) -> Result<SamplingHints> {
-        Ok(SamplingHints {
-            primary_eos_token_id: self.primary_eos_token_id,
-            extra_eos_token_ids: self.extra_eos_token_ids.clone(),
-            default_temperature: self.generation_config.temperature,
-            default_top_p: self.generation_config.top_p,
-            default_top_k: self.generation_config.top_k,
-            default_min_p: self.generation_config.min_p,
-            default_repetition_penalty: self.generation_config.repetition_penalty,
-            default_max_tokens: self.generation_config.max_new_tokens,
-        })
+        Ok(build_sampling_hints(
+            self.generation_config_mode,
+            &self.generation_config,
+            self.primary_eos_token_id,
+            self.extra_eos_token_ids.clone(),
+        ))
+    }
+}
+
+fn build_sampling_hints(
+    mode: GenerationConfigMode,
+    generation_config: &GenerationConfig,
+    primary_eos_token_id: Option<u32>,
+    extra_eos_token_ids: BTreeSet<u32>,
+) -> SamplingHints {
+    let sampling_config = match mode {
+        // Auto inherits sampling defaults from the model's generation config.
+        GenerationConfigMode::Auto => Some(generation_config),
+        // Vllm skips model-provided sampling defaults. `lower_sampling_params`
+        // applies vLLM fallback values; separately resolved EOS tokens remain.
+        GenerationConfigMode::Vllm => None,
+    };
+
+    SamplingHints {
+        primary_eos_token_id,
+        extra_eos_token_ids,
+        default_temperature: sampling_config.and_then(|config| config.temperature),
+        default_top_p: sampling_config.and_then(|config| config.top_p),
+        default_top_k: sampling_config.and_then(|config| config.top_k),
+        default_min_p: sampling_config.and_then(|config| config.min_p),
+        default_repetition_penalty: sampling_config.and_then(|config| config.repetition_penalty),
+        default_max_tokens: sampling_config.and_then(|config| config.max_new_tokens),
     }
 }
 
@@ -163,7 +185,10 @@ impl TextBackend for HfTextBackend {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig, resolve_eos_token_ids};
+    use super::{
+        GenerationConfig, GenerationConfigMode, HfTokenizerConfig, ModelConfig,
+        build_sampling_hints, resolve_eos_token_ids,
+    };
     use vllm_tokenizer::Tokenizer;
 
     struct FakeTokenizer;
@@ -234,5 +259,83 @@ mod tests {
 
         assert_eq!(primary, Some(2));
         assert_eq!(extra, BTreeSet::from([200006, 200010]));
+    }
+
+    #[test]
+    fn vllm_generation_config_keeps_eos_and_uses_neutral_sampling_defaults() {
+        let generation_config: GenerationConfig = serde_json::from_str(
+            r#"{
+                "eos_token_id": [2, 3],
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.1,
+                "repetition_penalty": 1.1,
+                "max_new_tokens": 4096
+            }"#,
+        )
+        .unwrap();
+        let extra_eos_token_ids = BTreeSet::from([3]);
+
+        let hints = (
+            build_sampling_hints(
+                GenerationConfigMode::Auto,
+                &generation_config,
+                Some(2),
+                extra_eos_token_ids.clone(),
+            ),
+            build_sampling_hints(
+                GenerationConfigMode::Vllm,
+                &generation_config,
+                Some(2),
+                extra_eos_token_ids,
+            ),
+        );
+
+        expect_test::expect![[r#"
+            (
+                SamplingHints {
+                    primary_eos_token_id: Some(
+                        2,
+                    ),
+                    extra_eos_token_ids: {
+                        3,
+                    },
+                    default_temperature: Some(
+                        0.6,
+                    ),
+                    default_top_p: Some(
+                        0.95,
+                    ),
+                    default_top_k: Some(
+                        20,
+                    ),
+                    default_min_p: Some(
+                        0.1,
+                    ),
+                    default_repetition_penalty: Some(
+                        1.1,
+                    ),
+                    default_max_tokens: Some(
+                        4096,
+                    ),
+                },
+                SamplingHints {
+                    primary_eos_token_id: Some(
+                        2,
+                    ),
+                    extra_eos_token_ids: {
+                        3,
+                    },
+                    default_temperature: None,
+                    default_top_p: None,
+                    default_top_k: None,
+                    default_min_p: None,
+                    default_repetition_penalty: None,
+                    default_max_tokens: None,
+                },
+            )
+        "#]]
+        .assert_debug_eq(&hints);
     }
 }

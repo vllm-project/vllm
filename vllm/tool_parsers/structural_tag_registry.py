@@ -376,6 +376,7 @@ _K3_ARG_CLOSE = f"{_K3_CLOSE}argument{_K3_SEP}"
 # the end-of-message token. It is generated (not part of the prompt prefix), so
 # the tag must permit it or the FSM would mask the model's natural terminator.
 _K3_MESSAGE_CLOSE = f"{_K3_CLOSE}message{_K3_SEP}"
+_K3_END_OF_MSG = "<|end_of_msg|>"
 
 # JSON-schema type -> K3 XTML ``type=`` attribute value. Mirrors
 # ``encoding_k3._xtml_type`` (integer collapses onto number).
@@ -556,12 +557,17 @@ def _k3_response_prefix() -> list[Any]:
 
     ``response`` is generated in thinking mode (prefix ends at
     ``<|open|>think<|sep|>``) but is part of the generation prefix in
-    non-thinking mode, so its open marker is optional. The body is bounded by
-    the response close marker.
+    non-thinking mode, so its open marker is optional. Excluding the reserved
+    marker heads commits ``<|close|>`` to the response-close branch immediately
+    and prevents a nested channel from starting inside response text.
     """
     return [
         OptionalFormat(content=ConstStringFormat(value=_K3_RESPONSE_OPEN)),
-        TagFormat(begin="", content=AnyTextFormat(), end=_K3_RESPONSE_CLOSE),
+        TagFormat(
+            begin="",
+            content=AnyTextFormat(excludes=[_K3_OPEN, _K3_CLOSE, _K3_END_OF_MSG]),
+            end=_K3_RESPONSE_CLOSE,
+        ),
     ]
 
 

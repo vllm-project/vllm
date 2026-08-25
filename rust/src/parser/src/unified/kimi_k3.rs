@@ -56,6 +56,7 @@ use crate::unified::parsing_failed;
 use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 
 const OPEN: &str = "<|open|>";
+const CLOSE: &str = "<|close|>";
 const SEP: &str = "<|sep|>";
 const END_OF_MSG: &str = "<|end_of_msg|>";
 

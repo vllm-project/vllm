@@ -55,6 +55,7 @@ def _run_engine_core_handshake(
     class _FakeScheduler:
         def __init__(self, **kwargs: Any) -> None:
             self.connector = connector
+            self.ec_connector = None
 
         def get_kv_connector(self) -> KVConnectorBase_V1:
             return connector

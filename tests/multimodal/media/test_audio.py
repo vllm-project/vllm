@@ -46,6 +46,18 @@ def test_audio_media_io_load_base64(dummy_audio_bytes):
     assert out[1] == 16000
 
 
+def test_audio_media_io_load_base64_rejects_malformed(dummy_audio_bytes):
+    """Malformed base64 must surface as a ValueError so the server answers 400.
+    Without strict decoding the bad characters are dropped, the garbage reaches
+    libsndfile, and the client gets a 500 instead."""
+    encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
+    malformed = encoded[:8] + "!!!@@@###" + encoded[8:]
+
+    audio_io = AudioMediaIO()
+    with pytest.raises(ValueError):
+        audio_io.load_base64("audio/wav", malformed)
+
+
 def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
     audio_io = AudioMediaIO()
     path = audio_assets[0].get_local_path()

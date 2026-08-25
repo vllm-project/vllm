@@ -49,12 +49,15 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -101,6 +104,34 @@ MOSS_AUDIO_PROCESSOR_CONFIG_KEYS = {
     "enable_time_marker",
     "mel_config",
 }
+MOSS_AUDIO_PLACEHOLDER_TOKENS = (
+    MOSS_AUDIO_BOS_TOKEN,
+    MOSS_AUDIO_TOKEN,
+    MOSS_AUDIO_EOS_TOKEN,
+)
+
+
+def _ensure_moss_audio_placeholder_tokens(tokenizer: object) -> None:
+    """Register the audio placeholder tokens if the tokenizer lacks them.
+
+    The MOSS-Audio hub tokenizer does not define the audio placeholder
+    tokens (the reference HF processor patches them in at runtime). Left
+    as plain text, they merge with adjacent tokens under BPE, so prompts
+    no longer contain a stable token sequence for prompt updates to match.
+    """
+    convert_tokens_to_ids = getattr(tokenizer, "convert_tokens_to_ids", None)
+    add_tokens = getattr(tokenizer, "add_tokens", None)
+    if convert_tokens_to_ids is None or add_tokens is None:
+        return
+
+    unk_token_id = getattr(tokenizer, "unk_token_id", None)
+    missing_tokens = [
+        token
+        for token in MOSS_AUDIO_PLACEHOLDER_TOKENS
+        if convert_tokens_to_ids(token) in (None, unk_token_id)
+    ]
+    if missing_tokens:
+        add_tokens(missing_tokens, special_tokens=True)
 
 
 class MossAudioAudioInputs(TensorSchema):
@@ -835,15 +866,14 @@ class MossQwen3ForCausalLM(Qwen3ForCausalLM):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             from .utils import PPMissingLayer
 
@@ -1157,6 +1187,11 @@ class MossAudioProcessor:
 
 
 class MossAudioProcessingInfo(BaseProcessingInfo):
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(ctx)
+        if ctx.tokenizer is not None:
+            _ensure_moss_audio_placeholder_tokens(ctx.tokenizer)
+
     def get_hf_config(self) -> MossAudioConfig:
         config = self.ctx.get_hf_config()
         if isinstance(config, MossAudioConfig):
@@ -1301,29 +1336,32 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
 
 
 class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
         if audios:
             mm_data["audio"] = audios
-        mm_kwargs = dict(mm_kwargs)
-        processor_kwargs = _filter_moss_audio_processor_config(mm_kwargs)
-        tok_kwargs = {
-            key: value
-            for key, value in tok_kwargs.items()
-            if key not in MOSS_AUDIO_PROCESSOR_CONFIG_KEYS
-        }
-        return self.info.ctx.call_hf_processor(
+        hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
+        processor_kwargs = _filter_moss_audio_processor_config(hf_processor_mm_kwargs)
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**processor_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**tok_kwargs),
+            mm_data,
+            {},
         )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -1339,6 +1377,8 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = processor.tokenizer
+
         out_mm_data = out_mm_kwargs.get_data()
         audio_data_seqlens = out_mm_data.get("audio_data_seqlens")
         if audio_data_seqlens is None:
@@ -1356,7 +1396,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         def get_replacement(
             item_idx: int,
             suffix_token_ids: list[int] | None = None,
-        ) -> PromptUpdateDetails[list[int]]:
+        ) -> PromptUpdateDetails:
             num_tokens = audio_token_lens[item_idx]
             if num_tokens == 0:
                 raise ValueError("The audio is too short to be represented.")
@@ -1373,7 +1413,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                     processor.audio_end_id,
                     *suffix_token_ids,
                 ],
-                is_embed=lambda _tokenizer, _seq: torch.cat(
+                is_embed=lambda _seq: torch.cat(
                     [
                         torch.tensor([False]),
                         is_embed,
@@ -1394,11 +1434,13 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
             )
         ]
         for suffix in ("", "\n"):
-            tokenizer_target = processor.tokenizer.encode(
+            tokenizer_target = cached_encode(
+                tokenizer,
                 MOSS_AUDIO_PLACEHOLDER + suffix,
                 add_special_tokens=False,
             )
-            suffix_token_ids = processor.tokenizer.encode(
+            suffix_token_ids = cached_encode(
+                tokenizer,
                 suffix,
                 add_special_tokens=False,
             )
@@ -1450,6 +1492,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             "language_model.embed_tokens.": "language_model.model.embed_tokens.",
             "language_model.layers.": "language_model.model.layers.",
             "language_model.norm.": "language_model.model.norm.",
+            "audio_encoder.embed_positions": None,
         },
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -1668,15 +1711,19 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         """
         audio_data = audio_input["audio_data"]
         audio_data_seqlens = audio_input["audio_data_seqlens"]
-        last_hidden_state, deepstack = self.audio_encoder(
-            audio_data.to(self.audio_encoder.dtype),
-            feature_lens=audio_data_seqlens,
-            output_deepstack_hidden_states=len(self.deepstack_audio_merger_list) > 0,
-        )
-        audio_embeds = self.audio_adapter(last_hidden_state)
-        audio_lengths = MossAudioEncoder._compute_downsampled_length(
-            audio_data_seqlens.to(device=audio_embeds.device, dtype=torch.long)
-        ).tolist()
+        # The encoder chunks the input by per-audio feature lengths, which
+        # needs Python ints for `split`/`pad_sequence`.
+        want_deepstack = len(self.deepstack_audio_merger_list) > 0
+        with gpu_sync_allowed():
+            last_hidden_state, deepstack = self.audio_encoder(
+                audio_data.to(self.audio_encoder.dtype),
+                feature_lens=audio_data_seqlens,
+                output_deepstack_hidden_states=want_deepstack,
+            )
+            audio_embeds = self.audio_adapter(last_hidden_state)
+            audio_lengths = MossAudioEncoder._compute_downsampled_length(
+                audio_data_seqlens.to(device=audio_embeds.device, dtype=torch.long)
+            ).tolist()
         main_embeddings = tuple(audio_embeds.squeeze(0).split(audio_lengths, dim=0))
 
         deepstack_embeddings: list[tuple[torch.Tensor, ...]] = []
@@ -1861,8 +1908,5 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["audio_encoder.embed_positions"],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -384,17 +384,17 @@ class CompressedTensorsConfig(QuantizationConfig):
                 supported = capability == min_capability
                 if error and not supported:
                     raise RuntimeError(
-                        "Quantization scheme is not supported for ",
-                        "the current GPU. Required capability: ",
-                        f"{min_capability}. Current capability: {capability}.",
+                        "Quantization scheme is not supported for the current GPU. "
+                        f"Required capability: {min_capability}. "
+                        f"Current capability: {capability}."
                     )
             else:
                 supported = capability >= min_capability
                 if error and not supported:
                     raise RuntimeError(
-                        "Quantization scheme is not supported for ",
-                        f"the current GPU. Min capability: {min_capability}. ",
-                        f"Current capability: {capability}.",
+                        "Quantization scheme is not supported for the current GPU. "
+                        f"Min capability: {min_capability}. "
+                        f"Current capability: {capability}."
                     )
             return supported
         else:
@@ -737,8 +737,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
             if not self._is_nvfp4_format(input_quant):
                 raise ValueError(
-                    "For NVFP4 weights, input quantization must also be NVFP4 format, ",
-                    "None for NVFP4A16",
+                    "For NVFP4 weights, input quantization must also be NVFP4 "
+                    "format, None for NVFP4A16"
                 )
             return CompressedTensorsW4A4Fp4()
 

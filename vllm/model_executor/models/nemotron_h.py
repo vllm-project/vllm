@@ -708,7 +708,7 @@ class NemotronHForCausalLM(
     is_non_gated_moe: bool = True
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"backbone": "model"},
+        orig_to_new_prefix={"backbone": "model", "mtp": None},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -887,5 +887,5 @@ class NemotronHForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

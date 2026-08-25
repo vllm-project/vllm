@@ -55,6 +55,7 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
 )
@@ -118,6 +119,9 @@ def _run_sparse_backend_vs_sdpa(
     num_heads: int,
     device: torch.device,
     force_future_dominance: bool = False,
+    qk_nope_head_dim: int = 128,
+    v_head_dim: int = 128,
+    stale_cpu_query_lens: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run a sparse-MLA backend with the given per-token indices and compute a
     dense per-token SDPA reference over the SAME indices.
@@ -145,9 +149,7 @@ def _run_sparse_backend_vs_sdpa(
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
 
     kv_lora_rank = 512
-    qk_nope_head_dim = 128
     qk_rope_head_dim = 64
-    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
 
     max_seqlen = max(seq_lens)
@@ -290,6 +292,16 @@ def _run_sparse_backend_vs_sdpa(
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, block_size, device, arange_block_indices=True
     )
+    if stale_cpu_query_lens is not None:
+        # Adaptive verification updates only device boundaries; the stale CPU
+        # copy proves token_to_req_indices consumes the device layout.
+        assert len(stale_cpu_query_lens) == len(query_lens)
+        cpu_query_start_loc = [0]
+        for query_len in stale_cpu_query_lens:
+            cpu_query_start_loc.append(cpu_query_start_loc[-1] + query_len)
+        common_attn_metadata.query_start_loc_cpu = torch.tensor(
+            cpu_query_start_loc, dtype=torch.int32
+        )
     kv_cache = create_and_prepopulate_kv_cache(
         kv_c_contexts=kv_c_contexts,
         k_pe_contexts=k_pe_contexts,
@@ -407,6 +419,52 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
         cap = current_platform.get_device_capability()
         if cap is None or not backend_cls.supports_compute_capability(cap):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
+
+
+def test_flashinfer_sparse_mla_adaptive_varlen_matches_sdpa(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+):
+    """Adaptive request boundaries must drive SM100 sparse index conversion."""
+    backend_cls = FlashInferMLASparseTRTLLMBackend
+    _skip_if_backend_unavailable(backend_cls, "fp8", 64)
+    assert (
+        backend_cls.get_builder_cls().get_cudagraph_support(None, None)
+        == AttentionCGSupport.ALWAYS
+    )
+
+    device = torch.device(DEVICE_TYPE)
+    seq_lens = [257, 270, 265, 276]
+    query_lens = [1, 7, 3, 5]
+    sparse_indices = _build_dspark_noncausal_indices(
+        seq_lens,
+        query_lens,
+        window=128,
+        topk_width=256,
+        device=device,
+    )
+
+    backend_output, sdpa_reference, _ = _run_sparse_backend_vs_sdpa(
+        backend_cls,
+        seq_lens,
+        query_lens,
+        sparse_indices,
+        "fp8",
+        64,
+        16,
+        device,
+        qk_nope_head_dim=192,
+        v_head_dim=256,
+        stale_cpu_query_lens=[4, 4, 4, 4],
+    )
+
+    torch.testing.assert_close(
+        backend_output,
+        sdpa_reference,
+        rtol=0.065,
+        atol=0.05,
+    )
 
 
 @pytest.mark.parametrize(

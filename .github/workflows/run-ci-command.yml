@@ -21,7 +21,12 @@ jobs:
       github.event.comment.body == '/ci run all' ||
       github.event.comment.body == '/ci run nightly' ||
       github.event.comment.body == '/ci retry' ||
-      github.event.comment.body == '/ci cancel')
+      github.event.comment.body == '/ci cancel' ||
+      github.event.comment.body == '/amd-ci run' ||
+      github.event.comment.body == '/amd-ci run all' ||
+      github.event.comment.body == '/amd-ci run nightly' ||
+      github.event.comment.body == '/amd-ci retry' ||
+      github.event.comment.body == '/amd-ci cancel')
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -37,6 +42,7 @@ jobs:
           .github/workflows/scripts/run_ci_command.py
         env:
           BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+          BUILDKITE_AMD_PIPELINE: amd-ci
           BUILDKITE_ORGANIZATION: vllm
           BUILDKITE_PIPELINE: ci
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}

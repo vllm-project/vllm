@@ -5,16 +5,20 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import inspect
 import itertools
 import operator
 import textwrap
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 __all__ = [
+    "JitWarmupRegistry",
     "VllmJitKernel",
     "WarmupIntRange",
     "get_ast_full_name",
@@ -136,7 +140,14 @@ class _CompileKeyDispatchTrace:
     field_exprs: tuple[tuple[str, ast.AST], ...]
     globals: Mapping[str, Any]
     input_names: frozenset[str]
+    # Named parameters are excluded from direct **kwargs forwarding.
+    named_parameters: frozenset[str] | None
     defaults: Mapping[str, Any]
+
+    def input_names_for(self, available_names: set[str]) -> frozenset[str]:
+        if self.named_parameters is None:
+            return self.input_names
+        return self.input_names | (available_names - self.named_parameters)
 
     def compile_key(
         self,
@@ -146,12 +157,20 @@ class _CompileKeyDispatchTrace:
         dispatch_values = _eval_local_exprs(
             self.local_exprs, {**self.defaults, **kwargs}, self.globals
         )
-        return compile_key_type(
-            **{
-                field: _eval_dispatch_expr(expr, dispatch_values, self.globals)
-                for field, expr in self.field_exprs
+        named_parameters = self.named_parameters
+        # Materialize direct fields before evaluating named AST expressions.
+        fields: dict[str, Any] = {}
+        if named_parameters is not None:
+            fields = {
+                name: value
+                for name, value in kwargs.items()
+                if name not in named_parameters
             }
-        )
+        for field, expr in self.field_exprs:
+            if field in fields:
+                raise TypeError(f"CompileKey field '{field}' is specified twice")
+            fields[field] = _eval_dispatch_expr(expr, dispatch_values, self.globals)
+        return compile_key_type(**fields)
 
 
 @dataclass(frozen=True)
@@ -186,6 +205,10 @@ _CMP_OPS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
     ast.LtE: operator.le,
     ast.Gt: operator.gt,
     ast.GtE: operator.ge,
+    ast.In: lambda left, right: left in right,
+    ast.NotIn: lambda left, right: left not in right,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
 }
 
 
@@ -200,8 +223,9 @@ def _dispatch_expr_error(node: ast.AST, reason: str) -> ValueError:
     return ValueError(
         f"{reason}: {_dispatch_expr_source(node)}. "
         "Supported dispatch expressions are names, constants, attributes, "
-        "tuple/list literals, conditional expressions, comparisons, boolean "
-        "operators, unary not/minus, arithmetic, and calls without **kwargs."
+        "subscriptions, tuple/list literals, conditional expressions, "
+        "comparisons, boolean operators, unary not/minus, arithmetic, and "
+        "calls without **kwargs."
     )
 
 
@@ -225,6 +249,8 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
             return self.values[node.id]
         if node.id in self.globals:
             return self.globals[node.id]
+        if hasattr(builtins, node.id):
+            return getattr(builtins, node.id)
         raise _dispatch_expr_error(node, f"Unknown dispatch name '{node.id}'")
 
     def visit_Constant(self, node: ast.Constant) -> Any:
@@ -299,6 +325,9 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> Any:
         return getattr(self.visit(node.value), node.attr)
 
+    def visit_Subscript(self, node: ast.Subscript) -> Any:
+        return self.visit(node.value)[self.visit(node.slice)]
+
 
 def get_ast_full_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
@@ -310,15 +339,23 @@ def get_ast_full_name(node: ast.AST) -> str | None:
     return None
 
 
-def get_function_source_node(fn: Callable[..., Any]) -> ast.FunctionDef:
+def get_function_source_node(fn: Callable[..., Any]) -> ast.FunctionDef | ast.Lambda:
     source_fn = getattr(fn, "fn", fn)
     source = textwrap.dedent(inspect.getsource(source_fn))
     tree = ast.parse(source)
     function_defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    if len(function_defs) != 1:
-        name = getattr(source_fn, "__name__", type(source_fn).__name__)
-        raise ValueError(f"Expected one function in {name}, found {len(function_defs)}")
-    return function_defs[0]
+    if len(function_defs) == 1:
+        return function_defs[0]
+
+    lambdas = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
+    if len(lambdas) == 1:
+        return lambdas[0]
+
+    name = getattr(source_fn, "__name__", type(source_fn).__name__)
+    raise ValueError(
+        f"Expected one function or lambda in {name}, found "
+        f"{len(function_defs)} functions and {len(lambdas)} lambdas"
+    )
 
 
 def _eval_dispatch_expr(
@@ -349,8 +386,11 @@ def _collect_input_names(
 
 def _collect_expression_body(
     fn: Callable[..., Any],
-    function_def: ast.FunctionDef,
+    function_def: ast.FunctionDef | ast.Lambda,
 ) -> tuple[list[tuple[str, ast.AST]], ast.AST]:
+    if isinstance(function_def, ast.Lambda):
+        return [], function_def.body
+
     local_exprs: list[tuple[str, ast.AST]] = []
     for statement in function_def.body:
         if (
@@ -421,6 +461,10 @@ def _trace_compile_key_dispatch(
     source_fn = getattr(fn, "__func__", fn)
     globals_ = source_fn.__globals__
     function_def = get_function_source_node(fn)
+    if isinstance(function_def, ast.Lambda):
+        raise _dispatch_expr_error(
+            function_def, "Dispatch must be a function definition"
+        )
 
     local_exprs, return_expr = _collect_expression_body(fn, function_def)
     if not isinstance(return_expr, ast.Call):
@@ -431,13 +475,37 @@ def _trace_compile_key_dispatch(
 
     field_exprs: list[tuple[str, ast.AST]] = []
     defaults, candidate_names = _function_trace_inputs(fn)
+    # Fields captured by dispatch **kwargs are forwarded, not AST-evaluated.
+    signature = inspect.signature(fn)
+    variadic_keyword = next(
+        (
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD
+        ),
+        None,
+    )
+    candidate_names.discard(variadic_keyword)
     input_names: set[str] = set()
     local_names = {name for name, _ in local_exprs}
     for _, expr in local_exprs:
         input_names.update(_collect_input_names(expr, candidate_names))
+    named_parameters: frozenset[str] | None = None
     for keyword in return_expr.keywords:
+        # CompileKey may unpack only that **kwargs parameter, once.
         if keyword.arg is None:
-            raise ValueError(f"{fn.__name__} cannot use **kwargs in CompileKey")
+            if (
+                named_parameters is not None
+                or variadic_keyword is None
+                or not isinstance(keyword.value, ast.Name)
+                or keyword.value.id != variadic_keyword
+            ):
+                raise ValueError(
+                    f"{fn.__name__} may unpack only its own **kwargs parameter "
+                    "once in CompileKey"
+                )
+            named_parameters = frozenset(candidate_names)
+            continue
         field_exprs.append((keyword.arg, keyword.value))
         input_names.update(
             _collect_input_names(keyword.value, candidate_names, local_names)
@@ -448,6 +516,7 @@ def _trace_compile_key_dispatch(
         tuple(field_exprs),
         globals_,
         frozenset(input_names),
+        named_parameters,
         defaults,
     )
 
@@ -482,10 +551,32 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     CompileKey: type[CompileKeyT]
 
     def __init__(self) -> None:
-        self.compile_key_dispatch_trace = _trace_compile_key_dispatch(self.dispatch)
+        self._dispatch_trace = _trace_compile_key_dispatch(self.dispatch)
+        self._compiled_cache: dict[Any, Any] = {}
 
     def compile_key(self, kwargs: Mapping[str, Any]) -> CompileKeyT:
-        return self.compile_key_dispatch_trace.compile_key(self.CompileKey, kwargs)
+        return self._dispatch_trace.compile_key(self.CompileKey, kwargs)
+
+    def _get_or_compile(
+        self,
+        compile_key: CompileKeyT,
+        *,
+        runtime_context: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Return a cached executor, compiling it on a monitored cache miss."""
+        if compile_key not in self._compiled_cache:
+            self.compile(compile_key)
+
+        try:
+            return self._compiled_cache[compile_key]
+        except KeyError as exc:
+            details = [f"compile_key={compile_key!r}"]
+            if runtime_context:
+                details.append(f"runtime_context={dict(runtime_context)!r}")
+            raise RuntimeError(
+                f"{type(self).__name__}.compile(...) did not cache its JIT "
+                f"executor ({', '.join(details)})"
+            ) from exc
 
     def _trace_dispatch(
         self, dispatch: CompileKeyDispatchFn[CompileKeyT]
@@ -506,7 +597,11 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             predicate_trace = (
                 _trace_warmup_predicate(_when) if _when is not None else None
             )
-            input_names = compile_key_dispatch_trace.input_names
+            # Unmatched **kwargs fields also belong to the expansion space.
+            available_names = set(kwargs).union(
+                *(group.rows[0] for group in input_groups)
+            )
+            input_names = compile_key_dispatch_trace.input_names_for(available_names)
             if predicate_trace is not None:
                 input_names = input_names | predicate_trace.input_names
             expanded_input_groups = tuple(
@@ -565,7 +660,105 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         """Compile one warmup key."""
         raise NotImplementedError
 
+    def register_warmup(self, *args: Any, **kwargs: Any) -> None:
+        """Register this kernel with the active runner's warmup registry."""
+        JitWarmupRegistry.register(self, *args, **kwargs)
+
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
         for compile_key in self.get_warmup_keys(*args, **kwargs):
             self.compile(compile_key)
+
+
+class JitWarmupRegistry:
+    """Collect and compile JIT kernels selected during runner setup."""
+
+    _active: ContextVar[JitWarmupRegistry | None] = ContextVar(
+        "active_jit_warmup_registry",
+        default=None,
+    )
+
+    def __init__(self, vllm_config: Any) -> None:
+        self.vllm_config = vllm_config
+        self._registrations: dict[
+            VllmJitKernel[Any],
+            list[tuple[tuple[Any, ...], dict[str, Any]]],
+        ] = {}
+
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        """Collect registrations made in this context."""
+        token = self._active.set(self)
+        try:
+            yield
+        finally:
+            self._active.reset(token)
+
+    @classmethod
+    def register(
+        cls,
+        kernel: VllmJitKernel[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Register a kernel with the active registry, if one exists."""
+        registry = cls._active.get()
+        if registry is not None:
+            registry._add(kernel, args, kwargs)
+
+    def _add(
+        self,
+        kernel: VllmJitKernel[Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        registrations = self._registrations.setdefault(kernel, [])
+        if (
+            not args
+            and not kwargs
+            and any(
+                not registered_args and not registered_kwargs
+                for registered_args, registered_kwargs in registrations
+            )
+        ):
+            return
+        registrations.append((args, kwargs))
+
+    def __len__(self) -> int:
+        return sum(len(registrations) for registrations in self._registrations.values())
+
+    def warmup(self) -> None:
+        """Expand registrations and compile each wrapper/key pair once."""
+        from tqdm import tqdm
+
+        from vllm.distributed import is_global_first_rank
+
+        kernel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
+        for kernel, registrations in self._registrations.items():
+            compile_keys: dict[Any, None] = {}
+            for args, kwargs in registrations:
+                if not args and not kwargs:
+                    args = (self.vllm_config,)
+                for compile_key in kernel.get_warmup_keys(*args, **kwargs):
+                    compile_keys[compile_key] = None
+            if compile_keys:
+                kernel_items.append((kernel, compile_keys))
+
+        if not kernel_items:
+            return
+
+        total_keys = sum(len(compile_keys) for _, compile_keys in kernel_items)
+        with tqdm(
+            kernel_items,
+            desc=f"JIT kernel warmup ({total_keys} compile keys)",
+            disable=not is_global_first_rank(),
+            dynamic_ncols=True,
+            unit="kernel",
+        ) as progress:
+            for kernel, compile_keys in progress:
+                progress.set_postfix_str(
+                    f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
+                    refresh=False,
+                )
+                for compile_key in compile_keys:
+                    kernel.compile(compile_key)

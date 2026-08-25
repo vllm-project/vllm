@@ -285,6 +285,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_transcription_request(cls, data):
+        if not isinstance(data, dict):
+            return data
         if isinstance(data.get("file"), str):
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,

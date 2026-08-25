@@ -24,7 +24,7 @@ pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub use hy_v3::HyV3ToolParser;
+pub(crate) use hy_v3::{HyV3ToolMarkers, HyV3ToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
     MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,

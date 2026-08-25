@@ -158,7 +158,9 @@ pub fn to_text_request(
     }
 
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: true,
+        skip_special_tokens: response
+            .and_then(|options| options.skip_special_tokens)
+            .unwrap_or(true),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),

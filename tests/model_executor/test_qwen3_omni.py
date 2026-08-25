@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import Mock
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
+import torch
+import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import InputProcessingContext
@@ -216,6 +220,172 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     assert len(updates) == expected_total, (
         f"Expected {expected_total} total tokens, got {len(updates)}"
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
+    from vllm.model_executor.models.interfaces import EagleModelMixin, supports_eagle3
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    class DummyBackbone(nn.Module, EagleModelMixin):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
+
+    class DummyLanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = DummyBackbone()
+
+        def embed_input_ids(self, input_ids):
+            return input_ids
+
+    model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
+        Qwen3OmniMoeThinkerForConditionalGeneration
+    )
+    nn.Module.__init__(model)
+    model.language_model = DummyLanguageModel()
+
+    assert supports_eagle3(model)
+    model.set_aux_hidden_state_layers((1, 2))
+    assert model.language_model.model.aux_hidden_state_layers == (1, 2)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import Qwen3MoeLLMModel
+
+    class DummyLayer(nn.Module):
+        def forward(self, positions, hidden_states, residual):
+            return hidden_states + 1, torch.full_like(hidden_states, 10)
+
+    class DummyNorm(nn.Module):
+        def forward(self, hidden_states, residual):
+            return hidden_states + residual, None
+
+    model = Qwen3MoeLLMModel.__new__(Qwen3MoeLLMModel)
+    nn.Module.__init__(model)
+    model.start_layer = 0
+    model.end_layer = 1
+    model.layers = nn.ModuleList([DummyLayer()])
+    model.norm = DummyNorm()
+    model.aux_hidden_state_layers = (1,)
+
+    pp_group = Mock(is_first_rank=True, is_last_rank=True)
+    inputs_embeds = torch.tensor([[1.0]])
+    deepstack_inputs = {"deepstack_input_embeds_0": torch.tensor([[3.0]])}
+    with patch(
+        "vllm.model_executor.models.qwen3_omni_moe_thinker.get_pp_group",
+        return_value=pp_group,
+    ):
+        output, aux_hidden_states = model.forward(
+            input_ids=None,
+            positions=torch.tensor([0]),
+            inputs_embeds=inputs_embeds,
+            deepstack_input_embeds=deepstack_inputs,
+        )
+
+    torch.testing.assert_close(output, torch.tensor([[15.0]]))
+    assert len(aux_hidden_states) == 1
+    torch.testing.assert_close(aux_hidden_states[0], torch.tensor([[15.0]]))
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("input_vocab_size", "draft_vocab_size", "weights", "error"),
+    [
+        (101, 100, [], "must include embed_tokens weights"),
+        (99, 99, [], "must include lm_head weights"),
+        (100, 40, [], "must include lm_head weights"),
+        (
+            100,
+            40,
+            [("lm_head.weight", torch.empty(40, 8))],
+            "must include a d2t mapping",
+        ),
+    ],
+)
+def test_qwen3_dspark_rejects_incomplete_vocab_weights(
+    input_vocab_size, draft_vocab_size, weights, error
+):
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+
+    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
+    nn.Module.__init__(model)
+    object.__setattr__(
+        model,
+        "config",
+        SimpleNamespace(
+            vocab_size=input_vocab_size,
+            draft_vocab_size=draft_vocab_size,
+        ),
+    )
+    object.__setattr__(model, "target_vocab_size", 100)
+
+    with pytest.raises(ValueError, match=error):
+        model.load_weights(weights)
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
+    from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
+
+    target_embedding = nn.Embedding(100, 8)
+    draft_embedding = nn.Embedding(99, 8)
+    target_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=target_embedding))
+    draft_model = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=draft_embedding),
+        has_own_embed_tokens=False,
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="qwen3"),
+        get_vocab_size=Mock(return_value=99),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=draft_model_config,
+            attention_backend=None,
+            kv_cache_dtype=None,
+        ),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(),
+        model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
+    )
+
+    def fake_replace(config, **changes):
+        values = vars(config).copy()
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    with (
+        patch.object(dspark_utils, "replace", side_effect=fake_replace),
+        patch.object(
+            dspark_utils,
+            "get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm.compilation.backends.set_model_tag",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm.model_executor.model_loader.get_model",
+            return_value=draft_model,
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.models.utils.get_draft_quant_config",
+            return_value=None,
+        ),
+    ):
+        loaded_model = dspark_utils.load_dspark_model(target_model, vllm_config)
+
+    assert loaded_model.model.embed_tokens is target_embedding
 
 
 if __name__ == "__main__":

@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Head-count padding + kernel selection for the ROCm AITER MLA backend.
+"""Head padding and kernel selection for the ROCm AITER MLA backend.
 
-Kimi-K3 at TP8 puts 12 heads/rank and at TP16 puts 6 heads/rank on the AITER
-MLA decode. The asm persistent decode requires exactly 16 heads, so small
-head counts are tile-padded to 16 and the padding heads are sliced back off
-the output. Divisor counts (1/2/4/8) may keep the Gluon kernel, but only on
-gfx950 where that kernel has a build; every small head count on gfx942 (which
-has no Gluon build) is routed to the asm persistent decode instead.
+The asm persistent decode requires a 16-aligned head count, so unaligned
+counts through 128 are tile-padded to the next multiple of 16 and sliced back
+off the output. Small divisor counts (1/2/4/8) preserve their existing
+repeat-interleave path and may keep the Gluon kernel on gfx950.
 """
 
 import math
@@ -19,6 +17,7 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla import rocm_aiter_mla
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLADecodeMetadata,
     AiterMLAHelper,
@@ -33,10 +32,18 @@ QK_HEAD_DIM = KV_LORA_RANK + QK_ROPE_HEAD_DIM
 CONTEXT_LEN = 4096
 SCALE = 1.0 / math.sqrt(QK_HEAD_DIM)
 
-# Non-divisor counts must go through the tile-and-slice path; divisor counts
-# (of 16) keep repeat_interleave. Both must pad to exactly 16 and round-trip.
+# Small non-divisor counts use tile-and-slice; divisors of 16 keep
+# repeat_interleave. Both pad to exactly 16 and round-trip.
 NON_DIVISOR_HEADS = [3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15]
 DIVISOR_HEADS = [1, 2, 4, 8]
+
+
+@pytest.fixture(autouse=True)
+def _disable_native_h24(monkeypatch):
+    """Exercise the padding fallback unless a test explicitly enables H24."""
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: False
+    )
 
 
 def _rocm_aiter_available() -> bool:
@@ -123,6 +130,72 @@ def test_h12_output_discards_padding_heads():
     torch.testing.assert_close(unpadded_o, o[:, :12])
 
 
+def test_h24_query_is_tile_padded_to_h32():
+    q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
+
+    padded_q = AiterMLAHelper.get_mla_padded_q(24, q)
+
+    assert padded_q.shape == (2, 32, 4)
+    assert padded_q.is_contiguous()
+    torch.testing.assert_close(padded_q[:, :24], q)
+    torch.testing.assert_close(padded_q[:, 24:], q[:, :8])
+
+
+def test_h24_output_discards_h32_padding_heads():
+    o = torch.arange(2 * 32 * 4, dtype=torch.float32).view(2, 32, 4)
+
+    unpadded_o = AiterMLAHelper.get_mla_unpadded_o(24, o)
+
+    assert unpadded_o.shape == (2, 24, 4)
+    torch.testing.assert_close(unpadded_o, o[:, :24])
+
+
+def test_h24_reducer_without_metadata_still_pads_to_h32(monkeypatch):
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_reducer_supported", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_metadata_supported", lambda: False
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_aiter_mla_native_h24_supported",
+        lambda: (
+            rocm_aiter_mla._aiter_mla_native_h24_reducer_supported()
+            and rocm_aiter_mla._aiter_mla_native_h24_metadata_supported()
+        ),
+    )
+    q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
+
+    assert AiterMLAHelper.get_actual_mla_num_heads(24) == 32
+    padded_q = AiterMLAHelper.get_mla_padded_q(24, q)
+    assert padded_q.shape == (2, 32, 4)
+    torch.testing.assert_close(padded_q[:, :24], q)
+    torch.testing.assert_close(padded_q[:, 24:], q[:, :8])
+
+
+def test_native_h24_requires_reducer_and_metadata(monkeypatch):
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_reducer_supported", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_metadata_supported", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_aiter_mla_native_h24_supported",
+        lambda: (
+            rocm_aiter_mla._aiter_mla_native_h24_reducer_supported()
+            and rocm_aiter_mla._aiter_mla_native_h24_metadata_supported()
+        ),
+    )
+    q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
+
+    assert AiterMLAHelper.get_actual_mla_num_heads(24) == 24
+    assert AiterMLAHelper.get_mla_padded_q(24, q) is q
+    assert AiterMLAHelper.get_mla_unpadded_o(24, q) is q
+
+
 def test_existing_divisor_head_mapping_is_unchanged():
     q = torch.arange(2 * 8 * 4, dtype=torch.bfloat16).view(2, 8, 4)
 
@@ -131,6 +204,18 @@ def test_existing_divisor_head_mapping_is_unchanged():
 
     # Divisor counts still use repeat_interleave / strided unpad, unchanged.
     torch.testing.assert_close(padded_q, q.repeat_interleave(2, dim=1))
+    torch.testing.assert_close(unpadded_o, q)
+
+
+@pytest.mark.parametrize("num_heads", [17, 24, 31])
+def test_unaligned_head_counts_round_trip_through_h32(num_heads: int):
+    q = torch.arange(2 * num_heads * 4, dtype=torch.float32).view(2, num_heads, 4)
+
+    padded_q = AiterMLAHelper.get_mla_padded_q(num_heads, q)
+    unpadded_o = AiterMLAHelper.get_mla_unpadded_o(num_heads, padded_q)
+
+    assert padded_q.shape == (2, 32, 4)
+    assert padded_q.is_contiguous()
     torch.testing.assert_close(unpadded_o, q)
 
 
@@ -147,26 +232,30 @@ def test_all_small_head_counts_pad_to_16_and_round_trip(num_heads: int):
     torch.testing.assert_close(unpadded_o, q)
 
 
-def test_num_heads_ge_16_is_passthrough():
-    q = torch.arange(2 * 16 * 4, dtype=torch.float32).view(2, 16, 4)
-    assert AiterMLAHelper.get_mla_padded_q(16, q) is q
-    assert AiterMLAHelper.get_mla_unpadded_o(16, q) is q
+def test_aligned_h32_is_zero_copy():
+    q = torch.arange(2 * 32 * 4, dtype=torch.float32).view(2, 32, 4)
+    assert AiterMLAHelper.get_mla_padded_q(32, q) is q
+    assert AiterMLAHelper.get_mla_unpadded_o(32, q) is q
 
 
 def test_is_valid_num_heads():
-    for n in range(1, 16):
+    for n in range(1, 129):
         assert AiterMLAHelper.is_valid_num_heads(n)
-    assert AiterMLAHelper.is_valid_num_heads(16)
-    assert AiterMLAHelper.is_valid_num_heads(32)
+    assert AiterMLAHelper.is_valid_num_heads(24)
+    assert AiterMLAHelper.is_valid_num_heads(127)
+    # Aligned counts remain valid above the range where padding is supported.
+    assert AiterMLAHelper.is_valid_num_heads(144)
     assert not AiterMLAHelper.is_valid_num_heads(0)
+    assert not AiterMLAHelper.is_valid_num_heads(129)
 
 
 def test_nondivisor_and_multitoken_never_use_gluon():
     # Non-divisor decode always takes the asm path (12 heads/rank at TP8).
     assert not AiterMLAHelper.use_gluon_decode(12, 1, "auto")
     assert not AiterMLAHelper.use_gluon_decode(6, 1, "auto")
-    # >=16 heads never pad, never Gluon.
+    # >=16 heads never use Gluon, including unaligned counts padded for asm.
     assert not AiterMLAHelper.use_gluon_decode(16, 1, "auto")
+    assert not AiterMLAHelper.use_gluon_decode(24, 1, "auto")
     # Multi-token (verify / qlen>1) is never the single-token Gluon decode.
     assert not AiterMLAHelper.use_gluon_decode(8, 4, "auto")
     assert not AiterMLAHelper.use_gluon_decode(12, 4, "auto")

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 
 import pytest
 import torch
@@ -25,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     ArmCPUUnquantizedExperts,
     CPUUnquantizedExperts,
+    PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
     select_experts,
 )
@@ -48,13 +48,12 @@ ACT = [
 ]
 USE_BIAS = [False, True]
 ISA = ["vec"]
-if (
-    current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-    and sys.platform != "darwin"
-):
+if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
     ISA.append("neon")
 if torch.cpu._is_amx_tile_supported():
     ISA.append("amx")
+if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+    ISA.append("vsx")
 
 DTYPE = [torch.bfloat16]
 
@@ -551,6 +550,7 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         "vec": CPUUnquantizedExperts,
         "amx": X86CPUUnquantizedExperts,
         "neon": ArmCPUUnquantizedExperts,
+        "vsx": PowerCPUUnquantizedExperts,
     }[isa]
     supported, reason = experts_cls.is_supported_config(
         experts_cls,

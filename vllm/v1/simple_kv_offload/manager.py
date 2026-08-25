@@ -4,7 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -190,35 +190,31 @@ class SimpleCPUOffloadScheduler:
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
         # Import here to avoid potential circular imports
-        from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        is_packed = any(t.block_stride for t in gpu_config.kv_cache_tensors)
-        assert not is_packed or all(t.block_stride for t in gpu_config.kv_cache_tensors)
-        gpu_total_bytes = (
-            gpu_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(t.size for t in gpu_config.kv_cache_tensors)
-        )
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total GPU KV cache size.
+        gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
                 size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
-                offset=t.offset,
+                layers=list(t.layers),
+                layer_stride=t.layer_stride,
                 block_stride=t.block_stride,
+                offset=t.offset,
             )
             for t in gpu_config.kv_cache_tensors
         ]
 
-        return KVCacheConfigCls(
+        return replace(
+            gpu_config,
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
-            kv_cache_groups=gpu_config.kv_cache_groups,
         )
 
     @staticmethod

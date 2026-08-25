@@ -3,6 +3,9 @@
 
 import inspect
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from itertools import accumulate
 from math import prod
 
@@ -26,22 +29,43 @@ _GiB = 1024**3
 
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
+_workspace_lane: ContextVar[int] = ContextVar("vllm_workspace_lane", default=0)
+
+
+@contextmanager
+def use_workspace_lane(lane: int) -> Iterator[None]:
+    """Select an independent workspace owner for this execution context."""
+    if lane < 0:
+        raise ValueError(f"Workspace lane must be non-negative, got {lane}.")
+    token = _workspace_lane.set(lane)
+    try:
+        yield
+    finally:
+        _workspace_lane.reset(token)
 
 
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages one workspace buffer per active ubatch slot.
+    Manages one workspace buffer per active ``(ubatch, lane)`` slot.
     Can be locked to prevent further growth during execution.
     """
 
-    def __init__(self, device: torch.device, num_ubatches: int | None = None):
+    def __init__(
+        self,
+        device: torch.device,
+        num_ubatches: int | None = None,
+        num_lanes: int = 1,
+    ):
         self._device = device
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
-        self._current_workspaces: list[torch.Tensor | None] = [
-            None
-        ] * self._num_ubatches
+        if num_lanes < 1:
+            raise ValueError(f"num_lanes must be at least one, got {num_lanes}.")
+        self._num_lanes = num_lanes
+        self._current_workspaces: list[torch.Tensor | None] = [None] * (
+            self._num_ubatches * self._num_lanes
+        )
         self._locked: bool = False
 
     @staticmethod
@@ -126,7 +150,14 @@ class WorkspaceManager:
             The current workspace tensor.
         """
         ubatch_id = dbo_current_ubatch_id()
-        current_workspace = self._current_workspaces[ubatch_id]
+        lane = _workspace_lane.get()
+        if lane >= self._num_lanes:
+            raise RuntimeError(
+                f"Workspace lane {lane} is not configured; manager has "
+                f"{self._num_lanes} lane(s)."
+            )
+        workspace_id = ubatch_id * self._num_lanes + lane
+        current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 
         if current_size < required_bytes:
@@ -161,11 +192,11 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            # Only resize the requesting ubatch's workspace.  Other
-            # ubatches resize lazily on their next get_simultaneous call.
+            # Only resize the requesting ubatch/lane workspace. Other slots
+            # resize lazily on their next get_simultaneous call.
             # Resizing all ubatches here would orphan the other ubatch's
             # old tensor when it still holds views into it (DBO leak).
-            self._current_workspaces[ubatch_id] = None
+            self._current_workspaces[workspace_id] = None
             del current_workspace
             # Release the freed segment back to CUDA so the caching
             # allocator can reuse the GPU memory for the larger
@@ -173,19 +204,20 @@ class WorkspaceManager:
             # dead segment in reserved memory which can cause higher peak
             # memory usage.
             torch.accelerator.empty_cache()
-            self._current_workspaces[ubatch_id] = torch.empty(
+            self._current_workspaces[workspace_id] = torch.empty(
                 (required_bytes,), dtype=torch.uint8, device=self._device
             )
-            current_workspace = self._current_workspaces[ubatch_id]
+            current_workspace = self._current_workspaces[workspace_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
                     "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "
-                    "%.2f MB (ubatch %d)",
+                    "%.2f MB (ubatch %d, lane %d)",
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
                     ubatch_id,
+                    lane,
                 )
 
         return current_workspace
@@ -214,7 +246,9 @@ def current_workspace_manager() -> "WorkspaceManager":
 
 
 def init_workspace_manager(
-    device: torch.device, num_ubatches: int | None = None
+    device: torch.device,
+    num_ubatches: int | None = None,
+    num_lanes: int = 1,
 ) -> None:
     """Initialize the workspace manager with a device.
 
@@ -224,6 +258,7 @@ def init_workspace_manager(
     Args:
         device: The device to allocate workspace on.
         num_ubatches: Number of workspace ubatch slots. Defaults to 1.
+        num_lanes: Number of independent execution lanes per ubatch. Defaults to 1.
     """
     global _manager
     if _manager is not None:
@@ -233,7 +268,7 @@ def init_workspace_manager(
             _manager._device,
             device,
         )
-    _manager = WorkspaceManager(device, num_ubatches)
+    _manager = WorkspaceManager(device, num_ubatches, num_lanes)
 
 
 def lock_workspace() -> None:

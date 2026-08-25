@@ -2,7 +2,7 @@ group: Basic Correctness
 depends_on: 
   - image-build
 steps:
-- label: Basic Correctness
+- label: ":nvidia: (H200) Basic Correctness"
   key: basic-correctness
   timeout_in_minutes: 68
   device: h200_18gb
@@ -19,6 +19,7 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   mirror:
     amd:
+      label: ":amd: (MI300) Basic Correctness"
       dind: false
       device: mi300_1
       timeout_in_minutes: 60

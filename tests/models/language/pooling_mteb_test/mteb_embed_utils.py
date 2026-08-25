@@ -163,6 +163,7 @@ def mteb_test_embed_models(
     hf_model_callback=None,
     atol=MTEB_EMBED_TOL,
     prompt_prefix: str | None = None,
+    vllm_model_callback=None,
 ):
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
@@ -177,6 +178,9 @@ def mteb_test_embed_models(
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
+
+        if vllm_model_callback is not None:
+            vllm_model_callback(vllm_model)
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
