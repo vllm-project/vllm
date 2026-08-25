@@ -1408,7 +1408,6 @@ def test_humming_delegates_to_instance_activation():
         activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         input=input,
         output=output,
-        valid_rows=None,
     )
 
 
