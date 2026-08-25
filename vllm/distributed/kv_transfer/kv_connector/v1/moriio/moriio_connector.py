@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConfig,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
     ReqId,
@@ -1517,21 +1518,44 @@ class MoRIIOConnectorWorker:
     def _get_built_session(self, remote_engine_id):
         if remote_engine_id not in self.built_write_session:
             cur_remote_engine_sessions = []
+            failed_sessions: list[str] = []
+            remote_meta_map = self.layer_name_to_remote_kv_cache_metadata[
+                remote_engine_id
+            ]
             for ln, local_meta in self.layer_name_to_local_kv_cache_metadata.items():
                 unpacked_local_memory_meta = (
                     self.moriio_wrapper.get_unpack_memory_metadata(local_meta[0])
                 )
                 unpacked_remote_memory_meta = (
                     self.moriio_wrapper.get_unpack_memory_metadata(
-                        self.layer_name_to_remote_kv_cache_metadata[remote_engine_id][
-                            ln
-                        ][0]
+                        remote_meta_map[ln][0]
                     )
                 )
-                cur_remote_engine_sessions.append(
-                    self.moriio_wrapper.build_session(
-                        unpacked_local_memory_meta, unpacked_remote_memory_meta
+                session = self.moriio_wrapper.build_session(
+                    unpacked_local_memory_meta, unpacked_remote_memory_meta
+                )
+                if session is None:
+                    failed_sessions.append(ln)
+                    logger.error(
+                        "MoRIIO build_session returned None for layer %s "
+                        "(group=%d, remote_engine=%s, local_meta_present=%s, "
+                        "remote_meta_present=%s). This layer's KV cannot be "
+                        "transferred; a subsequent read/write would dereference "
+                        "a null session.",
+                        ln,
+                        self.layer_to_group.get(ln, 0),
+                        remote_engine_id,
+                        local_meta[0] is not None,
+                        remote_meta_map[ln][0] is not None,
                     )
+                cur_remote_engine_sessions.append(session)
+            if failed_sessions:
+                raise MoRIIOError(
+                    "MoRIIO failed to build transfer sessions for "
+                    f"{len(failed_sessions)} layer(s): {failed_sessions} "
+                    f"(remote_engine={remote_engine_id}). See the per-layer "
+                    "ERROR logs above; this typically means a hybrid KV cache "
+                    "layout whose per-layer views mori cannot pair for RDMA."
                 )
             self.built_write_session[remote_engine_id] = cur_remote_engine_sessions
         return self.built_write_session[remote_engine_id], self.remote_moriio_metadata[
@@ -1944,18 +1968,63 @@ class MoRIIOConnectorWorker:
                 caches_data.append((base_addr, region_len, cache.device.index, ""))
                 kv_caches_base_addr.append(base_addr)
 
+        # Diagnostics for hybrid KV cache layouts: the uniform-page allocator
+        # packs layers from different groups (different block_size/shape) as
+        # strided views into one backing allocation, so multiple layers can
+        # share a base storage pointer. Log per-layer view vs backing pointer
+        # and group so a null registration/session can be traced to a layer.
+        failed_local_reg: list[str] = []
+        base_alloc_ptrs: dict[int, str] = {}
         for layer_name, kv_cache in kv_caches.items():
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
             moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(kv_cache)
+            if moriio_mem_metadata is None:
+                failed_local_reg.append(layer_name)
             self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                 moriio_mem_metadata
+            )
+
+            base_ptr = kv_cache.untyped_storage().data_ptr()
+            shares_with = base_alloc_ptrs.get(base_ptr)
+            base_alloc_ptrs.setdefault(base_ptr, layer_name)
+            logger.debug(
+                "MoRIIO register layer %s: group=%d shape=%s dtype=%s "
+                "view_ptr=%#x base_ptr=%#x storage_offset=%d contiguous=%s "
+                "registered=%s%s",
+                layer_name,
+                self.layer_to_group.get(layer_name, 0),
+                tuple(kv_cache.shape),
+                kv_cache.dtype,
+                kv_cache.data_ptr(),
+                base_ptr,
+                kv_cache.storage_offset(),
+                kv_cache.is_contiguous(),
+                moriio_mem_metadata is not None,
+                f" shares_backing_alloc_with={shares_with}" if shares_with else "",
             )
 
             self.local_kv_cache_size.append(
                 kv_cache.nelement() * kv_cache.element_size()
             )
+
+        if failed_local_reg:
+            logger.error(
+                "MoRIIO register_local_tensor returned None for %d layer(s): "
+                "%s. These KV caches could not be registered for RDMA (likely a "
+                "hybrid KV cache view/layout mori cannot register); their "
+                "transfer sessions will be null.",
+                len(failed_local_reg),
+                failed_local_reg,
+            )
+        logger.info(
+            "MoRIIO registered %d layers across %d backing allocation(s); "
+            "%d layer(s) failed local registration.",
+            len(kv_caches),
+            len(base_alloc_ptrs),
+            len(failed_local_reg),
+        )
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
