@@ -783,7 +783,7 @@ class ModelConfig:
                 mm_processor_kwargs, mm_processor_device
             )
 
-            if paged_shm_size > 0:
+            if paged_shm_size is not None and paged_shm_size > 0:
                 mm_processor_cache_gb = 0
                 logger.warning(
                     "paged_shm does not currently support mm cache, "
