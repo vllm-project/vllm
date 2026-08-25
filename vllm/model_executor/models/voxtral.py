@@ -245,10 +245,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
     ) -> HFMultiModalInputs:
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        hf_data = hf_inputs.hf_data
-        if "audio" in hf_data:
-            hf_data["audios"] = hf_data.pop("audio")
-
         # Avoid padding issue
         return hf_inputs._replace(
             hf_kwargs=dict(hf_inputs.hf_kwargs, return_tensors=None)
