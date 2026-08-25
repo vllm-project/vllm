@@ -240,6 +240,7 @@ steps:
     gpu: 4+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
+  # skip test_pyccl.py due to xpu will not support it.
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
@@ -256,7 +257,6 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    pytest -v -s distributed/test_pynccl.py || true &&
     pytest -v -s distributed/test_events.py || true &&
     pytest -v -s distributed/test_symm_mem_allreduce.py || true &&
     pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
@@ -274,6 +274,7 @@ steps:
     label: debug
     gpu: 4+
   _raw_old_commands:
+  # skip cases due to ray issue for test_custom_all_reduce
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
@@ -285,7 +286,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s distributed/test_custom_all_reduce.py --deselect="tests/distributed/test_custom_all_reduce.py::test_custom_allreduce[test_target0-1-2]" --deselect="tests/distributed/test_custom_all_reduce.py::test_custom_allreduce[test_target0-2-2]" || true &&
     torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py || true &&
     TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed(num_gpus=2) || true &&
     pytest -v -s -x lora/test_mixtral.py || true'
@@ -333,6 +333,7 @@ steps:
   _raw_old_commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/distributed/test_nccl_symm_mem.py
+  # remove test_kimi_k3_gemm_rs.py due to the test is for cuda and it is kernel case
   - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
   - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
@@ -341,7 +342,6 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/distributed/test_context_parallel.py || true &&
     pytest -v -s tests/distributed/test_nccl_symm_mem.py || true &&
-    pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
     pytest -v -s tests/distributed/test_mnnvl_alltoall.py || true'
 - label: Pipeline + Context Parallelism (4 GPUs)

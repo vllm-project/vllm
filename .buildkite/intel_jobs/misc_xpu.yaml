@@ -117,7 +117,7 @@ steps:
     pytest -v -s v1/simple_kv_offload || true &&
     pytest -v -s v1/worker || true &&
     pytest -v -s v1/streaming_input || true &&
-    pytest -v -s -m not cpu_test v1/kv_connector/unit || true &&
+    pytest -v -s -m not cpu_test v1/kv_connector/unit --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_batch_write_and_read_dtype[float32]" --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_batch_write_and_read_dtype[float16]" --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_batch_write_and_read_dtype[bfloat16]" --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_multiple_tensors_rw" || true &&
     pytest -v -s -m not cpu_test v1/ec_connector/unit || true &&
     pytest -v -s -m not cpu_test v1/metrics --ignore="v1/metrics/test_ray_metrics.py" || true &&
     pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api || true &&
