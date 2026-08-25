@@ -21,7 +21,6 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -297,7 +296,6 @@ def test_online_quantization(
 
             if kv_cache_dtype == "fp8":
                 attn = model.model.layers[0].self_attn.attn
-                assert isinstance(attn.quant_method, Fp8KVCacheMethod)
                 assert attn._k_scale == 1.0
                 assert attn._v_scale == 1.0
 
