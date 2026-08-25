@@ -17,6 +17,18 @@ class SchedulingPolicy(Enum):
     PRIORITY = "priority"
 
 
+class PreemptionVictim(Enum):
+    """Enum for preemption-victim selection policies.
+
+    This is independent of the scheduling (admission) policy: it only
+    controls which running request is evicted when the scheduler must
+    preempt to free KV cache.
+    """
+
+    FCFS = "fcfs"
+    LCF = "lcf"
+
+
 class RequestQueue(ABC):
     """Abstract base class for request queues."""
 

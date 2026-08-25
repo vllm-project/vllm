@@ -3065,6 +3065,102 @@ def test_priority_scheduling_preemption_victim_selection():
     assert waiting_req_ids == ["1", "0"]
 
 
+def _make_lcf_running_scheduler(preemption_victim: str):
+    """Build a scheduler with three running requests under full KV pressure.
+
+    All three requests are prefilled and decoded once so they end with
+    distinct ``num_computed_tokens`` and exactly zero free KV blocks:
+
+        running order = [x, y, z]
+        computed      = [33, 21, 37]   (y is the least-computed)
+        block usage   = [ 2,  2,  3]   (7 usable blocks, all in use)
+
+    ``x`` is processed first on the next ``schedule()`` and needs a new
+    block, forcing a preemption while ``y`` and ``z`` are still untouched
+    this step.  This lets the two victim policies diverge:
+
+    - "fcfs" pops the last-admitted running request -> ``z``.
+    - "lcf" evicts the least-computed running request -> ``y``.
+
+    Returns:
+      A ``(scheduler, output)`` tuple where ``output`` is the preempting
+      schedule step.
+    """
+    block_size = 16
+    # 7 usable blocks (x:2 + y:2 + z:3) + 1 null block.
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=200,
+        num_blocks=8,
+        block_size=block_size,
+        preemption_victim=preemption_victim,
+    )
+
+    # Distinct prompt lengths -> distinct computed-token counts after decode.
+    specs = [("x", 32), ("y", 20), ("z", 36)]
+    reqs = []
+    for req_id, num_tokens in specs:
+        req = create_requests(
+            num_requests=1,
+            num_tokens=num_tokens,
+            req_ids=[req_id],
+            max_tokens=64,
+            ignore_eos=True,
+        )[0]
+        scheduler.add_request(req)
+        reqs.append(req)
+
+    # Phase 1: prefill all three. 7 usable blocks used, 0 free.
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 3
+    assert len(scheduler.running) == 3
+
+    # Decode once: x->33, y->21 (least), z->37.
+    model_output = ModelRunnerOutput(
+        req_ids=["x", "y", "z"],
+        req_id_to_index={"x": 0, "y": 1, "z": 2},
+        sampled_token_ids=[[100], [100], [100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    computed = {r.request_id: r.num_computed_tokens for r in reqs}
+    assert computed["y"] == min(computed.values()), computed
+    assert computed["x"] != computed["z"] != computed["y"], computed
+
+    # Phase 2: x needs a 3rd block but 0 are free -> preemption.
+    output = scheduler.schedule()
+    return scheduler, output
+
+
+def test_lcf_preemption_victim_selection():
+    """LCF evicts the least-computed running request under KV pressure."""
+    scheduler, _ = _make_lcf_running_scheduler(preemption_victim="lcf")
+
+    assert scheduler.requests["y"].status == RequestStatus.PREEMPTED, (
+        "LCF should preempt least-computed 'y'"
+    )
+    assert scheduler.requests["x"].status == RequestStatus.RUNNING
+    assert scheduler.requests["z"].status == RequestStatus.RUNNING
+    waiting_ids = {req.request_id for req in scheduler.waiting}
+    assert waiting_ids == {"y"}, waiting_ids
+
+
+def test_fcfs_preemption_victim_unchanged():
+    """Default victim policy still pops the last-admitted running request."""
+    scheduler, _ = _make_lcf_running_scheduler(preemption_victim="fcfs")
+
+    assert scheduler.requests["z"].status == RequestStatus.PREEMPTED, (
+        "Default FCFS victim policy should preempt last-admitted 'z'"
+    )
+    assert scheduler.requests["x"].status == RequestStatus.RUNNING
+    assert scheduler.requests["y"].status == RequestStatus.RUNNING
+    waiting_ids = {req.request_id for req in scheduler.waiting}
+    assert waiting_ids == {"z"}, waiting_ids
+
+
 def test_priority_scheduling_equal_priority_preemption():
     """Test arrival time tiebreaker when requests have equal priority."""
     # This test verifies that arrival time is used as a tiebreaker for equal
