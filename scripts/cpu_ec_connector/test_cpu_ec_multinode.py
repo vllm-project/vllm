@@ -11,9 +11,10 @@ directly over the cluster network.
 
 Run from the repo root::
 
-    python scripts/cpu_ec_connector/test_cpu_ec_multinode.py \\
-        --namespace my-ns \\
-        --image quay.io/my-org/vllm:tag
+    python scripts/cpu_ec_connector/test_cpu_ec_multinode.py --namespace my-ns
+
+The pods run a prebuilt image that already carries the connector and nixl, so
+they clone and install nothing; pass --image to run a different one.
 
 Prerequisites:
   - `oc` is installed and logged in to the target cluster.
@@ -51,6 +52,9 @@ DEFAULT_CONSUMER_PORT = 8002
 DEFAULT_PRODUCER_SIDE_PORT = 5601
 DEFAULT_CONSUMER_SIDE_PORT = 5602
 DEFAULT_IMAGE_PATH = REPO_ROOT / "tests/v1/ec_connector/integration/hato.jpg"
+# Ships the connector and nixl prebuilt, with ["vllm", "serve"] as its
+# entrypoint, so the pods clone and install nothing.
+DEFAULT_CONTAINER_IMAGE = "quay.io/omerpaz95/vllm_ec_nixl:v1"
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +124,10 @@ def main() -> int:
         "--namespace", required=True, help="OpenShift namespace to deploy into"
     )
     parser.add_argument(
-        "--image", required=True, help="vLLM container image (registry/image:tag)"
+        "--image",
+        default=DEFAULT_CONTAINER_IMAGE,
+        help="vLLM container image (registry/image:tag). "
+        f"Default: {DEFAULT_CONTAINER_IMAGE}",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(

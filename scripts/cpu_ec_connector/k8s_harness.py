@@ -134,25 +134,25 @@ def patch_manifests(
         if vol["name"] == "sitecustomize":
             vol["configMap"]["name"] = f"ec-test-sitecustomize-{run_id}"
 
-    pod_spec = doc["spec"]["template"]["spec"]
+    # Only the podAntiAffinity term is driver-owned; the template's nodeAffinity
+    # (excluded nodes) has to survive either way.
+    affinity = doc["spec"]["template"]["spec"].setdefault("affinity", {})
     if different_nodes:
-        pod_spec["affinity"] = {
-            "podAntiAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": [
-                    {
-                        "labelSelector": {
-                            "matchLabels": {
-                                "app": "vllm-ec-test",
-                                "run-id": run_id,
-                            },
+        affinity["podAntiAffinity"] = {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "labelSelector": {
+                        "matchLabels": {
+                            "app": "vllm-ec-test",
+                            "run-id": run_id,
                         },
-                        "topologyKey": "kubernetes.io/hostname",
-                    }
-                ],
-            },
+                    },
+                    "topologyKey": "kubernetes.io/hostname",
+                }
+            ],
         }
     else:
-        pod_spec.pop("affinity", None)
+        affinity.pop("podAntiAffinity", None)
 
     return docs
 
