@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -269,6 +270,30 @@ def test_top_k_per_row(
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_ties_use_source_index() -> None:
+    top_k = 64
+    logits = torch.ones((4, 512), dtype=torch.float32, device="cuda")
+    row_starts = torch.zeros(4, dtype=torch.int32, device="cuda")
+    row_ends = torch.full((4,), 512, dtype=torch.int32, device="cuda")
+    expected = torch.arange(top_k, dtype=torch.int32, device="cuda").expand(4, -1)
+
+    for _ in range(10):
+        indices = torch.empty((4, top_k), dtype=torch.int32, device="cuda")
+        ops.top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            top_k,
+        )
+        torch.testing.assert_close(indices, expected, rtol=0, atol=0)
 
 
 def _run_top_k_per_row_decode_test(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
@@ -16,6 +17,10 @@ from vllm.utils.flashinfer import (
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+_ds4_bi_topk_lib = os.environ.get("DS4_BI_TOPK_LIB")
+if _ds4_bi_topk_lib:
+    torch.ops.load_library(_ds4_bi_topk_lib)
 
 current_platform.import_kernels()
 
@@ -3025,16 +3030,28 @@ def top_k_per_row_prefill(
     stride1: int,
     topk_tokens: int,
 ) -> None:
-    torch.ops._C.top_k_per_row_prefill(
-        logits,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        raw_topk_indices,
-        num_rows,
-        stride0,
-        stride1,
-        topk_tokens,
-    )
+    if envs.VLLM_BATCH_INVARIANT and _ds4_bi_topk_lib:
+        torch.ops.ds4_bi.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            raw_topk_indices,
+            num_rows,
+            stride0,
+            stride1,
+            topk_tokens,
+        )
+    else:
+        torch.ops._C.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            raw_topk_indices,
+            num_rows,
+            stride0,
+            stride1,
+            topk_tokens,
+        )
 
 
 def top_k_per_row_decode(
