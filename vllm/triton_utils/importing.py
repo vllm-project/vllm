@@ -23,8 +23,15 @@ if HAS_TRITON:
         # It's generally expected that x.driver exists and has
         # an is_active method.
         # The `x.driver and` check adds a small layer of safety.
+        # The "cpu" backend's driver reports itself active unconditionally, so
+        # it must be excluded here or every GPU host looks like it has 2 active
+        # drivers. Triton's own driver selection skips it for the same reason
+        # (see triton.runtime.driver._create_driver): CPU is only ever used
+        # when explicitly selected.
         active_drivers = [
-            x.driver for x in backends.values() if x.driver and x.driver.is_active()
+            x.driver
+            for name, x in backends.items()
+            if name != "cpu" and x.driver and x.driver.is_active()
         ]
 
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
