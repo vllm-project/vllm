@@ -1589,6 +1589,7 @@ class EagleModelMixin:
             aux_hidden_states.append(value)
         return aux_hidden_states
 
+
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
