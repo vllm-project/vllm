@@ -12,8 +12,12 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 import regex as re
+from openai.types.responses import ToolChoiceFunction
 
 from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,11 +26,13 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
@@ -205,6 +211,56 @@ class ParserEngine(Parser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         request.skip_special_tokens = False
+        if self.tool_parser_cls is not None:
+            request = self._apply_structural_tag(request)
+        return request
+
+    def _apply_structural_tag(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Attach the xgrammar structural tag for strict tool calling.
+
+        Mirrors ``DelegatingParser._apply_structural_tag`` but reads the
+        registered tool parser class directly, because engine-backed
+        parsers do not instantiate a separate tool parser.
+        """
+        tool_parser_cls = self.tool_parser_cls
+        if (
+            tool_parser_cls is None
+            or tool_parser_cls.structural_tag_model is None
+            or not request.tools
+        ):
+            return request
+
+        need_tool_calling = (
+            request.tool_choice == "auto"
+            or request.tool_choice == "required"
+            or isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
+        )
+        if not need_tool_calling:
+            return request
+
+        # get_structural_tag only reads the structural_tag_model class
+        # attribute, so the class itself can act as self here.
+        structure_tag = tool_parser_cls.get_structural_tag(
+            tool_parser_cls,
+            request,
+            reasoning=False,  # type: ignore[arg-type]
+        )
+        if structure_tag is None:
+            return request
+
+        structural_tag = json.dumps(structure_tag.model_dump())
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=structural_tag,
+        )
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
         return request
 
     def _preprocess_feed(

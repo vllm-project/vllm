@@ -140,6 +140,20 @@ class ParserManager:
         reasoning_engine_cls = cls._get_parser_engine_cls(reasoning_parser_cls)
         tool_engine_cls = cls._get_parser_engine_cls(tool_parser_cls)
         if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
+            # Keep the single-engine fast path but preserve the registered
+            # tool parser, which may carry a structural tag for strict
+            # tool calling that the generic adapter lacks.
+            if (
+                tool_parser_cls is not None
+                and tool_parser_cls is not reasoning_engine_cls.tool_parser_cls
+            ):
+                engine_cls = reasoning_engine_cls
+                t_cls = tool_parser_cls
+
+                class _SharedEngineParser(engine_cls):
+                    tool_parser_cls = t_cls
+
+                return _SharedEngineParser
             return reasoning_engine_cls
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":

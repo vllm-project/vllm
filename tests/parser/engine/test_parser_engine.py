@@ -998,6 +998,98 @@ def test_parser_manager_rejects_non_engine_adapter_metadata():
     )
 
 
+def test_parser_manager_shared_engine_keeps_registered_tool_parser(monkeypatch):
+    """Shared-engine fast path keeps the registered tool parser.
+
+    Regression test for #53745: when the reasoning and tool parsers map to
+    the same engine, get_parser collapsed them into the raw engine class
+    whose tool_parser_cls is the generic adapter without
+    structural_tag_model. The registered tool parser must survive so strict
+    tool calling can attach the xgrammar structural tag.
+    """
+
+    class _FakeStructuralTag:
+        def model_dump(self):
+            return {"type": "structural_tag", "model": "qwen_3_coder"}
+
+    class _TaggedToolParser(_CombinedToolAdapter):
+        structural_tag_model = "qwen_3_coder"
+
+        def get_structural_tag(self, request, *, reasoning=False):
+            return _FakeStructuralTag()
+
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _TaggedToolParser),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, _CombinedTestEngine)
+    assert parser_cls.tool_parser_cls is _TaggedToolParser
+
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    tool = _make_tool("f", {"arg": {"type": "string"}})
+
+    # tool_choice="auto" attaches the tag
+    request = _make_delegating_request()
+    request.tools = [tool]
+    request.tool_choice = "auto"
+    adjusted = parser.adjust_request(request)
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.structural_tag is not None
+    assert "qwen_3_coder" in adjusted.structured_outputs.structural_tag
+
+    # tool_choice="required" attaches the tag too
+    request = _make_delegating_request()
+    request.tools = [tool]
+    request.tool_choice = "required"
+    adjusted = parser.adjust_request(request)
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.structural_tag is not None
+
+    # tool_choice="none" must not attach a tag
+    request = _make_delegating_request()
+    request.tools = [tool]
+    request.tool_choice = "none"
+    request.structured_outputs = None
+    adjusted = parser.adjust_request(request)
+    assert adjusted.structured_outputs is None
+
+
+def test_parser_manager_qwen3_shared_engine_resolves_registered_tool_parser():
+    """qwen3 + qwen3_coder resolves to the registered Qwen3EngineToolParser.
+
+    Mirrors the reported #53745 configuration: both names map to
+    Qwen3Parser, so get_parser must surface the registered tool parser
+    carrying structural_tag_model = "qwen_3_coder" rather than the generic
+    Qwen3ParserToolAdapter.
+    """
+    from vllm.parser.qwen3 import Qwen3Parser
+    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_coder",
+        reasoning_parser_name="qwen3",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, Qwen3Parser)
+    assert parser_cls.tool_parser_cls is Qwen3EngineToolParser
+
+
 def test_reasoning_adapter_counts_after_final_non_streaming_parse():
     parser = _CombinedReasoningAdapter(make_mock_tokenizer(_VOCAB))
     request = _make_delegating_request()
