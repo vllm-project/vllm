@@ -229,6 +229,7 @@ def init_kv_cache(
             return allocate_pcp_direct_backing(
                 nbytes, device, pcp_group.device_group
             ).storage
+
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
         kv_caches = allocate_kv_cache(
@@ -236,7 +237,7 @@ def init_kv_cache(
             device,
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
-            buffer_allocator,
+            buffer_allocator=buffer_allocator,
         )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
