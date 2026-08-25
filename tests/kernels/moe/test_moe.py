@@ -16,6 +16,7 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 
 import vllm.model_executor.layers.fused_moe  # noqa
+import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
 from tests.kernels.moe.utils import (
     fused_moe,
     make_dummy_moe_config,
@@ -66,6 +67,46 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
+    captured: dict[str, torch.Tensor] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["a_scale"] = args[4]
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    a_scale = torch.tensor(0.5)
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=torch.ones((1, 1)),
+        B=torch.ones((1, 1, 1)),
+        C=torch.empty((1, 1, 1)),
+        A_scale=a_scale,
+        B_scale=torch.ones(1),
+        topk_weights=torch.ones((1, 1)),
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=True,
+        top_k=1,
+        config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+        compute_type=tl.float32,
+        use_fp8_w8a8=True,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+    )
+
+    captured_scale = captured["a_scale"]
+    assert a_scale.ndim == 0
+    assert captured_scale.shape == (1,)
+    assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
 def iterative_moe(
@@ -416,6 +457,50 @@ def test_fused_moe(
             use_compile=use_compile,
             use_cudagraph=use_cudagraph,
         )
+
+
+def test_fused_shared_expert_alignment(workspace_init):
+    set_random_seed(7)
+    m, n, k = 4, 64, 128
+    routed_experts = 8
+    physical_experts = routed_experts + 1
+    dtype = torch.bfloat16
+
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((physical_experts, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((physical_experts, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
+    topk_ids = torch.tensor(
+        [[0, 8], [1, 8], [2, 8], [3, 8]], device=DEVICE_TYPE, dtype=torch.int32
+    )
+    topk_weights = torch.tensor(
+        [[0.5, 1.0]] * m, device=DEVICE_TYPE, dtype=torch.float32
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=physical_experts,
+        experts_per_token=2,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=dtype,
+        max_num_tokens=m,
+    )
+    modular_moe = modular_triton_fused_moe(moe_config, FUSED_MOE_UNQUANTIZED_CONFIG)
+
+    with set_current_vllm_config(vllm_config):
+        expected = torch_experts(a, w1, w2, topk_weights, topk_ids)
+        actual = modular_moe.apply(
+            hidden_states=a,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=routed_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
 
 def test_fused_moe_int64_overflow(workspace_init):

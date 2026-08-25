@@ -269,14 +269,6 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
     double eps, int64_t cache_block_size);
 
-void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
-    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& q_out, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size);
-
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
@@ -400,6 +392,18 @@ void fused_kda_decode(
     torch::stable::Tensor& out, std::optional<double> lower_bound,
     std::optional<torch::stable::Tensor> output_gate,
     std::optional<torch::stable::Tensor> norm_weight, double norm_eps);
+
+void fused_gdn_decode_post_conv_mtp(
+    torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias,
+    torch::stable::Tensor const& state_indices,
+    torch::stable::Tensor const& cu_seqlens,
+    torch::stable::Tensor const& num_accepted_tokens,
+    torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
+    torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
+    double scale, double norm_eps);
+
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
