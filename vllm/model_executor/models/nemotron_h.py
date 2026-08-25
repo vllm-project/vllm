@@ -22,8 +22,10 @@ from collections.abc import Iterable, Mapping
 from itertools import islice
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
@@ -45,6 +47,11 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -54,6 +61,11 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8LinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -81,6 +93,32 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+
+
+@CustomOp.register("nemotron_h_relu2_fp8_quant")
+class NemotronHReLU2Fp8Quant(CustomOp):
+    """ReLU2 followed by static per-tensor FP8 quantization."""
+
+    def __init__(self) -> None:
+        # Shared experts execute inside the opaque MoE custom op. Compiling this
+        # native function explicitly keeps activation and quantization in one
+        # pointwise kernel.
+        super().__init__(compile_native=True)
+
+    def forward_native(
+        self, x: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
+        fp8_min, fp8_max = get_fp8_min_max()
+        activated = torch.square(F.relu(x))
+        return (
+            activated.to(torch.float32)
+            .mul(scale.to(torch.float32).reciprocal())
+            .clamp(fp8_min, fp8_max)
+            .to(torch.float8_e4m3fn)
+        )
+
+    def forward_cuda(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x, scale)
 
 
 class NemotronHMLP(nn.Module):
@@ -115,10 +153,33 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
+        self.relu2_fp8_quant = NemotronHReLU2Fp8Quant()
+        down_quant_method = self.down_proj.quant_method
+        self.use_fused_relu2_fp8_quant = (
+            envs.VLLM_EXPERIMENTAL_NEMOTRON_SHARED_RELU2_FP8_QUANT
+            and self.down_proj.tp_size == 1
+            and isinstance(down_quant_method, ModelOptFp8LinearMethod)
+            and isinstance(
+                down_quant_method.fp8_linear, CutlassFP8ScaledMMLinearKernel
+            )
+            and down_quant_method.fp8_linear.input_quant_key()
+            == kFp8StaticTensorSym
+        )
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
-        x = self.act_fn(x)
+        if self.use_fused_relu2_fp8_quant:
+            input_scale = self.down_proj.input_scale
+            x_q = self.relu2_fp8_quant(x, input_scale)
+            x = QuantizedActivation(
+                data=x_q,
+                scale=input_scale,
+                orig_dtype=x.dtype,
+                orig_shape=x.shape,
+                quant_key=kFp8StaticTensorSym,
+            )
+        else:
+            x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
 
