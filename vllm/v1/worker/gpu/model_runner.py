@@ -850,7 +850,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def post_kv_cache_wake_up(self) -> None:
-        self.block_tables.init_block_table_layout_tensors()
+        self.block_tables.refresh_block_table_layout_tensors()
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:

@@ -86,11 +86,8 @@ class BlockTables:
         )
 
     def init_block_table_layout_tensors(self) -> None:
-        # Called at init and after a CuMem kv_cache wake-up. The ptr tensors
-        # cache raw data_ptr() values that go stale once the underlying tensors
-        # are reallocated on wake; the size tensors need re-populating because
-        # their storage lives under the kv_cache pool tag and comes back with
-        # undefined contents.
+        # These tensors are captured by CUDA graphs. Allocate them once; wake-up
+        # refreshes their undefined CuMem contents in place.
         self.block_table_ptrs = self._make_ptr_tensor(
             [b.gpu for b in self.block_tables]
         )
@@ -106,6 +103,28 @@ class BlockTables:
             self.kernel_block_sizes, dtype=torch.int32, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
+
+    def refresh_block_table_layout_tensors(self) -> None:
+        """Restore graph-captured layout metadata without changing its addresses."""
+        self.block_table_ptrs.copy_(
+            self._make_ptr_tensor([b.gpu for b in self.block_tables])
+        )
+        self.block_table_strides.copy_(
+            torch.tensor(
+                [b.gpu.stride(0) for b in self.block_tables],
+                dtype=torch.int64,
+                device=self.device,
+            )
+        )
+        self.block_sizes_tensor.copy_(
+            torch.tensor(self.block_sizes, dtype=torch.int32, device=self.device)
+        )
+        self.kernel_block_sizes_tensor.copy_(
+            torch.tensor(self.kernel_block_sizes, dtype=torch.int32, device=self.device)
+        )
+        self.input_block_table_ptrs.copy_(
+            self._make_ptr_tensor(self.input_block_tables)
+        )
 
     def append_block_ids(
         self,
