@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import BadRequestError, InternalServerError, NotFoundError, OpenAI
+from openai import BadRequestError, NotFoundError, OpenAI
 from openai_harmony import Message
 
 from tests.utils import RemoteOpenAIServer
