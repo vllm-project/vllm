@@ -81,13 +81,40 @@ def test_prepare_lora_metadata_on_cpu_no_lora():
     assert meta.no_lora_flag_cpu.item()
 
 
-def test_copy_prepared_lora_metadata():
+def test_prepare_lora_metadata_vectorized():
+    mapping = [2, -1, 0, 2, 0] * 103
+    meta = LoRAKernelMeta.make(4, len(mapping), DEVICE_TYPE)
+
+    meta.prepare_tensors_cpu(mapping)
+
+    mapping_tensor = torch.tensor(mapping, dtype=torch.int32, device=DEVICE_TYPE)
+    sorted_ids, sorted_indices = torch.sort(mapping_tensor, stable=True)
+    expected_ids, expected_counts = torch.unique_consecutive(
+        sorted_ids, return_counts=True
+    )
+    num_active = expected_ids.size(0)
+    torch.testing.assert_close(meta.token_lora_mapping, mapping_tensor)
+    torch.testing.assert_close(
+        meta.token_indices_sorted_by_lora_ids,
+        sorted_indices.to(dtype=torch.int32),
+    )
+    torch.testing.assert_close(meta.active_lora_ids[:num_active], expected_ids)
+    torch.testing.assert_close(
+        meta.num_tokens_per_lora[:num_active],
+        expected_counts.to(dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        meta.lora_token_start_loc[1 : num_active + 1],
+        torch.cumsum(expected_counts, dim=0, dtype=torch.int32),
+    )
+
+
+def test_prepare_lora_metadata_for_two_targets():
     mapping = [2, -1, 0, 2, 0]
     source = LoRAKernelMeta.make(4, len(mapping), DEVICE_TYPE)
     destination = LoRAKernelMeta.make(4, len(mapping), DEVICE_TYPE)
 
-    metadata = source.prepare_tensors_cpu(mapping)
-    destination.copy_tensors_cpu(metadata)
+    source.prepare_tensors_cpu(mapping, copy_to=destination)
 
     torch.testing.assert_close(
         destination.token_lora_mapping, source.token_lora_mapping
