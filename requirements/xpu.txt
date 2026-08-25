@@ -1,5 +1,7 @@
 # Common dependencies
 -r common.txt
+--extra-index-url=https://wheels.vllm.ai/xpu/
+triton==3.7.2+xpu
 
 ray>=2.9
 cmake>=3.26.1
@@ -18,4 +20,4 @@ torchvision
 torchcodec >= 0.14 # Required for the torchcodec video decoding backend
 
 auto_round_lib==0.14.2
-vllm_xpu_kernels==0.1.12.3
+vllm_xpu_kernels==0.1.13.2
