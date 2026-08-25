@@ -4,6 +4,7 @@
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -17,7 +18,9 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         invalid_block_ids: set[int] | None = None,
         failed_recving: set[str] | None = None,
         expected_finished_count: int = 0,
+        hisparse_stats: HiSparseStats | None = None,
     ):
+        self.hisparse_stats = hisparse_stats
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
@@ -88,6 +91,18 @@ def test_aggregate_workers_output():
     assert aggregated.finished_recving == {"req2"}
     assert aggregated.invalid_block_ids == {3, 4, 5}
     assert aggregated.failed_recving == {"req3"}
+
+
+def test_aggregate_hisparse_stats():
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    outputs = [
+        DummyModelRunnerOutput(hisparse_stats=HiSparseStats(7, 3, 48)),
+        DummyModelRunnerOutput(hisparse_stats=HiSparseStats(5, 1, 16)),
+    ]
+
+    output = aggregator.aggregate(outputs)
+
+    assert output.hisparse_stats == HiSparseStats(12, 4, 64)
 
 
 def test_aggregate_workers_output_with_expected_finished_count():

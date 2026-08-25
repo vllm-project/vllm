@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.metrics.stats import HiSparseStats
     from vllm.v1.request import Request
 
 
@@ -226,6 +227,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.reset_hot_state()
 
+    def finish_step(self) -> HiSparseStats | None:
+        assert self.connector_worker is not None
+        return self.connector_worker.finish_step()
+
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
@@ -302,7 +307,17 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         return False, None
 
 
-def find_hisparse_connector(
+class _HiSparseMultiConnector(MultiConnector):
+    """Compose HiSparse without changing the configured connector's telemetry."""
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        return self._connectors[0].get_kv_connector_stats()
+
+    def finish_step(self) -> HiSparseStats | None:
+        return self._connectors[-1].finish_step()
+
+
+def attach_hisparse_connector(
     connector: KVConnectorBase_V1 | None,
 ) -> HiSparseConnector | None:
     if connector is None:

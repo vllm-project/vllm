@@ -24,6 +24,7 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.metrics.stats import HiSparseStats
 
 
 class KVConnector:
@@ -48,6 +49,9 @@ class KVConnector:
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
+        return None
+
+    def finish_step(self) -> "HiSparseStats | None":
         return None
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
@@ -166,6 +170,11 @@ class ActiveKVConnector(KVConnector):
         )
         self.kv_connector.clear_connector_metadata()
         return output
+
+    def finish_step(self) -> "HiSparseStats | None":
+        if self._disabled:
+            return None
+        return self.kv_connector.finish_step()
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:
