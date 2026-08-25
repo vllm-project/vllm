@@ -172,6 +172,34 @@ instead of a function if it does not depend on the input.
 """
 
 
+@dataclass(frozen=True)
+class _SelectTokenId:
+    """`is_embed` selecting a single token id.
+
+    A callable class rather than a closure so that a processor cache with an
+    out-of-process backend can recognize the update and re-encode it, which is
+    impossible for an opaque closure.
+    """
+
+    embed_token_id: int
+
+    def __call__(self, full: list[int]) -> torch.Tensor:
+        return torch.tensor(full) == self.embed_token_id
+
+
+@dataclass(frozen=True)
+class _SelectTokenIds:
+    """`is_embed` selecting any of several token ids. See `_SelectTokenId`."""
+
+    embed_token_ids: tuple[int, ...]
+
+    def __call__(self, full: list[int]) -> torch.Tensor:
+        return torch.isin(
+            torch.tensor(full),
+            torch.tensor(self.embed_token_ids),
+        )
+
+
 @dataclass
 class PromptUpdateDetails:
     """Details about the token sequence that is part of the update."""
@@ -200,23 +228,20 @@ class PromptUpdateDetails:
         seq: list[int],
         embed_token_id: int,
     ) -> "PromptUpdateDetails":
-        def is_embed(full: list[int]) -> torch.Tensor:
-            return torch.tensor(full) == embed_token_id
-
-        return PromptUpdateDetails(full=seq, is_embed=is_embed)
+        return PromptUpdateDetails(
+            full=seq,
+            is_embed=_SelectTokenId(embed_token_id),
+        )
 
     @staticmethod
     def select_token_ids(
         seq: list[int],
         embed_token_ids: list[int],
     ) -> "PromptUpdateDetails":
-        def is_embed(full: list[int]) -> torch.Tensor:
-            return torch.isin(
-                torch.tensor(full),
-                torch.tensor(embed_token_ids),
-            )
-
-        return PromptUpdateDetails(full=seq, is_embed=is_embed)
+        return PromptUpdateDetails(
+            full=seq,
+            is_embed=_SelectTokenIds(tuple(embed_token_ids)),
+        )
 
 
 PromptUpdateInfo: TypeAlias = list[int] | PromptUpdateDetails
