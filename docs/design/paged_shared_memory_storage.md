@@ -53,7 +53,7 @@ The `PagedShmTensorIPC` class wraps the client to automatically handle large ten
 
 - **`write()`**: Scans `mm_inputs` for tensors larger than `block_size`, batches `open_write` requests, submits asynchronous copies to SHM, and replaces the original tensor with a `PagedShmTensor` metadata object (containing the read token, shape, dtype, and block list). The metadata is small enough to be sent via ZMQ.
 - **`read()`**: On the worker side, extracts `PagedShmTensor` from the received metadata, waits for the write to complete (with timeout), reads the tensor data from SHM to the target device, and reconstructs the full tensor. It **does not** call `close_read`; the token is left active. The actual cleanup is handled later by `PagedShmTensorTracker.free_request()`.
-- **`PagedShmTensorTracker`**: A companion class that lives in the GPU worker process. It is instantiated with the `ModelConfig` and provides a `free_request(request)` method. When a request finishes, the engine calls this method, which iterates over the request's multimodal features and releases each associated SHM read token by invoking `close_read` on a `PagedShmClientWithoutStorage` instance. This ensures that SHM blocks are freed promptly without blocking the critical inference path.
+- **`PagedShmTensorTracker`**: A companion class that lives in the EncoderCacheManager. When a request finishes, free_request(request) iterates over its multimodal features and releases each SHM read token via close_read.
 
 This design ensures that only the metadata traverses the ZMQ path, while the heavy tensor data stays in SHM, drastically reducing latency and CPU overhead under load.
 

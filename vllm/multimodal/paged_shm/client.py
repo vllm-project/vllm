@@ -350,10 +350,6 @@ class PagedShmClientWithoutStorage(_BaseClient):
         resp = self._request(GET_MANAGER_STATE)
         return json.loads(resp)
 
-    def get_shm_name(self) -> str:
-        """Return the shared memory name (cached from initial handshake)."""
-        return self._shm_name
-
     def get_info(self, uuid: str) -> dict[str, Any]:
         """
         Return object info for the given UUID.
@@ -615,6 +611,10 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         with self.read_context(uuid, timeout=timeout) as ctx:
             it = self._storage.get_iterator_tensor(ctx.size, ctx.blocks)()
             yield it
+
+    def get_shm_name(self) -> str:
+        """Return the shared memory name (cached from initial handshake)."""
+        return self._shm_name
 
 
 def _close_sock_pool(pool: queue.Queue):
