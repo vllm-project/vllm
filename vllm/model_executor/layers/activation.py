@@ -548,8 +548,6 @@ class SwigluStepAndMul(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        # Not forward_cuda(): that path uses the in-tree Triton kernel, whereas
-        # XPU has a fused native kernel for this op.
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
@@ -672,7 +670,6 @@ class ReLUSquaredActivation(CustomOp):
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.relu_squared
         elif current_platform.is_xpu():
-            # XPU registers the same kernel under a different name.
             self.op = torch.ops._C.relu2_no_mul
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
