@@ -245,6 +245,9 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    probe_ckpt: str | None = None
+    """Path to a token-probe checkpoint. Currently supported by
+    BailingMoeV3ForCausalLM only."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)

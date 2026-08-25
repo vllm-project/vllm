@@ -310,6 +310,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    token_probe_probs=output.token_probe_probs,
                 )
                 choices.append(choice_data)
 

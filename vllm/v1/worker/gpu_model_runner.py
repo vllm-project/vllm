@@ -97,6 +97,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.models.token_probe.runner import TokenProbeRunner
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -300,6 +301,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
+        token_probe_scores: torch.Tensor | None = None,
         check_ep_fault: bool = False,
         num_nans: torch.Tensor | None = None,
     ):
@@ -316,6 +318,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
         self._routed_experts = routed_experts
+        self._token_probe_scores = token_probe_scores
         self._num_nans = num_nans
         self._has_fault: torch.Tensor | None = None
 
@@ -323,6 +326,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
+            scores_cpu, copy_event = TokenProbeRunner.start_output_copy(
+                self._token_probe_scores
+            )
+            self._token_probe_scores_cpu = scores_cpu
+            self.token_probe_copy_ready_event = copy_event
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
                 "cpu", non_blocking=True
             )
@@ -379,6 +387,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._routed_experts_cpu is not None:
             output.routed_experts = self._routed_experts_cpu.tolists()
         del self._routed_experts
+
+        if self._token_probe_scores_cpu is not None:
+            output.token_probe_scores = self._token_probe_scores_cpu.numpy()
+        del self._token_probe_scores
 
         if self._num_nans_cpu is not None:
             output.num_nans_in_logits = nans_to_dict(
@@ -497,6 +509,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    token_probe_scores: torch.Tensor | None
 
 
 class GPUModelRunner(
@@ -537,6 +550,10 @@ class GPUModelRunner(
 
         self.is_pooling_model = model_config.runner_type == "pooling"
         self.enable_prompt_embeds = model_config.enable_prompt_embeds
+        self.token_probe_runner = TokenProbeRunner(
+            model_config.probe_ckpt,
+            output_rank=get_tp_group().rank_in_group == 0,
+        )
         self.is_multimodal_raw_input_only_model = (
             model_config.is_multimodal_raw_input_only_model
         )
@@ -3421,6 +3438,24 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
+    def _token_probe_model_kwargs(
+        self,
+        *,
+        num_reqs: int,
+        max_query_len: int,
+        slot_mappings_by_group: dict[int, torch.Tensor] | None,
+        is_prefill_only: bool = False,
+    ) -> dict[str, Any]:
+        return self.token_probe_runner.model_kwargs(
+            num_reqs=num_reqs,
+            max_query_len=max_query_len,
+            slot_mappings_by_group=slot_mappings_by_group,
+            block_tables=self.input_batch.block_table,
+            query_start_loc=self.query_start_loc.gpu,
+            kv_cache_initialized=hasattr(self, "kv_cache_config"),
+            is_prefill_only=is_prefill_only,
+        )
+
     def get_draft_model(self) -> nn.Module | None:
         drafter = getattr(self, "drafter", None)
         if drafter is None:
@@ -4360,6 +4395,10 @@ class GPUModelRunner(
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+            is_prefill_only = self.token_probe_runner.is_prefill_only(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                self.input_batch.num_prompt_tokens[:num_reqs],
+            )
 
             logits_indices, spec_decode_metadata, max_num_sampled_tokens = (
                 self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
@@ -4518,6 +4557,14 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
+            model_kwargs.update(
+                self._token_probe_model_kwargs(
+                    num_reqs=num_reqs_padded,
+                    max_query_len=max_num_scheduled_tokens,
+                    slot_mappings_by_group=slot_mappings_by_group,
+                    is_prefill_only=is_prefill_only,
+                )
+            )
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
@@ -4565,6 +4612,9 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
+            model_output, token_probe_scores = (
+                self.token_probe_runner.unpack_model_output(model_output)
+            )
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
@@ -4633,6 +4683,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            token_probe_scores,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4684,6 +4735,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            token_probe_scores,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -4887,6 +4939,14 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                token_probe_scores=(
+                    self.token_probe_runner.to_numpy(
+                        token_probe_scores,
+                        scheduler_output.total_num_scheduled_tokens,
+                    )
+                    if not self.use_async_scheduling
+                    else None
+                ),
             )
 
         if not self.use_async_scheduling:
@@ -4904,8 +4964,8 @@ class GPUModelRunner(
         with record_function_or_nullcontext(
             "gpu_model_runner: AsyncGPUModelRunnerOutput"
         ):
-            # Async path: produce a device-side snapshot that the async
-            # copy stream can D2H later. Both tensors must be private
+            # Async path: produce device-side snapshots that the async copy
+            # stream can D2H later. Routed-expert tensors must be private
             # clones because:
             #   - ``routing_data`` source is the shared capturer buffer,
             #     which the next forward overwrites on the default stream.
@@ -4918,6 +4978,10 @@ class GPUModelRunner(
             routed_experts_snapshot = self.get_routed_experts(
                 scheduler_output.total_num_scheduled_tokens
             )
+            token_probe_scores = self.token_probe_runner.trim_scores(
+                token_probe_scores,
+                scheduler_output.total_num_scheduled_tokens,
+            )
 
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
@@ -4927,8 +4991,12 @@ class GPUModelRunner(
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
+                token_probe_scores=token_probe_scores,
                 check_ep_fault=self.check_ep_fault,
                 num_nans=num_nans_device,
+            )
+            self.token_probe_runner.set_output_copy_event(
+                async_output.token_probe_copy_ready_event
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -6110,9 +6178,15 @@ class GPUModelRunner(
         # protocol so that back-to-back dummy/real steps don't overwrite
         # pinned memory while a prior non_blocking H2D DMA is still reading.
         with self.synchronize_input_prep():
-            # If force_attention is True, we always capture attention.
-            # Otherwise, it only happens for cudagraph_runtime_mode=FULL.
-            if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # The attention probe shares the paged-input buffers but does not
+            # require the base model's metadata in piecewise mode.
+            build_attention_metadata = (
+                force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
+            )
+            prepare_token_probe = self.token_probe_runner.needs_paged_attention_inputs(
+                hasattr(self, "kv_cache_config")
+            )
+            if build_attention_metadata or prepare_token_probe:
                 if profile_seq_lens is not None:
                     seq_lens = profile_seq_lens  # type: ignore[assignment]
                 elif create_mixed_batch:
@@ -6164,23 +6238,26 @@ class GPUModelRunner(
                 # requests can corrupt Mamba state.
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
-                pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                attn_metadata, _ = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded,
-                    num_tokens_padded=num_tokens_padded if pad_attn else None,
-                    num_reqs=num_reqs_padded,
-                    max_query_len=max_query_len,
-                    ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
-                    # FULL replay reads capture-time metadata buffers. Re-stage them
-                    # from the zeroed dummy block tables instead of retaining state
-                    # indices from the previous real batch.
-                    for_cudagraph_capture=(
-                        is_graph_capturing
-                        or cudagraph_runtime_mode == CUDAGraphMode.FULL
-                    ),
-                    slot_mappings=slot_mappings_by_group,
-                    use_spec_decode=self.speculative_config is not None,
-                )
+                if build_attention_metadata:
+                    pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    attn_metadata, _ = self._build_attention_metadata(
+                        num_tokens=num_tokens_unpadded,
+                        num_tokens_padded=num_tokens_padded if pad_attn else None,
+                        num_reqs=num_reqs_padded,
+                        max_query_len=max_query_len,
+                        ubatch_slices=(
+                            ubatch_slices_padded if pad_attn else ubatch_slices
+                        ),
+                        # FULL replay reads capture-time metadata buffers. Re-stage
+                        # them from the zeroed dummy block tables instead of retaining
+                        # state indices from the previous real batch.
+                        for_cudagraph_capture=(
+                            is_graph_capturing
+                            or cudagraph_runtime_mode == CUDAGraphMode.FULL
+                        ),
+                        slot_mappings=slot_mappings_by_group,
+                        use_spec_decode=self.speculative_config is not None,
+                    )
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
@@ -6206,6 +6283,14 @@ class GPUModelRunner(
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
+
+            model_kwargs.update(
+                self._token_probe_model_kwargs(
+                    num_reqs=num_reqs_padded,
+                    max_query_len=max_query_len,
+                    slot_mappings_by_group=slot_mappings_by_group,
+                )
+            )
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
@@ -6260,6 +6345,8 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+
+            outputs, _ = self.token_probe_runner.unpack_model_output(outputs)
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -7545,6 +7632,11 @@ class GPUModelRunner(
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
+        )
+        self.token_probe_runner.initialize_kv_cache(
+            model=self.get_model(),
+            kv_cache_config=kv_cache_config,
+            block_tables=self.input_batch.block_table,
         )
 
         if (

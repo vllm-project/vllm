@@ -420,6 +420,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                     if request.return_token_ids
                                     else None
                                 ),
+                                token_probe_probs=output.token_probe_probs,
                             )
                         ],
                     )
@@ -578,7 +579,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     if output.routed_experts is not None
                     else None
                 )
-
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -593,6 +593,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    token_probe_probs=output.token_probe_probs,
                 )
                 choices.append(choice_data)
 

@@ -734,7 +734,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     include_token_ids = (
                         request.return_token_ids and not hide_stream_metadata
                     )
-
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
@@ -745,6 +744,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
+                            token_probe_probs=output.token_probe_probs,
                         )
 
                     # if the model is finished generating
@@ -773,6 +773,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
+                            token_probe_probs=output.token_probe_probs,
                         )
 
                         finish_reason_sent[i] = True
@@ -1081,7 +1082,6 @@ class OpenAIServingChat(GenerateBaseServing):
                 if output.routed_experts is not None
                 else None
             )
-
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
@@ -1098,6 +1098,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                token_probe_probs=output.token_probe_probs,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

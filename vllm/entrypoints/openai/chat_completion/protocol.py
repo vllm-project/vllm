@@ -122,6 +122,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    token_probe_probs: list[dict[str, float]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -161,6 +164,9 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: int | str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
+    token_probe_probs: list[dict[str, float]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):

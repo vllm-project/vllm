@@ -641,6 +641,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    token_probe_probs: list[dict[str, float]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -680,6 +683,9 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
     # prompt tokens is put into choice to align with CompletionResponseChoice
     prompt_token_ids: list[int] | None = None
     token_ids: list[int] | None = None
+    token_probe_probs: list[dict[str, float]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class CompletionStreamResponse(OpenAIBaseModel):
