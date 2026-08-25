@@ -83,6 +83,8 @@ def _swiglu_oai_quant_kernel(
     limit,
     HAS_LIMIT: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TINY: tl.constexpr,
 ):
     """SwiGLU-OAI (split layout) fused with per-32-block MXFP8 (E4M3 + E8M0)
     quant. Each program handles ``[BLOCK_M, 32]`` of the ``[M, I]`` output (one
@@ -109,9 +111,9 @@ def _swiglu_oai_quant_kernel(
         gate = tl.minimum(gate, limit)
         up = tl.minimum(tl.maximum(up, -limit), limit)
     act = gate * tl.sigmoid(alpha * gate) * (up + beta)  # [BLOCK_M, 32] fp32
-    amax = tl.maximum(tl.max(tl.abs(act), axis=1), 1e-30)  # [BLOCK_M]
+    amax = tl.maximum(tl.max(tl.abs(act), axis=1), TINY)  # [BLOCK_M]
     sb = tl.minimum(
-        tl.maximum(tl.ceil(tl.log2(amax / 448.0)) + 127.0, 0.0), 254.0
+        tl.maximum(tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0, 0.0), 254.0
     )
     descale = tl.exp2(sb - 127.0)
     aq = (act / descale[:, None]).to(aq_ptr.dtype.element_ty)
@@ -175,6 +177,8 @@ def swiglu_oai_quantize_mxfp8(
         0.0 if limit is None else float(limit),
         HAS_LIMIT=limit is not None,
         BLOCK_M=block_m,
+        FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
         num_warps=4,
     )
     return aq, asc

@@ -170,12 +170,14 @@ def test_swiglu_oai_split(m, inter, limit, dtype):
 
 @torch.inference_mode()
 def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
-    # Keep a small value in each MX block next to its maximum. The scale must
+    # Keep a small value in two MX blocks next to their maxima. The scale must
     # use E4M3's finite range (448), otherwise that value underflows to zero.
-    m, inter = 3, 64
+    # Keep the third block empty to cover the reference's finite tiny clamp.
+    m, inter = 3, 96
     gate = torch.full((m, inter), 2.0, device=DEVICE, dtype=torch.float16)
     up = torch.full((m, inter), 2**-10, device=DEVICE, dtype=torch.float16)
-    up[:, ::32] = 1.0
+    up[:, :64:32] = 1.0
+    up[:, 64:] = 0.0
     gate_up = torch.cat((gate, up), dim=-1)
 
     got_q, got_s = swiglu_oai_quantize_mxfp8(
