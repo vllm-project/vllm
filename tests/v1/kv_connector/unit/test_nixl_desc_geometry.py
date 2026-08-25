@@ -182,11 +182,16 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.host_buffer_kv_cache_layout = "NHD"
     worker._physical_blocks_per_logical_kv_block = 1
     worker._logical_num_blocks = num_blocks
+    worker.region_mem_types = []
     worker.region_strides = []
     worker.region_group_ids = []
     worker.region_block_sizes = []
     worker.region_names = []
     worker.region_num_blocks = []
+    worker._mixed_mem_types = False
+    worker._desc_is_dram_by_block_size = {}
+    worker._desc_pos_by_block_size = {}
+    worker._dram_src_handles_by_block_size = {}
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
@@ -199,6 +204,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
     worker._layer_specs = {name: spec for name in caches}
+    worker._nixl_adapter = None
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -211,6 +217,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
             for name in caches
         ],
         kv_cache_groups=groups,
+        num_blocks_by_pool=[num_blocks],
     )
 
     transfer_topology = MagicMock()
@@ -300,8 +307,6 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     # would not be deduplicated. Pin it to the faked device type.
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
-    from unittest.mock import MagicMock
-
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
     fake_backend.get_name.return_value = "FLASHMLA"
@@ -387,6 +392,16 @@ def _make_remote_meta(
     )
 
 
+def _register_remote_agents(worker, metadata, tp_size):
+    """Mirror the async handshake callback that publishes prepared agents."""
+    worker._remote_agents[metadata.engine_id] = {
+        (0, rank): worker.add_remote_agent(
+            metadata, remote_tp_rank=rank, remote_tp_size=tp_size
+        )
+        for rank in range(tp_size)
+    }
+
+
 def _owned_byte_ranges(worker, group_logical_ids):
     """Byte ranges owned by a request: for each HMA region tensor, every
     logical block id of every group maps to one unified page."""
@@ -444,8 +459,7 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
         remote_num_logical=12,
         remote_ssm_sizes=(24, 32),
     )
-    for rank in (0, 1):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=2)
+    _register_remote_agents(worker, meta_r, 2)
 
     # Request B: 17 matched tokens. Local: 2 logical blocks (24 tok
     # capacity); remote: 16 prefilled tokens -> 2 remote logical blocks.
@@ -461,7 +475,7 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
             "remote_block_ids": remote_ids,
             "remote_engine_id": "remote-engine",
             "remote_request_id": "prefill-req-b",
-            "remote_host": "localhost",
+            "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": 2,
         },
@@ -544,8 +558,7 @@ def _run_hetero_case(
         remote_num_logical=max(2 * n_remote + 4, 8),
         remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
     )
-    for rank in range(tp_size):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=tp_size)
+    _register_remote_agents(worker, meta_r, tp_size)
 
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]
@@ -561,7 +574,7 @@ def _run_hetero_case(
             "remote_block_ids": remote_ids,
             "remote_engine_id": "remote-engine",
             "remote_request_id": "prefill-req-b",
-            "remote_host": "localhost",
+            "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": tp_size,
         },

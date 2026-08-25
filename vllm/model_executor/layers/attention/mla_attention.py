@@ -207,7 +207,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 import numpy as np
 import torch
@@ -304,6 +304,11 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+        HiSparseIndexGroupBuilder,
+    )
 
 logger = init_logger(__name__)
 
@@ -419,6 +424,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_sparse: bool = False,
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        hisparse_index_group_builder: "HiSparseIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
@@ -524,9 +530,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # explicitly so backbone "skip" layers (indexer=None) still find it.
         if use_sparse:
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
+            if hisparse_index_group_builder is not None:
+                extra_impl_args["hisparse_index_group_builder"] = (
+                    hisparse_index_group_builder
+                )
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
+        impl = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -548,6 +558,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
+        self.impl = impl  # type: ignore[assignment]
+        self.hisparse_cache = impl.hisparse_cache
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
         # AMX reads kv_b_proj's weight directly and never calls it live; the
@@ -689,6 +701,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            self.impl.prepare_for_batch(attn_metadata)
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                 maybe_gather_mla_latent_cache_inputs(
@@ -1219,6 +1232,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return MLAAttentionSpec(
             **common_kwargs,
+            is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
@@ -1273,6 +1287,7 @@ def unified_mla_kv_cache_update(
         layer_name
     )
     if layer_slot_mapping is not None:
+        attn_layer.impl.prepare_for_batch(attn_metadata)
         kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
@@ -1443,6 +1458,7 @@ class MLACommonBackend(AttentionBackend):
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack an inline fp32 scale pair after the
         latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        spec = super().customize_spec(spec)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
             return spec
@@ -2683,12 +2699,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_lse = None
         for chunk in chunked_context.chunks:
             toks = chunk.num_context_tokens
-            block_table = prefill_metadata.block_table[chunk.request_slice]
+            chunk_block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
-                    block_table=block_table,
+                    block_table=chunk_block_table,
                     workspace_starts=chunk.cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
@@ -2697,7 +2713,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
-                    block_table=block_table,
+                    block_table=chunk_block_table,
                     cu_seq_lens=chunk.cu_seq_lens,
                     token_to_seq=chunk.token_to_seq,
                     num_tokens=toks,
@@ -2710,7 +2726,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 ops.cp_gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
-                    block_table=block_table,
+                    block_table=chunk_block_table,
                     cu_seq_lens=chunk.cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,

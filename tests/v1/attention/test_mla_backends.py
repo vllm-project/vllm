@@ -81,6 +81,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     layer = SimpleNamespace(
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
     )

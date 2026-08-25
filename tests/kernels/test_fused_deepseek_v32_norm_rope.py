@@ -234,6 +234,76 @@ def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_dtype: str
     assert (topk == -1).all(), "topk buffer not cleared on indexer layer"
 
 
+def test_fused_norm_rope_packed_indexer_block_stride():
+    """Indexer writes use their HMA block stride and independent slot map."""
+    torch.manual_seed(7)
+    dev = "cuda"
+    num_tokens = block_size = 2
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    ik = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    ikw = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    ikb = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(32, ROPE_DIM, dev)
+
+    idx_row = INDEX_HEAD_DIM + INDEX_HEAD_DIM // 128 * 4
+    packed_block_stride = block_size * idx_row + 64
+    backing = torch.zeros(2 * packed_block_stride, device=dev, dtype=torch.uint8)
+    idx_cache = torch.as_strided(
+        backing,
+        (2, block_size, idx_row),
+        (packed_block_stride, idx_row, 1),
+    )
+    mla_cache = torch.zeros(
+        1,
+        block_size,
+        KV_LORA + ROPE_DIM,
+        device=dev,
+        dtype=torch.bfloat16,
+    )
+    topk = torch.zeros(num_tokens, 8, device=dev, dtype=torch.int32)
+
+    K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        cos_sin,
+        ik,
+        ikw,
+        ikb,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=torch.arange(num_tokens, device=dev, dtype=torch.int64),
+        indexer_slot_mapping=torch.arange(
+            block_size, block_size + num_tokens, device=dev, dtype=torch.int64
+        ),
+        indexer_k_cache=idx_cache,
+        mla_kv_cache=mla_cache,
+        has_indexer=True,
+    )
+
+    ik_ref = rope(layer_norm(ik, ikw, ikb), pos, cos_sin, interleave=False)
+    q_ref, s_ref = ue8m0_quant(ik_ref)
+    packed = idx_cache[1].reshape(-1)
+    values = (
+        packed[: block_size * INDEX_HEAD_DIM].view(FP8).view(block_size, INDEX_HEAD_DIM)
+    )
+    scales = packed[block_size * INDEX_HEAD_DIM :].view(torch.float32)
+    assert_fp8(values, q_ref, "packed indexer-K fp8")
+    torch.testing.assert_close(scales, s_ref, rtol=0, atol=0)
+    assert (backing[block_size * idx_row : packed_block_stride] == 0).all()
+
+
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])
 def test_fused_norm_rope_no_indexer(num_tokens: int):
     """Shared (no-indexer) layer: q + kv/MLA only; top-k buffer untouched."""

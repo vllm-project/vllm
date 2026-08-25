@@ -1405,9 +1405,7 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     freed: list = []
     blocks = [SimpleNamespace(block_id=7), SimpleNamespace(block_id=9)]
     mock = SimpleNamespace(
-        kv_cache_manager=SimpleNamespace(
-            block_pool=SimpleNamespace(free_blocks=freed.extend)
-        ),
+        kv_cache_manager=SimpleNamespace(free_blocks=freed.extend),
         deferred_frees=deque(),
         defer_block_free=True,
         processed_step_seq=2,

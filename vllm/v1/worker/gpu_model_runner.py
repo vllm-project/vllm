@@ -241,10 +241,10 @@ from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
     AttentionGroup,
-    KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
     bind_kv_cache,
+    build_kv_block_zeroers,
     copy_kv_cache_blocks_inplace,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
@@ -1194,18 +1194,20 @@ class GPUModelRunner(
 
         Called from gpu_worker.py outside the CuMem pool context.
         """
-        self._kv_block_zeroer = KVBlockZeroer(
-            self.device,
-            attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
+        self._kv_block_zeroers = build_kv_block_zeroers(
+            device=self.device,
+            attn_groups=self.attn_groups,
             kernel_block_sizes=self._kernel_block_sizes,
-            runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
+            kv_cache_config=self.kv_cache_config,
+            runner_only_attn_layers=self.runner_only_attn_layers,
         )
 
-    def _zero_block_ids(self, block_ids: list[int]) -> None:
+    def _zero_block_ids(self, block_ids_by_pool: dict[int, list[int]]) -> None:
         """Zero the KV cache memory for the given block IDs."""
-        if hasattr(self, "_kv_block_zeroer"):
-            self._kv_block_zeroer.zero_block_ids(block_ids)
+        if hasattr(self, "_kv_block_zeroers"):
+            for pool_id, block_ids in block_ids_by_pool.items():
+                self._kv_block_zeroers[pool_id].zero_block_ids(block_ids)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
