@@ -521,6 +521,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Build the vLLM wheel
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=.git,target=.git \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        export SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"; \
+    fi && \
     if [ "${vllm_target_device}" = "cuda" ]; then \
         export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
