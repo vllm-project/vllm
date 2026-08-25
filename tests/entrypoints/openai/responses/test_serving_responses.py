@@ -637,7 +637,7 @@ class TestHarmonyPreambleStreaming:
         mcp_segment = self._make_segment(
             channel="commentary", recipient="repo_browser.list"
         )
-        events = emit_content_delta_events(mcp_segment, StreamingState())
+        events = emit_content_delta_events(mcp_segment, StreamingState(), frozenset())
         assert "response.mcp_call.in_progress" in [event.type for event in events]
 
     def test_preamble_done_emits_text_done_events(self) -> None:
