@@ -10,7 +10,7 @@ clusters:
   • decode  (language-model inference)
 
 For MM input we:
-    1. Extract *every* image/audio item.
+    1. Extract *every* image/audio/video item.
     2. Fire N concurrent requests to the encoder cluster
        (one request per item, with **all text removed**).
     3. Wait for all of them to succeed.
@@ -51,12 +51,12 @@ decode_session: aiohttp.ClientSession | None = None
 ###############################################################################
 
 
-MM_TYPES = {"image_url", "audio_url", "input_audio"}
+MM_TYPES = {"image_url", "audio_url", "input_audio", "video_url"}
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
     """
-    Return *all* image/audio items that appear anywhere in `messages`.
+    Return *all* image/audio/video items that appear anywhere in `messages`.
 
     Each returned dict looks like:
         { "type": "image_url", "image_url": {...} }
