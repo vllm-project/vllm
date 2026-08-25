@@ -27,6 +27,8 @@ def _gelu_and_mul_sparse_kernel(
     row_start = row * 2 * d
 
     gate = tl.load(x_ptr + row_start + offsets, mask=mask, other=0.0).to(tl.float32)
+    # TODO: Investigate delaying this load to reduce spills for large reductions
+    # without regressing smaller shapes.
     up = tl.load(x_ptr + row_start + d + offsets, mask=mask, other=0.0).to(tl.float32)
 
     input_dtype = x_ptr.dtype.element_ty
