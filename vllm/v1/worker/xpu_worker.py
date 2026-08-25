@@ -47,30 +47,55 @@ class XPUWorker(Worker):
             parallel_config.distributed_executor_backend
             not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
-            and parallel_config.nnodes_within_dp == 1
+            and (
+                parallel_config.data_parallel_external_lb
+                or parallel_config.nnodes_within_dp == 1
+            )
         ):
             dp_local_rank = parallel_config.data_parallel_rank_local
             if dp_local_rank is None:
                 dp_local_rank = parallel_config.data_parallel_index
-            tp_pp_world_size = (
+            tp_pp_pcp_world_size = (
                 parallel_config.pipeline_parallel_size
                 * parallel_config.tensor_parallel_size
+                * parallel_config.prefill_context_parallel_size
             )
             visible_device_count = torch.accelerator.device_count()
 
             if parallel_config.data_parallel_external_lb:
-                local_dp_capacity = visible_device_count // tp_pp_world_size
-                if local_dp_capacity == 1:
+                if tp_pp_pcp_world_size < visible_device_count:
+                    # A node can host multiple complete TP/PP/PCP replicas.
+                    local_dp_capacity = (
+                        visible_device_count // tp_pp_pcp_world_size
+                    )
+                elif tp_pp_pcp_world_size == visible_device_count:
+                    # A node hosts exactly one complete TP/PP/PCP replica.
+                    local_dp_capacity = 1
                     logger.warning_once(
-                        "XPU external LB sees capacity for only one TP/PP replica, "
-                        "which may indicate a device visibility misconfiguration. "
-                        "This is valid when each node hosts one DP rank. If multiple "
-                        "DP ranks share this node, ensure every XPU remains visible "
-                        "and ZE_AFFINITY_MASK is not narrowed per process."
+                        "XPU external LB sees exactly enough devices for one "
+                        "TP/PP/PCP replica. This may be the intended "
+                        "configuration, but it may also indicate that device "
+                        "visibility is misconfigured. Every DP rank must see "
+                        "all XPU devices on its node; consider removing "
+                        "ZE_AFFINITY_MASK or setting it to expose the complete "
+                        "device set."
+                    )
+                else:
+                    # The replica spans nodes, so use its node-local shard.
+                    tp_pp_pcp_world_size = parallel_config.local_world_size
+                    if tp_pp_pcp_world_size > visible_device_count:
+                        raise ValueError(
+                            f"Local TP/PP/PCP replica size "
+                            f"({tp_pp_pcp_world_size}) "
+                            "exceeds the number of visible XPU devices "
+                            f"({visible_device_count})."
+                        )
+                    local_dp_capacity = (
+                        visible_device_count // tp_pp_pcp_world_size
                     )
                 dp_local_rank = parallel_config.data_parallel_index % local_dp_capacity
 
-            self.local_rank += dp_local_rank * tp_pp_world_size
+            self.local_rank += dp_local_rank * tp_pp_pcp_world_size
 
             assert self.local_rank < visible_device_count, (
                 f"DP adjusted local rank {self.local_rank} is out of bounds. "
