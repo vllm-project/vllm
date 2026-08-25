@@ -138,13 +138,12 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
         > /vllm-version.txt
 
 # -----------------------
-# Rust/protoc toolchain inputs
+# Rust toolchain inputs
 #
 # Keep these separate from Rust source inputs so Rust source-only changes do not
 # invalidate the long-lived ci_base image that carries the toolchain.
 FROM scratch AS rust_toolchain_input_0
 COPY rust-toolchain.toml /rust-toolchain-input/vllm/rust-toolchain.toml
-COPY tools/install_protoc.sh /rust-toolchain-input/vllm/tools/install_protoc.sh
 
 FROM base AS rust_toolchain_input_1
 ARG VLLM_REPO
@@ -155,7 +154,6 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-toolchain-inpu
     && git sparse-checkout init --no-cone \
     && git sparse-checkout set \
         rust-toolchain.toml \
-        tools/install_protoc.sh \
     && git checkout FETCH_HEAD
 
 FROM rust_toolchain_input_${REMOTE_VLLM} AS rust-toolchain-input
@@ -195,20 +193,16 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
 FROM rust_input_${REMOTE_VLLM} AS rust-input
 
 # -----------------------
-# Rust/protoc toolchain
+# Rust toolchain
 FROM base AS rust-toolchain
 
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=${CARGO_HOME}/bin:${PATH}
 
-# protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-        ca-certificates curl unzip \
+        ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-
-COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/tools/install_protoc.sh /tmp/install_protoc.sh
-RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/rust-toolchain.toml /tmp/rust-toolchain.toml
 RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
@@ -224,7 +218,7 @@ RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"
 # -----------------------
 # Rust build stage
 # Builds the `vllm-rs` frontend in a dedicated stage so the wheel build stages
-# don't need the rust toolchain or protoc.
+# don't need the rust toolchain.
 FROM rust-toolchain AS rust-build
 ARG COMMON_WORKDIR
 ARG USE_SCCACHE
@@ -780,12 +774,10 @@ ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=${CARGO_HOME}/bin:${PATH}
 
-# Bake the Rust/protoc toolchain into ci_base so Rust build/test steps do not
+# Bake the Rust toolchain into ci_base so Rust build/test steps do not
 # need to fetch it on each per-commit image build.
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
-COPY --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
-COPY --from=rust-toolchain /usr/local/include/google /usr/local/include/google
 
 # Update rdma-core to support latest rocshmem.
 ARG DEEPEP_NIC
