@@ -1114,10 +1114,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> InputBatch:
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = (
-            num_tokens if self.pcp_manager is not None else batch_desc.num_tokens
-        )
-        assert num_tokens > 0
-        if envs.VLLM_MOE_SKIP_PADDING:
+        num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
             # Mark trailing cudagraph-padding rows so kernels can skip work for
             # them when supported.
             is_padding = self.input_buffers.is_padding
