@@ -12,6 +12,9 @@ from prometheus_client.parser import text_string_to_metric_families
 from .conftest import gen, health, ok, resume, server
 
 
+_SERVER_PORT_BASE = 8880
+
+
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
 def use_v2(request):
     """Run the metrics tests with both model-runner implementations."""
@@ -29,6 +32,7 @@ def server_url(use_v2):
     with (
         patch.dict(os.environ, env_vars),
         server(
+            port=8880 + int(use_v2),
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
@@ -105,11 +109,12 @@ class TestWeightUpdateMetricsCount:
 
     def test_weight_gen_gauge_tracks_update_weight_label_calls(self, server_url):
         """Updating only the label must not increment ``weight_gen``."""
-        requests.post(
+        response = requests.post(
             f"{server_url}/update_weight_label",
             json={"weight_label": "test"},
             timeout=5,
         )
+        assert response.status_code == 200, response.text
         metrics = _metrics(server_url)
         value = _metric_value(
             metrics,
@@ -147,4 +152,6 @@ class TestWeightUpdateMetricsCoexist:
         assert ok(gen(server_url)), "generation failed after fetching metrics"
         _metrics(server_url)
         assert health(server_url) == 200
+
+
 
