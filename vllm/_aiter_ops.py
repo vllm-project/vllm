@@ -793,7 +793,14 @@ def _rocm_aiter_gemm_a8w8_blockscale_bpreshuffle_impl(
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_blockscale_bpreshuffle
 
-    # B preshuffled (shuffle_weight (16,16)); As column-major group scale.
+    # B preshuffled (shuffle_weight (16,16)). The kernel reads the activation
+    # group scales column-major; convert HERE, inside the op impl, so the
+    # layout survives torch.compile: a caller-side strided transpose is not
+    # guaranteed to reach a custom op intact (inductor may normalize inputs
+    # to contiguous, silently undoing it — observed as model-level numeric
+    # corruption). A contiguous tensor with column-major data is preserved.
+    m, g = As.shape
+    As = As.transpose(0, 1).contiguous().view(m, g)
     return gemm_a8w8_blockscale_bpreshuffle(A, B, As, Bs, dtype=output_dtype)
 
 

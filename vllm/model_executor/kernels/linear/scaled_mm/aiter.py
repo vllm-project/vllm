@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -384,6 +386,23 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
+        # gfx950-dsr1-opt prototype: route dense blockscale GEMMs through the
+        # CK bpreshuffle backend (ATOM's path). Microbench on MI355X / AITER
+        # eb84cb022 shows it beats the triton path in 28/30 DSR1 shape/M
+        # configs (+20..55% typical, up to +144%); trace-level it accounts for
+        # ~74% of the 8K-prefill compute gap vs ATOM. Env-gated while a
+        # prototype; requires weights preshuffled at load (see
+        # process_weights_after_loading below).
+        self.use_bpreshuffle = (
+            not current_platform.is_fp8_fnuz()
+            and not _on_gfx1250
+            and os.environ.get("VLLM_ROCM_USE_AITER_BPRESHUFFLE_BLOCKSCALE", "0")
+            == "1"
+        )
+        # Set per-layer in process_weights_after_loading: True only once the
+        # layer's weight has actually been preshuffled.
+        self.bpre_shuffled = False
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
@@ -394,6 +413,29 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             ws, attr = params.weight_scale, params.WEIGHT_SCALE
         if ws is not None and ws.dtype == torch.float8_e8m0fnu:
             replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        if self.use_bpreshuffle:
+            # kv_b_proj's weight has a second consumer: MLA weight absorption
+            # (attention layer process_weights_after_loading, which the model
+            # loader runs AFTER quant-method processing) dequantizes
+            # layer.weight raw via get_and_maybe_dequant_weights() to build
+            # the decode W_UK/W_UV tensors. Shuffling it would feed shuffled
+            # bytes into that dequant and silently corrupt every decode step,
+            # so leave it in the plain layout (triton/CK fallback in apply).
+            if "kv_b_proj" in getattr(layer, "prefix", ""):
+                return
+            # One-time (16,16) tile preshuffle into the layout the CK
+            # b_preshuffle GEMM consumes; shape [N, K] is preserved.
+            w = params.weight
+            replace_parameter(
+                layer,
+                FP8BlockParams.WEIGHT,
+                torch.nn.Parameter(
+                    rocm_aiter_ops.shuffle_weight(w.data.contiguous()),
+                    requires_grad=False,
+                ),
+            )
+            self.bpre_shuffled = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -449,6 +491,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+        if self.bpre_shuffled:
+            # Row-major As; the custom-op impl converts to the kernel's
+            # column-major layout internally (torch.compile-safe).
+            return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                A, B, As, Bs, output_dtype=out_dtype
+            )
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
