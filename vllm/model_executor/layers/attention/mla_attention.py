@@ -838,8 +838,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 and _use_masked_mha(
                     backend_name=self.attn_backend.get_name(),
                     tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
+                    qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                    v_head_dim=self.v_head_dim,
                     query_len=prefill.max_query_len,
                     seq_len=prefill_max_seq_len,
+                    has_context=prefill.chunked_context is not None,
                 )
                 and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
             )
@@ -1632,17 +1635,61 @@ _DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
 }
 _DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
 
+_GLM5_MASKED_MHA_PURE_PREFILL_MAX_QUERY_LEN = {
+    1: 8 * 1024,
+    2: 20 * 1024,
+    4: 48 * 1024,
+    8: 112 * 1024,
+}
+_GLM5_MASKED_MHA_CONTEXT_THRESHOLDS = {
+    2: ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
+    4: (
+        (8 * 1024, 4 * 1024),
+        (16 * 1024, 8 * 1024),
+        (24 * 1024, 16 * 1024),
+        (34 * 1024, 32 * 1024),
+    ),
+    8: (
+        (8 * 1024, 4 * 1024),
+        (16 * 1024, 8 * 1024),
+        (32 * 1024, 16 * 1024),
+        (48 * 1024, 32 * 1024),
+    ),
+}
+
 
 def _use_masked_mha(
     *,
     backend_name: str,
     tensor_parallel_size: int,
+    qk_head_dim: int,
+    v_head_dim: int,
     query_len: int,
     seq_len: int,
+    has_context: bool,
 ) -> bool:
-    thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
-        tensor_parallel_size
-    )
+    if (qk_head_dim, v_head_dim) == (256, 256):
+        if backend_name != "FLASHMLA_SPARSE":
+            return False
+        if not has_context:
+            max_query_len = _GLM5_MASKED_MHA_PURE_PREFILL_MAX_QUERY_LEN.get(
+                tensor_parallel_size
+            )
+            return max_query_len is not None and query_len <= max_query_len
+        for (
+            max_seq_len,
+            context_min_query_len,
+        ) in _GLM5_MASKED_MHA_CONTEXT_THRESHOLDS.get(tensor_parallel_size, ()):
+            if seq_len <= max_seq_len:
+                return query_len >= context_min_query_len
+        return False
+    elif (qk_head_dim, v_head_dim) == (192, 128):
+        thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
+            tensor_parallel_size
+        )
+    else:
+        return False
+
     if thresholds is None:
         return False
     for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
