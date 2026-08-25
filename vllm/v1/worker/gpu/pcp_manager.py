@@ -782,8 +782,6 @@ def _validate_pcp_direct_kv_config(vllm_config: VllmConfig) -> None:
         raise NotImplementedError(
             "Direct PCP KV requires the specialized NVIDIA deepseek_v32 attention path."
         )
-    if parallel_config.tensor_parallel_size != 1:
-        raise NotImplementedError("Direct PCP KV currently requires TP=1.")
     if parallel_config.decode_context_parallel_size != 1:
         raise NotImplementedError("Direct PCP KV currently requires DCP=1.")
     if parallel_config.data_parallel_size != 1:

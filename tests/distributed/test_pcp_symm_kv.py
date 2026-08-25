@@ -125,7 +125,10 @@ def test_select_pcp_direct_slot_row_rejects_global_token_count():
     assert unpadded.shape == (2, 512)
 
 
-def run_fp8_ds_mla_indexer_oracle() -> None:
+def run_fp8_ds_mla_indexer_oracle(
+    group: dist.ProcessGroup | None = None,
+    seed_offset: int = 0,
+) -> None:
     """Byte-exact fused peer stores vs gather+insert for production GLM layout.
 
     Packed uint8 backing with a nonzero layer offset. MLA is fp8_ds_mla (656 B)
@@ -135,11 +138,11 @@ def run_fp8_ds_mla_indexer_oracle() -> None:
     from vllm.model_executor.layers.attention.pcp_direct_kv import PCPPeerCacheFence
     from vllm.models.deepseek_v32.common.kernels import fused_norm_rope
 
-    rank = dist.get_rank()
-    world = dist.get_world_size()
-    device = torch.device(f"cuda:{rank}")
-    group = dist.group.WORLD
-    torch.manual_seed(0)
+    group = group or dist.group.WORLD
+    rank = dist.get_rank(group)
+    world = dist.get_world_size(group)
+    device = torch.device(f"cuda:{dist.get_rank()}")
+    torch.manual_seed(seed_offset)
     local = 13
     q_dim, kv_dim, rope, idx_dim = 1536, 512, 64, 128
     mla_entry, idx_entry = 656, 132
@@ -150,6 +153,7 @@ def run_fp8_ds_mla_indexer_oracle() -> None:
     backing = allocate_symm_mem_peer(
         (layer_offset + mla_nbytes + idx_nbytes,), torch.uint8, device, group
     )
+    assert backing.peer_ptrs.numel() == world
     guard = 0xA5
     backing.storage.fill_(guard)
     mla_view = backing.storage[layer_offset : layer_offset + mla_nbytes].view(
@@ -166,7 +170,7 @@ def run_fp8_ds_mla_indexer_oracle() -> None:
     idx_w = torch.ones(idx_dim, device=device, dtype=torch.float32)
     idx_b = torch.zeros(idx_dim, device=device, dtype=torch.float32)
     cos_sin = torch.randn(8192, rope, device=device, dtype=torch.float32)
-    torch.manual_seed(rank + 1)
+    torch.manual_seed(seed_offset + rank + 1)
     slots = torch.arange(local, device=device, dtype=torch.int64) + rank * local
     positions = torch.arange(local, device=device)
     q_c = torch.randn(local, q_dim, device=device, dtype=torch.bfloat16)
@@ -180,12 +184,12 @@ def run_fp8_ds_mla_indexer_oracle() -> None:
     g_ik = torch.empty(total, idx_dim, device=device, dtype=index_k.dtype)
     g_pos = torch.empty(total, device=device, dtype=positions.dtype)
     g_slots = torch.empty(total, device=device, dtype=slots.dtype)
-    dist.all_gather_into_tensor(g_q, q_c.contiguous())
-    dist.all_gather_into_tensor(g_kv, kv_c.contiguous())
-    dist.all_gather_into_tensor(g_pe, k_pe.contiguous())
-    dist.all_gather_into_tensor(g_ik, index_k.contiguous())
-    dist.all_gather_into_tensor(g_pos, positions.contiguous())
-    dist.all_gather_into_tensor(g_slots, slots.contiguous())
+    dist.all_gather_into_tensor(g_q, q_c.contiguous(), group=group)
+    dist.all_gather_into_tensor(g_kv, kv_c.contiguous(), group=group)
+    dist.all_gather_into_tensor(g_pe, k_pe.contiguous(), group=group)
+    dist.all_gather_into_tensor(g_ik, index_k.contiguous(), group=group)
+    dist.all_gather_into_tensor(g_pos, positions.contiguous(), group=group)
+    dist.all_gather_into_tensor(g_slots, slots.contiguous(), group=group)
     ref_mla = torch.zeros_like(mla_view)
     ref_idx = torch.zeros_like(idx_view)
     fused_norm_rope(
@@ -213,7 +217,7 @@ def run_fp8_ds_mla_indexer_oracle() -> None:
     )
     mla_view.zero_()
     idx_view.zero_()
-    dist.barrier()
+    dist.barrier(group=group)
     fused_norm_rope(
         positions,
         q_c,
@@ -264,6 +268,50 @@ def _worker_fused_direct_matches_gather_insert(env: dict[str, str]) -> None:
     dist.destroy_process_group()
 
 
+def _worker_fused_direct_tp2_pcp2(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    global_rank = int(env["RANK"])
+    world_size = int(env["WORLD_SIZE"])
+    torch.cuda.set_device(global_rank)
+    from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        get_pcp_group,
+        get_tp_group,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    config = VllmConfig()
+    config.parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+    )
+    with set_current_vllm_config(config):
+        init_distributed_environment(
+            world_size=world_size,
+            rank=global_rank,
+            local_rank=global_rank,
+            backend="nccl",
+        )
+        initialize_model_parallel(
+            tensor_model_parallel_size=2,
+            prefill_context_model_parallel_size=2,
+        )
+        pcp_group = get_pcp_group()
+        tp_rank = get_tp_group().rank_in_group
+        gathered_tp_ranks = [None] * pcp_group.world_size
+        dist.all_gather_object(gathered_tp_ranks, tp_rank, group=pcp_group.cpu_group)
+        assert gathered_tp_ranks == [tp_rank] * pcp_group.world_size
+        run_fp8_ds_mla_indexer_oracle(
+            group=pcp_group.device_group,
+            seed_offset=1000 * (tp_rank + 1),
+        )
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2+ GPUs")
 def test_fused_direct_fp8_ds_mla_indexer_pcp2():
     _distributed_run(_worker_fused_direct_matches_gather_insert, world_size=2)
@@ -272,3 +320,8 @@ def test_fused_direct_fp8_ds_mla_indexer_pcp2():
 @pytest.mark.skipif(torch.cuda.device_count() < 4, reason="needs 4 GPUs")
 def test_fused_direct_fp8_ds_mla_indexer_pcp4():
     _distributed_run(_worker_fused_direct_matches_gather_insert, world_size=4)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 4, reason="needs 4 GPUs")
+def test_fused_direct_fp8_ds_mla_indexer_tp2_pcp2_subgroups():
+    _distributed_run(_worker_fused_direct_tp2_pcp2, world_size=4)
