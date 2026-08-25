@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import dataclasses
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, is_dataclass
 
 import pytest
 import torch
@@ -410,8 +409,8 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
             torch.testing.assert_close(new, ref, msg=lambda m: f"{path}: {m}")
         elif isinstance(ref, (int, float, bool, str)) or ref is None:
             assert new == ref, f"{path}: {new!r} != {ref!r}"
-        elif dataclasses.is_dataclass(ref):
-            for f in dataclasses.fields(ref):
+        elif is_dataclass(ref):
+            for f in fields(ref):
                 assert_equivalent(
                     getattr(new, f.name), getattr(ref, f.name), f"{path}.{f.name}"
                 )

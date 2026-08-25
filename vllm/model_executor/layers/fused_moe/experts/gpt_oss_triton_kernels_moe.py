@@ -578,13 +578,14 @@ def triton_kernel_moe_forward(
         if sm_first:
             logits = torch.softmax(logits, dim=-1)
         topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+        is_sparse_topk = not isinstance(topk_result, tuple)
         # topk may return a tuple (vals, indx, bitmatrix) or a
         # SparseMatrix depending on the triton_kernels version.
-        if isinstance(topk_result, tuple):
-            topk_weights, topk_ids_raw, _ = topk_result
-        else:
+        if is_sparse_topk:
             topk_weights = topk_result.vals
             topk_ids_raw = topk_result.indx
+        else:
+            topk_weights, topk_ids_raw, _ = topk_result
 
         if expert_map is not None:
             # topk_ids_raw contains global expert IDs - remap to local.
@@ -596,22 +597,22 @@ def triton_kernel_moe_forward(
             # expert_map already applied; pass None downstream.
             effective_expert_map = None
             effective_global_num_experts = local_num_experts
-        elif not isinstance(topk_result, tuple):
-            # v3.6+ topk returns a SparseMatrix whose construction already
-            # computed the bitmatrix and its metadata; reuse it instead of
-            # re-packing the bitmatrix and recomputing the metadata in
-            # make_routing_data.
-            routing_data, gather_idx, scatter_idx = routing_data_from_sparse_topk(
-                topk_result, gating_output.shape[-1]
-            )
-            effective_expert_map = expert_map
-            effective_global_num_experts = global_num_experts
         else:
-            topk_ids = topk_ids_raw.to(torch.long)
-            routing_data, gather_idx, scatter_idx = make_routing_data(
-                topk_ids, topk_weights, gating_output.shape[-1]
-            )
-            effective_expert_map = expert_map
+            if is_sparse_topk:
+                # v3.6+ topk returns a SparseMatrix whose construction already
+                # computed the bitmatrix and its metadata; reuse it instead of
+                # re-packing the bitmatrix and recomputing the metadata in
+                # make_routing_data.
+                routing_data, gather_idx, scatter_idx = routing_data_from_sparse_topk(
+                    topk_result, gating_output.shape[-1]
+                )
+            else:
+                topk_ids = topk_ids_raw.to(torch.long)
+                routing_data, gather_idx, scatter_idx = make_routing_data(
+                    topk_ids, topk_weights, gating_output.shape[-1]
+                )
+
+            effective_expert_map = None
             effective_global_num_experts = global_num_experts
 
     output = torch.empty_like(hidden_states)
@@ -797,7 +798,7 @@ def make_routing_data(
 
 def routing_data_from_sparse_topk(
     sparse_topk,  # SparseMatrix
-    n_expts_tot: int,
+    n_expts: int,
 ) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
     """Build routing structures from the ``SparseMatrix`` returned by
     ``triton_kernels.topk``, reusing its precomputed bitmatrix metadata.
@@ -820,7 +821,7 @@ def routing_data_from_sparse_topk(
     routing_data = RoutingData(
         gate_scal,
         ragged_batch_metadata.block_sizes,
-        n_expts_tot,
+        n_expts,
         n_expts_act,
         ragged_batch_metadata,
     )
