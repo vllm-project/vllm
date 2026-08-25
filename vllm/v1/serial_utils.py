@@ -144,12 +144,17 @@ class MsgpackEncoder:
 
     When a ``oob_tensor_consumer`` is provided, tensors (CUDA and CPU) will be
     offered to it for out-of-band handling.
+
+    ``use_mm_field_refs`` replaces repeated multi-modal field definitions with
+    per-message references. It is intended for same-version internal IPC; keep
+    it disabled for externally exchanged payloads.
     """
 
     def __init__(
         self,
         size_threshold: int | None = None,
         oob_tensor_consumer: OOBTensorConsumer | None = None,
+        use_mm_field_refs: bool = False,
     ):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
@@ -160,6 +165,8 @@ class MsgpackEncoder:
         self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
         self.oob_tensor_consumer = oob_tensor_consumer
+        self.use_mm_field_refs = use_mm_field_refs
+        self.mm_field_cache: dict[int, tuple[BaseMultiModalField, int]] | None = None
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -167,6 +174,8 @@ class MsgpackEncoder:
         try:
             if self.oob_tensor_consumer is not None:
                 self.oob_tensor_consumer.new_message()
+            if self.use_mm_field_refs:
+                self.mm_field_cache = {}
             self.aux_buffers = bufs = [b""]
             bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
@@ -176,17 +185,21 @@ class MsgpackEncoder:
             return bufs
         finally:
             self.aux_buffers = None
+            self.mm_field_cache = None
 
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
             if self.oob_tensor_consumer is not None:
                 self.oob_tensor_consumer.new_message()
+            if self.use_mm_field_refs:
+                self.mm_field_cache = {}
             self.aux_buffers = [buf]
             bufs = self.aux_buffers
             self.encoder.encode_into(obj, buf)
             return bufs
         finally:
             self.aux_buffers = None
+            self.mm_field_cache = None
 
     def enc_hook(self, obj: Any) -> Any:
         if isinstance(obj, torch.Tensor):
@@ -298,7 +311,19 @@ class MsgpackEncoder:
             return nt
         return [self._encode_nested_tensors(x) for x in nt]
 
-    def _encode_mm_field(self, field: BaseMultiModalField):
+    def _encode_mm_field(
+        self, field: BaseMultiModalField
+    ) -> int | tuple[str, dict[str, Any]]:
+        if self.mm_field_cache is not None:
+            field_id = id(field)
+            cached = self.mm_field_cache.get(field_id)
+            if cached is not None:
+                cached_field, field_index = cached
+                assert cached_field is field
+                return field_index
+
+            self.mm_field_cache[field_id] = (field, len(self.mm_field_cache))
+
         # Figure out the factory name for the field type.
         name = MMF_CLASS_TO_FACTORY.get(field.__class__)
         if not name:
@@ -333,19 +358,22 @@ class MsgpackDecoder:
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
         )
         self.aux_buffers: Sequence[bytestr] = ()
+        self.mm_fields: list[BaseMultiModalField] | None = None
         self.oob_tensor_provider = oob_tensor_provider
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
     def decode(self, bufs: bytestr | Sequence[bytestr]) -> Any:
-        if isinstance(bufs, bytestr):  # type: ignore
-            return self.decoder.decode(bufs)
-
-        self.aux_buffers = bufs
+        self.mm_fields = None
         try:
+            if isinstance(bufs, bytestr):  # type: ignore
+                return self.decoder.decode(bufs)
+
+            self.aux_buffers = bufs
             return self.decoder.decode(bufs[0])
         finally:
             self.aux_buffers = ()
+            self.mm_fields = None
 
     def dec_hook(self, t: type, obj: Any) -> Any:
         # Given native types in `obj`, convert to type `t`.
@@ -441,16 +469,30 @@ class MsgpackDecoder:
         if obj["data"] is not None:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
-        # Reconstruct the field processor using MultiModalFieldConfig
-        factory_meth_name, factory_kw = obj["field"]
-        factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
+        field = obj["field"]
+        if type(field) is int:
+            if self.mm_fields is None or field < 0 or field >= len(self.mm_fields):
+                raise ValueError(f"Invalid multi-modal field reference: {field}")
+            decoded_field = self.mm_fields[field]
+        else:
+            if not isinstance(field, (list, tuple)) or len(field) != 2:
+                raise TypeError(f"Invalid multi-modal field definition: {field!r}")
 
-        # Special case: decode the union "slices" field of
-        # MultiModalFlatField
-        if factory_meth_name == "flat":
-            factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
+            # Reconstruct the field processor using MultiModalFieldConfig
+            factory_meth_name, factory_kw = field
+            factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
 
-        obj["field"] = factory_meth("", **factory_kw).field
+            # Special case: decode the union "slices" field of
+            # MultiModalFlatField
+            if factory_meth_name == "flat":
+                factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
+
+            decoded_field = factory_meth("", **factory_kw).field
+            if self.mm_fields is None:
+                self.mm_fields = []
+            self.mm_fields.append(decoded_field)
+
+        obj["field"] = decoded_field
         return MultiModalFieldElem(**obj)
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:

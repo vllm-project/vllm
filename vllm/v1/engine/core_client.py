@@ -629,7 +629,15 @@ class MPClient(EngineCoreClient):
                 if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
                     tensor_ipc_sender = TensorIpcSender(tensor_queue)
 
-            self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
+            # Client and EngineCore run the same version, so the internal wire
+            # can safely use per-message references for repeated MM fields.
+            self.encoder = MsgpackEncoder(
+                oob_tensor_consumer=tensor_ipc_sender,
+                use_mm_field_refs=(
+                    model_config is not None
+                    and model_config.multimodal_config is not None
+                ),
+            )
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
             dp_size = parallel_config.data_parallel_size

@@ -10,6 +10,7 @@ import torch
 
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
+    MultiModalFieldConfig,
     MultiModalFieldElem,
     MultiModalFlatField,
     MultiModalKwargsItem,
@@ -102,6 +103,10 @@ class MyRequest(msgspec.Struct):
     mm: list[MultiModalKwargsItems] | None
 
 
+class MyItemRequest(msgspec.Struct):
+    mm: list[MultiModalKwargsItem | None]
+
+
 def test_multimodal_kwargs():
     e1 = MultiModalFieldElem(
         torch.zeros(1000, dtype=torch.bfloat16),
@@ -158,6 +163,127 @@ def test_multimodal_kwargs():
     mm_data = mm.get_data()
     decoded_data = decoded.get_data()
     assert all(nested_equal(mm_data[k], decoded_data[k]) for k in mm_data)
+
+
+def _make_repeated_flat_field_items(num_items: int) -> MultiModalKwargsItems:
+    sizes = torch.ones(num_items, dtype=torch.int64)
+    config = MultiModalFieldConfig.flat_from_sizes(
+        "image", sizes, dim=1, keep_on_cpu=True
+    )
+    return MultiModalKwargsItems.from_hf_inputs(
+        {"pixels": torch.arange(2 * num_items).view(2, num_items)},
+        {"pixels": config},
+    )
+
+
+def test_multimodal_field_deduplication():
+    mm = _make_repeated_flat_field_items(128)
+    fields = [item["pixels"].field for item in mm["image"]]
+    assert all(field is fields[0] for field in fields)
+
+    legacy = MsgpackEncoder(size_threshold=2**62).encode(mm)
+    encoder = MsgpackEncoder(
+        size_threshold=2**62,
+        use_mm_field_refs=True,
+    )
+    encoded = encoder.encode(mm)
+
+    # The first occurrence defines the field using the legacy wire format;
+    # subsequent occurrences reference its per-message table index.
+    legacy_raw = msgspec.msgpack.decode(legacy[0])
+    assert all(
+        isinstance(item["pixels"]["field"], list) for item in legacy_raw["image"]
+    )
+    raw = msgspec.msgpack.decode(encoded[0])
+    encoded_fields = [item["pixels"]["field"] for item in raw["image"]]
+    assert isinstance(encoded_fields[0], list)
+    assert encoded_fields[1:] == [0] * 127
+
+    # This input triggers the former quadratic duplication of the 128 slices.
+    assert len(encoded[0]) * 4 < len(legacy[0])
+
+    decoded = MsgpackDecoder(MultiModalKwargsItems).decode(encoded)
+    decoded_fields = [item["pixels"].field for item in decoded["image"]]
+    assert all(field is decoded_fields[0] for field in decoded_fields)
+    assert isinstance(decoded_fields[0], MultiModalFlatField)
+    assert decoded_fields[0].dim == 1
+    assert decoded_fields[0].keep_on_cpu
+    assert torch.equal(decoded.get_data()["pixels"], mm.get_data()["pixels"])
+
+
+def test_multimodal_field_deduplication_across_items():
+    mm = _make_repeated_flat_field_items(3)
+    request = MyItemRequest([*mm["image"], None])
+
+    encoded = MsgpackEncoder(use_mm_field_refs=True).encode(request)
+    decoded = MsgpackDecoder(MyItemRequest).decode(encoded)
+
+    assert decoded.mm[-1] is None
+    fields = [item["pixels"].field for item in decoded.mm if item is not None]
+    assert all(field is fields[0] for field in fields)
+
+
+def test_multimodal_field_deduplication_uses_identity():
+    fields = [
+        MultiModalFlatField(slices=[slice(0, 1)]),
+        MultiModalFlatField(slices=[slice(0, 1)]),
+    ]
+    mm = MultiModalKwargsItems(
+        {
+            "image": [
+                MultiModalKwargsItem({"pixels": MultiModalFieldElem(float(i), field)})
+                for i, field in enumerate(fields)
+            ]
+        }
+    )
+
+    encoded = MsgpackEncoder(use_mm_field_refs=True).encode(mm)
+    raw = msgspec.msgpack.decode(encoded[0])
+    encoded_fields = [item["pixels"]["field"] for item in raw["image"]]
+    assert all(isinstance(field, list) for field in encoded_fields)
+
+    decoded = MsgpackDecoder(MultiModalKwargsItems).decode(encoded)
+    assert decoded["image"][0]["pixels"].field is not (
+        decoded["image"][1]["pixels"].field
+    )
+
+
+def test_multimodal_field_tables_reset_between_messages():
+    mm = _make_repeated_flat_field_items(2)
+    encoder = MsgpackEncoder(
+        size_threshold=2**62,
+        use_mm_field_refs=True,
+    )
+    decoder = MsgpackDecoder(MultiModalKwargsItems)
+
+    first = encoder.encode(mm)
+    first_decoded = decoder.decode(first)
+    assert first_decoded["image"][0]["pixels"].field is (
+        first_decoded["image"][1]["pixels"].field
+    )
+
+    # Reuse both instances and exercise encode_into plus raw-bytes decode.
+    second = encoder.encode_into(mm, bytearray())
+    raw = msgspec.msgpack.decode(second[0])
+    assert isinstance(raw["image"][0]["pixels"]["field"], list)
+    assert raw["image"][1]["pixels"]["field"] == 0
+    second_decoded = decoder.decode(second[0])
+    second_fields = [item["pixels"].field for item in second_decoded["image"]]
+    assert second_fields[0] is second_fields[1]
+    assert second_fields[0] is not (first_decoded["image"][0]["pixels"].field)
+
+
+@pytest.mark.parametrize("field_ref", [-1, 0, True])
+def test_invalid_multimodal_field_reference(field_ref: int):
+    payload = msgspec.msgpack.encode(
+        {
+            "image": [
+                {"pixels": {"data": 1.0, "field": field_ref}},
+            ]
+        }
+    )
+    with pytest.raises(msgspec.ValidationError, match="Invalid multi-modal field"):
+        MsgpackDecoder(MultiModalKwargsItems).decode(payload)
 
 
 def nested_equal(a: NestedTensors, b: NestedTensors):
