@@ -6,6 +6,7 @@ import torch
 
 from vllm.forward_context import get_forward_context
 from vllm.models.minimax_m3.common.sparse_attention import (
+    PAGE16_SIDES_PER_BLOCK,
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
 )
@@ -28,6 +29,8 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+            PAGES_PER_SPARSE_BLOCK,
+            minimax_m3_sparse_block_page_stride,
             minimax_m3_sparse_attn_decode_aiter,
             minimax_m3_sparse_attn_prefill_aiter,
         )
@@ -42,10 +45,16 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         num_tokens = main_md.num_actual_tokens
         topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
         assert topk is not None
-        if self.num_kv_heads != 1:
+        # Set only when the layer's indexer emitted the page table alongside its
+        # selection; otherwise these stay None and the table is built below.
+        sparse_bt_buf = getattr(layer, "sparse_bt_buffer", None)
+        sparse_ctx_buf = getattr(layer, "sparse_ctx_buffer", None)
+        kvh = self.num_kv_heads
+        if kvh != 1 and sparse_bt_buf is None:
             raise NotImplementedError(
-                "MiniMax-M3 AITER sparse PA currently requires per-rank "
-                f"num_kv_heads == 1, got {self.num_kv_heads}"
+                "MiniMax-M3 AITER sparse PA needs the page table the indexer's "
+                f"top-k emits to serve per-rank num_kv_heads == {kvh}; the "
+                "Triton builders it falls back to address one head's cache."
             )
 
         hd = self.head_size
@@ -55,9 +64,31 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
         v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
+        if sparse_bt_buf is not None:
+            # An emitted table was scaled by the metadata builder, which reads
+            # the packing off the layout rather than off these tensors. The two
+            # only disagree if the resolved layout gives each side its own
+            # plane, and a silent disagreement reads unrelated pages.
+            stride = minimax_m3_sparse_block_page_stride(k_cache, v_cache)
+            expected = PAGES_PER_SPARSE_BLOCK * PAGE16_SIDES_PER_BLOCK
+            if stride != expected:
+                raise RuntimeError(
+                    "MiniMax-M3 AITER sparse PA: the indexer emitted a page "
+                    f"table for a block spanning {expected} pages, but this "
+                    f"KV cache lays a block out over {stride}. The page-16 "
+                    "rebase assumes both K/V sides share a block."
+                )
+
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
+            prepared_decode_table = decode_sparse_table
+            if sparse_bt_buf is not None:
+                assert sparse_ctx_buf is not None
+                prepared_decode_table = (
+                    sparse_bt_buf[: nd * kvh],
+                    sparse_ctx_buf[: nd * kvh],
+                )
             minimax_m3_sparse_attn_decode_aiter(
                 q[:nd],
                 k_cache,
@@ -72,10 +103,14 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 v_scale=v_scale,
                 decode_query_len=d.decode_query_len,
                 sparse_block_table=(
-                    decode_sparse_table[0] if decode_sparse_table is not None else None
+                    prepared_decode_table[0]
+                    if prepared_decode_table is not None
+                    else None
                 ),
                 sparse_context_lens=(
-                    decode_sparse_table[1] if decode_sparse_table is not None else None
+                    prepared_decode_table[1]
+                    if prepared_decode_table is not None
+                    else None
                 ),
             )
 
@@ -96,5 +131,15 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 out[nd:],
                 k_scale=k_scale,
                 v_scale=v_scale,
+                sparse_bt=(
+                    None
+                    if sparse_bt_buf is None
+                    else sparse_bt_buf[nd * kvh : num_tokens * kvh]
+                ),
+                sparse_ctx=(
+                    None
+                    if sparse_ctx_buf is None
+                    else sparse_ctx_buf[nd * kvh : num_tokens * kvh]
+                ),
             )
         return output
