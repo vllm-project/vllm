@@ -2398,12 +2398,18 @@ def test_hidden_states_with_tp_scales_page_size():
     # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
     #         = 16 * 2 * 64 * 2 = 4096 bytes.
     kv_spec = new_kv_cache_spec(
-        block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16,
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
     )
     # Hidden-state per-token cost = num_hidden_states(6) * hidden_size(512)
     #   * dtype(2) = 6144 bytes, which exceeds the 4096-byte KV page.
     hs_spec = HiddenStateCacheSpec(
-        block_size=16, num_kv_heads=6, head_size=512, dtype=torch.bfloat16,
+        block_size=16,
+        num_kv_heads=6,
+        head_size=512,
+        dtype=torch.bfloat16,
     )
     specs = {
         "target.0.attn": kv_spec,

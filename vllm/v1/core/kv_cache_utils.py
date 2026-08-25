@@ -1755,7 +1755,7 @@ def _ensure_min_page_size(
 ) -> tuple[list[KVCacheGroupSpec], int]:
     """Scale up group block sizes so the common page is at least as large as
     the biggest hidden-state per-token cost.
-    
+
     This protects the hidden state extraction feature, where we store hidden states in
     the KV cache, and return them to clients using a custom hidden state connector.
 
