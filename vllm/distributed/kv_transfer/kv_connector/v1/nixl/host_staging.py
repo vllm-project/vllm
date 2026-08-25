@@ -167,6 +167,10 @@ class HostWriteStager:
             num_slots,
         )
 
+    @property
+    def active_req_ids(self) -> set[str]:
+        return set(self._reqs)
+
     def submit(
         self,
         req_id: str,
