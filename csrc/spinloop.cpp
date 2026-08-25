@@ -205,7 +205,7 @@ static enum bounded_wait_status umwait_bounded_wait(
   // instructions only execute on CPUID-gated WAITPKG parts.
   __asm__ volatile(
       "movq %%rdi, %%rax\n"             // rax = address for umonitor
-      ".byte 0xf3, 0x0f, 0xae, 0xf6\n"  // umonitor rax
+      ".byte 0xf3, 0x0f, 0xae, 0xf0\n"  // umonitor rax
       "movl %1, %%eax\n"                // eax = counter low 32
       "movl %2, %%edx\n"                // edx = counter high 32
       "xorl %%ecx, %%ecx\n"             // control = 0 (C0.1 permitted)
