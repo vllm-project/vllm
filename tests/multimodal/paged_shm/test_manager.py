@@ -412,8 +412,8 @@ class TestInfoAndState:
         with pytest.raises(ValueError, match="not found"):
             manager.get_info("ghost")
 
-    def test_get_manager_state(self, manager, item_small, item_large):
-        state = manager.get_manager_state()
+    def test_get_manager_states(self, manager, item_small, item_large):
+        state = manager.get_manager_states()
         assert state["size"] == 1024
         assert state["block_size"] == 256
         assert state["n_block"] == 4
@@ -425,7 +425,7 @@ class TestInfoAndState:
 
         manager.open_write([item_small, item_large])
         manager.close_write("small")
-        state = manager.get_manager_state()
+        state = manager.get_manager_states()
         assert state["free_blocks_count"] == 1  # 4 - (1+2) = 1
         # total_available_blocks = free_blocks(1) + cached_blocks(1) = 2
         assert state["total_available_blocks"] == 2
@@ -433,18 +433,18 @@ class TestInfoAndState:
         assert state["cached_blocks_count"] == 1  # small's block
         assert state["total_items_count"] == 2
 
-    def test_get_manager_state_with_noncacheable(self, manager):
+    def test_get_manager_states_with_noncacheable(self, manager):
         """Non-cacheable items with open reads are counted as reading."""
         item = ShmWriteRequest(uuid="nc", size=200, use_cache=False)
         manager.open_write([item])
         manager.close_write("nc", open_n_reads=1)
-        state = manager.get_manager_state()
+        state = manager.get_manager_states()
         assert state["total_items_count"] == 1
         assert state["reading_items_count"] == 1
         assert state["idle_items_count"] == 0
         assert state["writing_items_count"] == 0
         # Close the read -> item will be deleted
         manager.close_read("nc")
-        state = manager.get_manager_state()
+        state = manager.get_manager_states()
         assert state["total_items_count"] == 0
         assert state["free_blocks_count"] == 4

@@ -111,7 +111,7 @@ class PagedShmManager:
 
     def close_write(self, uuid: str, open_n_reads: int = 0):
         """
-        Finalize a write operation. If open_read is False, the item becomes idle
+        Finalize a write operation. If open_n_reads == 0, the item becomes idle
         and may be cached.
         For non-cacheable items (use_cache=False) with no open reads, delete
         immediately to free resources.
@@ -121,15 +121,14 @@ class PagedShmManager:
             raise ValueError(f"UUID {uuid} not being written")
 
         if open_n_reads <= 0:
+            item.ref_count = _REF_IDLE
             if item.use_cache:
                 # Normal cacheable idle item: put into LRU
-                item.ref_count = _REF_IDLE
                 self._total_available_blocks += item.n_block()
                 self._lru_cache.put(uuid, item)
             else:
                 # Non-cacheable: release immediately
                 # Set ref_count to idle to allow delete, then delete
-                item.ref_count = _REF_IDLE
                 self.delete(uuid, force=False)
         else:
             item.ref_count = open_n_reads
@@ -211,7 +210,7 @@ class PagedShmManager:
             "ref_count": item.ref_count,
         }
 
-    def get_manager_state(self) -> dict[str, int]:
+    def get_manager_states(self) -> dict[str, int]:
         """Return aggregated statistics about the manager."""
         idle_count = 0
         writing_count = 0
@@ -257,7 +256,7 @@ class PagedShmManager:
             raise ValueError(f"UUID {uuid} not found")
         return item
 
-    def _get_item_blocks_copy(self, uuid: str) -> tuple[int, list[int]]:
+    def _get_readable_item_blocks(self, uuid: str) -> tuple[int, list[int]]:
         """
         This is used for PagedShmServer token-based open_read.
         """
@@ -266,4 +265,4 @@ class PagedShmManager:
             raise ValueError(f"UUID {uuid} not found")
         if item.ref_count == _REF_WRITING:
             raise RuntimeError(f"Item {uuid} is still being written")
-        return item.size, item.blocks.copy()
+        return item.size, item.blocks

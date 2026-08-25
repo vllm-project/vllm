@@ -27,7 +27,7 @@ from .constants import (
     EMPTY,
     ERROR,
     GET_INFO,
-    GET_MANAGER_STATE,
+    GET_MANAGER_STATES,
     GET_STORAGE_INFO,
     OK,
     OPEN_READ,
@@ -330,7 +330,7 @@ class PagedShmServer:
                 )
             # Get the item info without modifying ref_count
             try:
-                size, blocks = self.manager._get_item_blocks_copy(real_uuid)
+                size, blocks = self.manager._get_readable_item_blocks(real_uuid)
             except RuntimeError as e:
                 # If item not found or still being written, delegate to waiting logic
                 if "still being written" in str(e):
@@ -467,7 +467,7 @@ class PagedShmServer:
                 try:
                     if is_token:
                         # Token path: do not increase ref_count
-                        size, blocks = self.manager._get_item_blocks_copy(real_uuid)
+                        size, blocks = self.manager._get_readable_item_blocks(real_uuid)
                         resp = ShmAllocation(
                             uuid=real_uuid, size=size, blocks=blocks, use_cache=True
                         )
@@ -623,9 +623,9 @@ class PagedShmServer:
         self.manager.delete(uuid, force=True)
         return _OK_RESPONSE
 
-    def get_manager_state(self) -> str:
+    def get_manager_states(self) -> str:
         """Return manager statistics as a JSON string."""
-        return json.dumps(self.manager.get_manager_state())
+        return json.dumps(self.manager.get_manager_states())
 
     def get_storage_info(self) -> str:
         """Return storage metadata (name, size, block info) as a JSON string."""
@@ -688,7 +688,7 @@ def _zmq_server(
             CLOSE_WRITE: (server.close_write, True),
             CLOSE_READ: (server.close_read, True),
             GET_INFO: (server.get_info, True),
-            GET_MANAGER_STATE: (server.get_manager_state, False),
+            GET_MANAGER_STATES: (server.get_manager_states, False),
             GET_STORAGE_INFO: (server.get_storage_info, False),
         }
 
@@ -698,7 +698,7 @@ def _zmq_server(
         logger.info("PagedShmServer started at %s", address)
 
         # For periodic maintenance
-        last_cleanup_time = time.monotonic()
+        next_cleanup_time = time.monotonic() + CLEANUP_INTERVAL
 
         while True:
             try:
@@ -708,9 +708,9 @@ def _zmq_server(
 
             # Perform maintenance at fixed intervals
             now = time.monotonic()
-            if now - last_cleanup_time >= CLEANUP_INTERVAL:
+            if now >= next_cleanup_time:
                 server._perform_maintenance(socket)
-                last_cleanup_time = now
+                next_cleanup_time = now + CLEANUP_INTERVAL
 
             if socket not in socks or socks[socket] != zmq.POLLIN:
                 continue

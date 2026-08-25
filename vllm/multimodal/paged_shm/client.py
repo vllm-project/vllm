@@ -56,7 +56,7 @@ from .constants import (
     DELETE,
     ERROR,
     GET_INFO,
-    GET_MANAGER_STATE,
+    GET_MANAGER_STATES,
     GET_STORAGE_INFO,
     OK,
     OPEN_READ,
@@ -345,9 +345,9 @@ class PagedShmClientWithoutStorage(_BaseClient):
         resp_dict = json.loads(resp)
         return resp_dict["data"]
 
-    def get_manager_state(self) -> dict[str, Any]:
+    def get_manager_states(self) -> dict[str, Any]:
         """Return manager statistics (allocations, cache state, etc.)."""
-        resp = self._request(GET_MANAGER_STATE)
+        resp = self._request(GET_MANAGER_STATES)
         return json.loads(resp)
 
     def get_info(self, uuid: str) -> dict[str, Any]:

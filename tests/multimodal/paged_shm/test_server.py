@@ -61,7 +61,7 @@ def _fill_memory_with_writing(client) -> str:
     This holds the blocks in the 'writing' state, preventing eviction.
     Returns the UUID so the caller can delete it to free space.
     """
-    state = client.get_manager_state()
+    state = client.get_manager_states()
     free_blocks = state["free_blocks_count"]
     if free_blocks == 0:
         raise RuntimeError("No free blocks available")
@@ -73,7 +73,7 @@ def _fill_memory_with_writing(client) -> str:
         [ShmWriteRequest(uuid=uuid, size=size, use_cache=True)], timeout=0.0
     )
     # Ensure we've consumed all free blocks
-    new_state = client.get_manager_state()
+    new_state = client.get_manager_states()
     assert new_state["free_blocks_count"] == 0, "Failed to fill memory"
     return uuid
 
@@ -87,11 +87,11 @@ class TestWriteRead:
     def test_write_read_bytes(self, client):
         uuid = _unique_uuid()
         data = b"Hello, shared memory!"
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, data)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         needed = _blocks_needed(len(data))
         assert (
             state_after_write["cached_items_count"]
@@ -111,18 +111,18 @@ class TestWriteRead:
         assert result.tobytes() == data
 
         client.delete(uuid)
-        state_final = client.get_manager_state()
+        state_final = client.get_manager_states()
         assert state_final["cached_items_count"] == state_before["cached_items_count"]
         assert state_final["free_blocks_count"] == state_before["free_blocks_count"]
 
     def test_write_read_numpy(self, client):
         uuid = _unique_uuid()
         original = np.arange(100, dtype=np.float32)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, original)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         needed = _blocks_needed(original.nbytes)
         assert (
             state_after_write["cached_items_count"]
@@ -138,17 +138,17 @@ class TestWriteRead:
         np.testing.assert_array_equal(result.view(np.float32), original)
 
         client.delete(uuid)
-        state_final = client.get_manager_state()
+        state_final = client.get_manager_states()
         assert state_final["cached_items_count"] == state_before["cached_items_count"]
 
     def test_write_read_torch_cpu(self, client):
         uuid = _unique_uuid()
         original = torch.arange(50, dtype=torch.int32)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, original)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         needed = _blocks_needed(original.numel() * original.element_size())
         assert (
             state_after_write["cached_items_count"]
@@ -172,11 +172,11 @@ class TestWriteRead:
         try:
             uuid = _unique_uuid()
             original = torch.randint(0, 255, (500,), dtype=torch.uint8, device="cuda")
-            state_before = client.get_manager_state()
+            state_before = client.get_manager_states()
 
             client.write(uuid, original)
 
-            state_after_write = client.get_manager_state()
+            state_after_write = client.get_manager_states()
             needed = _blocks_needed(original.numel())
             assert (
                 state_after_write["cached_items_count"]
@@ -206,11 +206,11 @@ class TestMultiBlock:
     def test_bytes_multi_block(self, client, size):
         uuid = _unique_uuid()
         data = bytes(np.random.bytes(size))
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, data)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         needed = _blocks_needed(size)
         assert (
             state_after_write["cached_blocks_count"]
@@ -225,18 +225,18 @@ class TestMultiBlock:
         assert result.tobytes() == data
 
         client.delete(uuid)
-        state_final = client.get_manager_state()
+        state_final = client.get_manager_states()
         assert state_final["free_blocks_count"] == state_before["free_blocks_count"]
 
     @pytest.mark.parametrize("size", [8000, 16384, 20000])
     def test_numpy_multi_block(self, client, size):
         uuid = _unique_uuid()
         original = np.random.randint(0, 256, size, dtype=np.uint8)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, original)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         needed = _blocks_needed(original.nbytes)
         assert (
             state_after_write["cached_blocks_count"]
@@ -256,11 +256,11 @@ class TestMultiBlock:
     def test_torch_multi_block(self, client, size):
         uuid = _unique_uuid()
         original = torch.randint(0, 256, (size,), dtype=torch.uint8)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, original)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         needed = _blocks_needed(size)
         assert (
             state_after_write["cached_blocks_count"]
@@ -288,12 +288,12 @@ class TestContextManagers:
         uuid = _unique_uuid()
         data = b"context write test"
         size = len(data)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         with client.write_context(uuid, size) as ctx:
             client._storage.write(data, ctx.blocks)
 
-        state_after_commit = client.get_manager_state()
+        state_after_commit = client.get_manager_states()
         needed = _blocks_needed(size)
         assert (
             state_after_commit["cached_items_count"]
@@ -313,7 +313,7 @@ class TestContextManagers:
         uuid = _unique_uuid()
         data = b"should not be visible"
         size = len(data)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
         initial_free = state_before["free_blocks_count"]
 
         class TestException(Exception):
@@ -324,7 +324,7 @@ class TestContextManagers:
                 client._storage.write(data, ctx.blocks)
                 raise TestException("trigger rollback")
 
-        state_after_rollback = client.get_manager_state()
+        state_after_rollback = client.get_manager_states()
         # With force delete, blocks are fully freed
         assert state_after_rollback["free_blocks_count"] == initial_free
         with pytest.raises(RuntimeError, match="Server error"):
@@ -335,17 +335,17 @@ class TestContextManagers:
         data = b"read context test"
         client.write(uuid, data)
 
-        state_before_read = client.get_manager_state()
+        state_before_read = client.get_manager_states()
         reading_before = state_before_read["reading_items_count"]
 
         with client.read_context(uuid) as ctx:
-            state_during = client.get_manager_state()
+            state_during = client.get_manager_states()
             assert state_during["reading_items_count"] == reading_before + 1
             assert ctx.size == len(data)
             result = client._storage.read_to_numpy(ctx.size, ctx.blocks)
             assert result.tobytes() == data
 
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         assert state_after["reading_items_count"] == reading_before
 
         client.delete(uuid)
@@ -393,21 +393,21 @@ class TestErrors:
         uuid = _unique_uuid()
         info = client.get_storage_info()
         block_size = info["block_size"]
-        free_blocks = client.get_manager_state()["free_blocks_count"]
+        free_blocks = client.get_manager_states()["free_blocks_count"]
         too_large = bytes((free_blocks + 1) * block_size)
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
         with pytest.raises(RuntimeError, match="Server error"):
             client.write(uuid, too_large)
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         assert state_after["free_blocks_count"] == state_before["free_blocks_count"]
         assert state_after["total_items_count"] == state_before["total_items_count"]
 
     def test_delete_and_read(self, client):
         uuid = _unique_uuid()
         client.write(uuid, b"temp data")
-        state_before_delete = client.get_manager_state()
+        state_before_delete = client.get_manager_states()
         client.delete(uuid)
-        state_after_delete = client.get_manager_state()
+        state_after_delete = client.get_manager_states()
         assert (
             state_after_delete["cached_items_count"]
             == state_before_delete["cached_items_count"] - 1
@@ -423,9 +423,9 @@ class TestErrors:
         client.open_write([item], timeout=0.0)
 
         # Delete should succeed despite ref_count == -1
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
         client.delete(uuid)
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         # Blocks should be freed
         assert state_after["free_blocks_count"] == state_before["free_blocks_count"] + 1
         with pytest.raises(RuntimeError, match="Server error"):
@@ -448,7 +448,7 @@ class TestMetadata:
     def test_manager_state_initial(self, client):
         info = client.get_storage_info()
         n_block = info["n_block"]
-        state = client.get_manager_state()
+        state = client.get_manager_states()
         assert state["free_blocks_count"] == n_block
         assert state["cached_items_count"] == 0
         assert state["total_items_count"] == 0
@@ -458,10 +458,10 @@ class TestMetadata:
 
     def test_manager_state_after_write(self, client):
         uuid = _unique_uuid()
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
         data = b"state check"
         client.write(uuid, data)
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         needed = _blocks_needed(len(data))
         assert (
             state_after["cached_items_count"] == state_before["cached_items_count"] + 1
@@ -507,7 +507,7 @@ class TestConcurrency:
         uuids = [_unique_uuid() for _ in range(4)]
         datas = [f"writer-{i}".encode() for i in range(4)]
 
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         def writer(u, d):
             client.write(u, d)
@@ -520,7 +520,7 @@ class TestConcurrency:
         for t in threads:
             t.join()
 
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         needed_blocks = sum(math.ceil(len(d) / 4096) for d in datas)
         assert state_after["cached_items_count"] == state_before[
             "cached_items_count"
@@ -554,11 +554,11 @@ class TestTokenProtection:
         """
         uuid = _unique_uuid()
         data = b"auto protection test"
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         size, token = client.write(uuid, data, generate_read_token=True)
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         # Should have one extra reading item (the automatically reserved reference)
         assert (
             state_after_write["reading_items_count"]
@@ -578,7 +578,7 @@ class TestTokenProtection:
         # Token can be open_read multiple times without consuming it
         alloc1 = client.open_read(token, timeout=0.0)
         assert alloc1.size == len(data)
-        state_after_read1 = client.get_manager_state()
+        state_after_read1 = client.get_manager_states()
         assert (
             state_after_read1["reading_items_count"]
             == state_after_write["reading_items_count"]
@@ -586,7 +586,7 @@ class TestTokenProtection:
 
         alloc2 = client.open_read(token, timeout=0.0)
         assert alloc2.size == len(data)
-        state_after_read2 = client.get_manager_state()
+        state_after_read2 = client.get_manager_states()
         assert (
             state_after_read2["reading_items_count"]
             == state_after_write["reading_items_count"]
@@ -594,7 +594,7 @@ class TestTokenProtection:
 
         # Close the token to release the read reference and destroy it
         client.close_read(token)
-        state_after_close = client.get_manager_state()
+        state_after_close = client.get_manager_states()
         assert (
             state_after_close["reading_items_count"]
             == state_before["reading_items_count"]
@@ -631,14 +631,14 @@ class TestTokenProtection:
         """Async write with token automatically gets protection."""
         uuid = _unique_uuid()
         data = b"async auto protection"
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         size, future, token = client.write(
             uuid, data, generate_read_token=True, async_write=True
         )
         future.result()
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         assert (
             state_after_write["reading_items_count"]
             == state_before["reading_items_count"] + 1
@@ -649,7 +649,7 @@ class TestTokenProtection:
         )
 
         client.close_read(token)
-        state_after_close = client.get_manager_state()
+        state_after_close = client.get_manager_states()
         assert (
             state_after_close["cached_items_count"]
             == state_before["cached_items_count"] + 1
@@ -871,13 +871,13 @@ class TestAsyncWrite:
     def test_async_write_basic(self, client):
         uuid = _unique_uuid()
         data = b"async test data"
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         size, future, _ = client.write(uuid, data, async_write=True)
         assert size == len(data)
         future.result()
 
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         needed = _blocks_needed(len(data))
         assert (
             state_after["cached_items_count"] == state_before["cached_items_count"] + 1
@@ -895,7 +895,7 @@ class TestAsyncWrite:
         """Async write with token automatically holds a reference."""
         uuid = _unique_uuid()
         data = b"async token protection"
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         size, future, token = client.write(
             uuid, data, generate_read_token=True, async_write=True
@@ -903,7 +903,7 @@ class TestAsyncWrite:
         assert size == len(data)
         future.result()
 
-        state_after_write = client.get_manager_state()
+        state_after_write = client.get_manager_states()
         assert (
             state_after_write["reading_items_count"]
             == state_before["reading_items_count"] + 1
@@ -920,7 +920,7 @@ class TestAsyncWrite:
         assert alloc2.size == len(data)
 
         client.close_read(token)
-        state_after_close = client.get_manager_state()
+        state_after_close = client.get_manager_states()
         assert (
             state_after_close["cached_items_count"]
             == state_before["cached_items_count"] + 1
@@ -1347,11 +1347,11 @@ class TestInfoAndCache:
     def test_use_cache_true_caches_after_close(self, client):
         uuid = _unique_uuid()
         data = b"cacheable"
-        state_before = client.get_manager_state()
+        state_before = client.get_manager_states()
 
         client.write(uuid, data, use_cache=True)
 
-        state_after = client.get_manager_state()
+        state_after = client.get_manager_states()
         assert (
             state_after["cached_items_count"] == state_before["cached_items_count"] + 1
         )
