@@ -99,6 +99,35 @@ fn find_last_user_render_index(messages: &[ChatMessage], render_offset: isize) -
         .unwrap_or(-1)
 }
 
+/// A trailing system turn folds into the preceding user turn.
+fn system_folds_into_previous_user_turn(messages: &[ChatMessage], index: usize) -> bool {
+    if index == 0 || index >= messages.len() {
+        return false;
+    }
+    if !matches!(messages[index], ChatMessage::System { .. }) {
+        return false;
+    }
+    if !matches!(
+        messages[index - 1].role(),
+        ChatRole::User | ChatRole::Developer
+    ) {
+        return false;
+    }
+    index + 1 == messages.len() || matches!(messages[index + 1].role(), ChatRole::Assistant)
+}
+
+/// Trailing system content folded into the user turn at `index`, written before the suffix.
+fn folded_system_content(messages: &[ChatMessage], index: usize) -> Option<&ChatContent> {
+    let next = index + 1;
+    if !system_folds_into_previous_user_turn(messages, next) {
+        return None;
+    }
+    match &messages[next] {
+        ChatMessage::System { content } => Some(content),
+        _ => None,
+    }
+}
+
 /// Render one real request message, using `render_offset` to account for any
 /// synthetic tool-only system turn that was already emitted before the loop.
 fn render_message(
@@ -118,22 +147,33 @@ fn render_message(
     let opens_thinking = render_index == last_user_render_index;
     let after_last_user_turn = render_index > last_user_render_index;
     let after_or_at_last_user_turn = render_index >= last_user_render_index;
-    let add_generation_prompt = message_index + 1 != messages.len() || add_generation_prompt;
+    let folded_system = folded_system_content(messages, message_index);
+    // A folded trailing system turn makes this the last turn rendered.
+    let renders_final_turn = message_index + 1 == messages.len()
+        || (folded_system.is_some() && message_index + 2 == messages.len());
+    let add_generation_prompt = !renders_final_turn || add_generation_prompt;
 
     match message {
-        ChatMessage::System { content } => render_system_message(out, Some(content), &[]),
+        ChatMessage::System { content } => {
+            if system_folds_into_previous_user_turn(messages, message_index) {
+                return Ok(());
+            }
+            render_system_message(out, Some(content), &[])
+        }
         ChatMessage::Developer { content, tools } => render_developer_message(
             out,
             content,
             tools.as_deref().unwrap_or(&[]),
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
             add_generation_prompt,
+            folded_system,
         ),
         ChatMessage::User { content } => render_user_message(
             out,
             content,
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
             add_generation_prompt,
+            folded_system,
         ),
         ChatMessage::Assistant { content } => render_assistant_message(
             out,
@@ -202,6 +242,7 @@ fn render_developer_message(
     tools: &[ChatTool],
     opens_thinking: bool,
     add_generation_prompt: bool,
+    folded_system: Option<&ChatContent>,
 ) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
@@ -216,6 +257,9 @@ fn render_developer_message(
     }
     out.push_str("\n\n# The user's message is: ");
     write_chat_content(out, content)?;
+    if let Some(folded) = folded_system {
+        write_chat_content(out, folded)?;
+    }
     write_user_like_suffix(out, opens_thinking, add_generation_prompt);
     Ok(())
 }
@@ -227,9 +271,13 @@ fn render_user_message(
     content: &ChatContent,
     opens_thinking: bool,
     add_generation_prompt: bool,
+    folded_system: Option<&ChatContent>,
 ) -> Result<()> {
     out.push_str("<｜User｜>");
     write_chat_content(out, content)?;
+    if let Some(folded) = folded_system {
+        write_chat_content(out, folded)?;
+    }
     write_user_like_suffix(out, opens_thinking, add_generation_prompt);
     Ok(())
 }
