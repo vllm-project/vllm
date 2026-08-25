@@ -55,6 +55,13 @@ class EngineCoreSentinel:
         self._initial_dp_size = parallel_config.data_parallel_size
         self._dead_dp_ranks: set[int] = set()
 
+    @property
+    def coordinator_lost(self) -> bool:
+        """True once rank 0 has been removed. The DP coordinator is pinned
+        to rank 0's API server, so the wave wake-up path is dead from then
+        on and the engine must never idle-pause."""
+        return 0 in self._dead_dp_ranks
+
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
