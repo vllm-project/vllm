@@ -104,6 +104,13 @@ class XPUWorker(Worker):
                         "topology, or ensure every DP rank can see all devices "
                         "on its node."
                     )
+                # Strip the node component off the global DP index to get this
+                # engine's slot on its own node. Assumes the launcher assigns
+                # DP ranks to nodes in contiguous blocks (node 0 gets ranks
+                # 0..capacity-1, and so on), which is what the usual sequential
+                # and one-pod-per-rank deployments do. A round-robin or
+                # unbalanced assignment would silently map two engines onto the
+                # same device.
                 dp_local_rank = parallel_config.data_parallel_index % local_dp_capacity
 
             self.local_rank += dp_local_rank * replica_world_size
