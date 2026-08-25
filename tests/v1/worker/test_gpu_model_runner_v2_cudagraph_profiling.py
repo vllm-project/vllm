@@ -74,17 +74,28 @@ def _make_profiling_runner(
     return runner
 
 
+class _FakePlatform:
+    """Stands in for current_platform; the global graph pool is a class attr,
+    matching vllm.platforms.Platform's lazy singleton."""
+
+    _global_graph_pool: Any = GLOBAL_POOL
+
+    @staticmethod
+    def graph_pool_handle() -> Any:
+        return THROWAWAY_POOL
+
+    def get_global_graph_pool(self) -> Any:
+        return type(self)._global_graph_pool
+
+
 def _patch_module(monkeypatch) -> None:
     @contextlib.contextmanager
     def _fake_set_current_vllm_config(_cfg):
         yield
 
+    _FakePlatform._global_graph_pool = GLOBAL_POOL
     monkeypatch.setattr(cgu, "set_current_vllm_config", _fake_set_current_vllm_config)
-    monkeypatch.setattr(
-        cgu,
-        "current_platform",
-        SimpleNamespace(graph_pool_handle=lambda: THROWAWAY_POOL),
-    )
+    monkeypatch.setattr(cgu, "current_platform", _FakePlatform())
     monkeypatch.setattr(
         cgu, "_init_minimal_kv_cache_for_profiling", lambda r: r.events.append("init")
     )
@@ -284,3 +295,43 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
         assert wrapper.graph_pool == GLOBAL_POOL
     finally:
         cgu.CUDAGraphWrapper._all_instances.discard(wrapper)
+
+
+def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatch):
+    """Speculator cudagraph managers must also capture into the throwaway pool.
+
+    They are created during the profiling KV-cache bootstrap, binding the
+    (swapped) global graph pool, and are re-created by the real
+    initialize_kv_cache; profiling-captured graphs must be dropped at
+    teardown rather than released against the persistent global pool, which
+    would trip the c10 create_or_incref_pool assert at the real capture.
+    """
+    _patch_module(monkeypatch)
+    runner = _make_profiling_runner(CUDAGraphMode.FULL_AND_PIECEWISE)
+
+    def _init(r):
+        r.events.append("init")
+        # Mirror production: the speculator's cudagraph managers are created
+        # during the profiling KV-cache bootstrap and bind the global pool
+        # (which profiling has already pointed at the throwaway pool).
+        manager = cgu.CudaGraphManager.__new__(cgu.CudaGraphManager)
+        manager.pool = cgu.current_platform.get_global_graph_pool()
+        r.speculator = SimpleNamespace(cudagraph_manager=manager)
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", _init)
+
+    pools_seen: list[Any] = []
+    capture_model = runner.capture_model
+
+    def _capture_model() -> int:
+        pools_seen.append(runner.speculator.cudagraph_manager.pool)
+        return capture_model()
+
+    runner.capture_model = _capture_model
+
+    cgu.profile_cudagraph_memory(runner)
+
+    assert pools_seen == [THROWAWAY_POOL]
+    assert runner.speculator.cudagraph_manager is None
+    # The real global pool is restored afterwards.
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
