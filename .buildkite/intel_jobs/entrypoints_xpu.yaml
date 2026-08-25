@@ -218,6 +218,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    pip install vllm[audio] || true &&
     cd tests &&
     pytest -v -s entrypoints/speech_to_text || true'
 - label: Entrypoints Integration (Multimodal)
@@ -243,6 +244,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    pip install vllm[audio] || true &&
     cd tests &&
     pytest -v -s entrypoints/multimodal || true'
 - label: Entrypoints Integration (Pooling)
