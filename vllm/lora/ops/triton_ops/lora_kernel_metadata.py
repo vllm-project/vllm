@@ -111,36 +111,66 @@ class LoRAKernelMeta:
     def prepare_tensors_cpu(self, token_lora_mapping: list[int]) -> None:
         """Prepare metadata on the CPU and asynchronously copy it to device."""
         self._reset()
-        mapping_cpu = torch.tensor(token_lora_mapping, dtype=torch.int32)
-        num_tokens = mapping_cpu.size(0)
-
-        no_lora = bool(torch.all(mapping_cpu == -1))
+        no_lora = all(lora_id == -1 for lora_id in token_lora_mapping)
         self.no_lora_flag_cpu[0] = no_lora
         if no_lora:
             return
 
-        _, sorted_indices = torch.sort(mapping_cpu, stable=True)
-        lora_ids, counts = torch.unique(
-            mapping_cpu, sorted=True, return_counts=True
-        )
-        num_active_loras = lora_ids.size(0)
+        indices_by_lora_id = [[] for _ in range(self.active_lora_ids.numel())]
+        for token_index, lora_id in enumerate(token_lora_mapping):
+            indices_by_lora_id[lora_id + 1].append(token_index)
 
-        start_locs = torch.cumsum(counts, dim=0)
-        if PIN_MEMORY:
-            mapping_cpu = mapping_cpu.pin_memory()
-            sorted_indices = sorted_indices.pin_memory()
-            lora_ids = lora_ids.pin_memory()
-            counts = counts.pin_memory()
-            start_locs = start_locs.pin_memory()
+        lora_ids: list[int] = []
+        counts: list[int] = []
+        sorted_indices: list[int] = []
+        start_locs: list[int] = []
+        next_start_loc = 0
+        for lora_id, token_indices in enumerate(indices_by_lora_id, start=-1):
+            if not token_indices:
+                continue
+            count = len(token_indices)
+            lora_ids.append(lora_id)
+            counts.append(count)
+            sorted_indices.extend(token_indices)
+            next_start_loc += count
+            start_locs.append(next_start_loc)
+
+        mapping_cpu = torch.tensor(
+            token_lora_mapping,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        sorted_indices_cpu = torch.tensor(
+            sorted_indices,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        lora_ids_cpu = torch.tensor(
+            lora_ids,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        counts_cpu = torch.tensor(
+            counts,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        start_locs_cpu = torch.tensor(
+            start_locs,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        num_tokens = len(token_lora_mapping)
+        num_active_loras = len(lora_ids)
 
         self.token_lora_mapping[:num_tokens].copy_(mapping_cpu, non_blocking=True)
         self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
-            sorted_indices, non_blocking=True
+            sorted_indices_cpu, non_blocking=True
         )
-        self.active_lora_ids[:num_active_loras].copy_(lora_ids, non_blocking=True)
-        self.num_tokens_per_lora[:num_active_loras].copy_(counts, non_blocking=True)
+        self.active_lora_ids[:num_active_loras].copy_(lora_ids_cpu, non_blocking=True)
+        self.num_tokens_per_lora[:num_active_loras].copy_(counts_cpu, non_blocking=True)
         self.lora_token_start_loc[1 : num_active_loras + 1].copy_(
-            start_locs, non_blocking=True
+            start_locs_cpu, non_blocking=True
         )
 
         if self.captured_lora_counts:
