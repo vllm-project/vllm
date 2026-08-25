@@ -94,6 +94,8 @@ def test_get_device_capability_uses_visible_device_ordinal(monkeypatch):
         "device_control_id_to_physical_device_id",
         classmethod(lambda _cls, device_id: int(device_id)),
     )
+    # Pin the NVML path: with CUDA initialized the platform reads torch instead.
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
     monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
     monkeypatch.setattr(
@@ -106,13 +108,90 @@ def test_get_device_capability_uses_visible_device_ordinal(monkeypatch):
         "nvmlDeviceGetCudaComputeCapability",
         lambda _handle: (9, 0),
     )
-    NvmlCudaPlatform.get_device_capability.cache_clear()
+    NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
 
     capability = NvmlCudaPlatform.get_device_capability(device_id=1)
 
     assert capability is not None
     assert capability.to_int() == 90
     assert seen_indices == [1]
+
+
+def test_get_device_capability_prefers_torch_when_cuda_initialized(monkeypatch):
+    """Once CUDA is initialized, capability must come from the torch ordinal.
+
+    NVML enumerates in PCI bus order while the CUDA runtime defaults to
+    FASTEST_FIRST, so on hosts with heterogeneous GPUs (e.g. DGX Station:
+    GB300 sm103 compute GPU + RTX PRO display GPU at a lower PCI bus id)
+    NVML index 0 is a different physical device than torch's cuda:0. Reading
+    NVML here made FlashInfer gate TRTLLM attention on the display GPU's
+    sm12x capability while the model ran on the GB300.
+    """
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    seen_torch_ordinals: list[int] = []
+
+    def record_torch(device_id: int) -> tuple[int, int]:
+        seen_torch_ordinals.append(device_id)
+        return (10, 3)
+
+    def fail_handle(index: int) -> str:
+        raise AssertionError(
+            "NVML must not be queried once CUDA is initialized; "
+            f"got nvmlDeviceGetHandleByIndex({index})"
+        )
+
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", record_torch)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", fail_handle)
+    # Pin a non-identity visible->physical mapping: the torch arm must pass
+    # the visible ordinal through to torch unmapped, never remap it via
+    # CUDA_VISIBLE_DEVICES the way the NVML arm does.
+    monkeypatch.setenv(NvmlCudaPlatform.device_control_env_var, "2,3")
+    NvmlCudaPlatform._get_torch_device_capability.cache_clear()
+    NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
+    try:
+        capability = NvmlCudaPlatform.get_device_capability(device_id=1)
+
+        assert capability is not None
+        assert (capability.major, capability.minor) == (10, 3)
+        assert seen_torch_ordinals == [1]
+    finally:
+        NvmlCudaPlatform._get_torch_device_capability.cache_clear()
+
+
+def test_get_device_capability_pre_init_value_does_not_shadow_torch(monkeypatch):
+    """A capability cached pre-CUDA-init (NVML) must not shadow the post-init
+    torch answer for the same ordinal once CUDA comes up."""
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    cuda_initialized = False
+
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: cuda_initialized)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device_id: (10, 3))
+    monkeypatch.setattr(
+        NvmlCudaPlatform,
+        "visible_device_id_to_physical_device_id",
+        classmethod(lambda _cls, device_id: int(device_id)),
+    )
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", lambda index: "handle")
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetCudaComputeCapability", lambda _handle: (12, 0)
+    )
+    NvmlCudaPlatform._get_torch_device_capability.cache_clear()
+    NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
+    try:
+        before = NvmlCudaPlatform.get_device_capability(device_id=0)
+        cuda_initialized = True
+        after = NvmlCudaPlatform.get_device_capability(device_id=0)
+
+        assert before is not None and (before.major, before.minor) == (12, 0)
+        assert after is not None and (after.major, after.minor) == (10, 3)
+    finally:
+        NvmlCudaPlatform._get_torch_device_capability.cache_clear()
+        NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
 
 
 def _stub_nvml(monkeypatch) -> dict[str, int]:
@@ -142,13 +221,15 @@ def _stub_nvml(monkeypatch) -> dict[str, int]:
         "device_control_id_to_physical_device_id",
         classmethod(lambda _cls, device_id: int(device_id)),
     )
+    # Pin the NVML path: with CUDA initialized the platform reads torch instead.
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(
         pynvml, "nvmlDeviceGetHandleByIndex", lambda index: f"handle-{index}"
     )
     monkeypatch.setattr(
         pynvml, "nvmlDeviceGetCudaComputeCapability", lambda _handle: (9, 0)
     )
-    NvmlCudaPlatform.get_device_capability.cache_clear()
+    NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
     return calls
 
 
@@ -174,7 +255,7 @@ def test_has_device_capability_does_not_reinit_nvml(monkeypatch):
         assert calls["init"] == 1
         assert calls["shutdown"] == 1
     finally:
-        NvmlCudaPlatform.get_device_capability.cache_clear()
+        NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
 
 
 def test_has_device_capability_comparisons(monkeypatch):
@@ -189,7 +270,7 @@ def test_has_device_capability_comparisons(monkeypatch):
         assert not NvmlCudaPlatform.has_device_capability(100)
         assert not NvmlCudaPlatform.has_device_capability((10, 0))
     finally:
-        NvmlCudaPlatform.get_device_capability.cache_clear()
+        NvmlCudaPlatform._get_nvml_device_capability.cache_clear()
 
 
 if __name__ == "__main__":

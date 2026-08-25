@@ -739,9 +739,33 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return pynvml.nvmlDeviceGetIndex(handle)
 
     @classmethod
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
+        # device_id is a visible (torch.cuda) ordinal, but NVML enumerates
+        # devices in PCI bus order while the CUDA runtime defaults to
+        # CUDA_DEVICE_ORDER=FASTEST_FIRST, so on hosts with heterogeneous
+        # GPUs the same ordinal can name different physical devices in the
+        # two namespaces. Once CUDA is initialized in this process, torch is
+        # authoritative for visible ordinals; reading it then does not
+        # trigger the CUDA initialization this class exists to avoid.
+        if torch.cuda.is_initialized():
+            return cls._get_torch_device_capability(device_id)
+        return cls._get_nvml_device_capability(device_id)
+
+    @classmethod
+    @cache
+    def _get_torch_device_capability(
+        cls, device_id: int = 0
+    ) -> DeviceCapability | None:
+        try:
+            major, minor = torch.cuda.get_device_capability(device_id)
+            return DeviceCapability(major=major, minor=minor)
+        except (RuntimeError, AssertionError):
+            return None
+
+    @classmethod
     @cache
     @with_nvml_context
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
+    def _get_nvml_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
             physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
