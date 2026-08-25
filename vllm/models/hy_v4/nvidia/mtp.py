@@ -50,6 +50,13 @@ _MTP_SCALE_ONLY_PARAM_SUBSTRINGS = (
     "_input_scale",
 )
 
+# Names of the quant-config attribute that stores the unquantized-module
+# prefix list, in the order we look them up. Different QuantizationConfig
+# subclasses expose the list under different names:
+#   * ``ignored_layers`` -- Fp8Config, GPTQ / AWQ configs.
+#   * ``exclude_modules`` -- ModelOpt* configs (Fp8, NvFp4, MxFp8, Mixed).
+_MTP_QUANT_EXCLUSION_ATTRS = ("ignored_layers", "exclude_modules")
+
 
 def _get_spec_layer_idx_from_weight_name(
     config: PretrainedConfig, weight_name: str
@@ -233,31 +240,52 @@ def _remap_mtp_quant_exclusions(
     """
     if quant_config is None:
         return None
-    patterns = getattr(quant_config, "ignored_layers", None)
-    if not patterns:
+
+    # Different QuantizationConfig subclasses expose the exclusion list under
+    # different attribute names; only the one that is actually populated on
+    # the backbone config governs which draft modules stay unquantized. For
+    # ModelOpt checkpoints (``quant_method: modelopt`` and friends) this is
+    # ``exclude_modules``; for the legacy fp8 path it is ``ignored_layers``.
+    exclusion_attr: str | None = None
+    patterns: list[str] | None = None
+    for attr in _MTP_QUANT_EXCLUSION_ATTRS:
+        value = getattr(quant_config, attr, None)
+        if value:
+            exclusion_attr = attr
+            patterns = list(value)
+            break
+    if not patterns or exclusion_attr is None:
         return quant_config
 
     extra: list[str] = []
     for offset in range(num_mtp_layers):
         source_prefix = f"model.mtp_layers.{offset}."
         draft_prefix = f"model.layers.{mtp_start_layer_idx + offset}."
-        extra.extend(
-            draft_prefix + pattern[len(source_prefix) :]
-            for pattern in patterns
-            if pattern.startswith(source_prefix)
-        )
+        for pattern in patterns:
+            if pattern.startswith(source_prefix):
+                extra.append(draft_prefix + pattern[len(source_prefix) :])
+            # ModelOpt exclusion patterns may end with a ``*`` wildcard; the
+            # remap must preserve that suffix so ``is_layer_skipped`` still
+            # matches the draft module prefixes.
+            elif pattern.rstrip("*").startswith(source_prefix):
+                stripped = pattern.rstrip("*")
+                trailing_stars = pattern[len(stripped) :]
+                extra.append(
+                    draft_prefix + stripped[len(source_prefix) :] + trailing_stars
+                )
     if not extra:
         return quant_config
 
     # The backbone shares this object with the target model; copy before
-    # widening the exclusion list. ``ignored_layers`` only exists on the
+    # widening the exclusion list. The attribute is only present on the
     # concrete configs that support exclusions, hence the getattr/setattr pair.
     quant_config = copy.copy(quant_config)
-    setattr(quant_config, "ignored_layers", list(patterns) + extra)  # noqa: B010
+    setattr(quant_config, exclusion_attr, patterns + extra)  # noqa: B010
     logger.info_once(
-        "HYV4 MTP: mapped %d checkpoint-named quant exclusions onto the draft "
-        "module prefixes: %s",
+        "HYV4 MTP: mapped %d checkpoint-named quant exclusions (%s) onto the "
+        "draft module prefixes: %s",
         len(extra),
+        exclusion_attr,
         ", ".join(extra),
     )
     return quant_config
@@ -272,8 +300,17 @@ class HYV4SharedHead(nn.Module):
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
+        # Use the same ``lm_head`` prefix as the backbone so that quant-config
+        # exclusion lists (e.g. ModelOpt's ``exclude_modules: ["lm_head", ...]``)
+        # also apply here: an unquantized checkpoint lm_head must not gain a
+        # spurious ``weight_scale`` parameter on the draft side, which would
+        # otherwise stay at its FP-min sentinel until the proposer swaps the
+        # whole ParallelLMHead for the target model's ``lm_head``.
         self.head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix="lm_head",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -843,7 +880,25 @@ class HYV4MTP(nn.Module):
             loaded_params.add(name)
 
         logger.info_once("HYV4 MTP draft model loaded: %d params", len(loaded_params))
-        unassigned = sorted(set(params_dict) - loaded_params)
+        unassigned_all = sorted(set(params_dict) - loaded_params)
+        # KVCacheScaleParameter (``k_scale`` / ``v_scale`` / ``q_scale`` /
+        # ``prob_scale``) is created by ``BaseKVCacheMethod.create_weights`` for
+        # every Attention layer that runs on an fp8-family quant method, and
+        # its -1.0 sentinel is replaced by the runtime default (1.0) in
+        # ``process_weights_after_loading`` -- which runs *after* this method.
+        # HY V4 checkpoints intentionally omit these (``kv_cache_quant_algo:
+        # null``); silence them only when the parameter is actually the
+        # sentinel type so a genuine mismatch on a same-named tensor still
+        # reaches the warning.
+        from vllm.model_executor.layers.quantization.kv_cache import (
+            KVCacheScaleParameter,
+        )
+
+        unassigned = [
+            name
+            for name in unassigned_all
+            if not isinstance(params_dict.get(name), KVCacheScaleParameter)
+        ]
         if unassigned:
             # A draft parameter with no checkpoint source keeps its sentinel
             # init value (FP8 scales start at finfo(float32).min), which
