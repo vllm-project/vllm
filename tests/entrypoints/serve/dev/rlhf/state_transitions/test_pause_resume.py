@@ -127,9 +127,15 @@ class TestPauseResume:
                 )
 
             new_thread.start()
-            assert not new_done.wait(timeout=0.3), (
-                "new request completed while generation was paused"
-            )
+            if mode == "keep":
+                assert not new_done.wait(timeout=0.3), (
+                    "new request completed while generation was paused"
+                )
+            else:
+                assert new_done.wait(timeout=30), (
+                    "new request was not rejected while generation was paused"
+                )
+                assert not ok(new_result["response"])
         finally:
             assert resume(server_url) == 200
             inflight_thread.join(timeout=30)
@@ -140,7 +146,11 @@ class TestPauseResume:
         assert inflight.error is None
         assert inflight.finish_reason == inflight_finish_reason
         assert not new_thread.is_alive()
-        assert ok(new_result.get("response"))
+        if mode == "keep":
+            assert ok(new_result.get("response"))
+        else:
+            # Rejected while paused; a retry after resume succeeds.
+            assert ok(gen(server_url, max_tokens=4, timeout=60))
 
     def test_clear_cache_preserves_output_and_controls_prefix_cache(self, server_url):
         prompt = (
