@@ -45,13 +45,13 @@
 #
 #   base-image-build 额外需要:
 #   HPC_OPS_GIT_REPO    hpc-ops 仓库地址；必填，不在仓库内提供默认值
+#   HPC_OPS_GIT_REF     hpc-ops commit/tag/branch/ref；必填，建议固定为完整 commit SHA
 #
 # Optional variables:
 #   FEISHU_WEBHOOK_URL  飞书机器人 webhook (未配置则跳过通知; 勿硬编码进仓库)
 #   BUILD_BASE_IMAGE    base 镜像构建的起点镜像 (需自带 torch+CUDA+nvcc)
 #   BASE_IMAGE_TAG      日常构建基于的 base 镜像 tag (默认 base-latest)
 #   CUDA_ARCH_LIST      base 构建的目标 GPU 架构
-#   HPC_OPS_GIT_REF     hpc-ops commit/tag/branch/ref (默认使用已验证的 BF16 MoE commit)
 #   BUILD_IMAGE         手动触发镜像构建 (不打 tag): GitLab Build -> Pipelines -> Run pipeline,
 #                       选目标分支, 设 BUILD_IMAGE=base|release|unittest, 对应构建 job 会用该
 #                       分支代码构建 (设了它时 lint/unit-test 跳过)
@@ -100,8 +100,7 @@ variables:
   NVCC_THREADS: "8"
   # 目标 GPU 架构: 8.9=Ada, 9.0=Hopper, 10.0/12.0=Blackwell
   CUDA_ARCH_LIST: "8.9 9.0 10.0 12.0"
-  # hpc-ops 仓库地址由 GitLab 项目 CI/CD Variable 提供；构建仍固定 commit，避免分支漂移。
-  HPC_OPS_GIT_REF: 4e21449375d17d4a883dd1fb40a60e5f596c31b8
+  # hpc-ops 仓库地址与固定 ref 均由 GitLab 项目 CI/CD Variables 提供。
   # CPU 可跑的单元测试子集 (iquest parser + 轻量顶层测试)
   # TODO: tests/reasoning/test_iquest_reasoning_parser.py tests/tool_parsers/test_iquest_coder_tool_parser.py
   UNIT_TEST_PATHS: >-
@@ -347,6 +346,7 @@ base-image-build:
     - *kaniko-auth
     - |
       : "${HPC_OPS_GIT_REPO:?HPC_OPS_GIT_REPO is required; configure it in GitLab Settings > CI/CD > Variables}"
+      : "${HPC_OPS_GIT_REF:?HPC_OPS_GIT_REF is required; configure it in GitLab Settings > CI/CD > Variables}"
       KANIKO_EXIT=0
       /kaniko/executor \
         --context "${CI_PROJECT_DIR}" \
