@@ -20,6 +20,7 @@ from packaging import version
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import set_current_vllm_config
+from vllm.config.cache import CacheConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
@@ -184,12 +185,33 @@ def test_quark_w8a8_fp8_per_block_requires_block_size():
         QuarkW8A8Fp8PerBlock(weight_config, input_config)
 
 
-def test_quark_fp8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_init):
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_quark_fp8_w_per_tensor_a_per_tensor(
+    kv_cache_dtype: str, monkeypatch, dist_init, workspace_init
+):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
+    checkpoint_scales = {}
+    scale_names = {
+        "model.layers.0.self_attn.k_proj.output_scale",
+        "model.layers.0.self_attn.v_proj.output_scale",
+    }
+    original_load_weights = LlamaForCausalLM.load_weights
+
+    def load_weights(self, weights):
+        def capture_scales():
+            for name, weight in weights:
+                if name in scale_names:
+                    checkpoint_scales[name] = weight.detach().cpu()
+                yield name, weight
+
+        return original_load_weights(self, capture_scales())
+
+    monkeypatch.setattr(LlamaForCausalLM, "load_weights", load_weights)
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
         LlamaForCausalLM,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+        vllm_config_kwargs={"cache_config": CacheConfig(cache_dtype=kv_cache_dtype)},
     )
 
     qkv_proj = model.model.layers[0].self_attn.qkv_proj
@@ -198,6 +220,22 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_i
     assert len(qkv_proj.input_scale.shape) == 0
     assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
     assert len(qkv_proj.weight_scale.shape) == 0
+
+    attn = model.model.layers[0].self_attn.attn
+    if kv_cache_dtype == "fp8":
+        assert checkpoint_scales.keys() == scale_names
+        scale_multiplier = 2 if current_platform.is_fp8_fnuz() else 1
+        assert attn._k_scale_float == (
+            checkpoint_scales["model.layers.0.self_attn.k_proj.output_scale"].item()
+            * scale_multiplier
+        )
+        assert attn._v_scale_float == (
+            checkpoint_scales["model.layers.0.self_attn.v_proj.output_scale"].item()
+            * scale_multiplier
+        )
+    else:
+        assert attn._k_scale_float == 1.0
+        assert attn._v_scale_float == 1.0
 
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
