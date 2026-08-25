@@ -197,6 +197,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
 
+        # Req_ids of requests that finished with async saves outstanding;
+        # their merged send completion is expected once more (the scheduler
+        # defers freeing their blocks until it arrives).
+        self._finished_awaiting_send: set[str] = set()
+
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
         # a single connector to load.
@@ -455,6 +460,26 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             # restore kv_connector_worker_meta
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
 
+        # A send completion is only valid for a finished request whose async
+        # saves are still outstanding (the scheduler defers freeing it until
+        # the completion arrives). Anything else (e.g. the nixl echo produced
+        # when an aborted PD request's decode side cleans up, with no save
+        # ever registered) would make the scheduler free/delete the request
+        # out from under an in-flight recv, so it is dropped.
+        if connector_output.finished_sending:
+            filtered_sending: set[str] = set()
+            for req_id in connector_output.finished_sending:
+                if req_id in self._finished_awaiting_send:
+                    self._finished_awaiting_send.discard(req_id)
+                    filtered_sending.add(req_id)
+                else:
+                    logger.warning(
+                        "Dropping unexpected finished_sending completion for "
+                        "request %s (no async save was outstanding).",
+                        req_id,
+                    )
+            connector_output.finished_sending = filtered_sending
+
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
         Get the KVConnector handshake metadata from sub-connectors.
@@ -510,6 +535,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._extra_async_saves[request.request_id] = async_saves - 1
 
         self._requests_to_connector.pop(request.request_id, None)
+        if async_saves > 0:
+            self._finished_awaiting_send.add(request.request_id)
 
         return async_saves > 0, kv_txfer_params
 

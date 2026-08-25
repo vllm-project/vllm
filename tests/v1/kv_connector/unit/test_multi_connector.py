@@ -1142,3 +1142,49 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+# A send completion is only valid when a request finished with async saves
+# outstanding; anything else would make the vllm scheduler free/delete the
+# request out from under an in-flight recv (or hit its asserts).
+
+
+def _finish_request(mc: MultiConnector, req_id: str, async_save: bool = False) -> None:
+    """Simulate the scheduler aborting/finishing a request."""
+    request = MagicMock()
+    request.request_id = req_id
+    for c in mc._connectors:
+        c.request_finished.return_value = (async_save, None)
+    mc.request_finished(request, [])
+
+
+def _deliver_sends(mc: MultiConnector, *req_ids: str) -> set[str] | None:
+    output = KVConnectorOutput(finished_sending=set(req_ids))
+    mc.update_connector_output(output)
+    return output.finished_sending
+
+
+def test_send_completion_after_finish_with_async_save(mc):
+    """A request finished with async saves outstanding gets exactly one send
+    completion through (the scheduler's deferred free); duplicates drop."""
+    _finish_request(mc, "req-1", async_save=True)
+    assert _deliver_sends(mc, "req-1") == {"req-1"}
+    assert _deliver_sends(mc, "req-1") == set()
+
+
+def test_send_completion_without_pending_save_dropped(mc):
+    """Send completions are dropped for unknown, live, and
+    finished-without-saves requests alike (e.g. the nixl echo produced when
+    an aborted PD request's decode side cleans up)."""
+    assert _deliver_sends(mc, "ghost") == set()
+
+    _finish_request(mc, "req-1")  # no async save outstanding
+    assert _deliver_sends(mc, "req-1") == set()
+
+
+def test_recv_completions_pass_through(mc):
+    """Recv completions are not filtered."""
+    _finish_request(mc, "req-1")
+    output = KVConnectorOutput(finished_recving={"req-1", "req-2"})
+    mc.update_connector_output(output)
+    assert output.finished_recving == {"req-1", "req-2"}
