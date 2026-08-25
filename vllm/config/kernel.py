@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -131,6 +131,8 @@ MoEBackend = Literal[
     "flashinfer_cutedsl",
     "flashinfer_b12x",
     "b12x",
+    "flashinfer_moe_ep_mega_deep_gemm",
+    "flashinfer_moe_ep_mega_cutedsl",
     "marlin",
     "humming",
     "triton_unfused",
@@ -139,6 +141,46 @@ MoEBackend = Literal[
     "hpc",
     "emulation",
 ]
+
+# Backends that run the mega-MoE model path through the flashinfer moe_ep
+# runtime. Only architectures in FLASHINFER_MOE_EP_ARCHITECTURES wire up
+# these experts.
+FLASHINFER_MOE_EP_BACKENDS = frozenset(
+    {
+        "flashinfer_moe_ep_mega_deep_gemm",
+        "flashinfer_moe_ep_mega_cutedsl",
+    }
+)
+
+# Backends that run a mega-MoE model path (fused expert module plus
+# prepare_megamoe routing): vLLM's native deep_gemm path, which any model
+# with a mega-MoE module may use (DeepSeek-V4, Kimi K3), plus the flashinfer
+# moe_ep variants.
+MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"}) | FLASHINFER_MOE_EP_BACKENDS
+
+# Architectures whose model code wires up the flashinfer moe_ep experts. MTP
+# and DSpark draft variants inherit the setting from these target models.
+FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+    }
+)
+
+
+def validate_flashinfer_moe_ep_model(
+    moe_backend: str, architectures: Iterable[str]
+) -> None:
+    """Reject flashinfer moe_ep backends for models that lack the FI path."""
+    if moe_backend not in FLASHINFER_MOE_EP_BACKENDS:
+        return
+    if not any(arch in FLASHINFER_MOE_EP_ARCHITECTURES for arch in architectures):
+        raise ValueError(
+            f"moe_backend={moe_backend!r} is only supported for DeepSeek-V4 "
+            f"models ({sorted(FLASHINFER_MOE_EP_ARCHITECTURES)}), but the "
+            f"model is {list(architectures)}."
+        )
+
 
 LinearBackend = Literal[
     "auto",
@@ -206,6 +248,14 @@ class KernelConfig:
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
+    - "flashinfer_moe_ep_mega_deep_gemm": Use the FlashInfer moe_ep
+      expert-parallel mega-MoE with the DeepGEMM megakernel, which consumes an
+      MXFP4 checkpoint verbatim (Blackwell, requires expert parallel;
+      DeepSeek-V4 only)
+    - "flashinfer_moe_ep_mega_cutedsl": Same, with the CuteDSL megakernel
+      (additionally requires NVSHMEM). The checkpoint selects the weight path:
+      an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
+      requantized at load
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
@@ -287,6 +337,11 @@ class KernelConfig:
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
         from vllm.platforms import current_platform
+
+        if vllm_config.model_config is not None:
+            validate_flashinfer_moe_ep_model(
+                self.moe_backend, vllm_config.model_config.architectures
+            )
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
         logger.debug(
