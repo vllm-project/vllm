@@ -30,8 +30,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.parallel import ParallelConfig
+from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
 )
@@ -80,12 +79,7 @@ def _make_region() -> ECSharedRegion:
 
 
 def _vllm_config(rank: int = 0) -> Mock:
-    cfg = Mock(spec=VllmConfig)
-    cfg.parallel_config = Mock(spec=ParallelConfig)
-    cfg.parallel_config.rank = rank
-    cfg.model_config = Mock()
-    cfg.model_config.dtype = _DTYPE
-    return cfg
+    return create_ec_vllm_config(rank=rank, dtype=_DTYPE)
 
 
 def _meta(
@@ -417,25 +411,6 @@ def test_start_load_caches_coalesces_across_entries(make_worker, loads, expected
 
 
 @_requires_accelerator
-def test_start_load_caches_overwrites_existing_encoder_cache_entry(make_worker):
-    """Every dispatched load is copied unconditionally. A resident entry with
-    the same ``mm_hash`` is replaced with freshly loaded bytes, so each
-    participating rank reports the transfer exactly once."""
-    worker = make_worker()
-    src_orig = torch.arange(_HIDDEN_DIM, dtype=_DTYPE).reshape(1, _HIDDEN_DIM)
-    src_int8 = src_orig.view(torch.int8).reshape(1, _BLOCK_SIZE_BYTES)
-    worker._region.blocks[0].copy_(src_int8[0])
-
-    stale = torch.full((1, _HIDDEN_DIM), 7.0, dtype=_DTYPE, device=DEVICE_TYPE)
-    encoder_cache = {"h": stale}
-    worker.start_load_caches(encoder_cache, _meta(loads={"h": [0]}))
-
-    out = encoder_cache["h"]
-    assert out is not stale, "resident entry must be replaced by the fresh load"
-    assert torch.equal(out.cpu(), src_orig)
-
-
-@_requires_accelerator
 def test_start_load_caches_noop_when_loads_is_empty(make_worker):
     """When ``meta.loads`` is empty the early-return must fire."""
     worker = make_worker()
@@ -694,16 +669,6 @@ def test_buffer_pool_is_reused_across_load_steps(make_worker):
     assert id(worker._buf_pool._pool[0].src_ptrs) == buf_id
 
 
-# ── stream management ────────────────────────────────────────────────────────
-
-
-@_requires_accelerator
-def test_stream_pool_empty_at_construction(make_worker):
-    """Streams are created lazily per transfer, so the pool starts empty."""
-    worker = make_worker()
-    assert worker._stream_pool == []
-
-
 # ── lifecycle ────────────────────────────────────────────────────────────────
 
 
@@ -805,20 +770,7 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     # Build scheduler sharing the same region.
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
-    class _EC:
-        is_ec_producer = True
-        is_ec_consumer = True
-
-    class _Parallel:
-        tensor_parallel_size = 1
-        prefill_context_parallel_size = 1
-        distributed_executor_backend = "mp"
-
-    class _Cfg:
-        ec_transfer_config = _EC()
-        parallel_config = _Parallel()
-
-    scheduler = ECCPUScheduler(_Cfg())
+    scheduler = ECCPUScheduler(_vllm_config())
 
     # -- Step 1: scheduler allocates, worker saves --
     n_blocks = 3

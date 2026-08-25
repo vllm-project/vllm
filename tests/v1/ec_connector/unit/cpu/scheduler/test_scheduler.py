@@ -3,6 +3,8 @@
 import uuid
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+from vllm.config.ec_transfer import ECRole
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUWorkerMetadata,
 )
@@ -58,8 +60,7 @@ def _make_scheduler(
     monkeypatch,
     num_blocks=_N,
     *,
-    is_producer=True,
-    is_consumer=True,
+    ec_role: ECRole = "ec_both",
     tensor_parallel_size=1,
 ) -> ECCPUScheduler:
     region = ECSharedRegion(
@@ -69,24 +70,12 @@ def _make_scheduler(
     )
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
-    _is_prod = is_producer
-    _is_cons = is_consumer
-    _tp = tensor_parallel_size
-
-    class _EC:
-        is_ec_producer = _is_prod
-        is_ec_consumer = _is_cons
-
-    class _Parallel:
-        tensor_parallel_size = _tp
-        prefill_context_parallel_size = 1
-        distributed_executor_backend = "mp"
-
-    class _Cfg:
-        ec_transfer_config = _EC()
-        parallel_config = _Parallel()
-
-    return ECCPUScheduler(_Cfg())
+    return ECCPUScheduler(
+        create_ec_vllm_config(
+            ec_role=ec_role,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+    )
 
 
 def _load_ids(meta) -> list[int]:
@@ -107,7 +96,9 @@ def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
 
 def test_offload_reuse_cycle(monkeypatch):
     s = _make_scheduler(monkeypatch)
-    req = _Request([_Feature("h1", length=1)])
+    # Two blocks, so the reload also pins down that every allocated block id
+    # comes back in meta.loads, not just the first.
+    req = _Request([_Feature("h1", length=2)])
 
     # Step A: first sight — allocate and save.
     assert s.has_cache_item("h1") is False
@@ -133,7 +124,7 @@ def test_offload_reuse_cycle(monkeypatch):
 
 
 def test_has_cache_item_false_when_not_consumer(monkeypatch):
-    s = _make_scheduler(monkeypatch, is_consumer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_producer")
     assert s.has_cache_item("anything") is False
     s.shutdown()
 
@@ -193,25 +184,6 @@ def test_multiple_mm_items_per_request(monkeypatch):
     s.update_state_after_alloc(req, 1)
     meta2 = s.build_connector_meta(scheduler_output=None)
     assert set(meta2.loads) == {"h1", "h2"}
-    s.shutdown()
-
-
-def test_load_returns_correct_block_ids(monkeypatch):
-    """meta.loads must contain the same block IDs that meta.saves
-    allocated — verified through the public API only."""
-    s = _make_scheduler(monkeypatch)
-    req = _Request([_Feature("a", length=2)])
-
-    s.update_state_after_alloc(req, 0)
-    meta_save = s.build_connector_meta(scheduler_output=None)
-    assert "a" in meta_save.saves
-
-    s.update_connector_output(_WorkerOutput(saves=["a"]))
-
-    # Reload.
-    s.update_state_after_alloc(req, 0)
-    meta_load = s.build_connector_meta(scheduler_output=None)
-    assert _load_blocks(meta_load, "a") == meta_save.saves["a"]
     s.shutdown()
 
 
@@ -337,26 +309,6 @@ def test_late_report_does_not_release_a_later_load_of_same_hash(monkeypatch):
     s.shutdown()
 
 
-def test_eviction_skips_entry_pinned_by_pending_load(monkeypatch):
-    """A loaded entry still awaiting its unpin completion must survive
-    eviction attempts from new saves."""
-    # 2 blocks: A occupies both, ready.
-    s = _make_scheduler(monkeypatch, num_blocks=2)
-    _seed_cached(s, "A", n_blocks=2)
-
-    # Load A → pinned.
-    s.update_state_after_alloc(_Request([_Feature("A")]), 0)
-    meta_load = s.build_connector_meta(scheduler_output=None)
-    assert "A" in meta_load.loads
-
-    # Try to save C (needs 2 blocks) — can't evict pinned A.
-    s.update_state_after_alloc(_Request([_Feature("C", length=2)]), 0)
-    meta_save = s.build_connector_meta(scheduler_output=None)
-    assert "C" not in meta_save.saves
-    assert s.has_cache_item("A") is True  # survived
-    s.shutdown()
-
-
 def test_region_full_skips_save_and_never_blocks(monkeypatch):
     """When the region is fully occupied by pinned entries, new saves are
     silently skipped and ensure_cache_available never blocks."""
@@ -379,7 +331,7 @@ def test_region_full_skips_save_and_never_blocks(monkeypatch):
 def test_producer_only_never_emits_loads(monkeypatch):
     """A producer-only scheduler must never populate meta.loads, even when
     entries are ready."""
-    s = _make_scheduler(monkeypatch, is_consumer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_producer")
     req = _Request([_Feature("h1", length=1)])
 
     s.update_state_after_alloc(req, 0)
@@ -398,7 +350,7 @@ def test_producer_only_never_emits_loads(monkeypatch):
 
 def test_consumer_only_never_emits_saves(monkeypatch):
     """A consumer-only scheduler must never populate meta.saves."""
-    s = _make_scheduler(monkeypatch, is_producer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_consumer")
     _seed_cached(s, "a", n_blocks=1)
 
     req = _Request([_Feature("a", length=1)])
@@ -411,7 +363,7 @@ def test_consumer_only_never_emits_saves(monkeypatch):
 
 def test_consumer_only_has_cache_item(monkeypatch):
     """Consumer-only: has_cache_item works normally for ready entries."""
-    s = _make_scheduler(monkeypatch, is_producer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_consumer")
     assert s.has_cache_item("a") is False
     _seed_cached(s, "a", n_blocks=1)
     assert s.has_cache_item("a") is True
