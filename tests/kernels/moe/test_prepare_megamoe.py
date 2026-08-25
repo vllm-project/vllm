@@ -122,7 +122,7 @@ def test_prepare_nvfp4_megamoe_inputs_cuda_graph_replay() -> None:
     with torch.cuda.graph(graph):
         run()
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     expected_x, expected_sf = ops.scaled_fp4_quant(
         x_bf16, gscale, is_sf_swizzled_layout=False
