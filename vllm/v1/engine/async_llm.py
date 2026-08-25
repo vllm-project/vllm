@@ -512,6 +512,13 @@ class AsyncLLM(EngineClient):
         ):
             self.check_admission(request_id=request.request_id)
 
+        # Re-check after input processing: a pause may have closed admission
+        # while this request was suspended in tokenization.
+        if self._reject_while_paused is not None:
+            raise EnginePausedError(
+                f"Generation is paused (mode={self._reject_while_paused!r}); "
+                "retry after resume."
+            )
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 

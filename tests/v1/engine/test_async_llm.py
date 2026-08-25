@@ -1122,6 +1122,34 @@ async def test_pause_rejection_races_with_concurrent_adds():
 
 
 @pytest.mark.asyncio
+async def test_pause_mid_tokenization_rejects():
+    """A request that passed the admission guard but is still suspended in
+    input processing when the pause lands must be rejected -- not queued into
+    the paused engine and served after resume (crossing the boundary)."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.get_supported_tasks()
+        gate = asyncio.Event()
+        original = engine.input_processor.process_inputs_async
+
+        async def parked(*args, **kwargs):
+            await gate.wait()
+            return await original(*args, **kwargs)
+
+        engine.input_processor.process_inputs_async = parked
+        task = asyncio.create_task(_add(engine, "mid-tokenize"))
+        await asyncio.sleep(0.1)
+        await engine.pause_generation(mode="abort")
+        gate.set()
+        with pytest.raises(EnginePausedError):
+            await task
+        await engine.resume_generation()
+
+
+@pytest.mark.asyncio
 async def test_switching_to_keep_reopens_admission():
     """`keep` carries requests across the pause by design, so a caller that
     moves from a boundary mode to `keep` is asking for them to be accepted."""
