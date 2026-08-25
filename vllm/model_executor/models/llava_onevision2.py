@@ -98,6 +98,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.multimodal.video import (
@@ -1894,7 +1895,7 @@ class LlavaOnevision2MultiModalProcessor(
         video_pad_id = vocab["<|video_pad|>"]
         vision_start_id = vocab["<|vision_start|>"]
         vision_end_id = vocab["<|vision_end|>"]
-        newline_ids = tokenizer.encode("\n", add_special_tokens=False)
+        newline_ids = cached_encode(tokenizer, "\n", add_special_tokens=False)
         merge_length = image_processor.merge_size**2
         decimals = int(hf_processor_mm_kwargs.get("timestamp_decimals", 1))
 
