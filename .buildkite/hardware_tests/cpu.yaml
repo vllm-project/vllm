@@ -11,6 +11,10 @@ steps:
   - CMakeLists.txt
   - vllm/_custom_ops.py
   - tests/kernels/attention/test_cpu_attn.py
+  - tests/v1/attention/test_group_head_counts.py
+  - tests/kernels/attention/test_amx_mla.py
+  - vllm/v1/attention/backends/mla/amx_mla.py
+  - vllm/model_executor/layers/attention/mla_attention.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
   - tests/kernels/test_onednn.py
@@ -20,10 +24,15 @@ steps:
   - tests/kernels/mamba/test_cpu_short_conv.py
   - tests/kernels/mamba/test_causal_conv1d.py
   - tests/kernels/mamba/test_mamba_ssm.py
+  - vllm/v1/sample/ops/topk_topp_triton.py
+  - vllm/v1/sample/ops/topk_topp_sampler.py
+  - tests/v1/sample/test_topk_topp_sampler.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
+      pytest -x -v -s tests/v1/attention/test_group_head_counts.py
+      pytest -x -v -s tests/kernels/attention/test_amx_mla.py
       pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
       pytest -x -v -s tests/kernels/moe/test_cpu_quant_fused_moe.py
       pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
@@ -32,7 +41,8 @@ steps:
       pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
       pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
       pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
-      pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py"
+      pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
+      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
@@ -57,31 +67,12 @@ steps:
   - vllm/
   - tests/models/language/generation/
   - tests/models/language/pooling/
+  - tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 50m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
-      pytest -x -v -s tests/models/language/pooling -m cpu_model"
-
-- label: CPU-ModelRunnerV2 Tests
-  depends_on: []
-  device: intel_cpu
-  no_plugin: true
-  soft_fail: true
-  source_file_dependencies:
-  - vllm/v1/worker/cpu/
-  - vllm/v1/worker/gpu/
-  - vllm/v1/sample/ops/topk_topp_triton.py
-  - vllm/v1/sample/ops/topk_topp_sampler.py
-  - tests/v1/sample/test_topk_topp_sampler.py
-  - tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
-  commands:
-    - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
-      uv pip install git+https://github.com/triton-lang/triton-cpu.git@270e696d
-      VLLM_USE_V2_MODEL_RUNNER=1 pytest -x -v -s tests/models/language/generation/test_granite.py -m cpu_model
-      # TODO: move to CPU-Kernel Tests once triton-cpu has a pre-built wheel
-      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp
+      pytest -x -v -s tests/models/language/pooling -m cpu_model
       pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
 
 - label: CPU-Quantization Model Tests

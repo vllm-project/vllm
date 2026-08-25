@@ -2,7 +2,7 @@ group: Spec Decode
 depends_on:
   - image-build
 steps:
-- label: V1 Spec Decode
+- label: ":nvidia: (H200) V1 Spec Decode"
   device: h200_35gb
   key: v1-spec-decode
   timeout_in_minutes: 40
@@ -23,13 +23,14 @@ steps:
     - pytest -v -s -m 'not slow_test' v1/spec_decode
   mirror:
     amd:
+      label: ":amd: (MI300) V1 Spec Decode"
       dind: false
       device: mi300_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
-- label: "Spec Decode Eagle 1: DeepSeek + Qwen"
+- label: ":nvidia: (H200) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
   timeout_in_minutes: 25
   device: h200_35gb
@@ -41,6 +42,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode Eagle 1: DeepSeek + Qwen"
       dind: false
       device: mi300_1
       timeout_in_minutes: 25
@@ -55,7 +57,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: "Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+- label: ":nvidia: (H200) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
   key: spec-decode-eagle-2-llama3-qwen-vl-other
   timeout_in_minutes: 25
   device: h200_35gb
@@ -67,6 +69,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
       dind: false
       device: mi300_1
       timeout_in_minutes: 25
@@ -81,7 +84,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: Spec Decode Eagle Nightly (B200)
+- label: ":nvidia: (B200) Spec Decode Eagle Nightly"
   key: spec-decode-eagle-nightly-b200
   timeout_in_minutes: 25
   device: b200-k8s
@@ -93,7 +96,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/eagle/
 
-- label: Spec Decode Speculators + MTP
+- label: ":nvidia: (H200) Spec Decode Speculators + MTP"
   key: spec-decode-speculators-mtp
   timeout_in_minutes: 50
   device: h200_35gb
@@ -108,6 +111,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode Speculators + MTP"
       dind: false
       device: mi300_1
       timeout_in_minutes: 75
@@ -123,7 +127,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: Spec Decode Speculators + MTP Nightly (B200)
+- label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
   key: spec-decode-speculators-mtp-nightly-b200
   timeout_in_minutes: 30
   device: b200-k8s
@@ -137,7 +141,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/speculators/
     - pytest -v -s v1/e2e/spec_decode/mtp/
 
-- label: Spec Decode Ngram + Suffix
+- label: ":nvidia: (H200) Spec Decode N-Gram + Suffix"
   key: spec-decode-ngram-suffix
   timeout_in_minutes: 20
   device: h200_35gb
@@ -151,6 +155,7 @@ steps:
     - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode N-Gram + Suffix"
       dind: false
       device: mi300_1
       timeout_in_minutes: 35
@@ -165,7 +170,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: Spec Decode Draft Model
+- label: ":nvidia: (H200) Spec Decode Draft Model"
   key: spec-decode-draft-model
   timeout_in_minutes: 45
   device: h200_18gb
@@ -177,6 +182,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/draft_model/
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode Draft Model"
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
@@ -191,7 +197,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: Spec Decode Draft Model Nightly (B200)
+- label: ":nvidia: (B200) Spec Decode Draft Model Nightly"
   key: spec-decode-draft-model-nightly-b200
   timeout_in_minutes: 40
   device: b200-k8s
@@ -203,7 +209,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/draft_model/
 
-- label: Speculators Correctness Nightly (H100)
+- label: ":nvidia: (H100) Speculators Correctness Nightly"
   key: speculators-correctness
   timeout_in_minutes: 30
   device: h100
@@ -217,8 +223,16 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI300) Speculators Correctness Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
 
-- label: Spec Decode DeepSeek MTP Parallel Load (2xB200-2xMI300)
+- label: ":nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load"
   key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
   timeout_in_minutes: 30
   device: b200-k8s
@@ -235,6 +249,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode DeepSeek MTP Parallel Load"
       dind: false
       device: mi300_2
       timeout_in_minutes: 45
@@ -254,7 +269,7 @@ steps:
       - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
       - vllm/platforms/rocm.py
 
-- label: Spec Decode AL DFlash Nightly
+- label: ":nvidia: (H200) Spec Decode AL DFlash Nightly"
   key: spec-decode-dflash-nightly
   timeout_in_minutes: 90
   device: h200_35gb
@@ -269,6 +284,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode AL DFlash Nightly"
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
@@ -289,7 +305,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: Spec Decode AL DSpark Nightly
+- label: ":nvidia: (H200) Spec Decode AL DSpark Nightly"
   key: spec-decode-dspark-nightly
   timeout_in_minutes: 60
   device: h200_35gb
@@ -304,6 +320,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
   mirror:
     amd:
+      label: ":amd: (MI300) Spec Decode AL DSpark Nightly"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
@@ -328,7 +345,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: Spec Decode AL MTP + Other Acceptance Nightly
+- label: ":nvidia: (H200) Spec Decode AL MTP + Other Acceptance Nightly"
   key: spec-decode-mtp-other-acceptance-nightly
   timeout_in_minutes: 60
   device: h200_35gb
