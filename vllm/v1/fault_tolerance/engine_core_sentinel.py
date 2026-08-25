@@ -6,6 +6,7 @@ import json
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
+import time
 
 import msgspec
 
@@ -85,8 +86,20 @@ class EngineCoreSentinel:
         )
 
         engine = self.engine
-        aborted = engine.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
-        engine._send_abort_outputs(aborted)
+        ft_config = self.parallel_config.fault_tolerance_config
+        if ft_config.resume_requests_after_recovery:
+            timestamp = time.monotonic()
+            while engine.scheduler.running:
+                request = engine.scheduler.running.pop()
+                engine.scheduler._preempt_request(request, timestamp)
+                request.async_tokens_to_discard = request.num_output_placeholders
+                request.num_output_placeholders = 0
+            engine.scheduler.prev_step_scheduled_req_ids.clear()
+        else:
+            aborted = engine.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            engine._send_abort_outputs(aborted)
         if engine.batch_queue is not None:
             engine.batch_queue.clear()
         if (
