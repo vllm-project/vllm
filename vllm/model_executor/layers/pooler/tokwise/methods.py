@@ -70,30 +70,21 @@ class AllPool(TokenPoolingMethod):
 
         pooling_states = pooling_metadata.pooling_states
         finished_mask = pooling_cursor.get_finished_mask()
+        prompt_lens = pooling_cursor.prompt_lens_cpu.tolist()
 
-        # If chunked_prefill is enabled
-        # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
-        for p, hs_chunk, finished in zip(
-            pooling_states, hidden_states_lst, finished_mask
-        ):
-            # Own data retained across steps or returned without concatenation.
-            needs_owned_storage = not finished or (
-                self.clone_finished and not p.hidden_states_cache
-            )
-            p.hidden_states_cache.append(
-                hs_chunk.clone() if needs_owned_storage else hs_chunk
-            )
-
-        # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
         output_list = list[TokenPoolingMethodOutputItem]()
-        for p, finished in zip(pooling_states, finished_mask):
+        for state, hs_chunk, finished, prompt_len in zip(
+            pooling_states, hidden_states_lst, finished_mask, prompt_lens
+        ):
+            if state.hidden_states_buffer is None and finished:
+                output_list.append(
+                    hs_chunk.clone() if self.clone_finished else hs_chunk
+                )
+                continue
+
+            state.append_hidden_states(hs_chunk, prompt_len)
             if finished:
-                hidden_states_cache = p.hidden_states_cache
-                if len(hidden_states_cache) == 1:
-                    output_list.append(hidden_states_cache[0])
-                else:
-                    output_list.append(torch.concat(hidden_states_cache, dim=0))
-                p.clean()
+                output_list.append(state.take_hidden_states())
             else:
                 output_list.append(None)
 

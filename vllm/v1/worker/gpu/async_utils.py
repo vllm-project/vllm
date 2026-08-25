@@ -217,15 +217,19 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
+        self.pooler_output_cpu: PoolerOutput
+        if not any(finished_mask):
+            self.pooler_output_cpu = [None] * len(finished_mask)
+            self.copy_event: torch.cuda.Event | None = None
+            return
+
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
             if isinstance(self.pooler_output, torch.Tensor) and all(finished_mask):
-                self.pooler_output_cpu: PoolerOutput = self.pooler_output.to(
-                    "cpu", non_blocking=True
-                )
+                self.pooler_output_cpu = self.pooler_output.to("cpu", non_blocking=True)
             else:
                 outputs = (
                     self.pooler_output.unbind()
@@ -245,7 +249,8 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
         else:
             pooler_output = self.pooler_output_cpu
-        self.copy_event.synchronize()
+        if self.copy_event is not None:
+            self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 

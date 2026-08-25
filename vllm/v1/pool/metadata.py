@@ -47,11 +47,28 @@ class PoolingCursor:
 
 class PoolingStates:
     def __init__(self) -> None:
-        # for chunked prefill with ALL pooling
-        self.hidden_states_cache: list[torch.Tensor] = []
+        self.hidden_states_buffer: torch.Tensor | None = None
+        self.num_hidden_states = 0
+
+    def append_hidden_states(self, hidden_states: torch.Tensor, capacity: int) -> None:
+        if self.hidden_states_buffer is None:
+            self.hidden_states_buffer = hidden_states.new_empty(
+                (capacity, *hidden_states.shape[1:])
+            )
+
+        end = self.num_hidden_states + hidden_states.shape[0]
+        self.hidden_states_buffer[self.num_hidden_states : end].copy_(hidden_states)
+        self.num_hidden_states = end
+
+    def take_hidden_states(self) -> torch.Tensor:
+        assert self.hidden_states_buffer is not None
+        hidden_states = self.hidden_states_buffer[: self.num_hidden_states]
+        self.clean()
+        return hidden_states
 
     def clean(self) -> None:
-        self.hidden_states_cache.clear()
+        self.hidden_states_buffer = None
+        self.num_hidden_states = 0
 
 
 @dataclass
