@@ -56,7 +56,6 @@ from vllm.multimodal.processing.processor import (
     BaseDummyInputsBuilder,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
-    cached_encode,
 )
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
