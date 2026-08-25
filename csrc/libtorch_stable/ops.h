@@ -623,6 +623,72 @@ void concat_and_cache_mla_grouped(torch::stable::Tensor& kv_c,
                                   int64_t block_size, int64_t block_stride,
                                   int64_t entry_stride);
 
+#ifndef USE_ROCM
+// HiSparse kernels use raw PTX in the row copy; CUDA-only.
+void hisparse_swap_in(
+    torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
+    torch::stable::Tensor const& hot_block_table,
+    torch::stable::Tensor const& global_indices,
+    torch::stable::Tensor& hot_indices,
+    torch::stable::Tensor& device_global_indices,
+    torch::stable::Tensor& lru_slots,
+    std::optional<torch::stable::Tensor> const& request_state_indices,
+    int64_t region_stride,
+    std::optional<torch::stable::Tensor> const& miss_mask,
+    std::optional<torch::stable::Tensor> const& attention_indices,
+    int64_t attention_block_stride,
+    std::optional<torch::stable::Tensor> const& request_ids,
+    std::optional<torch::stable::Tensor> const& source_block_table,
+    int64_t source_block_size,
+    std::optional<torch::stable::Tensor> const& resolved_global_indices,
+    std::optional<torch::stable::Tensor> const& valid_counts,
+    std::optional<torch::stable::Tensor> const& compact_miss_globals,
+    std::optional<torch::stable::Tensor> const& compact_miss_hots,
+    std::optional<torch::stable::Tensor> const& compact_miss_counts,
+    std::optional<torch::stable::Tensor> const& resident_block_table,
+    int64_t resident_block_size, int64_t resident_null_block);
+
+void hisparse_gather_plan(
+    torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
+    torch::stable::Tensor const& global_indices,
+    torch::stable::Tensor const& hot_indices,
+    torch::stable::Tensor const& miss_mask,
+    std::optional<torch::stable::Tensor> const& request_state_indices,
+    std::optional<torch::stable::Tensor> const& attention_indices,
+    int64_t attention_block_stride);
+
+void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
+                             torch::stable::Tensor& hot_cache,
+                             torch::stable::Tensor const& miss_global_indices,
+                             torch::stable::Tensor const& miss_hot_indices,
+                             torch::stable::Tensor const& miss_counts);
+
+void hisparse_backup(torch::stable::Tensor const& src_cache,
+                     torch::stable::Tensor const& src_indices,
+                     torch::stable::Tensor& host_cache,
+                     torch::stable::Tensor const& dst_slots);
+
+void hisparse_backup_layers(torch::stable::Tensor const& hot_backing,
+                            torch::stable::Tensor const& layer_offsets,
+                            torch::stable::Tensor const& src_indices_ptrs,
+                            torch::stable::Tensor& host_anchor,
+                            torch::stable::Tensor const& host_cache_ptrs,
+                            torch::stable::Tensor const& dst_slots,
+                            int64_t num_items, int64_t src_block_stride,
+                            int64_t src_block_size, int64_t src_rows);
+
+void hisparse_backup_indexer(torch::stable::Tensor const& src_cache,
+                             torch::stable::Tensor const& src_indices,
+                             torch::stable::Tensor& host_cache,
+                             torch::stable::Tensor const& dst_slots,
+                             int64_t value_bytes);
+
+void hisparse_copy_blocks(torch::stable::Tensor const& src_cache,
+                          torch::stable::Tensor& dst_cache,
+                          torch::stable::Tensor const& src_block_ids,
+                          torch::stable::Tensor const& dst_block_ids);
+#endif  // !USE_ROCM
+
 // NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
 void concat_and_cache_mla_rope_fused(
     torch::stable::Tensor& positions, torch::stable::Tensor& q_pe,

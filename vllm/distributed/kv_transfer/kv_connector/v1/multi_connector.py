@@ -17,8 +17,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
+    supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -203,6 +205,30 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
+    @classmethod
+    def from_connectors(
+        cls,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+        connectors: list[KVConnectorBase_V1],
+    ) -> "MultiConnector":
+        """Compose already-created connectors without changing user config."""
+        connector = cls.__new__(cls)
+        KVConnectorBase_V1.__init__(connector, vllm_config, role, kv_cache_config)
+        connector._connectors = connectors
+        connector._ktc_kv_transfer_config = [
+            child._kv_transfer_config for child in connectors
+        ]
+        connector._all_support_hma = all(supports_hma(child) for child in connectors)
+        assert (
+            vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            or connector._all_support_hma
+        ), "HMA should not be enabled unless all sub-connectors support it"
+        connector._requests_to_connector = {}
+        connector._extra_async_saves = {}
+        return connector
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return bool(self._connectors) and all(
@@ -308,29 +334,31 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        finished_sending: set[str] = set()
-        finished_recving: set[str] = set()
-        for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
-            if not recving and not sending:
-                continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
-            # Aggregate finished sending request ids - only include
-            # once we've drained the "extra" count (for cases where
-            # more than one connector is async-saving the same request).
-            for req_id in sending or ():
+        results = self.get_transfer_results(finished_req_ids)
+        return (
+            results.finished_sending or None,
+            results.finished_recving or None,
+        )
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        results = KVConnectorTransferResults()
+        for connector in self._connectors:
+            child_results = connector.get_transfer_results(finished_req_ids)
+            results.finished_recving.update(child_results.finished_recving)
+            results.failed_recving.update(child_results.failed_recving)
+            for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
-                    finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
+                    results.finished_sending.add(req_id)
                 else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
-
-        return finished_sending or None, finished_recving or None
+                    assert extra_pending > 0
+                    if extra_pending == 1:
+                        del self._extra_async_saves[req_id]
+                    else:
+                        self._extra_async_saves[req_id] = extra_pending - 1
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
@@ -620,7 +648,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return MultiKVConnectorStats(data=reconstructed_data)
 
-    def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         # Group connector stats by connector type.
         stats_by_connector: MultiKVConnectorStats | None = None
         for c in self._connectors:

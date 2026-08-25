@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
@@ -23,12 +24,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.kv_cache_interface import (
-        AttentionSpec,
-        KVCacheLayout,
-        KVCacheSpec,
-        KVQuantMode,
-    )
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseCacheHandle
 
 from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
@@ -49,11 +46,45 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
     base: int
 
-    def __init__(self, base: int):
-        self.base = base
+
+def select_common_block_size_from_constraints(
+    kv_manager_block_size: int,
+    constraints: Sequence[Sequence[int | MultipleOf]],
+) -> int:
+    """Select the largest manager-block divisor supported by every constraint."""
+
+    def is_supported(block_size: int) -> bool:
+        return all(
+            any(
+                block_size == supported
+                if isinstance(supported, int)
+                else block_size % supported.base == 0
+                for supported in sizes
+            )
+            for sizes in constraints
+        )
+
+    if not constraints or any(not sizes for sizes in constraints):
+        raise ValueError("Kernel block-size constraints must not be empty.")
+
+    if is_supported(kv_manager_block_size):
+        return kv_manager_block_size
+
+    exact_sizes = {
+        supported
+        for sizes in constraints
+        for supported in sizes
+        if isinstance(supported, int)
+    }
+    for block_size in sorted(exact_sizes, reverse=True):
+        if kv_manager_block_size % block_size == 0 and is_supported(block_size):
+            return block_size
+
+    raise ValueError(f"No common block size for {kv_manager_block_size}.")
 
 
 class AttentionBackend(ABC):
@@ -144,7 +175,10 @@ class AttentionBackend(ABC):
 
         (see: https://github.com/vllm-project/vllm/issues/42449)
         """
-        return spec
+        return replace(
+            spec,
+            supported_kernel_block_sizes=tuple(cls.get_supported_kernel_block_sizes()),
+        )
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
@@ -865,6 +899,9 @@ class AttentionImplBase(ABC, Generic[T]):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    def prepare_for_batch(self, attn_metadata: T | None) -> None:
+        """Prepare implementation-specific state for the current batch."""
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
@@ -983,6 +1020,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
+    hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
     @abstractmethod

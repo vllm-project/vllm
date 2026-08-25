@@ -8,9 +8,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
+    SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms.interface import DeviceCapability
@@ -18,7 +18,6 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionLayer,
-    AttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
 )
@@ -106,26 +105,8 @@ class FlashAttnMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class FlashAttnMLASparseMetadata(AttentionMetadata):
-    num_reqs: int
-    max_query_len: int
-    max_seq_len: int
-
-    num_actual_tokens: int
-    query_start_loc: torch.Tensor
-    slot_mapping: torch.Tensor
-
-    block_table: torch.Tensor
-    req_id_per_token: torch.Tensor
-    seq_lens: torch.Tensor
-    block_size: int = 64
-    topk_tokens: int = 2048
-    num_decodes: int = 0
-    num_prefills: int = 0
-    num_decode_tokens: int = 0
-    prefill_max_seq_len: int = 0
-    prefill: MLACommonPrefillMetadata | None = None
-    cp_kv_cache_interleave_size: int = 1
+class FlashAttnMLASparseMetadata(SparseMLACommonMetadata):
+    pass
 
 
 class FlashAttnMLASparseMetadataBuilder(
@@ -214,18 +195,28 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
-        kv_rows, block_stride_rows = flat_kv_row_view(
-            kv_c_and_k_pe_cache, attn_metadata.block_size
-        )
-        topk_indices, valid_counts = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
+        hisparse_resolution = self._hisparse_decode_cache(
+            kv_c_and_k_pe_cache,
             topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            BLOCK_STRIDE_ROWS=block_stride_rows,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            attn_metadata,
             return_valid_counts=True,
         )
+        if hisparse_resolution is not None:
+            kv_c_and_k_pe_cache, topk_indices, valid_counts = hisparse_resolution
+            kv_rows, _ = flat_kv_row_view(kv_c_and_k_pe_cache, attn_metadata.block_size)
+        else:
+            kv_rows, block_stride_rows = flat_kv_row_view(
+                kv_c_and_k_pe_cache, attn_metadata.block_size
+            )
+            topk_indices, valid_counts = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
 
         cu_seqlens_q = torch.arange(
             0, num_actual_toks + 1, dtype=torch.int32, device=q_rope.device

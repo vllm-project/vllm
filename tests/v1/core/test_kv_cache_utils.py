@@ -12,6 +12,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -47,6 +48,8 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -58,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -68,6 +72,114 @@ from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
+    [
+        (256, (64,), (64,), 64),
+        (64, (32, 64), (16, 32), 32),
+    ],
+)
+def test_hisparse_hma_uses_backend_gpu_block_size(
+    block_size, main_sizes, indexer_sizes, gpu_block_size
+):
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=main_sizes,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=indexer_sizes,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    group = KVCacheGroupSpec(list(specs), group_spec)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128),
+            max_model_len=block_size,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+    indexer_spec = specs["model.layers.0.self_attn.indexer"]
+    assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == (
+        indexer_spec.max_memory_usage_bytes(config)
+    )
+
+    cache_config = kv_cache_utils._get_hisparse_hma_config(
+        config,
+        group,
+        available_memory=2**30,
+        host_budget=2**30,
+        log_layout=False,
+    )
+
+    host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
+    assert host_group.kv_cache_spec.block_size == block_size
+    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
+    host_specs = host_group.kv_cache_spec.kv_cache_specs
+    gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
+    source_spec = host_specs["model.layers.0.self_attn.indexer.hisparse_source"]
+    gpu_indexer_spec = gpu_indexer_specs["model.layers.0.self_attn.indexer"]
+    kernel_pages_per_host_block = source_spec.num_states // gpu_indexer_spec.num_states
+    assert (
+        source_spec.page_size_bytes
+        == kernel_pages_per_host_block * gpu_indexer_spec.page_size_bytes
+    )
+    auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
+    assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
+    assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
+    assert all(
+        spec.block_size == gpu_block_size
+        for spec in auxiliary_specs
+        if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
+    )
+
+
+def test_hisparse_rejects_deepseek_v4():
+    full_specs = {
+        "model.layers.0.attn": MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            model_version="deepseek_v4",
+        )
+    }
+    full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)
+    assert full_uniform is not None
+    group = KVCacheGroupSpec(list(full_specs), full_uniform)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    with pytest.raises(ValueError, match="does not support DeepSeek V4"):
+        kv_cache_utils._get_hisparse_hma_config(
+            config,
+            group,
+            available_memory=2**30,
+            host_budget=2**30,
+            log_layout=False,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -2875,6 +2987,9 @@ def test_unpadded_page_size_includes_per_token_head_scales():
     scales = 2 * spec.block_size * spec.num_kv_heads * 4
     assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+    assert spec.supported_kernel_block_sizes == tuple(
+        TritonAttentionBackend.get_supported_kernel_block_sizes()
+    )
 
 
 def test_page_size_padded_wins():

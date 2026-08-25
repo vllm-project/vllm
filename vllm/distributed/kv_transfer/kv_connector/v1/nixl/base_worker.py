@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base worker-side logic for the NIXL connector."""
 
+import contextlib
 import itertools
 import logging
+import math
 import os
 import queue
 import threading
@@ -31,8 +33,14 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.hisparse import (
+    make_hisparse_nixl_adapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -136,21 +144,26 @@ class NixlBaseConnectorWorker:
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
+        num_regions = self.num_regions or len(self.block_len_per_layer)
         if region_num_blocks is None:
-            region_num_blocks = [num_blocks] * self.num_regions
+            region_num_blocks = [num_blocks] * num_regions
         elif block_size_ratio is not None:
             region_num_blocks = [
                 int(count * block_size_ratio) for count in region_num_blocks
             ]
-        assert len(region_num_blocks) == self.num_regions
+        if region_num_blocks:
+            num_regions = len(region_num_blocks)
+        assert len(region_num_blocks) == num_regions
         region_offsets = np.cumsum([0, *region_num_blocks[:-1]])
         num_fa_descs = sum(region_num_blocks)
 
-        # All-attention fast path: single vectorized broadcast.
+        # All-attention fast path.
         if num_ssm_regions == 0:
             if region_group_ids is None:
                 region_group_ids = self.region_group_ids
-            assert len(region_group_ids) == self.num_regions
+            if not region_group_ids and num_regions == 1:
+                region_group_ids = [0]
+            assert len(region_group_ids) == num_regions
             region_group_ids_array = np.asarray(region_group_ids)
             region_num_blocks_array = np.asarray(region_num_blocks)
             if np.unique(region_group_ids_array).size == 1:
@@ -334,6 +347,18 @@ class NixlBaseConnectorWorker:
             )
         )
 
+        self.kv_cache_config = kv_cache_config
+        self._nixl_adapter = make_hisparse_nixl_adapter(kv_cache_config)
+        attention_block_sizes = [
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.transfer_groups
+            if not isinstance(group.kv_cache_spec, MambaSpec)
+        ]
+        self.block_size = (
+            math.lcm(*attention_block_sizes)
+            if attention_block_sizes
+            else cast(int, vllm_config.cache_config.block_size)
+        )
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
@@ -341,7 +366,6 @@ class NixlBaseConnectorWorker:
                 for g in kv_cache_config.transfer_groups
             )
         )
-        self.kv_cache_config = kv_cache_config
         self._layer_specs = {
             layer: group.kv_cache_spec
             for group in kv_cache_config.transfer_groups
@@ -354,10 +378,7 @@ class NixlBaseConnectorWorker:
         # The transfer requires DS (dim, state_len) conv layout so that
         # conv sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
-        self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.transfer_groups
-        )
+        self._has_mamba = kv_cache_config.has_mamba_layers
         if self._has_mamba:
             assert self._is_hma_required
             from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -484,11 +505,16 @@ class NixlBaseConnectorWorker:
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
+        self.region_mem_types: list[str] = []
         self.region_strides: list[int] = []
         self.region_group_ids: list[int] = []
         self.region_block_sizes: list[int] = []
         self.region_names: list[str] = []
         self.region_num_blocks: list[int] = []
+        self._mixed_mem_types = False
+        self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
+        self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
+        self._dram_src_handles_by_block_size: dict[int, int] = {}
 
         # PP>1 (push mode): this worker holds a contiguous layer slice and
         # transfers into the matching sub-range of a PP=1 remote's regions.
@@ -544,6 +570,13 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        self._invalidated_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
+        # A posted READ cannot be aborted, so failure remains pending until
+        # every sibling transfer is terminal and its blocks are safe to reuse.
+        self._failed_recv_pending: set[ReqId] = set()
+        self._failed_recv_reported: set[ReqId] = set()
+        self._failed_recv_lock = threading.Lock()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -566,7 +599,6 @@ class NixlBaseConnectorWorker:
             "engine_ttl", 3600.0
         )
 
-        self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
 
         self.use_mla = self.model_config.use_mla
@@ -1032,6 +1064,8 @@ class NixlBaseConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
+        if self._nixl_adapter is not None:
+            self._nixl_adapter.reset_regions()
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1074,16 +1108,31 @@ class NixlBaseConnectorWorker:
             self.use_host_buffer,
         )
 
-        caches_data = []
-        seen_storage_addresses: set[int] = set()
+        registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
+        region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        tensor_configs = {
+            layer_name: tensor_config
+            for tensor_config in self.kv_cache_config.kv_cache_tensors
+            for layer_name in tensor_config.layers
+        }
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
-        for layer_name in sorted(xfer_buffers, key=_region_sort_key):
+        def transfer_layer_name(layer_name: str) -> str:
+            if self._nixl_adapter is None:
+                return layer_name
+            return self._nixl_adapter.transfer_layer_name(layer_name)
+
+        # P and D may allocate equivalent transferable layers in different
+        # cache-group orders. Keep their region lists aligned without putting
+        # layers.10 before layers.2, which would break PP region slicing.
+        for layer_name in sorted(
+            xfer_buffers, key=lambda name: _region_sort_key(transfer_layer_name(name))
+        ):
             cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
             # kernel requires a specific block size. This leads to SSM and FA layers
@@ -1100,6 +1149,7 @@ class NixlBaseConnectorWorker:
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # DSA Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
+            group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
             physical_page_size = (
@@ -1108,28 +1158,59 @@ class NixlBaseConnectorWorker:
                 else layer_spec.page_size_bytes
                 // self._physical_blocks_per_logical_kv_block
             )
-            group_id = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            group = self.kv_cache_config.transfer_groups[group_index]
+            if group.block_pool_id is None:
+                logical_num_blocks = self._logical_num_blocks
+            else:
+                logical_num_blocks = self.kv_cache_config.num_blocks_by_pool[
+                    group.block_pool_id
+                ]
+            if self._nixl_adapter is not None:
+                logical_num_blocks = self._nixl_adapter.logical_num_blocks(
+                    group, logical_num_blocks
+                )
+            elif group.block_pool_id is None:
+                raise ValueError("NIXL transfer group has no block pool")
+            group_id = group_index
             num_blocks = (
-                self._logical_num_blocks
+                logical_num_blocks
                 if isinstance(layer_spec, MambaSpec)
-                else self.num_blocks
+                else logical_num_blocks * self._physical_blocks_per_logical_kv_block
+            )
+            base_addr = cache.data_ptr()
+            is_mla_region = isinstance(
+                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            ) or (
+                self._nixl_adapter is not None
+                and self._nixl_adapter.is_mla_region(layer_spec)
             )
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
             )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
-            # Memory registration follows allocations, while transfer regions follow
-            # logical layers (or contiguous head segments). This keeps strided
-            # cross-layer views inside their registered allocation.
-            if storage_addr not in seen_storage_addresses:
-                seen_storage_addresses.add(storage_addr)
-                self.device_id = max(cache.get_device(), 0)
-                caches_data.append((storage_addr, storage.nbytes(), self.device_id, ""))
-
-            is_mla_region = isinstance(
-                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            )
+            tensor_config = tensor_configs.get(layer_name)
+            is_host_resident = tensor_config is not None and tensor_config.host_resident
+            if cache.device.type == "cpu":
+                mem_type = "DRAM"
+                region_device_id = 0
+            else:
+                mem_type = self.nixl_memory_type
+                region_device_id = max(cache.get_device(), 0)
+                self.device_id = region_device_id
+            if is_host_resident:
+                registration_base = cache.data_ptr()
+                registration_len = cache.nbytes
+            else:
+                registration_base = storage_addr
+                registration_len = storage.nbytes()
+            storage_key = (registration_base, mem_type)
+            if storage_key not in registration_ranges:
+                registration_ranges[storage_key] = (
+                    registration_base,
+                    registration_base + registration_len,
+                    region_device_id,
+                )
 
             if isinstance(layer_spec, MambaSpec):
                 region_specs = [
@@ -1149,7 +1230,7 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
-                storage_is_block_major = num_blocks * block_stride == storage.nbytes()
+                storage_is_block_major = num_blocks * block_stride == registration_len
                 # A layer whose [H, N, C] interior is dense addresses its own page
                 # as one chunk, so it can own a region. When it does not, or when
                 # every layer is packed into this one storage, the block's whole
@@ -1164,9 +1245,9 @@ class NixlBaseConnectorWorker:
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
-                    storage_block_len = storage.nbytes() // num_blocks
+                    storage_block_len = registration_len // num_blocks
                     region_specs = [
-                        (storage_addr, storage_block_len, storage_block_len)
+                        (registration_base, storage_block_len, storage_block_len)
                     ]
                 elif storage_is_block_major:
                     region_specs = [
@@ -1210,9 +1291,14 @@ class NixlBaseConnectorWorker:
                     else layer_spec.block_size
                     // self._physical_blocks_per_logical_kv_block
                 )
-                self.region_names.append(layer_name)
+                self.region_names.append(transfer_layer_name(layer_name))
                 self.region_num_blocks.append(num_blocks)
                 self._region_is_mla.append(is_mla_region)
+                region_mem_types.append(mem_type)
+                if self._nixl_adapter is not None:
+                    self._nixl_adapter.register_region(
+                        layer_name, group, block_len, kv_caches
+                    )
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1247,9 +1333,12 @@ class NixlBaseConnectorWorker:
             == len(self.region_names)
             == len(self.region_num_blocks)
         )
+        if self._nixl_adapter is not None:
+            assert len(self._nixl_adapter.host_regions) == len(self.region_names)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
+        self.region_mem_types = region_mem_types
         if self._has_mamba:
             self.region_num_blocks = [self.num_blocks] * self.num_regions
 
@@ -1265,11 +1354,27 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(self.region_num_blocks)
 
-        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-        logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-        logger.debug("Done registering descs")
-        self._registered_descs.append(descs)
+        self._mixed_mem_types = len(set(region_mem_types)) > 1
+        if self._mixed_mem_types:
+            assert self.use_mla and not self._has_mamba, (
+                "Mixed-device KV registration is only supported for MLA "
+                "models without Mamba layers."
+            )
+        for mem_type in sorted(set(region_mem_types)):
+            typed = [
+                (start, end - start, device_id, "")
+                for (_, cache_mem_type), (
+                    start,
+                    end,
+                    device_id,
+                ) in registration_ranges.items()
+                if cache_mem_type == mem_type
+            ]
+            descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
+            self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+            self._registered_descs.append(descs)
+        if self._nixl_adapter is not None:
+            self._nixl_adapter.register_host_memory(self)
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
@@ -1570,7 +1675,51 @@ class NixlBaseConnectorWorker:
             mamba = self._build_mamba_local(local_base_addresses)
             blocks_data = np.concatenate([blocks_data, mamba])
 
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        if self._mixed_mem_types:
+            desc_is_dram = np.concatenate(
+                [
+                    np.full(
+                        count * block_size_ratio,
+                        mem_type == "DRAM",
+                        dtype=bool,
+                    )
+                    for mem_type, count in zip(
+                        self.region_mem_types,
+                        self.region_num_blocks,
+                        strict=True,
+                    )
+                ]
+            )
+            assert len(desc_is_dram) == len(blocks_data)
+            desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
+            dram_idx = np.where(desc_is_dram)[0]
+            vram_idx = np.where(~desc_is_dram)[0]
+            desc_pos[dram_idx] = np.arange(len(dram_idx), dtype=np.int64)
+            desc_pos[vram_idx] = np.arange(len(vram_idx), dtype=np.int64)
+            self._desc_is_dram_by_block_size[block_size] = desc_is_dram
+            self._desc_pos_by_block_size[block_size] = desc_pos
+
+            # DRAM descriptors are registered under CPU device 0.
+            blocks_data = [
+                (addr, length, 0) if is_dram else (addr, length, dev)
+                for (addr, length, dev), is_dram in zip(
+                    blocks_data, desc_is_dram, strict=True
+                )
+            ]
+            dram_blocks = [blocks_data[i] for i in dram_idx]
+            vram_blocks = [blocks_data[i] for i in vram_idx]
+            dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
+            self._dram_src_handles_by_block_size[block_size] = (
+                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
+            )
+            descs = self.nixl_wrapper.get_xfer_descs(vram_blocks, self.nixl_memory_type)
+            return (
+                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs),
+                blocks_data,
+            )
+
+        mem_type = self.region_mem_types[0]
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, mem_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
@@ -1655,10 +1804,6 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_strides = nixl_agent_meta.region_strides[
                     start:end
                 ]
-            if nixl_agent_meta.region_num_blocks is not None:
-                nixl_agent_meta.region_num_blocks = nixl_agent_meta.region_num_blocks[
-                    start:end
-                ]
             if nixl_agent_meta.region_group_ids is not None:
                 nixl_agent_meta.region_group_ids = nixl_agent_meta.region_group_ids[
                     start:end
@@ -1669,6 +1814,10 @@ class NixlBaseConnectorWorker:
                 ]
             if nixl_agent_meta.region_names is not None:
                 nixl_agent_meta.region_names = nixl_agent_meta.region_names[start:end]
+            if nixl_agent_meta.region_num_blocks is not None:
+                nixl_agent_meta.region_num_blocks = nixl_agent_meta.region_num_blocks[
+                    start:end
+                ]
 
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
@@ -1711,11 +1860,12 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_num_blocks
                 or [nixl_agent_meta.num_blocks] * num_remote_regions
             )
-            self.dst_region_group_ids[engine_id] = nixl_agent_meta.region_group_ids or (
+            remote_region_group_ids = nixl_agent_meta.region_group_ids or (
                 self.region_group_ids
                 if len(self.region_group_ids) == num_remote_regions
                 else [0] * num_remote_regions
             )
+            self.dst_region_group_ids[engine_id] = remote_region_group_ids
             remote_region_block_sizes = nixl_agent_meta.region_block_sizes or (
                 self.region_block_sizes
                 if len(self.region_block_sizes) == num_remote_regions
@@ -2226,15 +2376,16 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         """
-        Get requests that are done sending or recving on this specific worker.
+        Get transfers that completed on this specific worker.
+
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
-        done_recving = self._pop_done_transfers(self._recving_transfers)
+        done_recving = self._pop_done_transfers(self._recving_transfers, is_recv=True)
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2244,10 +2395,24 @@ class NixlBaseConnectorWorker:
             except queue.Empty:
                 break
 
+        invalidated_recv_reqs = set[ReqId]()
+        while not self._invalidated_recv_reqs.empty():
+            try:
+                invalidated_recv_reqs.add(self._invalidated_recv_reqs.get_nowait())
+            except queue.Empty:
+                break
+
+        # Drained: a later request reusing the same id (abort + resubmit) is
+        # a distinct lifecycle and may fail again.
+        with self._failed_recv_lock:
+            self._failed_recv_reported.difference_update(
+                failed_recv_reqs | invalidated_recv_reqs
+            )
+
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
-
+        done_recving.update(invalidated_recv_reqs)
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -2260,13 +2425,19 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
-        for req_id in done_recving:
+        direct_device_recving = set[str]()
+        for req_id in tuple(done_recving):
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
-            assert meta is not None, f"{req_id} not found in recving_metadata list"
+            if meta is None:
+                logger.debug(
+                    "Skipping late duplicate completion for request %s", req_id
+                )
+                done_recving.discard(req_id)
+                continue
 
             # Skip KV sync and post-processing for failed requests
-            if req_id in failed_recv_reqs:
+            if req_id in failed_recv_reqs or req_id in invalidated_recv_reqs:
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
                     req_id,
@@ -2276,6 +2447,12 @@ class NixlBaseConnectorWorker:
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            if meta.hisparse_host_block_ids is not None:
+                direct_device_recving.add(req_id)
+                continue
+
+            direct_device_recving.add(req_id)
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
@@ -2325,7 +2502,7 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
-        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+        self._sync_device_after_direct_recv(direct_device_recving)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
@@ -2346,20 +2523,23 @@ class NixlBaseConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        return done_sending, done_recving
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recv_reqs,
+        )
 
-    def _sync_device_after_mamba_recv(
-        self,
-        done_recving: set[str],
-        failed_recv_reqs: set[str],
-    ) -> None:
-        """Synchronize ROCm direct-GPU Mamba receives before model execution."""
-        if (
-            not current_platform.is_rocm()
-            or not self._has_mamba
-            or self.use_host_buffer
-            or not (done_recving - failed_recv_reqs)
-        ):
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Compatibility wrapper for the legacy completion API."""
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
+        """Make direct NIXL writes visible before model execution."""
+        requires_sync = (current_platform.is_rocm() and self._has_mamba) or (
+            current_platform.is_cuda() and self._nixl_adapter is not None
+        )
+        if self.use_host_buffer or not done_recving or not requires_sync:
             return
 
         torch.accelerator.synchronize()
@@ -2392,11 +2572,14 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
+    def _pop_done_transfers(
+        self, transfers: dict[str, list[int]], *, is_recv: bool
+    ) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
             transfers: dict of req_id -> list[running_xfer]
+            is_recv: Whether failures require receive-side invalidation and reporting.
         Returns:
             set of req_ids that have all done xfers
         """
@@ -2413,49 +2596,93 @@ class NixlBaseConnectorWorker:
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
-                        continue
                     else:
                         self._log_failure(
                             failure_type="transfer_failed",
-                            msg="Marking blocks as invalid",
+                            msg="Deferring request completion until its last "
+                            "xfer is terminal",
                             req_id=req_id,
                             xfer_state=xfer_state,
                         )
-                        self._handle_failed_transfer(req_id, handle)
+                        # ERR is terminal; PROC handles remain in_progress.
+                        with contextlib.suppress(Exception):
+                            self.nixl_wrapper.release_xfer_handle(handle)
+                        self.xfer_stats.record_failed_transfer()
+                        if is_recv:
+                            with self._failed_recv_lock:
+                                self._failed_recv_pending.add(req_id)
                 except Exception as e:
                     self._log_failure(
                         failure_type="transfer_exception",
-                        msg="Marking blocks as invalid",
+                        msg="Handle is unpollable; treating it as terminal",
                         req_id=req_id,
                         error=e,
                     )
-                    self._handle_failed_transfer(req_id, handle)
+                    self.xfer_stats.record_failed_transfer()
+                    with contextlib.suppress(Exception):
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    if is_recv:
+                        with self._failed_recv_lock:
+                            self._failed_recv_pending.add(req_id)
 
-            if not in_progress:
-                # Only report request as completed when all transfers are done.
-                done_req_ids.add(req_id)
-                del transfers[req_id]
-            else:
+            if in_progress:
                 transfers[req_id] = in_progress
+                continue
+            del transfers[req_id]
+            if is_recv:
+                with self._failed_recv_lock:
+                    failed = req_id in self._failed_recv_pending
+                    self._failed_recv_pending.discard(req_id)
+                if failed:
+                    self._report_failed_recv(req_id)
+                    continue
+            done_req_ids.add(req_id)
+            if is_recv:
+                self._send_pending_recv_notifs(req_id)
         return done_req_ids
 
-    def _handle_failed_transfer(self, req_id: str, handle: int | None):
-        """
-        Handle a failed transfer by marking all (logical) blocks as invalid and
-        recording the failure.
+    def _send_pending_recv_notifs(self, req_id: str) -> None:
+        """Send notifications deferred by split DRAM/VRAM reads."""
+        for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="notification_failed",
+                    msg="P worker blocks will be freed after timeout. "
+                    "This may indicate network issues.",
+                    req_id=req_id,
+                    error=e,
+                    remote_agent_name=agent_name,
+                )
+                self.xfer_stats.record_failed_notification()
 
-        Args:
-            req_id: The request ID.
-            handle: The transfer handle.
-        """
-        # Use .get() here as the metadata cleanup is handled by get_finished()
-        # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
-            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-        self._failed_recv_reqs.put(req_id)
+    def _handle_failed_transfer(self, req_id: str, handle: int | None):
+        """Defer failure reporting while sibling transfers remain in flight."""
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
+        with self._failed_recv_lock:
+            if self._recving_transfers.get(req_id):
+                self._failed_recv_pending.add(req_id)
+                return
+            self._failed_recv_pending.discard(req_id)
+        self._report_failed_recv(req_id)
+
+    def _report_failed_recv(self, req_id: str) -> None:
+        """Report a failed recv exactly once and invalidate its blocks."""
+        with self._failed_recv_lock:
+            if req_id in self._failed_recv_reported:
+                return
+            self._failed_recv_reported.add(req_id)
+        # Use .get() here; transfer-result collection owns metadata cleanup.
+        if self._is_hma_required:
+            self._failed_recv_reqs.put(req_id)
+        else:
+            if meta := self._recving_metadata.get(req_id):
+                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+            self._invalidated_recv_reqs.put(req_id)
+        self._pending_recv_notifs.pop(req_id, None)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
@@ -2564,10 +2791,9 @@ class NixlBaseConnectorWorker:
             return block_ids
         block_arange = np.arange(0, ratio).reshape(1, -1)
         # Mamba blocks have no logical<>physical discrepancy (block-size=1)
-        group_specs = self.kv_cache_config.transfer_groups
         physical_block_ids = []
         for i, group in enumerate(block_ids):
-            spec = group_specs[i].kv_cache_spec
+            spec = self.kv_cache_config.transfer_groups[i].kv_cache_spec
             if isinstance(spec, MambaSpec):
                 physical_block_ids.append(group)
             else:
@@ -2822,9 +3048,45 @@ class NixlBaseConnectorWorker:
             )
 
     def __del__(self):
-        self.shutdown()
+        with contextlib.suppress(Exception):
+            self.shutdown()
 
-    def shutdown(self):
+    def _finish_shutdown(self) -> None:
+        self._recving_transfers.clear()
+        try:
+            if self._nixl_adapter is not None:
+                self._nixl_adapter.release(self)
+            for handle in self.src_xfer_handles_by_block_size.values():
+                self.nixl_wrapper.release_dlist_handle(handle)
+            for handles in self.src_xfer_handles_by_tp_ratio.values():
+                for handle in handles:
+                    self.nixl_wrapper.release_dlist_handle(handle)
+            for handle in self._dram_src_handles_by_block_size.values():
+                self.nixl_wrapper.release_dlist_handle(handle)
+        except Exception:
+            logger.exception("NIXL dlist-handle release failed at shutdown.")
+        self.src_xfer_handles_by_block_size.clear()
+        self.src_xfer_handles_by_tp_ratio.clear()
+        self._dram_src_handles_by_block_size.clear()
+        try:
+            for engine_id in list(self._remote_agents):
+                self._cleanup_remote_engine(engine_id, log_eviction=False)
+        except Exception:
+            logger.exception("NIXL remote-engine cleanup failed at shutdown.")
+        try:
+            for desc in self._registered_descs:
+                self.nixl_wrapper.deregister_memory(desc)
+        finally:
+            self._registered_descs.clear()
+            # Drop the kv-cache tensor references: releasing the HiSparse
+            # pinned host pool must not depend on this worker object becoming
+            # unreachable (an in-flight handshake future or stray reference
+            # would otherwise keep hundreds of GiB alive past
+            # model_runner.shutdown()).
+            self.device_kv_caches = {}
+            self.host_xfer_buffers = {}
+
+    def shutdown(self) -> None:
         """Shutdown the connector worker."""
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
@@ -2834,15 +3096,4 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
-        for handle in self.src_xfer_handles_by_block_size.values():
-            self.nixl_wrapper.release_dlist_handle(handle)
-        self.src_xfer_handles_by_block_size.clear()
-        for handles in self.src_xfer_handles_by_tp_ratio.values():
-            for handle in handles:
-                self.nixl_wrapper.release_dlist_handle(handle)
-        self.src_xfer_handles_by_tp_ratio.clear()
-        for engine_id in list(self._remote_agents):
-            self._cleanup_remote_engine(engine_id, log_eviction=False)
-        for desc in self._registered_descs:
-            self.nixl_wrapper.deregister_memory(desc)
-        self._registered_descs.clear()
+        self._finish_shutdown()

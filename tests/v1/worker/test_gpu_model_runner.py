@@ -311,6 +311,10 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_without_active_backends_uses_manager_size():
+    assert select_common_block_size(256, []) == 256
+
+
 def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
 

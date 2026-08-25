@@ -2437,7 +2437,9 @@ def _make_bare_worker(
     # path; everything flows through the coordinator).
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
+        KVCacheConfig,
         KVCacheGroupSpec,
+        KVCacheTensor,
     )
 
     worker.disk_offload_buffer_budget_bytes = None
@@ -2451,6 +2453,18 @@ def _make_bare_worker(
         block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
     )
     group = KVCacheGroupSpec(["layer0", "__cross_layer__"], spec)
+    worker._kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=0,
+                layers=["layer0", "__cross_layer__"],
+                layer_stride=0,
+                block_stride=0,
+            )
+        ],
+        kv_cache_groups=[group],
+    )
     worker._kv_cache_groups = [group]
     worker.pcp_size = 1
     worker.dcp_size = 1
@@ -3008,6 +3022,79 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
         assert db.kv_caches_base_addr == [raw.data_ptr()]
         assert db.block_len == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+def test_register_kv_caches_uses_transfer_group_memory_domain():
+    """Derived GPU caches must not change host-source transfer addresses."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupRole,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+    )
+
+    host_num_blocks = 4
+    gpu_num_blocks = 2
+    page_size = 32
+    source_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+    )
+    indexer_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+    )
+    source_group = KVCacheGroupSpec(
+        ["source"],
+        source_spec,
+        block_pool_id=None,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
+    )
+    indexer_group = KVCacheGroupSpec(
+        ["indexer"],
+        indexer_spec,
+        enable_kv_transfer=False,
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+    config = KVCacheConfig(
+        num_blocks=gpu_num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=host_num_blocks * page_size,
+                layers=["source"],
+                layer_stride=host_num_blocks * page_size,
+                block_stride=page_size,
+                host_resident=True,
+                block_pool_id=None,
+            ),
+            KVCacheTensor(
+                size=gpu_num_blocks * page_size,
+                layers=["indexer"],
+                layer_stride=gpu_num_blocks * page_size,
+                block_stride=page_size,
+            ),
+        ],
+        kv_cache_groups=[source_group, indexer_group],
+        hisparse_host_num_blocks=host_num_blocks,
+    )
+    worker = _make_bare_worker(num_gpu_blocks=gpu_num_blocks)
+    worker._kv_cache_config = config
+    worker._kv_cache_groups = list(config.transfer_groups)
+    worker.token_dbs = [
+        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    ]
+    source = torch.zeros(host_num_blocks, page_size, dtype=torch.uint8)
+    indexer = torch.zeros(gpu_num_blocks, page_size, dtype=torch.uint8)
+
+    _register_with_mocked_threads(
+        worker,
+        {"source": source, "indexer": indexer},
+    )
+
+    db = worker.token_dbs[0]
+    assert db.kv_caches_base_addr == [source.data_ptr()]
+    assert db.block_len == [page_size]
+    worker.store.register_buffer.assert_called_once_with(
+        source.data_ptr(), source.nbytes
+    )
 
 
 def test_register_kv_caches_separate_head_groups():

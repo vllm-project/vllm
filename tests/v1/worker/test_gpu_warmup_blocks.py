@@ -90,7 +90,7 @@ def _make_runner(
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
         ),
-        kv_block_zeroer=None,
+        kv_block_zeroers={},
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
     )
 
