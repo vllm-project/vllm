@@ -108,17 +108,45 @@ fn validate_lora_path_access(
     Ok(Some(canonical_path.to_string_lossy().into_owned()))
 }
 
+fn load_lora_api_error(error: LoadLoraError) -> ApiError {
+    let message = error.to_report_string();
+    match error {
+        LoadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
+        LoadLoraError::InvalidRequest(_) => ApiError::invalid_request(message, None),
+        LoadLoraError::AlreadyLoaded { .. } => ApiError::invalid_request(
+            format!(
+                "{message}. If you want to load the adapter in place, set 'load_inplace' to true."
+            ),
+            Some("lora_name"),
+        ),
+        LoadLoraError::BaseModelName { .. } => {
+            ApiError::invalid_request(message, Some("lora_name"))
+        }
+        LoadLoraError::Engine { .. } | LoadLoraError::NotLoaded { .. } => {
+            ApiError::server_error(message)
+        }
+    }
+}
+
+fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
+    let message = error.to_report_string();
+    match error {
+        UnloadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
+        UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
+        UnloadLoraError::IntIdMismatch { .. } => {
+            ApiError::invalid_request(message, Some("lora_int_id"))
+        }
+        UnloadLoraError::Engine { .. } | UnloadLoraError::NotRemoved { .. } => {
+            ApiError::server_error(message)
+        }
+    }
+}
+
 /// Dynamically load one LoRA adapter and expose it as an OpenAI model id.
 pub async fn load_lora_adapter(
     State(state): State<Arc<AppState>>,
     ValidatedJson(request): ValidatedJson<LoadLoraAdapterRequest>,
 ) -> Result<String, ApiError> {
-    if request.lora_name.is_empty() || request.lora_path.is_empty() {
-        return Err(ApiError::invalid_request(
-            "Both 'lora_name' and 'lora_path' must be provided.".to_string(),
-            None,
-        ));
-    }
     let allowed_prefixes = runtime_lora_allowed_path_prefixes();
     let lora_path = validate_lora_path_access(&request.lora_path, allowed_prefixes.as_deref())?
         .unwrap_or(request.lora_path);
@@ -132,25 +160,7 @@ pub async fn load_lora_adapter(
             request.is_3d_lora_weight,
         )
         .await
-        .map_err(|error| match error {
-            LoadLoraError::AlreadyLoaded { lora_name } => ApiError::invalid_request(
-                format!(
-                    "The lora adapter '{lora_name}' has already been loaded. If you want to load the adapter in place, set 'load_inplace' to true."
-                ),
-                Some("lora_name"),
-            ),
-            LoadLoraError::BaseModelName { lora_name } => ApiError::invalid_request(
-                format!("The lora adapter name '{lora_name}' conflicts with a served base model."),
-                Some("lora_name"),
-            ),
-            LoadLoraError::Engine(error) => ApiError::server_error(format!(
-                "failed to load LoRA adapter '{lora_name}': {}",
-                error.to_report_string()
-            )),
-            LoadLoraError::NotLoaded { lora_name } => ApiError::server_error(format!(
-                "failed to load LoRA adapter '{lora_name}': engine rejected the adapter"
-            )),
-        })?;
+        .map_err(load_lora_api_error)?;
 
     Ok(format!(
         "Success: LoRA adapter '{lora_name}' added successfully."
@@ -172,30 +182,7 @@ pub async fn unload_lora_adapter(
     let lora_request = state
         .unload_lora(&request.lora_name, request.lora_int_id)
         .await
-        .map_err(|error| match error {
-            UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
-            UnloadLoraError::IntIdMismatch {
-                lora_name,
-                expected,
-                actual,
-            } => ApiError::invalid_request(
-                format!(
-                    "The requested lora_int_id {actual} does not match loaded adapter '{lora_name}' with id {expected}."
-                ),
-                Some("lora_int_id"),
-            ),
-            UnloadLoraError::Engine(error) => ApiError::server_error(format!(
-                "failed to unload LoRA adapter '{}': {}",
-                request.lora_name,
-                error.to_report_string()
-            )),
-            UnloadLoraError::NotRemoved {
-                lora_name,
-                lora_int_id,
-            } => ApiError::server_error(format!(
-                "failed to unload LoRA adapter '{lora_name}' with id {lora_int_id}"
-            )),
-        })?;
+        .map_err(unload_lora_api_error)?;
 
     Ok(format!(
         "Success: LoRA adapter '{}' removed successfully.",

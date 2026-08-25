@@ -28,6 +28,7 @@ serde_with.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 subtle.workspace = true
+thiserror.workspace = true
 thiserror-ext.workspace = true
 tls-listener.workspace = true
 tokio.workspace = true
