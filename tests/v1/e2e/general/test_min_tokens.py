@@ -13,11 +13,14 @@ Covers:
 5) Multiple stop conditions
 """
 
+import json
+
 import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import StructuredOutputsParams
 
 # Test configuration
 TEST_MODEL = "facebook/opt-125m"  # Small model for fast CI execution
@@ -166,6 +169,35 @@ def llm_v1():
         enforce_eager=True,  # Avoid graph compilation overhead
     )
     return llm
+
+
+def test_min_tokens_with_terminal_structured_output(llm_v1: LLM):
+    """A terminal structured-output grammar must be able to finish under
+    min_tokens.
+
+    Regression test for #53665: once the constrained value is complete, the
+    grammar allows only the stop token. If min_tokens is still censoring the
+    stop token, the intersection of the two masks is empty and greedy sampling
+    falls back to an unguarded argmax that emits a grammar-rejected token
+    (HTTP 500). The fix restores the stop token for the request so the
+    grammar-complete output terminates cleanly.
+    """
+    params = SamplingParams(
+        temperature=GREEDY,
+        min_tokens=20,
+        max_tokens=40,
+        structured_outputs=StructuredOutputsParams(
+            json=json.dumps({"type": "boolean"})
+        ),
+    )
+
+    output = llm_v1.generate("Answer:", params)[0].outputs[0]
+    eos_token_id = llm_v1.get_tokenizer().eos_token_id
+
+    assert output.finish_reason == "stop"
+    assert isinstance(json.loads(output.text), bool)
+    assert output.token_ids[-1] == eos_token_id
+    assert len(output.token_ids) < params.min_tokens
 
 
 def get_token_count(output: RequestOutput) -> int:

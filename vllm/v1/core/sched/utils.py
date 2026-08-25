@@ -97,9 +97,6 @@ def check_stop(request: Request, max_model_len: int) -> bool:
     sampling_params = request.sampling_params
     assert sampling_params is not None
 
-    if request.num_output_tokens < sampling_params.min_tokens:
-        return False
-
     last_token_id = request.output_token_ids[-1]
     if last_token_id == sampling_params.eos_token_id:
         request.status = RequestStatus.FINISHED_STOPPED
@@ -109,6 +106,16 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
+
+    below_min_tokens = request.num_output_tokens < sampling_params.min_tokens
+    if below_min_tokens:
+        # The MinTokensLogitsProcessor normally censors stop tokens until the
+        # minimum length is reached. For structured output, a completed grammar
+        # can leave only the stop token legal while still below min_tokens; the
+        # processor then restores it so the request can terminate cleanly, and
+        # the stop checks above finish the request. Otherwise keep running.
+        return False
+
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens
