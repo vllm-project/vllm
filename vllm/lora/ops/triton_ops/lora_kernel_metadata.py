@@ -11,7 +11,7 @@ import torch
 
 from vllm.utils.torch_utils import PIN_MEMORY
 
-_VECTORIZED_METADATA_MIN_TOKENS = 512
+_VECTORIZED_METADATA_MIN_TOKENS = 1024
 
 
 @dataclass
