@@ -1504,6 +1504,11 @@ rust_extensions = rust_build.rust_extensions(
     optional=not should_require_rust_frontend()
 )
 
+if _no_device() and not should_require_rust_frontend():
+    # VLLM_TARGET_DEVICE=empty is the one target that can produce a pure Python wheel,
+    # so drop rust_extensions unless user explicitly requires the Rust frontend.
+    rust_extensions = []
+
 setup(
     # static metadata should rather go in pyproject.toml
     version=vllm_version,
