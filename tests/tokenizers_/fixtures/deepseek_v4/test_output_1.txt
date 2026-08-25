@@ -1,4 +1,4 @@
-<｜begin▁of▁sentence｜>
+<｜begin▁of▁sentence｜>You are a helpful assistant.
 
 ## Tools
 
@@ -26,7 +26,7 @@ Otherwise, output directly after </think> with tool calls or final response.
 {"name": "search", "description": "Search the web for information", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "num_results": {"type": "integer", "description": "Number of results to return"}}, "required": ["query"]}}
 
 You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
-You are a helpful assistant.<｜User｜>What's the weather in Beijing?<｜Assistant｜><think>The user wants to know the weather in Beijing. I should use the get_weather tool.</think>
+<｜User｜>What's the weather in Beijing?<｜Assistant｜><think>The user wants to know the weather in Beijing. I should use the get_weather tool.</think>
 
 <｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_weather">
