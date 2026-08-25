@@ -400,7 +400,7 @@ class Gemma4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        self._thinking_enabled = chat_kwargs.get("enable_thinking", False)
         super().__init__(
             tokenizer,
             tools,
