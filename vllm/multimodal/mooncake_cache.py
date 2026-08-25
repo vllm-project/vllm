@@ -222,7 +222,14 @@ class MooncakeProcessorStore:
         self.options = (
             options if options is not None else (MooncakeProcessorCacheOptions.load())
         )
-        self._store = store if store is not None else self._connect()
+        # Two clients, not one. The buffers `get_batch` returns are not stable
+        # against concurrent operations on the same client: a multi-key
+        # `get_batch` racing a write comes back short or shifted for some of its
+        # keys. Reads run on the caller's thread and writes on the writer
+        # thread, so a client each removes the race without serializing reads
+        # behind megabyte-sized writes.
+        self._store = store if store is not None else self._connect("read")
+        self._write_store = store if store is not None else self._connect("write")
 
         # `MsgpackEncoder` is not thread-safe; it is only ever used from the
         # single writer thread. The decoder only runs in P1, on the engine's
@@ -234,7 +241,7 @@ class MooncakeProcessorStore:
             thread_name_prefix="mm-mooncake-put",
         )
 
-    def _connect(self) -> Any:
+    def _connect(self, role: str) -> Any:
         try:
             from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
@@ -257,7 +264,7 @@ class MooncakeProcessorStore:
         ret = store.setup(
             rdma_utils.get_requester_local_hostname(get_ip()),
             store_config.metadata_server,
-            self.options.global_segment_size,
+            self.options.global_segment_size if role == "read" else 0,
             store_config.local_buffer_size,
             store_config.protocol,
             store_config.device_name,
@@ -272,8 +279,9 @@ class MooncakeProcessorStore:
 
         logger.info(
             "Multi-modal processor cache backed by Mooncake "
-            "(key_prefix=%s, shadow_ttl_s=%s, global_segment_size=%d, "
-            "tenant_id=%s)",
+            "(%s client, key_prefix=%s, shadow_ttl_s=%s, "
+            "global_segment_size=%d, tenant_id=%s)",
+            role,
             self.options.key_prefix,
             self.options.shadow_ttl_s,
             self.options.global_segment_size,
@@ -378,7 +386,7 @@ class MooncakeProcessorStore:
         def remove() -> None:
             for key in keys:
                 try:
-                    self._store.remove(key)
+                    self._write_store.remove(key)
                 except Exception:
                     logger.debug("Failed to drop %s.", key, exc_info=True)
 
@@ -451,14 +459,14 @@ class MooncakeProcessorStore:
             # first (see `drop_meta` and the receiver cache).
             # kwargs first: a reader that sees the metadata can then assume the
             # kwargs object was written too.
-            ret = self._store.put_parts(self._kwargs_key(mm_hash), header, *bufs)
+            ret = self._write_store.put_parts(self._kwargs_key(mm_hash), header, *bufs)
             if ret != 0:
                 logger.debug(
                     "Mooncake put_parts returned %d for mm_hash %s.", ret, mm_hash
                 )
                 return
 
-            ret = self._store.put(self._meta_key(mm_hash), meta)
+            ret = self._write_store.put(self._meta_key(mm_hash), meta)
             if ret != 0:
                 logger.debug(
                     "Mooncake put returned %d for the metadata of mm_hash %s.",
@@ -513,10 +521,15 @@ class MooncakeProcessorStore:
     def close(self) -> None:
         self._writer.shutdown(wait=True)
 
-        try:
-            self._store.close()
-        except Exception:
-            logger.debug("Error closing the Mooncake store.", exc_info=True)
+        seen = set()
+        for store in (self._store, self._write_store):
+            if id(store) in seen:
+                continue
+            seen.add(id(store))
+            try:
+                store.close()
+            except Exception:
+                logger.debug("Error closing a Mooncake client.", exc_info=True)
 
 
 @dataclass
