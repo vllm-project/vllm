@@ -1522,7 +1522,17 @@ class MoRIIOConnectorWorker:
             remote_meta_map = self.layer_name_to_remote_kv_cache_metadata[
                 remote_engine_id
             ]
+            # Spike: with whole-storage registration, build ONE session per
+            # unique backing allocation and reuse it for every layer that shares
+            # the allocation. Default (per-layer) path builds one session per
+            # layer as before.
+            whole_storage = getattr(self, "_whole_storage_session", False)
+            session_by_base: dict[int, Any] = {}
             for ln, local_meta in self.layer_name_to_local_kv_cache_metadata.items():
+                base = self.layer_to_storage_base[ln]
+                if whole_storage and base in session_by_base:
+                    cur_remote_engine_sessions.append(session_by_base[base])
+                    continue
                 unpacked_local_memory_meta = (
                     self.moriio_wrapper.get_unpack_memory_metadata(local_meta[0])
                 )
@@ -1534,6 +1544,8 @@ class MoRIIOConnectorWorker:
                 session = self.moriio_wrapper.build_session(
                     unpacked_local_memory_meta, unpacked_remote_memory_meta
                 )
+                if whole_storage:
+                    session_by_base[base] = session
                 if session is None:
                     failed_sessions.append(ln)
                     logger.error(
@@ -1973,33 +1985,59 @@ class MoRIIOConnectorWorker:
         # strided views into one backing allocation, so multiple layers can
         # share a base storage pointer. Log per-layer view vs backing pointer
         # and group so a null registration/session can be traced to a layer.
+        # Spike (VLLM_MORIIO_WHOLE_STORAGE_SESSION=1): register each unique
+        # backing allocation ONCE (a flat view over the whole storage) instead
+        # of registering each layer's view, to test whether mori can pair
+        # whole-allocation regions for the hybrid packed layout (many layers per
+        # allocation). Default off keeps the per-layer registration unchanged.
+        whole_storage = os.environ.get("VLLM_MORIIO_WHOLE_STORAGE_SESSION", "0") == "1"
+        self._whole_storage_session = whole_storage
+        self._spike_storage_tensors: list[torch.Tensor] = []
+        self.layer_to_storage_base: dict[str, int] = {}
+        storage_meta_by_base: dict[int, Any] = {}
         failed_local_reg: list[str] = []
         base_alloc_ptrs: dict[int, str] = {}
         for layer_name, kv_cache in kv_caches.items():
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(kv_cache)
+            base_ptr = kv_cache.untyped_storage().data_ptr()
+            self.layer_to_storage_base[layer_name] = base_ptr
+            if whole_storage:
+                if base_ptr not in storage_meta_by_base:
+                    storage = kv_cache.untyped_storage()
+                    flat = torch.empty(0, dtype=torch.uint8, device=kv_cache.device)
+                    flat.set_(storage, 0, (storage.nbytes(),))
+                    self._spike_storage_tensors.append(flat)
+                    storage_meta_by_base[base_ptr] = (
+                        self.moriio_wrapper.register_local_tensor(flat)
+                    )
+                moriio_mem_metadata = storage_meta_by_base[base_ptr]
+            else:
+                moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(
+                    kv_cache
+                )
             if moriio_mem_metadata is None:
                 failed_local_reg.append(layer_name)
             self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                 moriio_mem_metadata
             )
 
-            base_ptr = kv_cache.untyped_storage().data_ptr()
             shares_with = base_alloc_ptrs.get(base_ptr)
             base_alloc_ptrs.setdefault(base_ptr, layer_name)
             logger.debug(
-                "MoRIIO register layer %s: group=%d shape=%s dtype=%s "
-                "view_ptr=%#x base_ptr=%#x storage_offset=%d contiguous=%s "
-                "registered=%s%s",
+                "MoRIIO register layer %s: group=%d shape=%s stride=%s dtype=%s "
+                "view_ptr=%#x base_ptr=%#x storage_offset=%d "
+                "storage_nbytes=%d contiguous=%s registered=%s%s",
                 layer_name,
                 self.layer_to_group.get(layer_name, 0),
                 tuple(kv_cache.shape),
+                tuple(kv_cache.stride()),
                 kv_cache.dtype,
                 kv_cache.data_ptr(),
                 base_ptr,
                 kv_cache.storage_offset(),
+                kv_cache.untyped_storage().nbytes(),
                 kv_cache.is_contiguous(),
                 moriio_mem_metadata is not None,
                 f" shares_backing_alloc_with={shares_with}" if shares_with else "",
