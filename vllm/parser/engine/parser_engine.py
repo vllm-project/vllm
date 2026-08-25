@@ -978,11 +978,70 @@ class ParserEngine(Parser):
         prev = slot.streamed_json
         if final_json and len(final_json) > len(prev):
             if prev and not final_json.startswith(prev):
-                return None
+                return self._close_streamed_json(slot, prev)
             diff = final_json[len(prev) :]
             slot.streamed_json = final_json
             return diff
+        if prev:
+            return self._close_streamed_json(slot, prev)
         return None
+
+    def _close_streamed_json(self, slot: ToolCallSlot, prev: str) -> str | None:
+        """Terminate an argument prefix the flush cannot extend.
+
+        ``_safe_arg_prefix`` deliberately streams unterminated string values for
+        prefix-stable keys, on the understanding that the flush completes them.
+        If the model never closes a parameter, the non-partial re-derivation
+        drops that parameter entirely, so it is neither longer than nor a prefix
+        of what was already sent. Returning ``None`` there ends the stream with
+        ``finish_reason`` set while the client holds a half-written string, which
+        no JSON parser accepts. Close what was already sent instead: the client
+        gets the truncated value rather than an unparseable message.
+        """
+        suffix = self._json_prefix_terminator(prev)
+        if not suffix:
+            return None
+        slot.streamed_json = prev + suffix
+        return suffix
+
+    @staticmethod
+    def _json_prefix_terminator(prefix: str) -> str:
+        """Return the shortest suffix that makes ``prefix`` parse, or ``""``."""
+        in_string = False
+        escape = False
+        stack: list[str] = []
+        for c in prefix:
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_string = False
+                continue
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                stack.append("}")
+            elif c == "[":
+                stack.append("]")
+            elif c in "}]" and stack:
+                stack.pop()
+        suffix = ""
+        if escape:
+            # A trailing escape would swallow the quote that closes the string.
+            suffix += "\\"
+        if in_string:
+            suffix += '"'
+        suffix += "".join(reversed(stack))
+        if not suffix:
+            return ""
+        try:
+            json.loads(prefix + suffix)
+        except (json.JSONDecodeError, ValueError):
+            return ""
+        return suffix
 
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
 
