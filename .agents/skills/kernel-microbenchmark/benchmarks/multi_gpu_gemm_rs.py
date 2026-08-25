@@ -14,6 +14,7 @@ import os
 import statistics
 from collections.abc import Callable
 
+import pandas as pd
 import torch
 import torch.distributed as dist
 
@@ -177,23 +178,23 @@ def main() -> None:
     )
     global_tflops = 2 * args.m * args.n * args.k * world_size / (latency_us * 1e6)
     if rank == 0:
-        print(
-            {
-                "world_size": world_size,
-                "local_world_size": local_world_size,
-                "num_nodes": world_size // local_world_size,
-                "backend": dist.get_backend(device_group),
-                "gpu": torch.cuda.get_device_name(local_rank),
-                "torch": torch.__version__,
-                "cuda": torch.version.cuda,
-                "M": args.m,
-                "N": args.n,
-                "K_per_rank": args.k,
-                "K_global": args.k * world_size,
-                "latency_us": round(latency_us, 3),
-                "global_tflops": round(global_tflops, 3),
-            }
-        )
+        row = {
+            "world_size": world_size,
+            "local_world_size": local_world_size,
+            "num_nodes": world_size // local_world_size,
+            "backend": dist.get_backend(device_group),
+            "gpu": torch.cuda.get_device_name(local_rank),
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "M": args.m,
+            "N": args.n,
+            "K_per_rank": args.k,
+            "K_global": args.k * world_size,
+            "latency_us": latency_us,
+            "global_tflops": global_tflops,
+        }
+        df = pd.DataFrame([row])
+        print(df.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
 
     dist.barrier(group=cpu_group)
     dist.destroy_process_group(cpu_group)
