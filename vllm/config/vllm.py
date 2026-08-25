@@ -73,6 +73,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "DeepseekV4ForCausalLM",
         "GlmMoeDsaForCausalLM",
         "GraniteMoeForCausalLM",
+        "HYV4ForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
