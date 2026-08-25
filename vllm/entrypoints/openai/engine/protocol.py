@@ -152,7 +152,13 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
 
 
 class PrefixCacheMetrics(OpenAIBaseModel):
-    """Experimental per-request prompt/KV telemetry."""
+    """Experimental per-request prompt/KV telemetry.
+
+    These fields expose exact cache-hit and eviction state. In multi-tenant
+    deployments, isolate every request with an unpredictable secret
+    ``cache_salt`` scoped to the intended tenant boundary. See the security
+    guide for details.
+    """
 
     num_computed_tokens: int
     num_cached_tokens: int

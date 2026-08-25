@@ -132,7 +132,10 @@ class BaseFrontendArgs:
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
     enable_per_request_metrics: bool = False
-    """If set to True, include per-request timing metrics in API responses."""
+    """If set to True, include per-request timing and experimental prefix-cache
+    metrics in API responses. Prefix-cache metrics expose exact cache state;
+    review the security guide before enabling them in multi-tenant deployments.
+    """
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False

@@ -16,6 +16,17 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-per-request-metrics
 When this flag is set, supported API responses include metrics for each
 attributable request.
 
+!!! warning "Security: prefix-cache state"
+    Prefix-cache metrics expose exact per-request cache-hit and eviction state.
+    In a shared deployment, this can reveal whether another tenant populated a
+    guessed prefix without relying on timing analysis. Use this flag only in a
+    trusted single-tenant deployment, or ensure that every request includes an
+    unpredictable secret `cache_salt` scoped to the intended tenant isolation
+    boundary. A shared or predictable salt does not provide cross-tenant
+    isolation. See the
+    [cache-salting guidance](../usage/security.md#prefix-cache-timing-side-channel-mitigation-cache-salting)
+    and [CVE-2025-46570](https://github.com/vllm-project/vllm/security/advisories/GHSA-4qjh-9fv9-r85r).
+
 !!! note
     At high concurrency, enabling per-request metrics computation may introduce
     non-negligible CPU overhead. Benchmark your specific workload to evaluate the
