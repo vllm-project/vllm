@@ -466,15 +466,6 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
 
 
 class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
