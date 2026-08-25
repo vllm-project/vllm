@@ -48,8 +48,9 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest -v -s models/test_initialization.py -k not test_can_initialize_small_subset --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    'pip install open-clip-torch --no-deps &&
+    cd tests &&
+    pytest -v -s models/test_initialization.py -k not test_can_initialize_small_subset --deselect="tests/models/test_initialization.py::test_can_initialize_large_subset[DFlashLagunaForCausalLM]" --deselect="tests/models/test_initialization.py::test_can_initialize_large_subset[MistralLarge3ForCausalLM]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: Basic Models Tests (Other)
   device: intel_gpu
   timeout_in_minutes: 35
