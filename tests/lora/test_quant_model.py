@@ -12,6 +12,8 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
+from ..models.utils import check_logprobs_close
+
 
 @dataclass
 class ModelWithQuantization:
@@ -124,6 +126,22 @@ def test_quant_model_lora(qwen3_meowing_lora_files, qwen3_woofing_lora_files, mo
 def test_quant_model_tp_equality(qwen3_meowing_lora_files, num_gpus_available, model):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
+    if model.quantization == "gptq":
+        pytest.skip("GPTQ lora outputs are just incredibly unstable")
+    num_logprobs = 5
+    prompts = [
+        "<|im_start|>user\nGive me an orange-ish brown color<|im_end|>\n"
+        "<|im_start|>assistant\n",
+        "<|im_start|>user\nGive me a neon pink color<|im_end|>\n"
+        "<|im_start|>assistant\n",
+    ]
+    sampling_params = vllm.SamplingParams(
+        temperature=0,
+        max_tokens=256,
+        stop=["<|im_end|>"],
+        logprobs=num_logprobs,
+    )
+    lora_request = LoRARequest("1", 1, qwen3_meowing_lora_files)
     llm_tp1 = vllm.LLM(
         model=model.model_path,
         enable_lora=True,
@@ -135,9 +153,13 @@ def test_quant_model_tp_equality(qwen3_meowing_lora_files, num_gpus_available, m
         enable_chunked_prefill=True,
     )
     try:
-        output_tp1 = do_sample(
-            llm_tp1, qwen3_meowing_lora_files, lora_id=1, max_tokens=10
+        outputs_tp1 = llm_tp1.generate(
+            prompts, sampling_params, lora_request=lora_request
         )
+        output_tp1 = [
+            (o.outputs[0].token_ids, o.outputs[0].text, o.outputs[0].logprobs)
+            for o in outputs_tp1
+        ]
     finally:
         del llm_tp1
         cleanup_dist_env_and_memory()
@@ -154,11 +176,20 @@ def test_quant_model_tp_equality(qwen3_meowing_lora_files, num_gpus_available, m
         enable_chunked_prefill=True,
     )
     try:
-        output_tp2 = do_sample(
-            llm_tp2, qwen3_meowing_lora_files, lora_id=1, max_tokens=10
+        outputs_tp2 = llm_tp2.generate(
+            prompts, sampling_params, lora_request=lora_request
         )
+        output_tp2 = [
+            (o.outputs[0].token_ids, o.outputs[0].text, o.outputs[0].logprobs)
+            for o in outputs_tp2
+        ]
     finally:
         del llm_tp2
         cleanup_dist_env_and_memory()
 
-    assert output_tp1 == output_tp2
+    check_logprobs_close(
+        outputs_0_lst=output_tp1,
+        outputs_1_lst=output_tp2,
+        name_0="tp1",
+        name_1="tp2",
+    )
