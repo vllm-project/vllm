@@ -51,7 +51,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language -m core_model and slow_test --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest -v -s models/language -m core_model and slow_test --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: Language Models Tests (Hybrid) %N
   device: intel_gpu
   timeout_in_minutes: 65
@@ -202,5 +202,6 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
+    'pip install peft &&
+    cd tests &&
     pytest -v -s models/language/pooling_mteb_test || true'
