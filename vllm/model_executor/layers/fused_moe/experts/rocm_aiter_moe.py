@@ -479,7 +479,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
                 return True
 
             if on_gfx1250():
-                return activation_key is None or activation_key == kMxfp4Dynamic
+                return activation_key is None
 
             return False
         return True

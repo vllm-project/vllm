@@ -235,11 +235,14 @@ def backend_to_kernel_cls(
         return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+            AiterW4A4ExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
-        return [AiterExperts]
+        return [AiterW4A4ExpertsMonolithic, AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
@@ -334,6 +337,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     if current_platform.is_rocm():
         return [
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
         ]
@@ -605,6 +609,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
         priority_backends = [
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
@@ -996,39 +1001,35 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         e8m0_dtype = torch.float8_e8m0fnu
 
         if is_gfx1250:
-            from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
+            from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
-            w13_raw = w13_weight.data.view(fp4_dtype)
-            w2_raw = w2_weight.data.view(fp4_dtype)
+            # Triton moe_gemm_a4w4: uint8 column-major weights,
+            # GFX1250_SCALE swizzled scales.
+            w13_data = w13_weight.data.view(torch.uint8)
+            w2_data = w2_weight.data.view(torch.uint8)
+
+            # Make column-major: transpose to [E, K, N] with K-contiguous
+            w13_data = w13_data.transpose(1, 2).contiguous()
+            w2_data = w2_data.transpose(1, 2).contiguous()
+
             w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
             w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
-            w13_scale_raw = w13_scale_raw.view(-1, w13_scale_raw.shape[-1])
-            w2_scale_raw = w2_scale_raw.view(-1, w2_scale_raw.shape[-1])
 
-            w13 = moe_shuffle_weight(
-                w13_raw, num_experts,
-                is_guinterleave=True, gate_up=True,
+            w13_scale = shuffle_scale_moe(
+                w13_scale_raw.reshape(-1, w13_scale_raw.shape[-1]),
+                arch="gfx1250",
+                preshuffle_factor=32,
+                scale_kwidth=8,
             )
-            w2 = moe_shuffle_weight(
-                w2_raw, num_experts,
-                is_guinterleave=False, gate_up=False,
+            w2_scale = shuffle_scale_moe(
+                w2_scale_raw.reshape(-1, w2_scale_raw.shape[-1]),
+                arch="gfx1250",
+                preshuffle_factor=32,
+                scale_kwidth=8,
             )
-            w13_scale = moe_shuffle_scale(
-                w13_scale_raw, num_experts,
-                is_guinterleave=True, gate_up=True,
-            )
-            w2_scale = moe_shuffle_scale(
-                w2_scale_raw, num_experts,
-                is_guinterleave=False, gate_up=False,
-            )
-            w13.is_shuffled = True
-            w2.is_shuffled = True
 
-            if w13_bias is not None:
-                from aiter.ops.shuffle import interleave_gate_up_rows
-                w13_bias = interleave_gate_up_rows(w13_bias)
-
-            return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+            return (w13_data, w2_data, w13_scale, w2_scale,
+                    w13_bias, w2_bias)
 
         from vllm._aiter_ops import rocm_aiter_ops
 
