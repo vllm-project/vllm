@@ -24,6 +24,9 @@ steps:
     soft_fail: true
     allow_dependency_failure: true
     timeout_in_minutes: 15
+    # Reporting is a couple of REST calls and a curl: no GPU needed, so keep it
+    # off the accelerator agents the test groups queue for.
+    device: cpu-small
     # No source_file_dependencies: this step is lane-gated, not change-gated,
     # so it must not be skipped by the file-based step selection.
     commands:
