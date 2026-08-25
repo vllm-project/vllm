@@ -7,14 +7,14 @@ from vllm.config import CompilationConfig
 
 from ...utils import compute_acceptance_len
 
-TARGET_MODEL = "unsloth/Meta-Llama-3.1-8B-Instruct"
+TARGET_MODEL = "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8"
 PARD2_DRAFT = "amd/PARD2-Llama-3.1-8B"
 
 
 def test_pard2_acceptance_length(vllm_runner):
-    """PARD-2 (https://arxiv.org/abs/2504.18583) target-dependent fusion should
-    accept multiple draft tokens per step; guards against a fusion regression that
-    collapses acceptance length toward 1.0."""
+    """PARD-2 (https://arxiv.org/abs/2504.18583) fusion should accept multiple draft
+    tokens per step; acceptance near 1.0 means it broke. The quantized target with a
+    bf16 draft also covers building draft layers from the draft's own quant config."""
     prompts = _build_gsm8k_prompts(num_questions=50, num_shots=5)[0]
 
     with vllm_runner(
