@@ -109,11 +109,51 @@ void quantize_probability_row_e4m3(
                        _mm256_cvtph_hf8(fp16));
     }
             }
+
+__attribute__((target("avx10.2"), noinline))
+void quantize_q_tile_e4m3(
+    const c10::BFloat16* __restrict__ src, uint8_t* __restrict__ dst,
+    int32_t q_num, int32_t q_heads_per_kv, int64_t q_num_stride,
+    int64_t q_head_stride, int64_t head_dim, float inv_scale) {
+  const __m512 scale = _mm512_set1_ps(inv_scale);
+  const __m512 max_value = _mm512_set1_ps(448.0f);
+  const __m512 min_value = _mm512_set1_ps(-448.0f);
+  const int64_t head_size_block_num = head_dim / AMX_TILE_ROW_BYTES;
+  int32_t packed_row = 0;
+
+  for (int32_t q = 0; q < q_num; ++q) {
+    const c10::BFloat16* head = src + q * q_num_stride;
+    for (int32_t h = 0; h < q_heads_per_kv;
+         ++h, head += q_head_stride, ++packed_row) {
+      uint8_t* packed_head =
+          dst + (packed_row / AMX_TILE_ROW_NUM) *
+                    head_size_block_num * AMX_TILE_BYTES +
+          (packed_row % AMX_TILE_ROW_NUM) * AMX_TILE_ROW_BYTES;
+      for (int64_t e = 0; e < head_dim; e += 16) {
+        const __m256i bf16 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(head + e));
+        __m512 values = _mm512_castsi512_ps(
+            _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
+        values = _mm512_mul_ps(values, scale);
+        values = _mm512_min_ps(values, max_value);
+        values = _mm512_max_ps(values, min_value);
+        const __m256h fp16 = (__m256h)_mm512_cvtps_ph(
+            values, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        const int64_t block = e / AMX_TILE_ROW_BYTES;
+        const int64_t offset = e % AMX_TILE_ROW_BYTES;
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(packed_head +
+                                       block * AMX_TILE_BYTES + offset),
+            _mm256_cvtph_hf8(fp16));
+      }
+    }
+  }
+}
             #else
             FORCE_INLINE void quantize_probability_row_e4m3(
               const float* __restrict__ src, uint8_t* __restrict__ dst, int32_t cols) {
               const __m512 scale = _mm512_set1_ps(448.0f * 0x1p-120f);
-              const __m512i payload_mask = _mm512_set1_epi32(0x7FFFFFu);
+              const __m512i payload_mask = _mm512_set1_epi32(0x07F00000u);
               const __m512i sign_mask =
                 _mm512_set1_epi32(static_cast<int>(0x80000000u));
               const __m512i max_payload = _mm512_set1_epi32(0x7E);
@@ -544,8 +584,7 @@ class TileGemm122<uint8_t, kv_cache_t> {
 // ---------------------------------------------------------------------------
 template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
   requires(!std::is_same_v<scalar_t, c10::BFloat16> ||
-           !(std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
-             std::is_same_v<kv_cache_scalar_t, c10::Float8_e5m2>) ||
+           !std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
            (head_dim % 64 != 0))
 class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t>
     : public AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
@@ -553,8 +592,7 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t>
 
 template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
   requires(std::is_same_v<scalar_t, c10::BFloat16> &&
-           (std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
-            std::is_same_v<kv_cache_scalar_t, c10::Float8_e5m2>) &&
+           std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> &&
            (head_dim % 64 == 0))
 class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
@@ -674,16 +712,35 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     float max_abs = 0.0f;
     {
       scalar_t* src_iter = src;
+#if defined(__AVX512F__)
+      __m512 max_abs_vec = _mm512_setzero_ps();
+      const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+#endif
       for (int32_t q = 0; q < q_num; ++q, src_iter += q_num_stride) {
         scalar_t* head_iter = src_iter;
         for (int32_t h = 0; h < q_heads_per_kv;
              ++h, head_iter += q_head_stride) {
+#if defined(__AVX512F__)
+          for (int64_t e = 0; e < head_dim; e += 16) {
+            const __m256i bf16 = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(head_iter + e));
+            const __m512i fp32_bits = _mm512_slli_epi32(
+                _mm512_cvtepu16_epi32(bf16), 16);
+            const __m512 abs_values = _mm512_castsi512_ps(
+                _mm512_and_si512(fp32_bits, abs_mask));
+            max_abs_vec = _mm512_max_ps(max_abs_vec, abs_values);
+          }
+#else
           for (int64_t e = 0; e < head_dim; ++e) {
             float v = static_cast<float>(head_iter[e]);
             max_abs = std::max(max_abs, std::abs(v));
           }
+#endif
         }
       }
+#if defined(__AVX512F__)
+      max_abs = _mm512_reduce_max_ps(max_abs_vec);
+#endif
     }
     if (max_abs == 0.0f) max_abs = 1.0f;  // avoid div-by-zero
     const float inv_scale = fp8_e4m3_max / max_abs;
@@ -701,6 +758,11 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     // 64 FP8 elements per 64-byte block.
     constexpr int64_t head_elem_num_per_block = AMX_TILE_ROW_BYTES;
 
+#if __GNUC__ >= 15
+    quantize_q_tile_e4m3(
+        src, reinterpret_cast<uint8_t*>(q_buffer), q_num, q_heads_per_kv,
+        q_num_stride, q_head_stride, head_dim, inv_scale);
+#else
     int32_t idx = 0;
     int8_t* __restrict__ q_buf_iter = reinterpret_cast<int8_t*>(q_buffer);
     for (int32_t q_idx = 0; q_idx < q_num; ++q_idx, src += q_num_stride) {
@@ -742,6 +804,7 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
         }
       }
     }
+#endif
   }
 
   // reshape KV to AMX-FP8 friendly layout.

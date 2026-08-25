@@ -372,9 +372,9 @@ FORCE_INLINE __m128i quant_fp32x16_to_fp8e4m3_avx512(const float* src,
   // sign: bit31 → bit7
   __m512i sign = _mm512_srli_epi32(
       _mm512_and_si512(vi, _mm512_set1_epi32(0x80000000u)), 24);
-  // payload: bits[26:20] → bits[6:0]  (7-bit mantissa field after bias shift)
+  // payload: bits[26:20] -> bits[6:0] after the exponent-bias shift.
   __m512i payload = _mm512_srli_epi32(
-      _mm512_and_si512(vi, _mm512_set1_epi32(0x7FFFFFu << 0)), 20);
+      _mm512_and_si512(vi, _mm512_set1_epi32(0x07F00000u)), 20);
   // Keep 0x7F (all-ones) reserved as NaN encoding: clamp to 0x7E
   payload = _mm512_min_epu32(payload, _mm512_set1_epi32(0x7E));
   __m512i fp8 = _mm512_or_si512(sign, payload);

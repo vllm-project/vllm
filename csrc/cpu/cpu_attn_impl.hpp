@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, AMX_FP8, VEC, VEC16, NEON, VXE, RVV, VSX };
+enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX, AMX_FP8 };
 
 // Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
