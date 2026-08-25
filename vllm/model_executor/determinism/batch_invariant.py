@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.batch_invariant_configs import (
+from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_matmul_config,
     resolve_tuned_matmul_configs,
 )
