@@ -14,7 +14,7 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-MODEL_NAME = "ibm-research/PowerMoE-3b"
+MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
 
 # Number of data parallel ranks for external LB testing
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
@@ -111,11 +111,12 @@ class ExternalLBServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
-        while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
+        servers = [s for s, _ in self.servers]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
 
 
 @pytest.fixture(scope="module")

@@ -27,6 +27,7 @@ class SymmMemCommunicator:
         "9.0": [4, 6, 8],
         "10.0": [6, 8],
         "10.3": [6, 8],
+        "10.7": [6, 8],  # sm_107 (Rubin): reuse 10.3 thresholds
     }
 
     def __init__(
@@ -121,7 +122,7 @@ class SymmMemCommunicator:
         inp_size = inp.numel() * inp.element_size()
         if inp_size % 4 != 0:
             return False
-        return inp_size < self.max_size
+        return inp_size <= self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor | None = None

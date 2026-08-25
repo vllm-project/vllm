@@ -10,8 +10,11 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe import fused_topk
-from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    determine_expert_map,
+)
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
     moe_permute_unpermute_supported,
     moe_unpermute,
@@ -207,3 +210,79 @@ def test_moe_permute_unpermute(
     )
     # check unpermuted hidden
     torch.testing.assert_close(result4, gold4, atol=2e-2, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_moe_permute_reuses_scratch_buffers(dtype: torch.dtype):
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    n_token = 64
+    n_hidden = 2048
+    n_expert = 16
+    topk = 4
+    hidden_states = torch.randn((n_token, n_hidden), device="cuda").to(dtype)
+    gating_output = torch.randn((n_token, n_expert), device="cuda").to(dtype)
+    _, topk_ids, _ = fused_topk(hidden_states, gating_output, topk, False)
+
+    scratch = MoEPermuteScratch(
+        max_num_tokens=n_token,
+        topk=topk,
+        num_experts=n_expert,
+        num_local_experts=n_expert,
+        device=hidden_states.device,
+        hidden_size=n_hidden,
+        hidden_dtype=hidden_states.dtype,
+    )
+
+    first = moe_permute(
+        hidden_states=hidden_states,
+        a1q_scale=None,
+        topk_ids=topk_ids,
+        n_expert=n_expert,
+        scratch=scratch,
+    )
+    second = moe_permute(
+        hidden_states=hidden_states,
+        a1q_scale=None,
+        topk_ids=topk_ids,
+        n_expert=n_expert,
+        scratch=scratch,
+    )
+
+    (
+        permuted_hidden_states_1,
+        _,
+        expert_first_token_offset_1,
+        inv_permuted_idx_1,
+        permuted_idx_1,
+    ) = first
+    (
+        permuted_hidden_states_2,
+        _,
+        expert_first_token_offset_2,
+        inv_permuted_idx_2,
+        permuted_idx_2,
+    ) = second
+
+    torch.testing.assert_close(permuted_hidden_states_1, permuted_hidden_states_2)
+    torch.testing.assert_close(expert_first_token_offset_1, expert_first_token_offset_2)
+    torch.testing.assert_close(inv_permuted_idx_1, inv_permuted_idx_2)
+    torch.testing.assert_close(permuted_idx_1, permuted_idx_2)
+
+    assert (
+        permuted_hidden_states_1.untyped_storage().data_ptr()
+        == permuted_hidden_states_2.untyped_storage().data_ptr()
+    )
+    assert (
+        expert_first_token_offset_1.untyped_storage().data_ptr()
+        == expert_first_token_offset_2.untyped_storage().data_ptr()
+    )
+    assert (
+        inv_permuted_idx_1.untyped_storage().data_ptr()
+        == scratch.inv_permuted_idx.untyped_storage().data_ptr()
+    )
+    assert (
+        permuted_idx_1.untyped_storage().data_ptr()
+        == scratch.permuted_idx.untyped_storage().data_ptr()
+    )

@@ -13,13 +13,80 @@
 #include "cpu/utils.hpp"
 
 #ifdef VLLM_NUMA_DISABLED
-std::string init_cpu_threads_env(const std::string& cpu_ids) {
-  return std::string(
-      "Warning: NUMA is not enabled in this build. `init_cpu_threads_env` has "
-      "no effect to setup thread affinity.");
-}
+void init_cpu_memory_env(std::vector<int64_t> node_ids) {}
+#else
+void init_cpu_memory_env(std::vector<int64_t> node_ids) {
+  // Memory node binding
+  if (numa_available() != -1) {
+    // Concatenate all node_ids into a single comma-separated string
+    if (!node_ids.empty()) {
+      std::string node_ids_str;
+      for (const int node_id : node_ids) {
+        if (!node_ids_str.empty()) {
+          node_ids_str += ",";
+        }
+        node_ids_str += std::to_string(node_id);
+      }
 
-#endif
+      bitmask* mask = numa_parse_nodestring(node_ids_str.c_str());
+      bitmask* src_mask = numa_get_mems_allowed();
+
+      int pid = getpid();
+
+      if (mask && src_mask) {
+        // move all existing pages to the specified numa node.
+        *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
+        int page_num = numa_migrate_pages(pid, src_mask, mask);
+        if (page_num == -1) {
+          TORCH_WARN("numa_migrate_pages failed. errno: " +
+                     std::to_string(errno));
+        }
+
+        // Restrict memory allocation to the selected NUMA node(s).
+        // Enhances memory locality for the threads bound to those NUMA CPUs.
+        if (node_ids.size() > 1) {
+          errno = 0;
+          numa_set_interleave_mask(mask);
+          if (errno != 0) {
+            TORCH_WARN("numa_set_interleave_mask failed. errno: " +
+                       std::to_string(errno));
+          } else {
+            TORCH_WARN(
+                "NUMA binding: Using INTERLEAVE policy for memory "
+                "allocation across multiple NUMA nodes (nodes: " +
+                node_ids_str +
+                "). Memory allocations will be "
+                "interleaved across the specified NUMA nodes.");
+          }
+        } else {
+          errno = 0;
+          numa_set_membind(mask);
+          if (errno != 0) {
+            TORCH_WARN("numa_set_membind failed. errno: " +
+                       std::to_string(errno));
+          } else {
+            TORCH_WARN(
+                "NUMA binding: Using MEMBIND policy for memory "
+                "allocation on the NUMA nodes (" +
+                node_ids_str +
+                "). Memory allocations will be "
+                "strictly bound to these NUMA nodes.");
+          }
+        }
+
+        numa_set_strict(1);
+
+        numa_free_nodemask(mask);
+        numa_free_nodemask(src_mask);
+      } else {
+        TORCH_WARN(
+            "numa_parse_nodestring or numa_get_run_node_mask failed. errno: " +
+            std::to_string(errno));
+      }
+    }
+  }
+}
+#endif  // VLLM_NUMA_DISABLED
 
 namespace cpu_utils {
 ScratchPadManager::ScratchPadManager() : size_(0), ptr_(nullptr) {

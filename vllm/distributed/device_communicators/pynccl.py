@@ -3,6 +3,8 @@
 
 
 # ===================== import region =====================
+import threading
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
@@ -108,9 +110,7 @@ class PyNcclCommunicator:
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
-            logger.info_once(
-                "vLLM is using nccl==%s", self.nccl.ncclGetVersion(), scope="local"
-            )
+            logger.info_once("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()
@@ -147,8 +147,19 @@ class PyNcclCommunicator:
 
     def destroy(self):
         if self.available and not self.disabled:
-            with torch.accelerator.device_index(self.device.index):
-                self.nccl.ncclCommDestroy(self.comm)
+            # ncclCommAbort can block until all CUDA graphs that
+            # captured NCCL ops on this comm are destroyed — and
+            # those graphs are released later in this same main-
+            # thread teardown, so a direct call here self-deadlocks.
+            # Run it in a daemon thread with a timeout: the main
+            # thread proceeds, the graphs drop, and the abort returns.
+            def _abort():
+                with torch.accelerator.device_index(self.device.index):
+                    self.nccl.ncclCommAbort(self.comm)
+
+            abort_thread = threading.Thread(target=_abort, daemon=True)
+            abort_thread.start()
+            abort_thread.join(timeout=5.0)
             self.available = False
             self.disabled = True
 
@@ -306,6 +317,66 @@ class PyNcclCommunicator:
                 cudaStream_t(stream.cuda_stream),
             )
             split_offset += split_size
+        self.nccl.ncclGroupEnd()
+
+    def reduce(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        root: int,
+        op: ReduceOp = ReduceOp.SUM,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclReduce(
+            buffer_type(input_tensor.data_ptr()),
+            buffer_type(output_tensor.data_ptr()),
+            input_tensor.numel(),
+            ncclDataTypeEnum.from_torch(input_tensor.dtype),
+            ncclRedOpTypeEnum.from_torch(op),
+            root,
+            self.comm,
+            cudaStream_t(stream.cuda_stream),
+        )
+
+    def scatter(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        sizes: list[int],
+        root: int = 0,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert output_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the output tensor is on {output_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclGroupStart()
+        if self.rank == root:
+            split_offset = 0
+            for dst, split_size in enumerate(sizes):
+                if split_size == 0:
+                    continue
+
+                chunk = input_tensor[split_offset : split_offset + split_size, ...]
+                if dst == root:
+                    output_tensor.copy_(chunk)
+                else:
+                    self.send(chunk, dst, stream)
+                split_offset += split_size
+        elif sizes[self.rank] > 0:
+            self.recv(output_tensor, root, stream)
         self.nccl.ncclGroupEnd()
 
     def send(self, tensor: torch.Tensor, dst: int, stream=None):

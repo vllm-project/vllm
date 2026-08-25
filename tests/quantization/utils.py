@@ -10,15 +10,15 @@ from vllm.platforms import current_platform
 
 
 def is_quant_method_supported(quant_method: str) -> bool:
-    # Currently, all quantization methods require Nvidia or AMD GPUs
-    if not (current_platform.is_cuda() or current_platform.is_rocm()):
+    # Currently, quantization tests only run GPUs
+    if current_platform.is_cpu():
         return False
-
     try:
         current_platform.verify_quantization(quant_method)
     except ValueError:
         return False
-
+    if current_platform.is_xpu():
+        return True
     capability = current_platform.get_device_capability()
     assert capability is not None
 
@@ -80,14 +80,13 @@ def _test_online_quant_peak_mem_impl(
     print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
     print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
 
-    # model specific, allenai/OLMoE-1B-7B-0125-Instruct fp8 online quant
-    # uses 6.65 GiB for weight loading (bf16 checkpoint is ~12.89 GiB)
     expected_model_memory_gib = 6.7
 
     # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06
-    # GiB, which is 1.36x above model_memory_gib. A slightly higher number is
-    # expected as when we load and quantize weights in a streaming fashion we
-    # need to have individual weights in bf16 + fp8 alive at the same time.
+    # GiB on CUDA, which is 1.36x above model_memory_gib. A slightly higher
+    # number is expected as when we load and quantize weights in a streaming
+    # fashion we need to have individual weights in bf16 + fp8 alive at the
+    # same time.
     expected_peak_memory_gib = expected_model_memory_gib * 1.4
 
     assert model_memory_gib < expected_model_memory_gib, (

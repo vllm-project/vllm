@@ -4,6 +4,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
+from vllm.distributed.device_communicators.base_device_communicator import (
+    All2AllManagerBase,
+)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -11,11 +14,15 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes():
-    return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+    dp_metadata = get_forward_context().dp_metadata
+    assert dp_metadata is not None
+    return dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
 class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """FlashInfer implementation using the Moe AlltoAll kernel."""
+
+    all2all_manager: All2AllManagerBase
 
     def __init__(
         self,
@@ -23,6 +30,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         top_k: int,
         num_experts: int,
         hidden_size: int,
+        x_bytes_per_token: int,
+        x_sf_bytes_per_token: int,
         num_dispatchers: int = 1,
     ):
         super().__init__()
@@ -32,12 +41,18 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         self.hidden_size = hidden_size
         self.num_dispatchers_ = num_dispatchers
 
-        self.all2all_manager = get_ep_group().device_communicator.all2all_manager
-        self.all2all_manager.initialize(
+        device_communicator = get_ep_group().device_communicator
+        assert device_communicator is not None
+        all2all_manager = device_communicator.all2all_manager
+        assert all2all_manager is not None
+        self.all2all_manager = all2all_manager
+        self.all2all_manager.initialize(  # type: ignore[attr-defined]
             max_num_tokens=self.max_num_tokens,
             top_k=self.top_k,
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
+            x_bytes_per_token=x_bytes_per_token,
+            x_sf_bytes_per_token=x_sf_bytes_per_token,
         )
 
     @property
@@ -51,7 +66,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         return self.num_dispatchers_
 
     def output_is_reduced(self) -> bool:
-        return False
+        return True
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int32
@@ -81,46 +96,57 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             else a1.shape[0]
         )
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            quant_config.a1_gscale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-            is_fp4_scale_swizzled=False,  # delay swizzle to after comm
-        )
+        if defer_input_quant:
+            dispatch_x, dispatch_x_sf = a1, None
+        else:
+            dispatch_x, dispatch_x_sf = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_gscale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+                is_scale_swizzled=False,  # delay swizzle to after comm
+                mx_alignment=quant_config.mx_alignment,
+            )
 
-        payloads = []
-        payloads.append(a1q)
-        if a1q_scale is not None:
-            payloads.append(a1q_scale)
+        payloads = [dispatch_x]
+        if dispatch_x_sf is not None:
+            payloads.append(dispatch_x_sf)
+        topk_ids_payload_index = len(payloads)
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
-        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(
+        assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
+        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
+            expert_id_payload_index=topk_ids_payload_index,
         )
-        if a1q_scale is not None:
-            a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
+        if dispatch_x_sf is not None:
+            recv_x, recv_x_sf, topk_ids_recv, topk_weights_recv = recv_payloads
+            x_sf_width = recv_x_sf.shape[-1]
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
-            if (
-                quant_config.quant_dtype == "nvfp4"
-                and quant_config.is_nvfp4_scale_swizzled
-            ):
-                a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
-                a1q_scale_recv = a1q_scale_recv.view(torch.uint8)
-                a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)
-            a1q_scale_recv = a1q_scale_recv.view(-1, self.hidden_size // 16)
+            if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
+                recv_x_sf = recv_x_sf.view(-1, x_sf_width)
+                recv_x_sf = recv_x_sf.view(torch.uint8)
+                recv_x_sf = nvfp4_block_scale_interleave(recv_x_sf)
+            recv_x_sf = recv_x_sf.view(-1, x_sf_width)
         else:
-            a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
-            a1q_scale_recv = None
-        a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
+            recv_x, topk_ids_recv, topk_weights_recv = recv_payloads
+            recv_x_sf = None
+        recv_x = recv_x.view(-1, recv_x.shape[-1])
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
 
-        return a1q_recv, a1q_scale_recv, None, topk_ids_recv, topk_weights_recv
+        return (
+            recv_x,
+            recv_x_sf,
+            None,
+            topk_ids_recv,
+            topk_weights_recv,
+        )
 
     def finalize(
         self,
@@ -131,7 +157,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        assert self.all2all_manager.moe_alltoall is not None
+        assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
 
         ep_size = self.all2all_manager.world_size
         hidden_size = fused_expert_output.shape[-1]
@@ -139,8 +165,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             ep_size, self.runtime_max_tokens_per_rank, hidden_size
         )
 
-        combined_output = self.all2all_manager.moe_alltoall.combine(
+        self.all2all_manager.combine_into(  # type: ignore[attr-defined]
             payload=fused_expert_output,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            output=output,
         )
-        output.copy_(combined_output)

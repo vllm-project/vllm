@@ -20,7 +20,7 @@ if not current_platform.is_rocm():
     pytest.skip("This test can only run on ROCm.", allow_module_level=True)
 
 # this import statement is needed to ensure the ops are registered
-import vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe  # noqa: F401
+import vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe  # noqa: F401
 
 # need to import once to ensure the ops are registered
 # Check if aiter package is installed

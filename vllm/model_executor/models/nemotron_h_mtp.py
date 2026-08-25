@@ -11,7 +11,9 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -214,7 +216,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -320,7 +322,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = vllm_config.quant_config
@@ -399,7 +401,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
         if getattr(self.config, "model_type", None) == "nemotron_h_puzzle":
             num_experts = self.config.mtp_n_routed_experts
         if num_experts is not None:
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
@@ -412,12 +414,12 @@ class NemotronHMTP(nn.Module, SupportsPP):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # MTP weights are nested in "language_model."
+            # in Multimodal Nemotron-H checkpoints.
+            name = name.removeprefix("language_model.")
+
             # Only process MTP weights - skip all non-MTP weights
-            if (
-                not name.startswith("mtp.")
-                and "embeddings" not in name
-                and "lm_head" not in name
-            ):
+            if not name.startswith("mtp.") and "embeddings" not in name:
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:

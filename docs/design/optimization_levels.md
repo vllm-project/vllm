@@ -16,7 +16,7 @@ User-set flags take precedence over optimization level defaults.
 
 ```bash
 # CLI usage
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
+vllm serve RedHatAI/Llama-3.2-1B-FP8 -O1
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
@@ -56,6 +56,7 @@ Fusions:
 - `-cc.pass_config.fuse_norm_quant=True`*
 - `-cc.pass_config.fuse_act_quant=True`*
 - `-cc.pass_config.fuse_act_padding=True`†
+- `-cc.pass_config.fuse_mla_dual_rms_norm=True`†
 
 \* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
 † These fusions are ROCm-only and require AITER.

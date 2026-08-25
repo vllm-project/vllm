@@ -18,7 +18,7 @@
 
 #include "libtorch_stable/torch_utils.h"
 
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 #include "nvfp4_utils.cuh"
 
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \

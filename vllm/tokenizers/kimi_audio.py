@@ -10,13 +10,13 @@ from typing import Any, overload
 
 import pybase64
 import tiktoken
-from huggingface_hub import hf_hub_download
 from transformers import AddedToken, BatchEncoding
 from transformers.utils import chat_template_utils as hf_chat_utils
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
+from vllm.transformers_utils.repo_utils import hf_api
 
 logger = init_logger(__name__)
 
@@ -78,7 +78,7 @@ class KimiAudioTokenizer(TokenizerLike):
 
             # Try to download tiktoken.model or tokenizer.model
             try:
-                vocab_path = hf_hub_download(
+                vocab_path = hf_api().hf_hub_download(
                     repo_id=repo_id,
                     filename="tiktoken.model",
                     revision=revision,
@@ -87,7 +87,7 @@ class KimiAudioTokenizer(TokenizerLike):
                 vocab_file = Path(vocab_path)
             except Exception:
                 try:
-                    vocab_path = hf_hub_download(
+                    vocab_path = hf_api().hf_hub_download(
                         repo_id=repo_id,
                         filename="tokenizer.model",
                         revision=revision,
@@ -101,7 +101,7 @@ class KimiAudioTokenizer(TokenizerLike):
 
             # Also download tokenizer_config.json if available
             with contextlib.suppress(Exception):
-                hf_hub_download(
+                hf_api().hf_hub_download(
                     repo_id=repo_id,
                     filename="tokenizer_config.json",
                     revision=revision,

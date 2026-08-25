@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+from typing import ClassVar
+
 import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -13,26 +16,34 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
+    RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        logger.warning_once(
-            "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
-        )
         return 64
 
     @classmethod
@@ -53,6 +64,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def supports_sink(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return False
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
@@ -63,17 +78,23 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def get_impl_cls() -> type["RocmAiterUnifiedAttentionImpl"]:
         return RocmAiterUnifiedAttentionImpl
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Keep K and V packed in the content dim, unlike the native HIP
+        kernels the base class targets."""
+        # block_size == 1 is the per-token page-size probe (see
+        # Platform.get_page_size_bytes); real blocks must be gatherable in
+        # 16-token units by the ROCm kernel.
+        if spec.block_size != 1 and spec.block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return spec
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # K and V come out of the content dim as transposed views rather than
+        # copies, so the head dim may sit on either side of the block dim, but
+        # the layer must stay outermost.
+        return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -133,6 +154,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
 
+    def _split_kv_cache(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -140,7 +167,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -152,7 +179,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -193,22 +220,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         softmax_scale = self.scale
-        fp8_post_attn_v_rescale = False
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            # When Q is FP8, triton kernel skips K/V dequant (for fp8xfp8 matmul).
-            # Compensate by absorbing q_scale and k_scale into softmax_scale, and
-            # v_scale into output_scale (or post-multiplying if no fusion).
-            if query.dtype == self.fp8_dtype:
-                softmax_scale = self.scale * layer._q_scale_float * layer._k_scale_float
-                if output_scale is not None:
-                    output_scale = output_scale / layer._v_scale_float
-                else:
-                    fp8_post_attn_v_rescale = True
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -216,35 +233,58 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        descale_shape = (
-            cu_seqlens_q.shape[0] - 1,
-            key.shape[1] if key is not None else self.num_kv_heads,
-        )
+        if attn_metadata.causal:
+            self.unified_attention(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                k_descale=layer._k_scale,
+                v_descale=layer._v_scale,
+                sinks=self.sinks,
+                output_scale=output_scale,
+            )
+        else:
+            # The aiter kernel is causal-only. Non-causal cross-attention
+            # (ENCODER_DECODER, e.g. Whisper) falls back to the vLLM Triton
+            # unified kernel, which shares this layout and honors the flag.
+            from vllm.v1.attention.ops.triton_unified_attention import (
+                unified_attention as triton_unified_attention,
+            )
 
-        self.unified_attention(
-            q=query[:num_actual_tokens],
-            k=key_cache,
-            v=value_cache,
-            out=output[:num_actual_tokens],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=softmax_scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
-            block_table=block_table,
-            softcap=self.logits_soft_cap,
-            q_descale=None,  # q_scale absorbed into softmax_scale
-            k_descale=layer._k_scale.expand(descale_shape),
-            v_descale=layer._v_scale.expand(descale_shape),
-            sinks=self.sinks,
-            output_scale=output_scale,
-        )
-
-        if fp8_post_attn_v_rescale:
-            output[:num_actual_tokens].mul_(layer._v_scale_float)
+            descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
+            triton_unified_attention(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                causal=attn_metadata.causal,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+                sinks=self.sinks,
+                output_scale=output_scale,
+            )
 
         return output
 
@@ -260,7 +300,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
@@ -276,6 +316,47 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
+
+    def fused_qk_norm_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            use_shuffle_layout=False,
+        )
 
     def do_rope_and_kv_cache_update(
         self,
@@ -293,7 +374,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

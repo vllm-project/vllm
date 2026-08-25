@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from typing import Any
 
-import regex as re
 import torch
 
+from vllm.kernels.helion.case_key import CaseKey
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_helion
 
@@ -22,14 +24,14 @@ from vllm.kernels.helion.register import register_kernel
 logger = init_logger(__name__)
 
 
-def generate_silu_mul_fp8_inputs() -> dict[str, tuple[Any, ...]]:
+def generate_silu_mul_fp8_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     intermediate_sizes = [2048, 2880, 4096, 8192, 11008, 14336]
 
     # Use the same num_tokens values as vLLM's default cudagraph capture sizes.
     # See vllm/config/vllm.py _set_cudagraph_sizes() for the canonical formula.
     num_tokens_list = [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 513, 16))
 
-    inputs = {}
+    inputs: dict[CaseKey, tuple[Any, ...]] = {}
     for num_tokens in num_tokens_list:
         for intermediate_size in intermediate_sizes:
             input_tensor = torch.randn(
@@ -40,15 +42,18 @@ def generate_silu_mul_fp8_inputs() -> dict[str, tuple[Any, ...]]:
             )
             scale = torch.tensor([1.0], device="cuda", dtype=torch.float32)
 
-            config_key = f"intermediate_{intermediate_size}_numtokens_{num_tokens}"
-            inputs[config_key] = (input_tensor, scale)
+            key = CaseKey({"intermediate": intermediate_size, "numtokens": num_tokens})
+            inputs[key] = (input_tensor, scale)
 
     return inputs
 
 
+_pick_cache: dict[tuple[int, int], CaseKey | None] = {}
+
+
 def pick_silu_mul_fp8_config(
-    args: tuple[Any, ...], config_keys: list[str]
-) -> str | None:
+    args: tuple[Any, ...], config_keys: list[CaseKey]
+) -> CaseKey | None:
     """Pick the best pre-tuned config for the given input shape.
 
     Selection strategy:
@@ -57,39 +62,35 @@ def pick_silu_mul_fp8_config(
       2. Among the num_tokens values tuned for that intermediate_size, pick
          the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
-
-    Config keys must be "default" or follow the format
-    "intermediate_{int}_numtokens_{int}".
     """
     if not config_keys:
         return None
 
     input_tensor, _scale = args
-    intermediate_size = input_tensor.shape[-1] // 2
-    num_tokens = input_tensor.view(-1, input_tensor.shape[-1]).shape[0]
-    configs: dict[int, list[int]] = {}
-    for key in config_keys:
-        if key == "default":
+    intermediate_size = int(input_tensor.shape[-1]) // 2
+    num_tokens = int(input_tensor.view(-1, input_tensor.shape[-1]).shape[0])
+
+    cache_key = (num_tokens, intermediate_size)
+    cached = _pick_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    by_isize: dict[int, list[int]] = {}
+    for k in config_keys:
+        if k.is_default():
             continue
-        match = re.fullmatch(r"intermediate_(\d+)_numtokens_(\d+)", key)
-        if not match:
-            raise ValueError(
-                f"Malformed config key '{key}', "
-                f"expected format 'intermediate_{{int}}_numtokens_{{int}}'"
-            )
-        isize_str, ntokens_str = match.groups()
-        configs.setdefault(int(isize_str), []).append(int(ntokens_str))
+        by_isize.setdefault(k["intermediate"], []).append(k["numtokens"])
 
-    if not configs:
-        return "default" if "default" in config_keys else None
+    if not by_isize:
+        return None
 
-    best_isize = min(configs, key=lambda s: abs(s - intermediate_size))
-    available_ntokens = sorted(configs[best_isize])
-    best_ntokens = next(
-        (n for n in available_ntokens if n >= num_tokens), available_ntokens[-1]
-    )
+    best_isize = min(by_isize, key=lambda s: abs(s - intermediate_size))
+    available = sorted(by_isize[best_isize])
+    best_ntokens = next((n for n in available if n >= num_tokens), available[-1])
 
-    return f"intermediate_{best_isize}_numtokens_{best_ntokens}"
+    result = CaseKey({"intermediate": best_isize, "numtokens": best_ntokens})
+    _pick_cache[cache_key] = result
+    return result
 
 
 @register_kernel(

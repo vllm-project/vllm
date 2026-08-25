@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal.parse import (
@@ -226,13 +226,30 @@ class InputProcessingContext:
         self,
         output: JSONTree,
     ) -> JSONTree:
-        def _postprocess_one(x: object):
-            if isinstance(x, torch.Tensor):  # noqa: SIM102
-                # This mimics the behavior of transformers.BatchFeature
-                if x.is_floating_point():
-                    x = x.to(dtype=self.model_config.dtype)
+        # "torch_shm" puts tensors on a torch.multiprocessing queue, which
+        # shares device tensors by CUDA IPC handle, so a device-side processor
+        # can hand `pixel_values` straight to the worker. Every other transport
+        # serializes host bytes, so the result has to be copied back first.
+        keep_on_device = (
+            self.model_config.get_multimodal_config().mm_tensor_ipc == "torch_shm"
+        )
 
-            return x
+        def _postprocess_one(x: object):
+            if not isinstance(x, torch.Tensor):
+                return x
+
+            # Bind to a Tensor-typed local: reassigning the `object`-typed
+            # parameter would discard the isinstance narrowing.
+            tensor = x
+
+            # This mimics the behavior of transformers.BatchFeature
+            if tensor.is_floating_point():
+                tensor = tensor.to(dtype=self.model_config.dtype)
+
+            if not tensor.is_cpu and not keep_on_device:
+                tensor = tensor.cpu()
+
+            return tensor
 
         return json_map_leaves(_postprocess_one, output)
 
@@ -245,9 +262,6 @@ class InputProcessingContext:
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-        *,
-        num_tries: int = 1,
-        max_tries: int = 5,
     ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
@@ -256,6 +270,12 @@ class InputProcessingContext:
         assert callable(hf_processor)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+
+        # vLLM needs the full untruncated sequence to keep multi-modal
+        # placeholder tokens aligned; note that the text inputs in
+        # call_hf_processor are just dummy text, not the original prompt.
+        # The original prompt is already tokenized by the renderer.
+        merged_kwargs.setdefault("truncation", False)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -268,28 +288,6 @@ class InputProcessingContext:
         try:
             output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
-            # See https://github.com/huggingface/tokenizers/issues/537
-            if (
-                isinstance(exc, RuntimeError)
-                and exc
-                and exc.args[0] == "Already borrowed"
-                and num_tries < max_tries
-            ):
-                logger.warning(
-                    "Failed to acquire tokenizer in current thread. "
-                    "Retrying (%d/%d)...",
-                    num_tries,
-                    max_tries,
-                )
-                time.sleep(0.5)
-                return self.call_hf_processor(
-                    hf_processor,
-                    data,
-                    kwargs,
-                    num_tries=num_tries + 1,
-                    max_tries=max_tries,
-                )
-
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "
                 f"on data={data} with kwargs={allowed_kwargs}"
@@ -371,6 +369,12 @@ class BaseProcessingInfo:
 
         return None
 
+    @property
+    def allow_missing_mm_embeddings(self) -> bool:
+        """Whether pre-computed embedding tensors may be omitted."""
+        mm_config = self.ctx.model_config.multimodal_config
+        return mm_config is not None and mm_config.allow_missing_mm_embeddings
+
     def get_data_parser(self) -> MultiModalDataParser:
         """
         Constructs a parser to preprocess multi-modal data items
@@ -383,6 +387,7 @@ class BaseProcessingInfo:
         """
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     @cached_property
@@ -393,7 +398,6 @@ class BaseProcessingInfo:
     def skip_prompt_length_check(self) -> bool:
         return False
 
-    @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
         Return the maximum supported number of items for each modality.
@@ -446,7 +450,7 @@ class BaseProcessingInfo:
             if num_items <= supported_limit:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
-            raise ValueError(msg)
+            raise VLLMValidationError(msg, parameter=modality)
 
     def parse_mm_data(
         self,

@@ -181,7 +181,7 @@ class MiniCPMMoE(nn.Module):
         )
 
         final_hidden_states = fused_experts(
-            hidden_states, self.ws, self.w2s, topk_weights, topk_ids, inplace=False
+            hidden_states, self.ws, self.w2s, topk_weights, topk_ids
         )
 
         if self.tp_size > 1:
@@ -648,8 +648,5 @@ class MiniCPMForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

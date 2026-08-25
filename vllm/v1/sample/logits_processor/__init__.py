@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
@@ -18,7 +19,6 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
-    ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
 from vllm.v1.sample.logits_processor.interface import (
@@ -51,7 +51,6 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
-    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -230,7 +229,12 @@ def validate_logits_processors_parameters(
         tuple(logits_processors) if logits_processors is not None else None
     )
     for logits_procs in cached_load_custom_logitsprocs(logits_processors):
-        logits_procs.validate_params(sampling_params)
+        try:
+            logits_procs.validate_params(sampling_params)
+        except ValueError as e:
+            # Legacy custom logitsprocs may still raise ValueError from
+            # validate_params; convert for backward compatibility.
+            raise VLLMValidationError(str(e)) from e
 
 
 class AdapterLogitsProcessor(LogitsProcessor):
@@ -356,5 +360,4 @@ __all__ = [
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
-    "ThinkingTokenBudgetLogitsProcessor",
 ]

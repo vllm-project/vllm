@@ -12,13 +12,14 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config import VllmConfig
+from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core_client import DPAsyncMPClient
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
@@ -82,7 +83,7 @@ async def generate(
 async def test_load(
     model: str,
     output_kind: RequestOutputKind,
-    data_parallel_backend: str,
+    data_parallel_backend: DataParallelBackend,
     async_scheduling: bool,
 ):
     if async_scheduling and data_parallel_backend == "ray":
@@ -162,7 +163,8 @@ async def test_load(
         assert not engine.output_processor.has_unfinished_requests()
 
         # testing internals here which may break
-        core_client: DPAsyncMPClient = engine.engine_core
+        core_client = engine.engine_core
+        assert isinstance(core_client, DPLBAsyncMPClient)
         # the engines only synchronize stopping every N steps so
         # allow a small amount of time here.
         for _ in range(10):
@@ -184,6 +186,67 @@ async def test_load(
             assert slogger.finished_req_count > NUM_REQUESTS // (DP_SIZE + 1), (
                 f"requests are imbalanced: {stats_loggers}"
             )
+
+
+@pytest.mark.parametrize("prefill_schedule_interval", [1, 4])
+@pytest.mark.asyncio
+async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
+    """Throttling new prefills to every Nth step (DP balancing) must not break
+    generation: a stream of staggered requests should still all complete with
+    the expected number of tokens.
+
+    The throttle only engages in the DP MoE/EP engine-core path
+    (`DPEngineCoreProc`), so this uses an MoE model with expert parallel.
+    """
+    with ExitStack() as after:
+        prompt = "This is a test of data parallel"
+
+        engine_args = AsyncEngineArgs(
+            model="ibm-research/PowerMoE-3b",
+            enforce_eager=True,
+            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+            data_parallel_size=DP_SIZE,
+            data_parallel_backend="mp",
+            enable_expert_parallel=True,
+            prefill_schedule_interval=prefill_schedule_interval,
+        )
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        NUM_REQUESTS = 50
+        NUM_EXPECTED_TOKENS = 10
+
+        request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
+
+        # Create requests with a small stagger so they arrive across many
+        # steps and (with interval > 1) accumulate in the waiting queue
+        # before being admitted together on cadence-aligned steps.
+        tasks = []
+        for request_id in request_ids:
+            tasks.append(
+                asyncio.create_task(
+                    generate(
+                        engine,
+                        request_id,
+                        prompt,
+                        RequestOutputKind.DELTA,
+                        NUM_EXPECTED_TOKENS,
+                    )
+                )
+            )
+            await asyncio.sleep(0.01)
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            num_generated_tokens, request_id = await task
+            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+                f"{request_id} generated {num_generated_tokens} but "
+                f"expected {NUM_EXPECTED_TOKENS}"
+            )
+
+        assert not engine.output_processor.has_unfinished_requests()
 
 
 # =============================================================================
@@ -234,6 +297,143 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
         ):
             pass
         assert out.finished
+
+
+async def _consume(generator) -> None:
+    async for _ in generator:
+        pass
+
+
+async def _poll_flag(engine: AsyncLLM, want: bool, timeout: float) -> bool:
+    """Wait for the front-end's view of the DP engines to reach ``want``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if engine.engine_core.dp_engines_running() == want:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_late_request_does_not_block_drain():
+    """A request arriving after pause must not leave the coordinator believing
+    the engines are running.
+
+    Paused engines discard START_DP_WAVE, so nothing can report wave
+    completion afterwards; if forwarding the wake also marks the engines as
+    running, drain has no way back and can only end in a timeout.
+
+    MoE only: wave coordination is enabled iff the model is MoE, so a dense
+    model never reaches the coordinator state this exercises.
+    """
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        # Run a wave first, so the engines are quiesced by the pause rather
+        # than by never having started, and drain has something to observe.
+        long_request = asyncio.create_task(
+            _consume(
+                engine.generate(
+                    request_id="warmup",
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=SamplingParams(max_tokens=400, ignore_eos=True),
+                )
+            )
+        )
+
+        # A design that never reports the engines as running would satisfy
+        # every drain assertion below while destroying the signal, so pin it
+        # down first. The front-end sets its own copy optimistically when it
+        # forwards the wake, so sample only after several coordinator
+        # publishes (every 100ms while stats change) have overwritten it.
+        await asyncio.sleep(2)
+        assert not long_request.done(), "the warmup request was too short to sample"
+        assert engine.engine_core.dp_engines_running(), (
+            "the coordinator does not report the engines as running while they are"
+        )
+
+        await long_request
+        assert await _poll_flag(engine, False, timeout=30)
+
+        await engine.pause_generation(mode="abort")
+        await engine.wait_for_requests_to_drain(drain_timeout=30)
+
+        # Awaiting add_request guarantees the new-request notification has been
+        # sent to the coordinator - the message that used to latch the flag.
+        collector = await engine.add_request(
+            request_id="late",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=5),
+        )
+
+        # The front-end marks the engines running off the back of that
+        # notification. This is what makes the test non-vacuous: it is the
+        # path that used to leave the coordinator stuck.
+        assert await _poll_flag(engine, True, timeout=5), (
+            "the late request did not notify the coordinator"
+        )
+
+        # It must settle back by itself. Unfixed it never does, because the
+        # paused engines discard the wake and so never report wave completion.
+        assert await _poll_flag(engine, False, timeout=60)
+
+        # The late request was held rather than dropped: it completes on resume.
+        await engine.resume_generation()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60)
+            if out.finished:
+                break
+
+
+@pytest.mark.asyncio
+async def test_dp_sleep_late_request_does_not_block_drain():
+    """The same latch, reached through sleep rather than pause.
+
+    Sleep stops the engines stepping just as pause does, so a request arriving
+    while they are asleep can leave the coordinator believing they are running
+    with nothing able to say otherwise. This is worth pinning separately from
+    the pause case because it is the shape that reaches
+    `_drain_requests_for_elastic_ep`, which decides from the same signal
+    whether it is safe to scale.
+    """
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        async for _ in engine.generate(
+            request_id="warmup",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert await _poll_flag(engine, False, timeout=30)
+
+        await engine.sleep(level=1)
+        assert await engine.is_sleeping()
+
+        collector = await engine.add_request(
+            request_id="while-asleep",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=5),
+        )
+
+        assert await _poll_flag(engine, True, timeout=5), (
+            "the request did not notify the coordinator"
+        )
+
+        # Sleeping engines cannot report wave completion, so a coordinator that
+        # marked them running when it forwarded the wake never hears otherwise.
+        assert await _poll_flag(engine, False, timeout=60)
+
+        await engine.wake_up()
+        assert not await engine.is_sleeping()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60)
+            if out.finished:
+                break
 
 
 @pytest.mark.asyncio
@@ -365,10 +565,13 @@ async def test_dp_pause_keep_race_staggered_engines():
         async def staggered_pause_keep(method: str, *args) -> Any:
             if method != "pause_scheduler" or not args or args[0] != "keep":
                 return await original_call_utility(method, *args)
-            # Send pause(keep) to engine 0 first
-            await client._call_utility_async(
-                method, *args, engine=client.core_engines[0]
+            # Fire pause(keep) to engine 0 (don't await — with DP
+            # two-phase pause, consensus requires all ranks).
+            pause_0 = asyncio.create_task(
+                client._call_utility_async(method, *args, engine=client.core_engines[0])
             )
+            # Let the event loop send the message to engine 0.
+            await asyncio.sleep(0.5)
             # In the middle: send two requests (race window)
             sp = SamplingParams(max_tokens=5, ignore_eos=True)
 
@@ -384,11 +587,13 @@ async def test_dp_pause_keep_race_staggered_engines():
             t2 = asyncio.create_task(consume_gen("race-2"))
             mid_pause_tasks.extend([t1, t2])
             await asyncio.sleep(3)
-            # Then send pause(keep) to engine 1
-            result = await client._call_utility_async(
-                method, *args, engine=client.core_engines[1]
+            # Fire pause(keep) to engine 1, then await both so
+            # consensus can be reached.
+            pause_1 = asyncio.create_task(
+                client._call_utility_async(method, *args, engine=client.core_engines[1])
             )
-            return result
+            results = await asyncio.gather(pause_0, pause_1)
+            return results[0]
 
         client.call_utility_async = staggered_pause_keep
 
@@ -398,3 +603,113 @@ async def test_dp_pause_keep_race_staggered_engines():
         assert not await engine.is_paused()
         # Let the two requests we sent mid-pause complete
         await asyncio.gather(*mid_pause_tasks)
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_barrier_request_deadlock():
+    """
+    Test that start_dp_wave is ignored while paused.
+
+    Sequence:
+      1. Pause all engines (PAUSED_ALL).
+      2. Send barrier to engine 0 only — blocks in dist.barrier(dp_group).
+      3. Send a request routed to engine 1.
+      4. Wait for any (buggy) START_DP_WAVE propagation.
+      5. Send barrier to engine 1 — completes in fixed code, deadlocks
+         in buggy code because engine 1 is stuck in EP all-to-all.
+    """
+    if DP_SIZE != 2:
+        pytest.skip("requires DP_SIZE=2")
+
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        client = engine.engine_core
+
+        # Cache get_supported_tasks so that generate() won't need to
+        # send a utility call to all engines (which would hang once
+        # engine 0 is blocked in the barrier).
+        await engine.get_supported_tasks()
+
+        # Pause all engines normally — no staggering.
+        await engine.pause_generation(mode="keep")
+        assert await engine.is_paused()
+
+        original_call_utility = client.call_utility_async
+        mid_barrier_tasks: list[asyncio.Task] = []
+
+        async def staggered_barrier(method: str, *args) -> Any:
+            if method != "barrier":
+                return await original_call_utility(method, *args)
+
+            # Send barrier to engine 0 only — it blocks in
+            # dist.barrier(dp_group) waiting for engine 1.
+            barrier_0 = asyncio.create_task(
+                client._call_utility_async(method, *args, engine=client.core_engines[0])
+            )
+            await asyncio.sleep(1)
+
+            # While engine 0 is blocked, send a request routed
+            # specifically to engine 1.
+            sp = SamplingParams(max_tokens=5, ignore_eos=True)
+
+            engine_1 = client.core_engines[1]
+            original_get_engine = client.get_core_engine_for_request
+
+            def route_to_engine_1(req):
+                client.reqs_in_flight[req.request_id] = engine_1
+                return engine_1
+
+            client.get_core_engine_for_request = route_to_engine_1
+
+            async def consume_gen(req_id: str) -> None:
+                async for _ in engine.generate(
+                    request_id=req_id,
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=sp,
+                ):
+                    pass
+
+            t1 = asyncio.create_task(consume_gen("race-1"))
+            mid_barrier_tasks.append(t1)
+
+            # Yield so generate() preprocessing completes and
+            # add_request_async is called (which, in buggy code,
+            # would send FIRST_REQ and wake engine 1).
+            for _ in range(200):
+                await asyncio.sleep(0)
+
+            client.get_core_engine_for_request = original_get_engine
+
+            # Wait for any START_DP_WAVE to propagate and for
+            # engine 1 to potentially enter execute_dummy_batch.
+            await asyncio.sleep(5)
+
+            # Now send barrier to engine 1.  In buggy code engine 1
+            # is stuck in execute_dummy_batch (EP all-to-all) while
+            # engine 0 is stuck in dist.barrier(dp_group) — deadlock.
+            result = await client._call_utility_async(
+                method, *args, engine=client.core_engines[1]
+            )
+            await barrier_0
+            return result
+
+        client.call_utility_async = staggered_barrier
+
+        # Drive the staggered barrier.  Old code deadlocks here.
+        try:
+            await asyncio.wait_for(client.call_utility_async("barrier"), timeout=30)
+        except asyncio.TimeoutError:
+            for t in mid_barrier_tasks:
+                t.cancel()
+            pytest.fail(
+                "Staggered barrier deadlocked — FIRST_REQ sent while "
+                "paused caused collective-op mismatch between engines"
+            )
+
+        await engine.resume_generation()
+        assert not await engine.is_paused()
+        # Let the two requests we sent mid-barrier complete.
+        await asyncio.gather(*mid_barrier_tasks)

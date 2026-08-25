@@ -23,11 +23,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     vllm_topk_sigmoid,
     vllm_topk_softmax,
 )
-from vllm.model_executor.layers.layernorm import (
-    RMSNorm,
-    dispatch_rocm_rmsnorm_func,
-    fused_add_rms_norm,
-)
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 RMS_NORM_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
@@ -153,26 +149,3 @@ def test_topk_sigmoid_dispatch(use_rocm_aiter: bool):
         assert topk_func == rocm_aiter_ops.topk_sigmoid
     else:
         assert topk_func == vllm_topk_sigmoid
-
-
-@pytest.mark.parametrize("add_residual", [False])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("use_rocm_aiter", [True, False])
-@pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="AITER is a feature exclusive for ROCm"
-)
-def test_rms_norm_dispatch(
-    add_residual: bool, dtype: torch.dtype, use_rocm_aiter: bool
-):
-    rms_norm_func = dispatch_rocm_rmsnorm_func(dtype, use_rocm_aiter)
-
-    should_use_rocm_aiter = (
-        current_platform.is_rocm()
-        and use_rocm_aiter
-        and dtype in RMS_NORM_SUPPORTED_DTYPES
-    )
-
-    if should_use_rocm_aiter:
-        assert rms_norm_func == rocm_aiter_ops.rms_norm2d_with_add
-    else:
-        assert rms_norm_func == fused_add_rms_norm

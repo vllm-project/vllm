@@ -12,6 +12,11 @@ Before using EP, you need to install the necessary dependencies. We are actively
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
 3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
+!!! note "NCCL version (CUDA 13+)"
+    The `deepep_v2` backend requires NCCL >= 2.30.4. PyTorch ships an older
+    NCCL, so you must upgrade it before building or running DeepEP. See the
+    [EP kernels guide](../../tools/ep_kernels) for instructions.
+
 ### Backend Selection Guide
 
 vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
@@ -25,9 +30,6 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 
 ## Single Node Deployment
-
-!!! warning
-    EP is an experimental feature. Argument names and default values may change in the future.
 
 ### Configuration
 
@@ -151,8 +153,9 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
-| `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
+| `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
+| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
 
 For example:
 
@@ -218,8 +221,6 @@ For multi-node deployment, add these EPLB flags to each node's command. We recom
 ### Benchmarking
 
 - Use simulator flags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=uniform_random` and `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so token routing is balanced across EP ranks.
-
-- Increasing `VLLM_MOE_DP_CHUNK_SIZE` may increase throughput by increasing the maximum batch size for inter-rank token transfers. This may cause DeepEP  to throw `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`, which can be fixed by increasing environment variable `NVSHMEM_QP_DEPTH`.
 
 ## Disaggregated Serving (Prefill/Decode Split)
 

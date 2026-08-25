@@ -10,6 +10,7 @@ import torch
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -60,7 +61,15 @@ def _set_vllm_config(
             tensor_model_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
             pipeline_model_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
         )
-        cpu_group = torch.distributed.new_group(list(range(world_size)), backend="gloo")
+        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+            cpu_group = torch.distributed.split_group(
+                split_ranks=[list(range(world_size))],
+                group_desc="moe_test_cpu",
+            )
+        else:
+            cpu_group = torch.distributed.new_group(
+                list(range(world_size)), backend="gloo"
+            )
     return cpu_group
 
 
@@ -77,8 +86,9 @@ def _worker_parallel_launch(
     *args: Any,
 ) -> None:
     rank = node_rank * world_local_size + local_rank
-    torch.accelerator.set_device_index(local_rank)
     device = torch.device("cuda", local_rank)
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
     torch.distributed.init_process_group(
         backend="cpu:gloo,cuda:nccl",
         init_method=init_method,
@@ -96,7 +106,7 @@ def _worker_parallel_launch(
     if vllm_config is not None:
         cpu_group = _set_vllm_config(vllm_config, world_size, rank, local_rank)
 
-    try:
+    def _run_worker():
         worker(
             ProcessGroupInfo(
                 world_size=world_size,
@@ -111,11 +121,19 @@ def _worker_parallel_launch(
             *args,
             **worker_kwargs,
         )
+
+    try:
+        if vllm_config is not None:
+            with set_current_vllm_config(vllm_config):
+                _run_worker()
+        else:
+            _run_worker()
     except Exception as ex:
         print(ex)
         traceback.print_exc()
         raise
     finally:
+        torch.accelerator.synchronize()
         if vllm_config is not None:
             cleanup_dist_env_and_memory()
         else:
@@ -126,7 +144,7 @@ def parallel_launch_with_config(
     world_size: int,
     worker: Callable[Concatenate[ProcessGroupInfo, VllmConfig, Any, P], None],
     vllm_config: VllmConfig,
-    env_dict: dict[Any, Any],
+    env_dict: dict[Any, Any] | None,
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:

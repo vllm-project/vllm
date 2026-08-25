@@ -8,7 +8,6 @@
 # --------------------------------------------------------
 
 import math
-import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,9 +23,10 @@ from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
-from vllm.multimodal.evs import compute_retained_tokens_count
 from vllm.multimodal.inputs import AudioItem
-from vllm.multimodal.processing.processor import PromptUpdateDetails, _seq2tokens
+from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
+from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
+from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
@@ -45,12 +45,6 @@ AUDIO_CONTEXT = "<so_embedding>"
 # MAX_FRAMES = 16
 DEFAULT_NUM_TILES = 12
 
-# Configure PIL to handle large images without warnings
-# This prevents DecompressionBombWarning for legitimate large images
-Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
-# Alternative: Set a specific higher limit
-# Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
-
 
 def calculate_timestamps(
     indices: list[int] | torch.Tensor,
@@ -63,42 +57,50 @@ def calculate_timestamps(
     return timestamps
 
 
-def input_conditioner(x: torch.Tensor, norm_mean: torch.Tensor, norm_std: torch.Tensor):
-    return (x - norm_mean) / norm_std
-
-
-def _bicubic_from_ndarray(
-    array: npt.NDArray[Any], *, size: tuple[int, int]
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _bicubic_resize_and_normalize(
+    tensor: torch.Tensor,
+    size: tuple[int, int] | None = None,
+    norm_mean: torch.Tensor | None = None,
+    norm_std: torch.Tensor | None = None,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """
-    Convert a 4D NHWC ndarray to NCHW and interpolate with bicubic.
-    Suppresses PyTorch's non-writable NumPy warning because interpolate copies,
-    and torch.from_numpy(array) is discarded at the end of function scope.
-    """
+    """Permute NHWC→NCHW, optional bicubic resize, rescale + normalize.
 
-    with warnings.catch_warnings():
-        msg = "The given NumPy array is not writ.*"
-        # Apparently, different versions of PyTorch use writable or writeable.
-        warnings.filterwarnings("ignore", message=msg, category=UserWarning)
-        tensor = torch.from_numpy(array)
-    assert tensor.ndim == 4, f"{tensor.ndim=}"
-    tensor = tensor.permute(0, 3, 1, 2)
-    return (
-        torch.nn.functional.interpolate(
+    Input must be a raw 4-D **NHWC** tensor.
+
+    *size*: target ``(H, W)``; skips interpolation when ``None``.
+    *norm_mean* / *norm_std*: when both provided, fused
+    ``(x/255 - mean) / std`` + dtype cast; otherwise ``x/255`` + cast.
+    """
+    tensor = tensor.permute(0, 3, 1, 2).to(dtype=torch.float32)
+    if size is not None:
+        tensor = torch.nn.functional.interpolate(
             tensor, size=size, mode="bicubic", align_corners=False, antialias=True
         )
-        / 255.0
+    if norm_mean is not None and norm_std is not None:
+        return ((tensor / 255.0 - norm_mean) / norm_std).to(dtype=dtype).contiguous()
+    return (tensor / 255.0).to(dtype=dtype).contiguous()
+
+
+def _pil_to_nhwc_tensor(image: Image.Image) -> torch.Tensor:
+    """Convert a PIL image to a 4-D NHWC tensor suitable for compiled ops."""
+    array = np.asarray(
+        image.convert("RGB") if image.mode != "RGB" else image, dtype=np.uint8
     )
+    return torch.from_numpy(np.expand_dims(array, axis=0))
 
 
 def dynamic_preprocess(
-    image,
+    image: Image.Image,
     *,
-    image_size=512,
-    max_num_tiles=12,
-    use_thumbnail=True,
-    idx=0,
-):
+    image_size: int = 512,
+    max_num_tiles: int = 12,
+    use_thumbnail: bool = True,
+    norm_mean: torch.Tensor | None = None,
+    norm_std: torch.Tensor | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     orig_width, orig_height = image.size
 
     target_ratios = get_internvl_target_ratios(1, max_num_tiles)
@@ -111,13 +113,15 @@ def dynamic_preprocess(
         use_thumbnail=False,
     )
 
-    image = np.asarray(
-        image.convert("RGB") if image.mode != "RGB" else image, dtype=np.uint8
+    tensor = _pil_to_nhwc_tensor(image)
+
+    resized_img = _bicubic_resize_and_normalize(
+        tensor,
+        size=(target_height, target_width),
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        dtype=dtype,
     )
-
-    image = np.expand_dims(image, axis=0)
-
-    resized_img = _bicubic_from_ndarray(image, size=(target_height, target_width))
     B, C, H, W = resized_img.shape
     hp, wp = H // image_size, W // image_size
     patches = (
@@ -127,30 +131,16 @@ def dynamic_preprocess(
     )
 
     if use_thumbnail and patches.shape[0] > 1:
-        thumb = _bicubic_from_ndarray(image, size=(image_size, image_size))
+        thumb = _bicubic_resize_and_normalize(
+            tensor,
+            size=(image_size, image_size),
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            dtype=dtype,
+        )
         patches = torch.cat([patches, thumb], dim=0)
 
-    return list(patches)
-
-
-def image_to_pixel_values(
-    image: Image.Image,
-    *,
-    input_size: int,
-    max_num: int,
-    use_thumbnail: bool,
-    idx: int,
-) -> torch.Tensor:
-    images = dynamic_preprocess(
-        image,
-        image_size=input_size,
-        max_num_tiles=max_num,
-        use_thumbnail=use_thumbnail,
-        idx=idx,
-    )
-
-    pixel_values = torch.stack(images)
-    return pixel_values
+    return patches
 
 
 def _compute_aspect_preserving_size(
@@ -233,14 +223,16 @@ def video_to_pixel_values(
     video_maintain_aspect_ratio: bool = False,
     patch_size: int = 16,
     downsample_ratio: float = 0.5,
+    norm_mean: torch.Tensor | None = None,
+    norm_std: torch.Tensor | None = None,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    # (num_frames, H, W, C) -> (num_frames, C, H, W)
-    video_tensor = torch.from_numpy(video).permute(0, 3, 1, 2)
+    """Convert video ndarray (T, H, W, C) to normalized pixel tensor (T, C, H, W)."""
+    orig_h, orig_w = video.shape[1], video.shape[2]
+    size: tuple[int, int] | None = None
 
     if video_target_num_patches is not None:
-        # Resize to target patch count (aspect-preserving or square).
-        orig_h, orig_w = video_tensor.shape[2], video_tensor.shape[3]
-        target_w, target_h, _ = get_video_target_size_and_feature_size(
+        tw, th, _ = get_video_target_size_and_feature_size(
             orig_w=orig_w,
             orig_h=orig_h,
             target_patches=video_target_num_patches,
@@ -248,14 +240,13 @@ def video_to_pixel_values(
             patch_size=patch_size,
             downsample_ratio=downsample_ratio,
         )
-        if video_tensor.shape[2] != target_h or video_tensor.shape[3] != target_w:
-            return _bicubic_from_ndarray(video, size=(target_h, target_w))
-    elif video_tensor.shape[2] != input_size or video_tensor.shape[3] != input_size:
-        return _bicubic_from_ndarray(video, size=(input_size, input_size))
+        if orig_h != th or orig_w != tw:
+            size = (th, tw)
+    elif orig_h != input_size or orig_w != input_size:
+        size = (input_size, input_size)
 
-    video_tensor = video_tensor / 255.0
-
-    return video_tensor
+    tensor = torch.from_numpy(video)
+    return _bicubic_resize_and_normalize(tensor, size, norm_mean, norm_std, dtype)
 
 
 class DynamicResolutionImageTiler:
@@ -343,6 +334,7 @@ class DynamicResolutionImageTiler:
         self,
         text_prompt_length: int,
         images: list[Image.Image],
+        dtype: torch.dtype = torch.float32,
     ) -> tuple[list[torch.Tensor], list[int]]:
         num_tokens_available = self.max_num_tokens_available(text_prompt_length)
         params_per_image = self.compute_params(images, num_tokens_available)
@@ -350,7 +342,7 @@ class DynamicResolutionImageTiler:
         feature_sizes = []
         images = []
         for param in params_per_image:
-            for t in self.apply_params(param):
+            for t in self.apply_params(param, dtype=dtype):
                 assert t.ndim == 3, f"{t.ndim=}: expected 3 dim tensor"
                 images.append(t)
                 feature_sizes.append(param.num_embeddings)
@@ -363,17 +355,23 @@ class DynamicResolutionImageTiler:
         num_embeddings: int
         patch_size: tuple[int, int]
 
-    def apply_params(self, params: DynamicResolutionParams) -> list[torch.Tensor]:
+    def apply_params(
+        self,
+        params: DynamicResolutionParams,
+        dtype: torch.dtype = torch.float32,
+    ) -> list[torch.Tensor]:
         target_size = (
             params.patch_size[1] * self._patch_size,
             params.patch_size[0] * self._patch_size,
         )
-        image = np.asarray(
-            params.media.convert("RGB") if params.media.mode != "RGB" else params.media,
-            dtype=np.uint8,
+        tensor = _pil_to_nhwc_tensor(params.media)
+        resized_img = _bicubic_resize_and_normalize(
+            tensor,
+            size=target_size,
+            norm_mean=self.norm_mean,
+            norm_std=self.norm_std,
+            dtype=dtype,
         )
-        image = np.expand_dims(image, axis=0)
-        resized_img = _bicubic_from_ndarray(image, size=target_size)
         return list(resized_img)
 
     def process_media(
@@ -619,6 +617,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 norm_mean=config.norm_mean,
                 norm_std=config.norm_std,
             )
+        self.dtype: torch.dtype = getattr(config, "dtype", torch.float32)
 
     @staticmethod
     def use_dynamic_resolution(config: PretrainedConfig) -> bool:
@@ -634,7 +633,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         self,
         feature_size: int,
         num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         raise NotImplementedError
 
     def get_num_image_tokens(
@@ -662,14 +661,16 @@ class BaseNanoNemotronVLProcessor(ABC):
         max_num_tiles: int,
     ) -> list[torch.Tensor]:
         return [
-            image_to_pixel_values(
+            dynamic_preprocess(
                 image,
-                input_size=self.image_size,
-                max_num=max_num_tiles,
+                image_size=self.image_size,
+                max_num_tiles=max_num_tiles,
                 use_thumbnail=self.use_thumbnail,
-                idx=idx,
+                norm_mean=self.norm_mean,
+                norm_std=self.norm_std,
+                dtype=self.dtype,
             )
-            for idx, image in enumerate(images)
+            for image in images
         ]
 
     def _preprocess_image(
@@ -690,23 +691,22 @@ class BaseNanoNemotronVLProcessor(ABC):
             pixel_values_lst, num_tokens_per_image = tiler._images_to_pixel_values_lst(
                 text_prompt_length=text_prompt_length,
                 images=images,
+                dtype=self.dtype,
             )
             imgs_sizes = [(pv.shape[-2], pv.shape[-1]) for pv in pixel_values_lst]
-            normalized = [
-                input_conditioner(img, tiler.norm_mean, tiler.norm_std)
-                for img in pixel_values_lst
-            ]
             image_num_patches = torch.tensor([1] * len(num_tokens_per_image))
             image_inputs = {
-                "pixel_values_flat": normalized,
+                "pixel_values_flat": pixel_values_lst,
                 "imgs_sizes": imgs_sizes,
                 "num_tokens_per_image": num_tokens_per_image,
             }
         else:
             pixel_values_lst = self._images_to_pixel_values_lst(images, max_num_tiles)
             image_num_patches = torch.tensor([len(item) for item in pixel_values_lst])
-            pixel_values_flat = input_conditioner(
-                torch.cat(pixel_values_lst), self.norm_mean, self.norm_std
+            pixel_values_flat = (
+                torch.cat(pixel_values_lst)
+                if len(pixel_values_lst) > 1
+                else pixel_values_lst[0]
             )
             image_inputs = {
                 "pixel_values_flat": pixel_values_flat,
@@ -730,7 +730,12 @@ class BaseNanoNemotronVLProcessor(ABC):
             zip(num_tokens_per_image, image_num_patches, strict=True)
         ):
             image_repl = self.get_image_repl(feature_size, num_patches)
-            parts[i] = parts[i].replace("<image>", image_repl.full)
+            # image_repl.full is a list of token IDs
+            # Convert token IDs back to text for the HF processor flow
+            image_repl_text = self.tokenizer.decode(
+                image_repl.full, skip_special_tokens=False
+            )
+            parts[i] = parts[i].replace("<image>", image_repl_text)
         text = ["".join(parts)]
 
         return text, image_inputs
@@ -771,6 +776,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
+        use_audio_in_video: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -781,6 +787,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # add extra video token for video processing
         self.video_token = video_token
         self.video_pruning_rate = video_pruning_rate
+        self.use_audio_in_video = use_audio_in_video
 
         # Video params live exclusively in vision_config
         vision_config = getattr(config, "vision_config", config)
@@ -861,6 +868,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     def _videos_to_pixel_values_lst(
         self,
         videos: list[npt.NDArray],
+        *,
+        dtype: torch.dtype = torch.float32,
     ) -> list[torch.Tensor]:
         return [
             video_to_pixel_values(
@@ -870,6 +879,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 video_maintain_aspect_ratio=self.video_maintain_aspect_ratio,
                 patch_size=self.config.patch_size,
                 downsample_ratio=self.config.downsample_ratio,
+                norm_mean=self.norm_mean,
+                norm_std=self.norm_std,
+                dtype=dtype,
             )
             for video in videos
         ]
@@ -884,8 +896,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         videos_lst = [v[0] for v in videos]
         video_metadata_lst = [v[1] for v in videos]
+
         pixel_values_lst_video = self._videos_to_pixel_values_lst(
             videos_lst,
+            dtype=self.dtype,
         )
 
         # We use frame duration in milliseconds (as integer) to ensure
@@ -901,10 +915,15 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             metadata["frames_indices"] for metadata in video_metadata_lst
         ]
         video_num_patches = torch.tensor([len(item) for item in pixel_values_lst_video])
+
+        # Normalization already fused into resize above.
+        # Skip the torch.cat copy when there is exactly one video
+        if len(pixel_values_lst_video) == 1:
+            pixel_values_flat = pixel_values_lst_video[0]
+        else:
+            pixel_values_flat = torch.cat(pixel_values_lst_video)
         video_inputs = {
-            "pixel_values_flat_video": input_conditioner(
-                torch.cat(pixel_values_lst_video), self.norm_mean, self.norm_std
-            ),
+            "pixel_values_flat_video": pixel_values_flat,
             "video_num_patches": video_num_patches,
             "frames_indices": frames_indices_lst,
             "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
@@ -987,20 +1006,14 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         for idx, part in enumerate(parts):
             if part == AUDIO_CONTEXT:
                 audio_repl = self.get_audio_repl(audios[audio_index])
-                parts[idx] = audio_repl.full
+                # audio_repl.full is a list of token IDs
+                # Convert token IDs back to text for the HF processor flow
+                parts[idx] = self.tokenizer.decode(
+                    audio_repl.full, skip_special_tokens=False
+                )
                 audio_index += 1
         text = ["".join(parts)]
-        audio_inputs = extractor(
-            audios,
-            sampling_rate=extractor.sampling_rate,
-            return_tensors="pt",
-        )
-        audio_inputs = {
-            "input_audio_features": audio_inputs.input_features,
-            "feature_attention_mask": audio_inputs.attention_mask,
-            "audio_num_clips": audio_inputs.audio_num_clips,
-        }
-
+        audio_inputs = extractor(audios)
         return text, audio_inputs
 
     def __call__(
@@ -1074,20 +1087,30 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         self,
         feature_size: int,
         num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+
+        return PromptUpdateDetails.select_token_ids(
+            full_ids, self._img_context_token_ids
+        )
 
     def get_audio_repl(
         self,
         audio: npt.NDArray,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         assert self.audio_extractor is not None
         num_tokens = self.audio_extractor.audio_token_count(len(audio))
         repl_full = f"{AUDIO_START}{AUDIO_CONTEXT * num_tokens}{AUDIO_END}"
-        return PromptUpdateDetails.select_text(repl_full, AUDIO_CONTEXT)
+
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+        ctx_token_ids = cached_encode(
+            self.tokenizer, AUDIO_CONTEXT, add_special_tokens=False
+        )
+
+        return PromptUpdateDetails.select_token_ids(full_ids, ctx_token_ids)
 
     @classmethod
     def get_video_repl(
@@ -1101,7 +1124,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
         video_temporal_patch_size: int = 1,
-    ) -> PromptUpdateDetails[list[int]]:
+    ) -> PromptUpdateDetails:
         """
         Build prompt replacement for a video.
         The replacement returned is not actually used to replace the placeholder
@@ -1176,20 +1199,21 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 for i, _ in enumerate(tokens_per_frame)
             ]
 
-        # Tokenize frame separator independently
-        frame_separators_tokenized = [
-            _seq2tokens(tokenizer, sep) for sep in frame_separators
-        ]
+        # Batch-tokenize all frame separators at once — the HuggingFace
+        # tokenizers Rust backend parallelizes batch encoding across threads.
+        batch_encoded = tokenizer(
+            frame_separators,
+            add_special_tokens=False,
+            return_attention_mask=False,
+        )
+        frame_separators_tokenized: list[list[int]] = batch_encoded["input_ids"]
 
         # Tokenize each component independently to avoid tokenizer merging tokens
         # across boundaries. This ensures consistent tokenization regardless of
         # num_tokens_per_frame values.
         all_token_ids = []
         for i, num_tokens in enumerate(tokens_per_frame):
-            frame_sep_token_ids = frame_separators_tokenized[i]
-            all_token_ids.extend(frame_sep_token_ids)
-
-            # Add pre-tokenized special tokens
+            all_token_ids.extend(frame_separators_tokenized[i])
             all_token_ids.extend(img_start_token_ids)
             all_token_ids.extend(img_context_token_ids * num_tokens)
             all_token_ids.extend(img_end_token_ids)

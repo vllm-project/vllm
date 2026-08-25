@@ -90,6 +90,23 @@ class RopeState:
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
 
+    def read_prefill_positions(self, req_idx: int, length: int) -> torch.Tensor:
+        """Return staged per-request prefill positions as [num_dims, length]."""
+        base = self.num_dims * req_idx
+        return self.prefill_positions.gpu[base : base + self.num_dims, :length]
+
+    def update_prefill_positions(
+        self, req_idx: int, positions: torch.Tensor, delta: int
+    ) -> None:
+        """Overwrite a request's staged prefill positions with recomputed values."""
+        base = self.num_dims * req_idx
+        length = positions.shape[1]
+        self.prefill_positions.gpu[base : base + self.num_dims, :length].copy_(
+            positions
+        )
+        if self.has_delta:
+            self.prefill_delta.np[req_idx] = delta
+
     def prepare_positions(
         self,
         idx_mapping: torch.Tensor,

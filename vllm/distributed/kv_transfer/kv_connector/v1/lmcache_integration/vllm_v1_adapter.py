@@ -439,13 +439,12 @@ def _init_lmcache_engine(
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
-    :param lmcache_config: The LMCache configuration.
-    :type lmcache_config: LMCacheEngineConfig
-    :param vllm_config: The vLLM configuration.
-    :type vllm_config: VllmConfig
+    Args:
+        lmcache_config: The LMCache configuration.
+        vllm_config: The vLLM configuration.
 
-    :return: The initialized LMCache engine
-    :rtype: LMCacheEngine
+    Returns:
+        The initialized LMCache engine
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -483,10 +482,11 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.accelerator.device_count()
-    local_rank = parallel_config.rank % num_gpus
-    torch.accelerator.set_device_index(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    from vllm.distributed.parallel_state import get_world_group
+
+    device_index = get_world_group().device_index
+    torch.accelerator.set_device_index(device_index)
+    device = torch.device(f"cuda:{device_index}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,

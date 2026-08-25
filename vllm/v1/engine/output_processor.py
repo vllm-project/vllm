@@ -17,6 +17,7 @@ from vllm.outputs import (
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
+    SamplingMask,
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
@@ -34,9 +35,11 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
+    RequestSpecDecodeMetrics,
     RequestStateStats,
     SchedulerStats,
 )
+from vllm.v1.outputs import SamplingMaskLists
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -172,8 +175,16 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
+        # Per-sequence spec-decode accumulator; arrives once (on finish) via
+        # EngineCoreOutput, then attached to this sequence's CompletionOutput.
+        self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+
+        # Routed experts accumulation (prompt + sample chunks)
+        self.routed_experts_chunks: list[np.ndarray] = []
+        self.sampling_mask_chunks: list[SamplingMaskLists] = []
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -220,6 +231,9 @@ class RequestState:
             if not sampling_params.detokenize:
                 tokenizer = None
             output_kind = sampling_params.output_kind
+            if sampling_params.stream_interval is not None:
+                # clamp to the engine-level stream interval.
+                stream_interval = max(sampling_params.stream_interval, stream_interval)
             logprobs_processor = LogprobsProcessor.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
@@ -273,7 +287,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
-        routed_experts: np.ndarray | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -314,9 +328,7 @@ class RequestState:
                 finished,
             )
 
-        output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
-        )
+        output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
         if self.parent_req is None:
             outputs = [output]
@@ -327,7 +339,11 @@ class RequestState:
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            external_req_id, outputs, finished, kv_transfer_params
+            external_req_id,
+            outputs,
+            finished,
+            kv_transfer_params,
+            ec_transfer_params,
         )
 
     def _new_request_output(
@@ -336,6 +352,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -369,7 +386,9 @@ class RequestState:
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
+            num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
         )
 
@@ -378,7 +397,6 @@ class RequestState:
         token_ids: list[int],
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
-        routed_experts: np.ndarray | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -395,15 +413,27 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        sampling_mask = None
+        if finished and self.sampling_mask_chunks:
+            merged = SamplingMaskLists.merge(self.sampling_mask_chunks)
+            sampling_mask = SamplingMask(merged.to_nested_list())
+
+        # Concatenate routed experts on finish
+        routed_experts = None
+        if finished and self.routed_experts_chunks:
+            routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            spec_decode_metrics=self.spec_decode_metrics if finished else None,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -493,6 +523,7 @@ class OutputProcessor:
                         finish_reason=FinishReason.ABORT,
                         stop_reason=None,
                         kv_transfer_params=None,
+                        ec_transfer_params=None,
                     )
                 ):
                     req_state.queue.put(request_output)
@@ -616,13 +647,32 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
-            routed_experts = engine_core_output.routed_experts
-            req_state.num_cached_tokens = engine_core_output.num_cached_tokens
-            req_state.is_prefilling = False
+            ec_transfer_params = engine_core_output.ec_transfer_params
+            if engine_core_output.routed_experts is not None:
+                req_state.routed_experts_chunks.append(
+                    engine_core_output.routed_experts
+                )
+
+            if req_state.is_prefilling:
+                if engine_core_output.prefill_stats is not None:
+                    req_state.num_cached_tokens = (
+                        engine_core_output.prefill_stats.num_cached_tokens
+                    )
+                    req_state.num_cache_creation_tokens = (
+                        engine_core_output.prefill_stats.num_cache_creation_tokens
+                    )
+                req_state.is_prefilling = False
+
+            if engine_core_output.spec_decode_metrics is not None:
+                req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
+                if engine_core_output.new_sampling_mask is not None:
+                    req_state.sampling_mask_chunks.append(
+                        engine_core_output.new_sampling_mask
+                    )
                 # 2) Detokenize the token ids into text and perform stop checks.
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
@@ -642,7 +692,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
-                routed_experts,
+                ec_transfer_params,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -776,7 +826,6 @@ class OutputProcessor:
             engine_core_output,
             engine_core_timestamp,
             req_state.is_prefilling,
-            req_state.prompt_len,
             req_state.stats,
             self.lora_states,
             req_state.lora_name,
@@ -795,6 +844,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
+            request_id=req_state.external_req_id,
             num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,

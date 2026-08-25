@@ -8,8 +8,6 @@ import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.platforms import current_platform
 
 MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
@@ -25,30 +23,20 @@ TEXTS_2 = [
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder-only models on ROCm.
-    attention_config = None
-    if current_platform.is_rocm():
-        attention_config = {"backend": "FLEX_ATTENTION"}
-
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-        attention_config=attention_config,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.fixture(scope="module")
@@ -110,6 +98,35 @@ def test_classify(llm):
     outputs = llm.encode(PROMPT, pooling_task="classify", use_tqdm=False)
     assert len(outputs) == 1
     assert len(outputs[0].outputs.data) == 1
+
+
+@pytest.mark.skip_global_cleanup
+def test_max_tokens_per_doc(llm: LLM):
+    """Test max_tokens_per_doc via PoolingParams.extra_kwargs (offline)."""
+    long_doc = "The capital of France is Paris. " * 20
+
+    # Without truncation
+    outputs_no_limit = llm.score(
+        TEXTS_1[0],
+        long_doc,
+        use_tqdm=False,
+    )
+
+    # With truncation via extra_kwargs
+    outputs_with_limit = llm.score(
+        TEXTS_1[0],
+        long_doc,
+        pooling_params=PoolingParams(extra_kwargs={"max_tokens_per_doc": 10}),
+        use_tqdm=False,
+    )
+
+    assert len(outputs_no_limit) == 1
+    assert len(outputs_with_limit) == 1
+
+    # Truncated version should have fewer prompt tokens
+    no_limit_tokens = len(outputs_no_limit[0].prompt_token_ids)
+    with_limit_tokens = len(outputs_with_limit[0].prompt_token_ids)
+    assert with_limit_tokens < no_limit_tokens
 
 
 def test_pooling_params(llm: LLM):

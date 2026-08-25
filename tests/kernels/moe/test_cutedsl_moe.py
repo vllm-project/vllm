@@ -142,7 +142,9 @@ def prepare_inputs(
     # Initialize the hidden_states_3d with ones instead of empty to avoid nan
     # issue.
     hidden_states_3d = torch.ones(
-        (num_experts, max(masked_m), hidden_states.shape[1]), dtype=hidden_states.dtype
+        (num_experts, max(masked_m), hidden_states.shape[1]),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
     )
     for i in range(num_experts):
         hidden_states_3d[i, : masked_m[i], :] = hidden_states[topk_idx.view(-1) == i]
@@ -426,7 +428,7 @@ def test_flashinfer_cutedsl_moe_masked(
     w1_alpha = 1.0 / (input_global_scale * w1_global_scale)
     w2_alpha = 1.0 / (a2_global_scale * w2_global_scale)
 
-    out = torch.empty_like(hidden_states_3d)
+    out = torch.empty_like(hidden_states_3d, device=hidden_states.device)
     # Note: the 1st dim shouldn't be bs
     wk = torch.empty(
         num_experts,
@@ -451,11 +453,15 @@ def test_flashinfer_cutedsl_moe_masked(
     )
 
     # reference
-    a_fp4, a_scale_interleaved = fp4_quantize(hidden_states, input_global_scale)
+    # input_global_scale is per-expert ([num_experts]); fp4_quantize and
+    # dequantize_nvfp4_to_dtype are non-grouped APIs that expect [1] or
+    # [num_tokens]. Use a single element since all values are uniform here.
+    a_global = input_global_scale[:1].contiguous()
+    a_fp4, a_scale_interleaved = fp4_quantize(hidden_states, a_global)
     a_in_dtype = dequantize_nvfp4_to_dtype(
         a_fp4,
         a_scale_interleaved,
-        input_global_scale,
+        a_global,
         dtype=hidden_states.dtype,
         device=hidden_states.device,
         block_size=16,

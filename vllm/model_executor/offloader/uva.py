@@ -10,9 +10,9 @@ from torch.func import functional_call
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader
+from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 from vllm.utils.mem_utils import format_gib
-from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
+from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
@@ -43,10 +43,7 @@ class UVAOffloader(BaseOffloader):
         self.cpu_offload_bytes = 0
         self.cpu_offload_params = cpu_offload_params or set()
 
-        self.pin_memory = (
-            is_pin_memory_available()
-            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
-        )
+        self.pin_memory = should_pin_memory()
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )

@@ -17,7 +17,8 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
             return False
         return all(deep_compare(dict1[k], dict2[k]) for k in dict1)
     elif isinstance(dict1, list):
-        return set(dict1) == set(dict2)
+        # `dict1` may be a list of dict.
+        return all(deep_compare(dict1[i], dict2[i]) for i in range(len(dict1)))
     else:
         return dict1 == dict2
 
@@ -26,9 +27,25 @@ def should_ignore_layer(
     layer_name: str | None,
     ignore: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    *,
+    check_children: bool = False,
 ) -> bool:
     if layer_name is None:
         return False
+
+    # MoE layers are currently all-or-nothing: if any child is ignored,
+    # the parent layer must be ignored as well. For example, the
+    # amd/GLM-5.2-MXFP4 config ignores children like
+    # model.layers.78.mlp.experts.*.down_proj, while the layer checked
+    # here is the parent model.layers.N.mlp.experts.
+    # See:
+    # https://huggingface.co/amd/GLM-5.2-MXFP4/blob/main/config.json#L793-L795
+    if check_children and any(
+        target == layer_name or target.startswith(layer_name + ".")
+        for target in ignore
+        if not target.startswith("re:")
+    ):
+        return True
 
     # layer_name = model.layers.0.self_attn.qkv_proj
     # proj_name = qkv_proj

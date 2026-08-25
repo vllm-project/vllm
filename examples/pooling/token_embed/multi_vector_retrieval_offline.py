@@ -4,6 +4,7 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
+from vllm.config import PoolerConfig
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -13,6 +14,7 @@ def parse_args():
     # Set example specific arguments
     parser.set_defaults(
         model="BAAI/bge-m3",
+        pooler_config=PoolerConfig(task="token_embed"),
         runner="pooling",
         enforce_eager=True,
     )
@@ -32,15 +34,6 @@ def main(args: Namespace):
     # You should pass runner="pooling" for embedding models
     llm = LLM(**vars(args))
 
-    # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = llm.embed(prompts)
-
-    # Print the outputs.
-    print("\nGenerated Outputs:\n" + "-" * 60)
-    for prompt, output in zip(prompts, outputs):
-        embeds = output.outputs.embedding
-        print(len(embeds))
-
     # Generate embedding for each token. The output is a list of PoolingRequestOutput.
     outputs = llm.encode(prompts, pooling_task="token_embed")
 
@@ -49,6 +42,20 @@ def main(args: Namespace):
     for prompt, output in zip(prompts, outputs):
         multi_vector = output.outputs.data
         print(multi_vector.shape)
+
+    query = "What is the capital of France?"
+    documents = [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+    ]
+    # Generate scores.
+    outputs = llm.score(query, documents)
+    # Print the outputs.
+    print("\nGenerated Outputs:\n" + "-" * 60)
+    for document, output in zip(documents, outputs):
+        score = output.outputs.score
+        print(f"Pair: {[query, document]!r} \nScore: {score}")
+        print("-" * 60)
 
 
 if __name__ == "__main__":

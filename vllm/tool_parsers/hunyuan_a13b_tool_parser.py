@@ -38,7 +38,6 @@ class HunyuanA13BToolParser(ToolParser):
         # Initialize state for streaming mode
         self.prev_tool_calls: list[dict] = []
         self.current_tool_id = -1
-        self.current_tool_name_sent = False
         self.streamed_args: list[str] = []  # Track arguments sent for each tool
 
         # For backward compatibility with tests
@@ -145,7 +144,7 @@ class HunyuanA13BToolParser(ToolParser):
                     function=FunctionCall(
                         name=call["name"],
                         arguments=(
-                            json.dumps(call["arguments"])
+                            json.dumps(call["arguments"], ensure_ascii=False)
                             if isinstance(call["arguments"], dict)
                             else call["arguments"]
                         ),
@@ -262,7 +261,6 @@ class HunyuanA13BToolParser(ToolParser):
                         )
                     else:
                         self.streaming_state["sent_tools"][0]["sent_name"] = True
-                    self.current_tool_name_sent = True
                     return delta
         return None
 
@@ -306,7 +304,6 @@ class HunyuanA13BToolParser(ToolParser):
                     ]
                 )
                 self.streaming_state["sent_tools"][current_idx]["sent_name"] = True
-                self.current_tool_name_sent = True
                 while len(self.streamed_args) <= current_idx:
                     self.streamed_args.append("")
                 return delta
