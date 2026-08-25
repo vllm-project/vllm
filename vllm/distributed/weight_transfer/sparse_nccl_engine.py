@@ -9,6 +9,7 @@ packed parameters.
 
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -155,36 +156,34 @@ class SparseNCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
-        # Use the worker's assigned device rather than the ambient current
-        # device: the receive path is no longer wrapped in
-        # `with torch.device(self.device)` by the caller, so the current device
-        # is not guaranteed to match self.device. The recv buffers must live on
-        # the same device as the NCCL communicator (created on self.device).
-        device = self.device
-        patches = []
-        stream = torch.cuda.current_stream()
-        for name, dtype_name, shape, num_updates in zip(
-            update_info.names,
-            update_info.dtype_names,
-            update_info.shapes,
-            update_info.num_updates_list,
-            strict=True,
-        ):
-            dtype = getattr(torch, dtype_name)
-            indices = torch.empty(num_updates, dtype=torch.int32, device=device)
-            values = torch.empty(num_updates, dtype=dtype, device=device)
-            self.model_update_group.broadcast(indices, src=0, stream=stream)
-            self.model_update_group.broadcast(values, src=0, stream=stream)
-            patches.append(
-                CheckpointWeightPatch(
-                    name=name,
-                    shape=tuple(shape),
-                    dtype=dtype,
-                    values=values,
-                    indices=indices,
+        # Receive on the communicator's device rather than relying on the
+        # ambient current device in the RPC thread.
+        device = self.model_update_group.device
+        with torch.accelerator.device_index(device.index):
+            stream = torch.cuda.current_stream(device=device)
+            patches = []
+            for name, dtype_name, shape, num_updates in zip(
+                update_info.names,
+                update_info.dtype_names,
+                update_info.shapes,
+                update_info.num_updates_list,
+                strict=True,
+            ):
+                dtype = getattr(torch, dtype_name)
+                indices = torch.empty(num_updates, dtype=torch.int32, device=device)
+                values = torch.empty(num_updates, dtype=dtype, device=device)
+                self.model_update_group.broadcast(indices, src=0, stream=stream)
+                self.model_update_group.broadcast(values, src=0, stream=stream)
+                patches.append(
+                    CheckpointWeightPatch(
+                        name=name,
+                        shape=tuple(shape),
+                        dtype=dtype,
+                        values=values,
+                        indices=indices,
+                    )
                 )
-            )
-        load_checkpoint_weight_patches(self.model, patches)
+            load_checkpoint_weight_patches(self.model, patches)
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
@@ -198,15 +197,16 @@ class SparseNCCLTrainerWeightTransferEngine(
 
     Broadcasts flat-index (indices, values) patches from NCCL rank 0 while the
     inference-side `update_weights` runs concurrently on a side thread (the
-    worker's recvs rendezvous inside the same NCCL broadcasts), then finishes
-    the update. Unlike the full-resync backends, sparse patches differ every
-    round (a fresh set of deltas from each optimizer step), so they are not a
-    stable `WeightSource`: the engine takes no `source`, and each round's
-    patches are passed straight to `send_weights(patches)`. A round with no
-    patches is a no-op.
+    worker's recvs rendezvous inside the same NCCL broadcasts). `send_weights`
+    owns a complete one-shot lifecycle. RL infrastructure that owns the generic
+    client lifecycle can call `send_weight_chunk` between one start and finish.
+
+    Sparse patches differ every round, so they are not a stable `WeightSource`:
+    the engine takes no `source`, and patches are passed directly to the send
+    methods. An empty patch list is a no-op.
 
     Only the designated trainer sender joins the transfer group; other trainer
-    ranks skip `send_weights`.
+    ranks skip sparse sends.
     """
 
     init_info_cls = SparseNCCLTrainerInitInfo
@@ -266,62 +266,86 @@ class SparseNCCLTrainerWeightTransferEngine(
         return engine
 
     def send_weights(self, patches: Iterable[SparseWeightPatch] | None = None) -> None:
-        """Broadcast this round's sparse patches. `patches` is the per-round
-        payload (sparse deltas differ every round), so it is passed here rather
-        than fixed at init. Every patch must set `full_shape`."""
-        if not self.is_sender:
-            return
-
-        patches = list(patches) if patches is not None else []
+        """Broadcast one sparse update through a one-shot lifecycle."""
+        patches = self._prepare_patches(patches)
         if not patches:
             return
 
-        for patch in patches:
-            self._validate_patch(patch)
-
-        update_info = SparseNCCLWeightTransferUpdateInfo(
-            names=[patch.name for patch in patches],
-            dtype_names=[str(patch.values.dtype).split(".")[-1] for patch in patches],
-            shapes=[list(patch.full_shape) for patch in patches],
-            num_updates_list=[patch.indices.numel() for patch in patches],
-        )
-
-        assert self.model_update_group is not None, (
-            "trainer_init() must be called before send_weights()."
-        )
         self.client.start_weight_update()
-        # update_weights (workers receive) must run concurrently with the
-        # trainer-side broadcasts — both rendezvous inside the same NCCL calls.
-        exe = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = exe.submit(self.client.update_weights, asdict(update_info))
-            # Cheap best-effort: if update_weights already failed (e.g. a bad
-            # request rejected before any NCCL call), surface it now instead of
-            # hanging in broadcast waiting for a peer that will never arrive.
-            if future.done():
-                future.result()
-            stream = torch.cuda.current_stream()
-            for patch in patches:
-                self.model_update_group.broadcast(patch.indices, src=0, stream=stream)
-                self.model_update_group.broadcast(patch.values, src=0, stream=stream)
-            future.result()  # surface inference-side errors
-        finally:
-            # Never wait for the RPC thread here: if a broadcast raised, the
-            # worker is still blocked in the matching NCCL call and will never
-            # return, so joining would turn the error into a permanent hang.
-            # See NCCLTrainerWeightTransferEngine.send_weights.
-            exe.shutdown(wait=False)
+        self._broadcast_chunk(patches)
         self.client.finish_weight_update()
-        self._post_send_sync()
+
+    def send_weight_chunk(
+        self, patches: Iterable[SparseWeightPatch] | None = None
+    ) -> None:
+        """Broadcast one chunk inside a caller-owned weight update lifecycle."""
+        patches = self._prepare_patches(patches)
+        if not patches:
+            return
+        self._broadcast_chunk(patches)
+
+    def _prepare_patches(
+        self, patches: Iterable[SparseWeightPatch] | None
+    ) -> list[SparseWeightPatch]:
+        if not self.is_sender:
+            return []
+
+        prepared = list(patches) if patches is not None else []
+        if not prepared:
+            return []
+        if self.model_update_group is None:
+            raise RuntimeError("trainer_init() must be called before sending weights.")
+        for patch in prepared:
+            self._validate_patch(patch)
+        return prepared
+
+    def _broadcast_chunk(self, patches: list[SparseWeightPatch]) -> None:
+        assert self.model_update_group is not None
+        device = self.model_update_group.device
+        device_context = (
+            torch.accelerator.device_index(device.index)
+            if device.type != "cpu"
+            else nullcontext()
+        )
+        with device_context:
+            update_info = SparseNCCLWeightTransferUpdateInfo(
+                names=[patch.name for patch in patches],
+                dtype_names=[
+                    str(patch.values.dtype).split(".")[-1] for patch in patches
+                ],
+                shapes=[list(patch.full_shape) for patch in patches],
+                num_updates_list=[patch.indices.numel() for patch in patches],
+            )
+
+            # update_weights (workers receive) must run concurrently with the
+            # trainer-side broadcasts — both rendezvous inside the same NCCL calls.
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(
+                    self.client.update_weights, asdict(update_info)
+                )
+                # Surface an RPC that failed before the worker entered NCCL rather
+                # than broadcasting to a peer that will never receive.
+                if future.done():
+                    future.result()
+                stream = torch.cuda.current_stream()
+                for patch in patches:
+                    self.model_update_group.broadcast(
+                        patch.indices, src=0, stream=stream
+                    )
+                    self.model_update_group.broadcast(
+                        patch.values, src=0, stream=stream
+                    )
+                future.result()  # surface inference-side errors
+            finally:
+                # A failed broadcast can leave the RPC blocked in the matching
+                # receive. Waiting for that thread would hide the original error.
+                executor.shutdown(wait=False, cancel_futures=True)
+            self._post_send_sync()
 
     @staticmethod
     def _validate_patch(patch: SparseWeightPatch) -> None:
-        """Reject a malformed patch before any NCCL call.
-
-        The worker validates again after receiving the payload, but a malformed
-        transfer may wedge both sides before then. Validate on the trainer before
-        `start_weight_update`.
-        """
+        """Reject a malformed patch before starting the NCCL transfer."""
         if patch.full_shape is None:
             raise ValueError(f"Sparse patch requires full_shape: {patch.name}")
         if patch.indices.dtype != torch.int32:
@@ -339,8 +363,8 @@ class SparseNCCLTrainerWeightTransferEngine(
 
     def _post_send_sync(self) -> None:
         """Wait for the broadcasts to land before returning, so a caller may
-        rebuild or free the patch tensors as soon as `send_weights` returns
-        rather than relying on same-stream ordering. See
+        rebuild or free the patch tensors as soon as a send method returns rather
+        than relying on same-stream ordering. See
         `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
         cross-rank barrier."""
         if torch.cuda.is_available():

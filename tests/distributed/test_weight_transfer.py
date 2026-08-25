@@ -313,46 +313,6 @@ class TestEngineRegistry:
             )
 
 
-# --- Unit Tests: Sparse checkpoint patch application (CPU) ---
-
-
-def test_sparse_nccl_maps_checkpoint_indices_to_tp_shard(monkeypatch):
-    model = torch.nn.Module()
-    model.register_parameter(
-        "w", torch.nn.Parameter(torch.full((2,), -1.0), requires_grad=False)
-    )
-
-    def load_weights(weights):
-        for name, weight in weights:
-            assert name == "w"
-            model.w.data.copy_(weight[2:])
-        return {"w"}
-
-    model.load_weights = load_weights
-    engine = SparseNCCLWeightTransferEngine(
-        WeightTransferConfig(backend="sparse_nccl"),
-        create_mock_vllm_config(world_size=2),
-        torch.device("cpu"),
-        model,
-    )
-    payloads = iter([torch.tensor([0, 3], dtype=torch.int32), torch.tensor([5.0, 7.0])])
-    engine.model_update_group = MagicMock()
-    engine.model_update_group.broadcast.side_effect = lambda tensor, **_: tensor.copy_(
-        next(payloads)
-    )
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda: None)
-    engine.start_weight_update()
-    engine.receive_weights(
-        SparseNCCLWeightTransferUpdateInfo(
-            names=["w"],
-            dtype_names=["float32"],
-            shapes=[[4]],
-            num_updates_list=[2],
-        )
-    )
-    assert torch.equal(model.w, torch.tensor([-1.0, 7.0]))
-
-
 # --- Test receive_weights without init raises ---
 
 
@@ -572,46 +532,32 @@ def test_nccl_weight_transfer_between_processes():
 
 
 @ray.remote(num_gpus=1)
-def trainer_broadcast_sparse_tensor(
+def trainer_broadcast_sparse_multichunk_tp2(
     master_address: str,
     master_port: int,
     world_size: int,
-) -> bool:
-    """Trainer task that broadcasts sparse patches via the trainer engine.
-
-    The worker task drives its own init/receive directly (it is not an RPC
-    endpoint), so the engine gets a no-op control-plane client; the NCCL
-    rendezvous and the patch broadcasts are the real thing.
-    """
-    import torch
-
+) -> dict:
     device = _set_ray_assigned_device()
 
-    from vllm.distributed.weight_transfer import WeightTransferTrainerFactory
-    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
-        SparseNCCLTrainerInitInfo,
-        SparseWeightPatch,
-    )
+    class RecordingNoopClient:
+        def __init__(self):
+            self.order: list[str] = []
+            self.update_infos: list[dict] = []
 
-    class NoopClient:
         def init_weight_transfer_engine(self, init_info):
-            pass
+            self.order.append("init")
 
         def start_weight_update(self):
-            pass
+            self.order.append("start")
 
         def update_weights(self, update_info):
-            pass
+            self.order.append("update")
+            self.update_infos.append(update_info)
 
         def finish_weight_update(self):
-            pass
+            self.order.append("finish")
 
-    patch = SparseWeightPatch(
-        name="test.weight",
-        indices=torch.tensor([1, 7, 25], dtype=torch.int32, device=device),
-        values=torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32, device=device),
-        full_shape=(10, 10),
-    )
+    client = RecordingNoopClient()
     engine = WeightTransferTrainerFactory.trainer_init(
         init_info=SparseNCCLTrainerInitInfo(
             master_address=master_address,
@@ -619,72 +565,62 @@ def trainer_broadcast_sparse_tensor(
             world_size=world_size,
             rank=0,
         ),
-        client=NoopClient(),
+        client=client,
     )
-    engine.send_weights([patch])
+    client.start_weight_update()
+    for index, value in ((0, 5.0), (3, 7.0)):
+        engine.send_weight_chunk(
+            [
+                SparseWeightPatch(
+                    name="w",
+                    indices=torch.tensor([index], dtype=torch.int32, device=device),
+                    values=torch.tensor([value], dtype=torch.float32, device=device),
+                    full_shape=(4,),
+                )
+            ]
+        )
+    client.finish_weight_update()
     torch.accelerator.synchronize()
     engine.shutdown()
-    return True
+    return {"order": client.order, "update_infos": client.update_infos}
 
 
 @ray.remote(num_gpus=1)
-def inference_receive_sparse_tensor(
+def inference_receive_sparse_multichunk_tp2(
     master_address: str,
     master_port: int,
     world_size: int,
-) -> dict:
-    """Inference task that receives sparse patches via the sparse engine."""
-    from unittest.mock import MagicMock
-
-    import torch
-
+    tp_rank: int,
+) -> list[float]:
     device = _set_ray_assigned_device()
-
-    from vllm.config.parallel import ParallelConfig
-    from vllm.config.weight_transfer import WeightTransferConfig
-    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
-        SparseNCCLWeightTransferEngine,
-        SparseNCCLWeightTransferUpdateInfo,
+    model = torch.nn.Module()
+    model.register_parameter(
+        "w",
+        torch.nn.Parameter(torch.full((2,), -1.0, device=device), requires_grad=False),
     )
 
-    config = WeightTransferConfig(backend="sparse_nccl")
+    def load_weights(weights):
+        for name, checkpoint_weight in weights:
+            assert name == "w"
+            model.w.data.copy_(checkpoint_weight[tp_rank * 2 : (tp_rank + 1) * 2])
+        return {"w"}
+
+    model.load_weights = load_weights
     vllm_config = MagicMock()
     parallel_config = MagicMock(spec=ParallelConfig)
-    parallel_config.rank = 0
-    parallel_config.world_size = 1
+    parallel_config.rank = tp_rank
+    parallel_config.world_size = 2
+    parallel_config.pipeline_parallel_size = 1
     parallel_config.data_parallel_rank = 0
     parallel_config.data_parallel_index = 0
     vllm_config.parallel_config = parallel_config
     vllm_config.model_config = MagicMock()
-
-    # Real module holding the target parameter the checkpoint loader will modify.
-    model = torch.nn.Module()
-    model.register_parameter(
-        "w", torch.nn.Parameter(torch.zeros(30, device="cuda"), requires_grad=False)
-    )
-
-    def load_weights(weights):
-        for name, weight in weights:
-            assert name == "w"
-            model.w.data.copy_(weight)
-        return {"w"}
-
-    model.load_weights = load_weights
-
-    update_info = SparseNCCLWeightTransferUpdateInfo(
-        names=["w"],
-        dtype_names=["float32"],
-        shapes=[[30]],
-        num_updates_list=[3],
-    )
-
     engine = SparseNCCLWeightTransferEngine(
-        config, vllm_config, torch.device("cuda"), model
+        WeightTransferConfig(backend="sparse_nccl"),
+        vllm_config,
+        device,
+        model,
     )
-    from vllm.distributed.weight_transfer.nccl_common import (
-        NCCLWeightTransferInitInfo,
-    )
-
     engine.init_transfer_engine(
         NCCLWeightTransferInitInfo(
             master_address=master_address,
@@ -693,47 +629,54 @@ def inference_receive_sparse_tensor(
             world_size=world_size,
         )
     )
-    engine.receive_weights(update_info)
+    engine.start_weight_update()
+    for _ in range(2):
+        engine.receive_weights(
+            SparseNCCLWeightTransferUpdateInfo(
+                names=["w"],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                num_updates_list=[1],
+            )
+        )
+    engine.finish_weight_update()
     torch.accelerator.synchronize()
-
-    expected = torch.zeros(30, dtype=torch.float32, device=device)
-    expected[[1, 7, 25]] = torch.tensor(
-        [10.0, 20.0, 30.0], dtype=torch.float32, device=device
-    )
-    success = torch.equal(model.w.data, expected)
+    result = model.w.detach().cpu().tolist()
     engine.shutdown()
-    return {
-        "success": success,
-        "selected_values": model.w.data[[1, 7, 25]].cpu().tolist(),
-    }
+    return result
 
 
 @pytest.mark.skipif(
-    torch.accelerator.device_count() < 2,
-    reason="Need at least 2 GPUs to run NCCL sparse weight transfer test.",
+    torch.accelerator.device_count() < 3,
+    reason="Need 1 trainer GPU and 2 TP worker GPUs.",
 )
-def test_nccl_sparse_weight_transfer_between_processes():
-    """Test NCCL sparse weight transfer from trainer to inference process."""
+def test_sparse_nccl_multichunk_tp2_between_processes():
+    """One caller-owned lifecycle carries two checkpoint-coordinate chunks."""
     _init_ray_for_weight_transfer()
-
     master_address = "127.0.0.1"
     master_port = get_open_port()
-    world_size = 2
+    world_size = 3
 
-    inference_future = inference_receive_sparse_tensor.remote(
+    worker_refs = [
+        inference_receive_sparse_multichunk_tp2.remote(
+            master_address, master_port, world_size, tp_rank
+        )
+        for tp_rank in range(2)
+    ]
+    trainer_ref = trainer_broadcast_sparse_multichunk_tp2.remote(
         master_address, master_port, world_size
     )
-    trainer_future = trainer_broadcast_sparse_tensor.remote(
-        master_address, master_port, world_size
-    )
+    session, rank0, rank1 = ray.get([trainer_ref, *worker_refs])
 
-    trainer_result, result = ray.get([trainer_future, inference_future])
-
-    assert trainer_result, "Trainer should complete successfully"
-    assert result["success"], (
-        "Sparse weight transfer failed. "
-        f"Received selected values: {result['selected_values']}"
-    )
+    assert session["order"] == ["init", "start", "update", "update", "finish"]
+    assert [info["names"] for info in session["update_infos"]] == [["w"], ["w"]]
+    assert [info["shapes"] for info in session["update_infos"]] == [[[4]], [[4]]]
+    assert [info["num_updates_list"] for info in session["update_infos"]] == [
+        [1],
+        [1],
+    ]
+    assert rank0 == [5.0, -1.0]
+    assert rank1 == [-1.0, 7.0]
 
 
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
@@ -1938,11 +1881,11 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
 
 
 def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
-    """send_weights takes the round's patches and ships per-patch metadata
-    (names / shapes / num_updates_list) + broadcasts indices + values each."""
+    """One-shot send drives start, update, and finish in order."""
     client = RecordingClient()
     engine = SparseNCCLTrainerWeightTransferEngine(client=client)
     engine.model_update_group = MagicMock()
+    engine.model_update_group.device = torch.device("cpu")
     # The group is a mock, so the stream is just a handle it is handed (and a
     # handle _post_send_sync can synchronize).
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
@@ -1956,6 +1899,7 @@ def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
     assert client.last_update_info["num_updates_list"] == [2]
     # One broadcast for indices + one for values per patch.
     assert engine.model_update_group.broadcast.call_count == 2
+    engine.shutdown()
 
 
 def test_sparse_nccl_trainer_send_weights_empty_round_is_noop():
@@ -1967,6 +1911,8 @@ def test_sparse_nccl_trainer_send_weights_empty_round_is_noop():
 
     engine.send_weights([])
     engine.send_weights()  # no argument is also a no-op round
+    engine.send_weight_chunk([])
+    engine.send_weight_chunk()
 
     assert client.order == []
 
@@ -1976,6 +1922,7 @@ def test_sparse_nccl_trainer_send_weights_requires_full_shape():
     patch.full_shape = None
     engine = SparseNCCLTrainerWeightTransferEngine(client=RecordingClient())
     engine.model_update_group = MagicMock()
+    engine.model_update_group.device = torch.device("cpu")
 
     with pytest.raises(ValueError, match="full_shape"):
         engine.send_weights([patch])
@@ -1997,6 +1944,7 @@ def test_sparse_nccl_trainer_validates_patch_before_any_rpc():
     client = RecordingClient()
     engine = SparseNCCLTrainerWeightTransferEngine(client=client)
     engine.model_update_group = MagicMock()
+    engine.model_update_group.device = torch.device("cpu")
 
     mismatched = SparseWeightPatch(
         name="w",
@@ -2035,4 +1983,5 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
     assert engine.model_update_group is None
     assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
     engine.send_weights([_sparse_patch()])
+    engine.send_weight_chunk([_sparse_patch()])
     assert client.order == []
