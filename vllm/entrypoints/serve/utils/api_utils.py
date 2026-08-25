@@ -206,7 +206,7 @@ def get_max_tokens(
 
 
 def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
 
     non_default_args = {}
 
