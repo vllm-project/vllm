@@ -560,11 +560,6 @@ def test_flash_attn_accepts_handled_fp8_variants(
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
 
 
-# FA4 dispatches head_size=256 on Blackwell to a dedicated 2-CTA kernel whose
-# feature set is far narrower than the generic FA4 forward. Every request shape
-# it cannot serve has to resolve to FA2 during selection, otherwise it becomes
-# an AssertionError at kernel-launch time.
-
 blackwell_only = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="FA4 is CUDA-only"
 )
@@ -615,33 +610,21 @@ def _hd256_config(
 @pytest.mark.parametrize(
     "kwargs,config_kwargs,expected",
     [
-        # Supported: the dedicated kernel serves this layer.
         ({}, {}, 4),
-        # Callers that do not build the kernel's call shape must opt out.
         ({"supports_fa4_hd256": False}, {}, 2),
-        # Per-layer features the kernel cannot express.
         ({"has_sinks": True}, {}, 2),
         ({"requires_softcap": True}, {}, 2),
-        # TMA paged KV with one page per 128-token tile. A larger multiple is
-        # split down to 128 by select_common_block_size, so it stays on FA4.
+        # Larger block sizes normalize to 128.
         ({"kv_cache_block_size": 16}, {}, 2),
         ({"kv_cache_block_size": 64}, {}, 2),
         ({"kv_cache_block_size": 256}, {}, 4),
-        # Model-level configurations: mm_prefix and R-SWA need a CuTe-DSL
-        # mask_mod plus aux tensors, the DCP context call cannot page-align its
-        # block table, and Gemma-2 style soft capping is unsupported.
         ({}, {"is_mm_prefix_lm": True}, 2),
         ({}, {"rswa_window": 512}, 2),
         ({}, {"dcp_size": 2}, 2),
         ({}, {"softcap": 50.0}, 2),
-        # Quantized KV caches are not supported by the dedicated kernel.
         ({}, {"cache_dtype": "fp8"}, 2),
-        # Only (256, 256) hits the dedicated kernel; head-dim combinations FA4
-        # can serve keep the generic forward and its 16-token pages.
         ({"head_size": 128, "kv_cache_block_size": 16}, {}, 4),
         ({"head_size": 192, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 4),
-        # (256, != 256) is not a shape FA4 can serve on SM100 (_validate_head_dims
-        # in flash_attn/cute/interface.py asserts), so the TMEM block gives FA2.
         ({"head_size": 256, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 2),
         ({"head_size": 256, "head_size_v": 64}, {}, 2),
     ],
@@ -664,12 +647,9 @@ def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
     "backend_name,config_kwargs,expected",
     [
         ("FLASH_ATTN", {}, 128),
-        # A model that falls back keeps the generic advertisement, so it does
-        # not pay a 128-token page (and lose --block-size < 128) for nothing.
         ("FLASH_ATTN", {"softcap": 50.0}, 16),
         ("FLASH_ATTN", {"head_size": 128}, 16),
         ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16),
-        # DiffKV's (256, 128) shape uses generic FA4, not the dedicated kernel.
         ("FLASH_ATTN_DIFFKV", {}, 16),
     ],
 )
@@ -699,8 +679,6 @@ def test_fa4_hd256_block_size_advertisement(
 
 @blackwell_only
 def test_fa4_hd256_mm_prefix_deselects_flash_attn():
-    """mm_prefix hd256 models must not reach the kernel: FLASH_ATTN reports the
-    combination as unsupported and the selector falls through to FLEX."""
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
     with _blackwell(_hd256_config(is_mm_prefix_lm=True)):
@@ -728,13 +706,9 @@ def test_fa4_hd256_mm_prefix_deselects_flash_attn():
 @pytest.mark.parametrize(
     "attn_type,sliding_window,expected",
     [
-        # Decoder attention always passes seqused_k, which is what the kernel
-        # needs for local attention, so a windowed decoder layer keeps FA4.
         (AttentionType.DECODER, None, 4),
         (AttentionType.DECODER, 512, 4),
-        # Encoder attention runs on dense cu_seqlens_k instead, and the kernel
-        # rejects local attention without seqused_q/seqused_k (e.g.
-        # google/embeddinggemma-300m: head_size=256, encoder-only, windowed).
+        # Local encoder attention lacks the required seqused tensors.
         (AttentionType.ENCODER_ONLY, None, 4),
         (AttentionType.ENCODER_ONLY, 512, 2),
     ],
@@ -742,8 +716,7 @@ def test_fa4_hd256_mm_prefix_deselects_flash_attn():
 def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
     from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
-    # Default block size (16), i.e. the state load_model() constructs impls in:
-    # Platform.update_block_size_for_backend() only runs afterwards.
+    # Implementations are constructed before the platform updates the block size.
     with set_current_vllm_config(VllmConfig()):
         impl = FlashAttentionImpl(
             num_heads=8,

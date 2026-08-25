@@ -96,7 +96,6 @@ class FlashAttentionBackend(AttentionBackend):
             return None
 
         head_size = vllm_config.model_config.get_head_size()
-        # No kv_cache_block_size: this call is what *decides* it.
         if (
             uses_fa4_hd256_kernel(head_size, cls.head_size_v)
             and get_flash_attn_version(
@@ -112,9 +111,7 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         if block_size := cls._get_fa4_hd256_block_size():
-            # Sliding-window cache specs select the smallest advertised size.
-            # Report the kernel's exact page-size contract instead of the
-            # generic FlashAttention multiple-of-16 capability.
+            # Sliding-window specs select the smallest advertised size.
             return [block_size]
         return [MultipleOf(16)]
 
@@ -447,8 +444,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
 
-        # FA4's dedicated Blackwell head_dim=256 kernel. self.block_size is
-        # this KV cache group's *actual* kernel page size.
         self.fa4_hd256 = uses_fa4_hd256_kernel(self.headdim) and (
             get_flash_attn_version(
                 head_size=self.headdim,
@@ -830,9 +825,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.fa4_hd256:
-            # The cascade path calls FA with the unsliced block table and a
-            # prefix length that is not page aligned, which the hd256 kernel
-            # rejects. Cascade is an optimization, so just turn it off.
+            # Cascade may use a non-page-aligned prefix length.
             return False
         return use_cascade_attention(*args, **kwargs)
 
@@ -882,8 +875,7 @@ class FlashAttentionImpl(AttentionImpl):
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
         )
-        # No kv_cache_block_size: it is not final at impl construction time and
-        # the page size is enforced at spec/group level (select_common_block_size).
+        # The final KV cache block size is unavailable during construction.
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
@@ -891,16 +883,11 @@ class FlashAttentionImpl(AttentionImpl):
             requires_softcap=bool(self.logits_soft_cap),
             supports_fa4_hd256=True,
         )
-        # Requests routed to FA4's dedicated Blackwell head_dim=256 kernel need
-        # the call-shape adjustments made in forward() below.
         self.fa4_hd256 = self.vllm_flash_attn_version == 4 and uses_fa4_hd256_kernel(
             head_size
         )
         if self.fa4_hd256 and not uses_kv_cache and sliding_window is not None:
-            # That kernel implements local attention only alongside
-            # seqused_q/seqused_k. The KV cache path always passes seqused_k,
-            # but encoder attention runs on dense cu_seqlens_k (e.g.
-            # google/embeddinggemma-300m: head_size=256, encoder-only, windowed).
+            # The hd256 kernel requires seqused_k for local attention.
             logger.warning_once(
                 "FA4's Blackwell head_size=256 kernel does not support local "
                 "attention on encoder inputs, defaulting to FA version 2."
@@ -1165,9 +1152,8 @@ class FlashAttentionImpl(AttentionImpl):
 
                 num_splits = attn_metadata.max_num_splits
                 if self.fa4_hd256:
-                    # The kernel requires max_seqlen_k % page_size == 0, a block
-                    # table of exactly max_seqlen_k // page_size columns (the
-                    # over-hang is masked out by seqused_k), and no SplitKV.
+                    # hd256 requires page-aligned lengths, exact-width block
+                    # tables, and no SplitKV.
                     num_pages = cdiv(max_seqlen_k, FA4_HD256_PAGE_SIZE)
                     max_seqlen_k = num_pages * FA4_HD256_PAGE_SIZE
                     block_table = block_table[:, :num_pages]
@@ -1506,7 +1492,7 @@ class FlashAttentionImpl(AttentionImpl):
             else None,
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
-            # hd256: no SplitKV, so never let FA pick num_splits > 1.
+            # The hd256 kernel does not support SplitKV.
             num_splits=1 if self.batch_invariant_enabled or self.fa4_hd256 else 0,
             s_aux=self.sinks,
         )

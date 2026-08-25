@@ -10,9 +10,7 @@ from vllm.utils.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
-# FA4 serves (head_dim, head_dim_v) == (256, 256) on Blackwell with a dedicated
-# 2-CTA kernel (flash_attn/cute/sm100_hd256_2cta_fmha_forward.py) that reads
-# paged KV through TMA only, with exactly one page per 128-token tile.
+# The dedicated hd256 kernel requires one 128-token page per tile.
 FA4_HD256_PAGE_SIZE = 128
 
 # Track whether upstream flash-attn is available on ROCm.
@@ -177,14 +175,8 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        # FA4 routes head_size=256 on Blackwell to a dedicated kernel whose
-        # feature set is much narrower than the generic FA4 forward. Anything
-        # it cannot express has to resolve to FA2 *here*, at selection time,
-        # or it becomes an AssertionError at kernel-launch time.
         if fa_version == 4 and uses_fa4_hd256_kernel(head_size, head_size_v):
             if not supports_fa4_hd256:
-                # Opt-in: the kernel also needs a call shape only
-                # FlashAttentionBackend builds (see FA4_HD256_PAGE_SIZE).
                 fa_version = 2
             elif (
                 reason := _fa4_hd256_fallback_reason(
@@ -198,10 +190,7 @@ def get_flash_attn_version(
                 )
                 fa_version = 2
 
-        # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
-        # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
-        # prefill). Development of symmetric 192, 384, and 512 support is being tracked
-        # in https://github.com/Dao-AILab/flash-attention/issues/2456
+        # FA4 head dimensions on Blackwell are limited by TMEM capacity.
         if (
             fa_version == 4
             and device_capability.major >= 10
@@ -235,14 +224,7 @@ def get_flash_attn_version(
 def uses_fa4_hd256_kernel(
     head_size: int | None, head_size_v: int | None = None
 ) -> bool:
-    """Whether FA4 would dispatch this layer to its dedicated hd256 kernel.
-
-    Mirrors ``use_dedicated_hd256_kernel`` in flash_attn/cute/interface.py:
-    ``arch // 10 in [10, 11] and head_dim == head_dim_v == 256``. head_size=256
-    with a different V head dim is not a shape FA4 supports on SM100 at all
-    (``_validate_head_dims`` asserts on it); the TMEM block above resolves it
-    to FA2.
-    """
+    """Return whether FA4 uses its dedicated hd256 kernel."""
     if head_size != 256:
         return False
     if head_size_v is not None and head_size_v != 256:
@@ -257,19 +239,12 @@ def _fa4_hd256_fallback_reason(
     kv_cache_block_size: int | None,
     vllm_config: Any,
 ) -> str | None:
-    """Feature of this layer that FA4's hd256 kernel cannot express, or None.
-
-    Only features are listed here. The kernel's remaining requirements are
-    call-shape ones that ``FlashAttentionImpl.forward`` satisfies directly, so
-    they are not fallback reasons; see ``FA4_HD256_PAGE_SIZE``.
-    """
     model_config = vllm_config.model_config if vllm_config is not None else None
     cache_config = vllm_config.cache_config if vllm_config is not None else None
     if has_sinks:
         return "attention sinks"
     if requires_softcap or (
-        # Model-level signal (Gemma-2), so the KV cache block size advertised
-        # for the model agrees with the version each of its layers selects.
+        # Keep model-level and per-layer version selection consistent.
         model_config is not None
         and getattr(model_config.hf_text_config, "attn_logit_softcapping", None)
     ):
@@ -277,8 +252,7 @@ def _fa4_hd256_fallback_reason(
     if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
         return f"quantized KV cache dtype {cache_config.cache_dtype}"
     if kv_cache_block_size is not None and kv_cache_block_size % FA4_HD256_PAGE_SIZE:
-        # A larger multiple is fine: the KV cache group is then split into
-        # FA4_HD256_PAGE_SIZE-token kernel pages (select_common_block_size).
+        # Larger blocks are split into 128-token kernel pages.
         return f"a KV cache block size of {kv_cache_block_size}"
     if model_config is not None:
         if model_config.is_mm_prefix_lm:
@@ -289,8 +263,7 @@ def _fa4_hd256_fallback_reason(
         vllm_config is not None
         and vllm_config.parallel_config.decode_context_parallel_size > 1
     ):
-        # The DCP context call reuses the unsliced block table with a
-        # max_dcp_context_kv_len that is not page aligned.
+        # DCP reuses an unsliced block table with a non-page-aligned length.
         return "decode context parallelism"
     return None
 

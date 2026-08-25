@@ -232,12 +232,7 @@ def test_fa4_hd256_paged_call_shape(
     num_heads: tuple[int, int],
     sliding_window: int | None,
 ) -> None:
-    """Pin the call shape ``FlashAttentionImpl.forward`` builds for FA4's
-    dedicated Blackwell head_size=256 kernel: ``FA4_HD256_PAGE_SIZE``-token KV
-    pages, a page-aligned ``max_seqlen_k``, a block table sliced to exactly
-    ``max_seqlen_k // FA4_HD256_PAGE_SIZE`` columns whose over-hang holds
-    unrelated block ids, and no SplitKV.
-    """
+    """Handles excess block-table columns with page-aligned ``max_seqlen_k``."""
     from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
 
     if not is_fa_version_supported(4):
@@ -265,8 +260,6 @@ def test_fa4_hd256_paged_call_shape(
         dim=0, dtype=torch.int32
     )
     num_pages = (max_kv_len + block_size - 1) // block_size
-    # The runtime block table is sized from max_model_len, not from the batch,
-    # so it is wider than max_seqlen_k // page needs.
     block_tables = torch.randint(
         0, num_blocks, (len(seq_lens), num_pages + 3), dtype=torch.int32
     )
