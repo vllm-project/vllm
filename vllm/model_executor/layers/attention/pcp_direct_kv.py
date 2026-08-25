@@ -188,8 +188,6 @@ def should_allocate_pcp_direct_kv(vllm_config) -> bool:
         raise RuntimeError(
             "VLLM_USE_PCP_DIRECT_KV=1 requires prefill_context_parallel_size > 1"
         )
-    if parallel_config.tensor_parallel_size != 1:
-        raise RuntimeError("VLLM_USE_PCP_DIRECT_KV requires tensor_parallel_size=1")
     if parallel_config.decode_context_parallel_size != 1:
         raise RuntimeError(
             "VLLM_USE_PCP_DIRECT_KV requires decode_context_parallel_size=1"
