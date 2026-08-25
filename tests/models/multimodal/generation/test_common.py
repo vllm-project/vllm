@@ -320,6 +320,16 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
     ),
+    "chameleon": VLMTestInfo(
+        models=["facebook/chameleon-7b"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        max_tokens=8,
+        dtype="bfloat16",
+    ),
     "cosmos3": VLMTestInfo(
         models=["nvidia/Cosmos3-Nano"],
         test_type=(
@@ -923,6 +933,14 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
+    "chameleon-broadcast": VLMTestInfo(
+        models=["facebook/chameleon-7b"],
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        max_model_len=4096,
+        auto_cls=AutoModelForImageTextToText,
+        marks=multi_gpu_marks(num_gpus=2),
+        **COMMON_BROADCAST_SETTINGS,  # type: ignore
+    ),
     "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
