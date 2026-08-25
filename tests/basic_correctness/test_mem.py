@@ -17,6 +17,7 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
 
+
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
     """Wake discarded allocations with deterministic nonzero contents."""
     original_create_and_map = cumem.create_and_map

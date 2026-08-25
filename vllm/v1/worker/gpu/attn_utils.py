@@ -211,7 +211,8 @@ def init_kv_cache(
     vllm_config: VllmConfig,
     kv_cache_allocation_context: AbstractContextManager | None = None,
 ) -> dict[str, Any]:
-    with kv_cache_allocation_context or nullcontext():
+    allocation_context = kv_cache_allocation_context or nullcontext()
+    with allocation_context:
         kv_caches = allocate_kv_cache(
             kv_cache_config,
             device,

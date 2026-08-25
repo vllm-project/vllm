@@ -256,7 +256,7 @@ class Worker(WorkerBase):
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
+        if not self.use_v2_model_runner and (tags is None or "kv_cache" in tags):
             self.model_runner.post_kv_cache_wake_up()
 
         self.synchronize_device()
@@ -690,7 +690,7 @@ class Worker(WorkerBase):
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         if self.use_v2_model_runner:
-            self.model_runner.initialize_kv_cache(
+            self.model_runner.initialize_kv_cache(  # type: ignore[call-arg]
                 kv_cache_config,
                 kv_cache_allocation_context=self._maybe_get_memory_pool_context(
                     tag="kv_cache"
