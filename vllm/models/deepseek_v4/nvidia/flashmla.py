@@ -54,29 +54,69 @@ def _batch_invariant_prefill_chunk_plan(
             rounding_mode="floor",
         )
     )
-    return [
-        (
-            index,
-            index + 1,
-            int(compressed_lens[index].item()),
-            int((compressed_lens[index] + gather_lens[index]).item()),
-        )
-        for index in range(metadata.num_prefills)
-    ]
+    query_lens = metadata.prefill_query_lens_cpu
+    compressed_values = compressed_lens.numpy()
+    gather_values = gather_lens.numpy()
+    query_values = query_lens.numpy()
+    plan: list[tuple[int, int, int, int]] = []
+    chunk_start = 0
+    while chunk_start < metadata.num_prefills:
+        chunk_n = int(compressed_values[chunk_start])
+        chunk_gather = int(gather_values[chunk_start])
+        chunk_query = int(query_values[chunk_start])
+        chunk_end = chunk_start + 1
+        while chunk_end < metadata.num_prefills and (
+            int(compressed_values[chunk_end]),
+            int(gather_values[chunk_end]),
+            int(query_values[chunk_end]),
+        ) == (chunk_n, chunk_gather, chunk_query):
+            chunk_end += 1
+        plan.append((chunk_start, chunk_end, chunk_n, chunk_n + chunk_gather))
+        chunk_start = chunk_end
+    return plan
 
 
 def _batch_invariant_decode_request_ranges(
     query_start_loc_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
     num_decodes: int,
-) -> list[tuple[int, int, int]]:
-    return [
-        (
-            request_index,
-            int(query_start_loc_cpu[request_index].item()),
-            int(query_start_loc_cpu[request_index + 1].item()),
+    compress_ratio: int,
+    window_size: int,
+) -> list[tuple[int, int, int, int]]:
+    query_offsets = query_start_loc_cpu.numpy()
+    seq_values = seq_lens_cpu.numpy()
+    ranges: list[tuple[int, int, int, int]] = []
+    request_start = 0
+    while request_start < num_decodes:
+        token_start = int(query_offsets[request_start])
+        query_len = int(query_offsets[request_start + 1]) - token_start
+        seq_len = int(seq_values[request_start])
+        compressed_len = 0 if compress_ratio <= 1 else seq_len // compress_ratio
+        gather_len = query_len + min(max(seq_len - query_len, 0), window_size - 1)
+        request_end = request_start + 1
+        while request_end < num_decodes:
+            next_token_start = int(query_offsets[request_end])
+            next_query_len = int(query_offsets[request_end + 1]) - next_token_start
+            next_seq_len = int(seq_values[request_end])
+            next_shape = (
+                next_query_len,
+                0 if compress_ratio <= 1 else next_seq_len // compress_ratio,
+                next_query_len
+                + min(max(next_seq_len - next_query_len, 0), window_size - 1),
+            )
+            if next_shape != (query_len, compressed_len, gather_len):
+                break
+            request_end += 1
+        ranges.append(
+            (
+                request_start,
+                token_start,
+                request_end - request_start,
+                int(query_offsets[request_end]) - token_start,
+            )
         )
-        for request_index in range(num_decodes)
-    ]
+        request_start = request_end
+    return ranges
 
 
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
@@ -356,20 +396,27 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and request_count is None
             and num_decodes > 1
         ):
-            for request_index, begin, end in _batch_invariant_decode_request_ranges(
-                swa_metadata.query_start_loc_cpu, num_decodes
-            ):
+            request_ranges = _batch_invariant_decode_request_ranges(
+                swa_metadata.query_start_loc_cpu,
+                swa_metadata.seq_lens_cpu,
+                num_decodes,
+                self.compress_ratio,
+                self.window_size,
+            )
+            if len(request_ranges) > num_decodes:
+                raise RuntimeError("decode-sparse BI launch count exceeded request count")
+            for request_index, begin, request_count_, token_count in request_ranges:
                 self._forward_decode_sparse(
-                    q[begin:end],
+                    q[begin : begin + token_count],
                     compressed_k_cache,
                     swa_k_cache,
                     swa_metadata,
                     attn_metadata,
                     swa_only,
-                    output[begin:end],
+                    output[begin : begin + token_count],
                     request_start=request_index,
                     token_start=begin,
-                    request_count=1,
+                    request_count=request_count_,
                 )
             return
 
@@ -396,7 +443,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             prefix_lens, min=0, max=self.window_size - 1
         )
 
-        if int(query_lens_cpu.sum().item()) != num_decode_tokens:
+        query_lens_values = query_lens_cpu.numpy()
+        if int(query_lens_values.sum()) != num_decode_tokens:
             raise RuntimeError(
                 "decode-sparse query metadata does not match decode token count"
             )
@@ -428,16 +476,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     "expected 1, 4, or 128."
                 )
             max_compressed = int(
-                torch.div(
-                    seq_lens_cpu,
-                    self.compress_ratio,
-                    rounding_mode="floor",
-                )
-                .max()
-                .item()
+                (seq_lens_cpu.numpy() // self.compress_ratio).max()
             )
 
-        max_gather = int(gather_lens_cpu.max().item())
+        max_gather = int(gather_lens_cpu.numpy().max())
         workspace_width = max_compressed + max_gather
         combined_topk = round_up(top_k + self.window_size, 128)
         specs: list[tuple[tuple[int, ...], torch.dtype]] = [
@@ -578,6 +620,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 self.compress_ratio,
                 self.window_size,
             )
+            if len(chunk_plan) > num_prefills:
+                raise RuntimeError("prefill BI launch count exceeded request count")
         else:
             chunk_plan = swa_metadata.get_prefill_chunk_plan(
                 compress_ratio=self.compress_ratio,
