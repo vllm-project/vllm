@@ -22,7 +22,6 @@ Both 2D and 3D launches are supported:
     for decode-only batches whose 2D grid would under-fill the GPU.
 """
 
-import os
 from typing import Any
 
 import torch
@@ -47,20 +46,14 @@ logger = init_logger(__name__)
 
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
-# Escape hatches, both defaulting to upstream behaviour. On 8x Arc Pro B70 at TP=8,
-# prefill completes and decode wedges in a userspace spin on a device event; the 3D /
-# split-KV launch is the largest structural difference between the two, since it is taken
-# only for decode-only batches (max_seqlen_q > 1 disqualifies prefill) with
-# num_seqs <= seq_threshold_3D. Forcing 2D moved wedge onset from decode step 1-2 to ~30.
-# It is a mitigation, not a fix -- see FAILURES.md failure 19/20 and CHANGES.md 1g.
-#
-#   VLLM_XPU_DIFFKV_FORCE_2D=1   force the 2D launch even for decode
-#   VLLM_XPU_DIFFKV_TILE_SIZE=N  override TILE_SIZE
-#
-# Two knobs, because forcing 2D also moves TILE_SIZE from 16 to 32; without the second
-# knob "the 3D grid is broken" cannot be separated from "TILE_SIZE=16 is broken".
-_FORCE_2D = os.environ.get("VLLM_XPU_DIFFKV_FORCE_2D", "0") == "1"
-_TILE_SIZE_OVERRIDE = os.environ.get("VLLM_XPU_DIFFKV_TILE_SIZE")
+# Debug overrides for the 2D/3D launch choice below, both defaulting to the
+# automatic behaviour. The 3D (split-KV) grid is taken only for decode-only
+# batches, so on hardware where the two geometries do not behave alike there is
+# otherwise no way to put decode on the same launch prefill uses. Two knobs
+# rather than one because forcing 2D also changes TILE_SIZE, which would
+# conflate the grid with the tile size when bisecting.
+force_2d = envs.VLLM_DIFFKV_FORCE_2D
+tile_size_override = envs.VLLM_DIFFKV_TILE_SIZE
 
 
 @triton.jit
@@ -456,14 +449,14 @@ def unified_attention_diffkv(
         or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
-        or _FORCE_2D
+        or force_2d
     )
 
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
     # smaller tiles to expose more parallelism along the KV dim.
     tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
-    if _TILE_SIZE_OVERRIDE:
-        tile_size = int(_TILE_SIZE_OVERRIDE)
+    if tile_size_override is not None:
+        tile_size = tile_size_override
 
     grid: tuple[Any, ...]
     if use_3d:
