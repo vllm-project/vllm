@@ -535,8 +535,9 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         "facebook/opt-125m",
         max_logprobs=5,
         enable_prefix_caching=False,
-        # 2 other llms alive during whole session
-        gpu_memory_utilization=0.05,
+        # 2 other llms alive during whole session; must also cover the
+        # cudagraph memory reservation from startup profiling.
+        gpu_memory_utilization=0.1,
         max_model_len=16,
         logprobs_mode=logprobs_mode,
     )
@@ -575,7 +576,7 @@ def test_prompt_logprobs_mode():
         llm = LLM(
             "facebook/opt-125m",
             enable_prefix_caching=False,
-            gpu_memory_utilization=0.05,
+            gpu_memory_utilization=0.1,
             max_model_len=16,
             logprobs_mode=mode,
         )

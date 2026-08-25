@@ -450,9 +450,19 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # The wrappers are planned from qo_indptr_cpu, so the CPU query offsets
-        # have to be the ones the kernel runs on.
-        return False
+        # Only trtllm-gen decode (SM100 family) reads query offsets from the
+        # device tensor; XQA and wrapper decode plan from qo_indptr_cpu, and
+        # under DCP spec queries are routed to the prefill path.
+        if not current_platform.is_device_capability_family(100):
+            return False
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None or vllm_config.model_config is None:
+            return True
+        pc = vllm_config.parallel_config
+        mc = vllm_config.model_config
+        return pc.decode_context_parallel_size == 1 and can_use_trtllm_attention(
+            mc.get_num_attention_heads(pc), mc.get_num_kv_heads(pc), is_prefill=False
+        )
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -833,6 +843,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_dedicated_xqa = (
             current_platform.is_device_capability_family(120)
             and self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
+        )
+        # Adaptive verification trims drafts on device, so decode query lengths
+        # must come from the device qo_indptr; only trtllm-gen supports that
+        # (the selector already rejects the other configurations).
+        self.use_trtllm_gen_varlen_decode = (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+            and self.flashinfer_trtllm_api_decode_kernel
+            == FlashInferDecodeKernel.TRTLLM_GEN
+            and not self.use_dcp
         )
         supports_spec_as_decode = (
             self.flashinfer_trtllm_api_decode_kernel
@@ -1619,7 +1639,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if num_decodes > 0:
             if decode_with_flashinfer_trtllm_api:
                 assert self.flashinfer_trtllm_api_decode_kernel is not None
-                if not self.use_dedicated_xqa:
+                if not self.use_dedicated_xqa and not self.use_trtllm_gen_varlen_decode:
                     assert num_decode_tokens % num_decodes == 0, (
                         "XQA/trtllm-gen decode requires uniform query lengths "
                         f"per request. Got {num_decode_tokens=} and {num_decodes=}."
@@ -1648,6 +1668,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_decodes,
                         bool(causal),
                     )
+                elif self.use_trtllm_gen_varlen_decode:
+                    # CPU lens are only an upper bound, device qo_indptr is
+                    # the truth.
+                    decode_q_lens = (
+                        qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+                    )
+                    max_q_upper = int(decode_q_lens.max())
+                    if max_q_upper > 1:
+                        q_len_per_req = max_q_upper
+                        q_cu_seq_lens = qo_indptr[: num_decodes + 1]
                 attn_metadata.decode = FlashInferTrtllmAPIDecode(
                     kernel=self.flashinfer_trtllm_api_decode_kernel,
                     block_tables=block_table_tensor[:num_decodes],
@@ -2382,7 +2412,7 @@ class FlashInferImpl(AttentionImpl):
                     bmm1_scale = self.get_xqa_bmm1_scale(
                         layer, attn_metadata.q_data_type_decode
                     )
-                    q_len_per_req = attn_metadata.decode.q_len_per_req
+                    q_len_per_req: int | None = attn_metadata.decode.q_len_per_req
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
                         query=decode_query,
@@ -2421,14 +2451,20 @@ class FlashInferImpl(AttentionImpl):
                 if needs_fp8_out:
                     out = self._nvfp4_fp8_out[:num_decode_tokens]
 
-                if num_decode_tokens % attn_metadata.num_decodes != 0:
+                q_cu_seq_lens = attn_metadata.decode.q_cu_seq_lens
+                max_q_len = None
+                q_len_per_req = None
+                if q_cu_seq_lens is not None:
+                    # q_len_per_req must stay None for the kernel's varlen path.
+                    max_q_len = attn_metadata.decode.q_len_per_req
+                elif num_decode_tokens % attn_metadata.num_decodes != 0:
                     # This gets triggered when the dummy_run forces
                     # attention to be initialized with q_len = 0
                     q_len_per_req = 1
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
-                if decode_with_xqa and q_len_per_req > 1:
+                if decode_with_xqa and q_len_per_req is not None and q_len_per_req > 1:
                     raise NotImplementedError(
                         "FlashInfer XQA speculative decode is not wired in vLLM yet."
                     )
@@ -2472,6 +2508,8 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                     backend=attn_metadata.decode.kernel.value,
                     q_len_per_req=q_len_per_req,
+                    max_q_len=max_q_len,
+                    cum_seq_lens_q=q_cu_seq_lens,
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     ),
