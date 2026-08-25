@@ -249,6 +249,53 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
     assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == 4
 
 
+def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
+    """min_kv_seq_len must not be driven by padded dummy requests.
+
+    Full-CG verify pins zero-qo rows to max_qo_len for paged_kv metadata; taking
+    per_req_len.min() over all rows then reports qlen instead of a real KV length
+    and collapses Gluon KV-split parallelism on single-request decode.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=mock.MagicMock()),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
+
+    mtp_qlen = 8
+    num_reqs = 8
+    active_seq_len = 1032
+    seq_lens = torch.tensor(
+        [active_seq_len] + [0] * (num_reqs - 1), dtype=torch.int32
+    )
+    query_start_loc = torch.tensor(
+        [0, mtp_qlen] + [mtp_qlen] * (num_reqs - 1), dtype=torch.int32
+    )
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(
+            mtp_decode_qlen=mtp_qlen,
+            has_full_cudagraphs=True,
+            max_decode_rows=num_reqs,
+            num_heads=12,
+        ),
+        block_table_tensor=torch.zeros(num_reqs, active_seq_len, dtype=torch.int32),
+        seq_lens_device=seq_lens,
+        max_seq_len=active_seq_len,
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=num_reqs * mtp_qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.min_kv_seq_len == active_seq_len
+
+
 def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     monkeypatch,
 ):

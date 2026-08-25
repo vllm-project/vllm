@@ -837,15 +837,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # ordinary per-request paged-KV view, so there is no expanded per-token
         # buffer to build here. mla_gluon still wants a lower bound on the KV
         # length it is asked to split; on the verify path that bound is over
-        # requests, not over expanded rows. The .item() below runs in the
-        # builder, outside the captured region, so it does not abort HIP graph
-        # capture the way the per-layer syncs in forward_mqa did.
+        # active requests, not cudagraph padding rows pinned to max_qo_len.
+        # The .item() below runs in the builder, outside the captured region,
+        # so it does not abort HIP graph capture the way the per-layer syncs
+        # in forward_mqa did.
         min_kv_seq_len = 1
         if AiterMLAHelper.use_gluon_verify(
             self.num_heads, int(max_qo_len), self._kv_cache_dtype_str
         ):
             per_req_len = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
-            min_kv_seq_len = int(per_req_len.min().item())
+            if pad_uniform_mtp:
+                active = qo_lens_device > 0
+                if active.any():
+                    min_kv_seq_len = int(per_req_len[active].min().item())
+            else:
+                min_kv_seq_len = int(per_req_len.min().item())
 
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
