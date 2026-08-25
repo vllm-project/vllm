@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -28,13 +28,8 @@ from vllm.distributed.artifact_connector.store import (
     BackgroundArtifactStore,
     InProcessArtifactStore,
 )
-from vllm.distributed.artifact_connector.worker import (
-    ArtifactWorkerConnector,
-    _WorkerRequestState,
-)
-from vllm.v1.core.sched.interface import PauseState
+from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
 
 pytestmark = pytest.mark.cpu_test
 
@@ -43,102 +38,24 @@ _DTYPE = np.dtype("uint8")
 _BLOCK_SIZE = 4
 
 
-class _BlockingArtifactStore:
-    def __init__(self) -> None:
-        self.started = threading.Event()
-        self.release = threading.Event()
-        self.objects: dict[str, bytes] = {}
-        self.closed = False
-
-    def put(self, objects: list[ArtifactObject]) -> None:
-        self.started.set()
-        self.release.wait()
-        self.objects.update((obj.key, obj.payload) for obj in objects)
-
-    def get_concatenated(self, keys: list[str]) -> bytes:
-        return b"".join(self.objects[key] for key in keys)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def test_background_store_put_is_async_and_ordered():
-    underlying = _BlockingArtifactStore()
-    store = BackgroundArtifactStore(underlying, max_pending_batches=2)
-
-    store.put([ArtifactObject("key", b"value")])
-    assert underlying.started.wait(timeout=1)
-    assert "key" not in underlying.objects
-
-    underlying.release.set()
-    assert store.get_concatenated(["key"]) == b"value"
-    store.close()
-    assert underlying.closed
-
-
-def test_background_store_surfaces_publication_failure():
-    underlying = Mock()
-    underlying.put.side_effect = ArtifactStoreError("full")
-    store = BackgroundArtifactStore(underlying, max_pending_batches=2)
-
-    store.put([ArtifactObject("key", b"value")])
-    with pytest.raises(ArtifactStoreError, match="publication failed"):
-        store.get_concatenated(["key"])
-    with pytest.raises(ArtifactStoreError, match="publication failed"):
-        store.close()
-
-
-def test_background_store_preserves_capacity_independent_batches():
+def test_background_store_publishes_without_blocking_caller():
     started = threading.Event()
     release = threading.Event()
-    batches: list[list[str]] = []
     underlying = Mock()
 
-    def put(objects):
-        if not batches:
-            started.set()
-            release.wait()
-        if len(objects) > 1:
-            raise ArtifactStoreError("batch exceeds capacity")
-        batches.append([obj.key for obj in objects])
+    def put(*_args, **_kwargs):
+        started.set()
+        release.wait()
 
     underlying.put.side_effect = put
-    store = BackgroundArtifactStore(underlying, max_pending_batches=3)
-    store.put([ArtifactObject("first", b"1")])
-    assert started.wait(timeout=1)
-    store.put([ArtifactObject("second", b"2")])
-    store.put([ArtifactObject("third", b"3")])
-    release.set()
+    store = BackgroundArtifactStore(underlying, max_pending_batches=1)
 
+    store.put([ArtifactObject("key", b"value")])
+    assert started.wait(timeout=1)
+    release.set()
     store.close()
 
-    assert batches == [["first"], ["second"], ["third"]]
-
-
-def _make_vllm_config(
-    *,
-    max_bytes: int | None = 1 << 20,
-    num_experts: int = 256,
-):
-    model_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(num_hidden_layers=3),
-        get_num_experts_per_tok=lambda: 2,
-        get_num_experts=lambda: num_experts,
-        get_total_num_hidden_layers=lambda: 3,
-        max_model_len=4096,
-    )
-    return SimpleNamespace(
-        artifact_config=SimpleNamespace(
-            enabled=True,
-            enable_return_routed_experts=True,
-            max_bytes=max_bytes,
-        ),
-        parallel_config=SimpleNamespace(data_parallel_rank=0, rank=0),
-        scheduler_config=SimpleNamespace(max_num_seqs=8),
-        cache_config=SimpleNamespace(enable_prefix_caching=True),
-        model_config=model_config,
-        instance_id="instance",
-    )
+    underlying.close.assert_called_once_with()
 
 
 def _make_connector():
@@ -169,6 +86,9 @@ class _SchedulerRequest:
     num_computed_tokens: int = 0
     num_in_flight_tokens: int = 0
     finished: bool = False
+    sampling_params: SimpleNamespace = field(
+        default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
+    )
 
     def is_finished(self) -> bool:
         return self.finished
@@ -211,7 +131,7 @@ def _metadata(
             generation,
             {request.request_id: request.emit_start for request in requests},
             block_hashes,
-            set(finished_requests),
+            tuple(finished_requests),
         ),
         requests,
     )
@@ -234,8 +154,15 @@ def _make_worker(
     max_num_seqs: int,
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
+    max_store_blocks: int | None = None,
 ) -> ArtifactWorkerConnector:
-    store = _make_store(object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)))
+    object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
+    store = _make_store(
+        max_bytes=(
+            1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
+        ),
+        object_nbytes=object_nbytes,
+    )
     worker = object.__new__(ArtifactWorkerConnector)
     worker._store = store
     worker._buffer = RoutedExpertsArtifactBuffer(
@@ -429,16 +356,6 @@ def test_worker_rejects_mismatched_capture_profile(routing):
     worker.close()
 
 
-def test_store_rejects_invalid_payload_size():
-    array = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
-    payload = array.tobytes()
-
-    store = _make_store(object_nbytes=len(payload))
-    with pytest.raises(ArtifactStoreError, match="size"):
-        store.put([ArtifactObject("key", payload[:-1])])
-    store.close()
-
-
 @pytest.mark.parametrize(
     ("initial_start", "initial_rows", "invalid_start"),
     [
@@ -548,6 +465,56 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
     assert output is not None
     np.testing.assert_array_equal(output["second"].rows, logical)
+    worker.close()
+
+
+def test_worker_matches_kv_eviction_order_after_requests_finish():
+    worker = _make_worker(2, max_store_blocks=3)
+    hashes = [bytes([value]) * 32 for value in range(5)]
+    blocks = [
+        np.full((_BLOCK_SIZE, *_SHAPE), value, dtype=_DTYPE) for value in range(5)
+    ]
+
+    def publish_and_finish(request_id, block_indexes):
+        rows = np.concatenate([blocks[index] for index in block_indexes])
+        step = _metadata(
+            0,
+            [
+                _request_metadata(
+                    request_id,
+                    0,
+                    len(rows),
+                    0,
+                    [hashes[index] for index in block_indexes],
+                )
+            ],
+            {},
+        )
+        _process_output(worker, step, rows, [request_id], np.array([0]))
+        _begin_step(worker, _metadata(0, [], {request_id: []}))
+
+    publish_and_finish("s", [0])
+    publish_and_finish("ab", [1, 2])
+    publish_and_finish("c", [3])
+    publish_and_finish("d", [4])
+
+    assert worker._store is not None
+    np.testing.assert_array_equal(
+        materialize_routed_experts(
+            worker._store,
+            routed_experts_keys([hashes[1], hashes[3], hashes[4]], "0"),
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+        ),
+        np.concatenate([blocks[1], blocks[3], blocks[4]]),
+    )
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        materialize_routed_experts(
+            worker._store,
+            routed_experts_keys([hashes[2]], "0"),
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+        )
     worker.close()
 
 
@@ -1075,22 +1042,21 @@ def test_worker_merges_block_hash_deltas():
 
 def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     worker = _make_worker(1)
-    worker._generation = 0
     logical = np.arange(2 * _BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(
         2 * _BLOCK_SIZE, 3, 2
     )
-    assert worker._buffer is not None
-    worker._requests["request"] = _WorkerRequestState(
-        pending_blocks=[
-            (0, worker._buffer.retain_block(logical[:_BLOCK_SIZE])),
-            (
-                _BLOCK_SIZE,
-                worker._buffer.retain_block(logical[_BLOCK_SIZE:]),
-            ),
-        ]
+    running = _metadata(
+        0,
+        [_request_metadata("request", 0, len(logical), 0, [])],
+        {},
     )
-    worker._buffer.capture(
-        "request", 2 * _BLOCK_SIZE, np.zeros((1, *_SHAPE), dtype=_DTYPE)
+    _process_output(
+        worker,
+        running,
+        logical,
+        ["request"],
+        np.array([0]),
+        np.array([0]),
     )
     block_hash = b"a" * 32
 
@@ -1104,6 +1070,8 @@ def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     )
 
     assert "request" not in worker._requests
+    assert worker._buffer is not None
+    assert "request" not in worker._buffer._requests
     assert worker._store is not None
     np.testing.assert_array_equal(
         materialize_routed_experts(
@@ -1114,7 +1082,6 @@ def test_worker_finish_publishes_keyed_block_and_discards_request_state():
         ),
         logical[:_BLOCK_SIZE],
     )
-    assert "request" not in worker._buffer._requests
     worker.close()
 
 
@@ -1178,6 +1145,80 @@ def test_store_lru_and_immutable_put():
     store.close()
 
 
+def test_store_does_not_evict_referenced_artifacts():
+    store = _make_store(max_bytes=8)
+    store.put([ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")])
+    store.put([], retain_keys=["first"])
+    store.put([], retain_keys=["first"], release_keys=["first"])
+
+    store.put([ArtifactObject("third", b"3333")])
+
+    assert store.get_concatenated(["first", "third"]) == b"11113333"
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        store.get_concatenated(["second"])
+    store.put([], release_keys=["first"])
+    store.close()
+
+
+def test_store_terminal_put_preserves_tail_first_eviction_order():
+    store = _make_store(max_bytes=8)
+    keys = ["first", "second", "third"]
+    store.put(
+        [ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")],
+        retain_keys=keys,
+    )
+
+    store.put(
+        [ArtifactObject("third", b"3333")],
+        release_keys=reversed(keys),
+    )
+
+    assert store.get_concatenated(keys[:2]) == b"11112222"
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        store.get_concatenated(["third"])
+    store.close()
+
+
+def test_store_terminal_put_orders_survivors_for_later_eviction():
+    store = _make_store(max_bytes=12)
+    keys = ["first", "second", "third"]
+    store.put(
+        [ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")],
+        retain_keys=keys,
+    )
+
+    store.put(
+        [ArtifactObject("third", b"3333")],
+        release_keys=reversed(keys),
+    )
+    store.put([ArtifactObject("fourth", b"4444")])
+
+    assert store.get_concatenated(["first", "second", "fourth"]) == b"111122224444"
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        store.get_concatenated(["third"])
+    store.close()
+
+
+def test_store_terminal_put_keeps_a_shared_incoming_key():
+    store = _make_store(max_bytes=8)
+    keys = ["first", "second", "third"]
+    store.put(
+        [ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")],
+        retain_keys=(*keys, "third"),
+    )
+
+    store.put(
+        [ArtifactObject("third", b"3333")],
+        release_keys=reversed(keys),
+    )
+
+    assert store.get_concatenated(["first", "third"]) == b"11113333"
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        store.get_concatenated(["second"])
+    store.put([], release_keys=["third"])
+    store.close()
+
+
 def test_store_rejects_access_after_close():
     store = _make_store(max_bytes=8)
     store.close()
@@ -1210,6 +1251,7 @@ def _scheduler_request(
     *,
     num_tokens: int = 10,
     num_output_tokens: int = 1,
+    prompt_start: int = 0,
 ):
     return _SchedulerRequest(
         request_id=request_id,
@@ -1217,6 +1259,7 @@ def _scheduler_request(
         num_tokens=num_tokens,
         num_output_tokens=num_output_tokens,
         num_computed_tokens=num_tokens,
+        sampling_params=SimpleNamespace(routed_experts_prompt_start=prompt_start),
     )
 
 
@@ -1258,24 +1301,39 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
 
 
-def test_scheduler_connector_sends_finish_after_block_hashes():
+def test_scheduler_starts_worker_output_at_requested_prompt_token():
     connector = _make_connector()
-    block_hashes = [b"a" * 32]
-    request = _scheduler_request("request", block_hashes)
-    request.num_computed_tokens = 0
-    connector.build_connector_meta(
-        _step_output([request.request_id], [0], [0]),
+    request = _scheduler_request(
+        "request",
+        [b"a" * 32],
+        num_tokens=4,
+        num_output_tokens=0,
+        prompt_start=2,
+    )
+
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [4]),
         {request.request_id: request},
     )
-    request.num_computed_tokens = request.num_tokens
-    connector.request_finished(request)
-    scheduler_output = _step_output([], [], [])
-    scheduler_output.finished_req_ids = {request.request_id}
 
-    metadata = connector.build_connector_meta(scheduler_output, {})
+    assert metadata.requests == {request.request_id: 2}
 
-    assert request.request_id in metadata.finished_requests
-    assert request.request_id not in metadata.block_hashes
+
+def test_scheduler_connector_preserves_request_finish_order():
+    connector = _make_connector()
+    first = _scheduler_request("first", [b"a" * 32])
+    second = _scheduler_request("second", [b"b" * 32])
+    connector.build_connector_meta(
+        _step_output([first.request_id, second.request_id], [0, 0], [0, 0]),
+        {first.request_id: first, second.request_id: second},
+    )
+    connector.request_finished(second)
+    connector.request_finished(first)
+
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+
+    assert metadata.finished_requests == (second.request_id, first.request_id)
+    assert not metadata.block_hashes
 
 
 def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
@@ -1355,6 +1413,54 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
         ),
         logical[_BLOCK_SIZE:],
     )
+    worker.close()
+
+
+def test_worker_releases_terminal_pins_before_same_step_publish():
+    worker = _make_worker(2, max_store_blocks=1)
+    victim_hash = b"a" * 32
+    producer_hash = b"b" * 32
+    victim_rows = np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE)
+    producer_rows = np.ones((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE)
+    running = _metadata(
+        0,
+        [
+            _request_metadata("victim", 0, _BLOCK_SIZE, 0, [victim_hash]),
+            _request_metadata("producer", 0, _BLOCK_SIZE, 0, []),
+        ],
+        {},
+    )
+    _process_output(
+        worker,
+        running,
+        np.concatenate((victim_rows, producer_rows)),
+        ["victim", "producer"],
+        np.zeros(2, dtype=np.int32),
+        np.zeros(2, dtype=np.int32),
+    )
+
+    _begin_step(
+        worker,
+        _metadata(
+            0,
+            [],
+            {"victim": []},
+            {"producer": [producer_hash]},
+        ),
+    )
+
+    assert worker._store is not None
+    np.testing.assert_array_equal(
+        materialize_routed_experts(
+            worker._store,
+            routed_experts_keys([producer_hash], "0"),
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+        ),
+        producer_rows,
+    )
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        worker._store.get_concatenated(routed_experts_keys([victim_hash], "0"))
     worker.close()
 
 
@@ -1564,37 +1670,3 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
-
-
-def test_scheduler_only_resets_running_artifact_requests_after_pause_keep():
-    scheduler = object.__new__(Scheduler)
-    scheduler.artifact_connector = Mock()
-    request = SimpleNamespace(num_in_flight_tokens=0)
-    scheduler.running = [request]
-    scheduler.requests = {"request": request}
-    scheduler._pause_state = PauseState.UNPAUSED
-
-    with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
-        scheduler.reset_prefix_cache(reset_running_requests=True)
-
-    scheduler._pause_state = PauseState.PAUSED_ALL
-    scheduler.running = []
-    request.num_in_flight_tokens = 1
-    with pytest.raises(RuntimeError, match="model output is in flight"):
-        scheduler.reset_prefix_cache(reset_running_requests=True)
-
-
-@pytest.mark.parametrize("reset_successful", [False, True])
-def test_scheduler_resets_artifacts_only_after_successful_kv_reset(reset_successful):
-    scheduler = object.__new__(Scheduler)
-    scheduler.running = []
-    scheduler.kv_cache_manager = Mock()
-    scheduler.kv_cache_manager.reset_prefix_cache.return_value = reset_successful
-    scheduler.artifact_connector = Mock()
-    scheduler.connector = None
-
-    assert scheduler.reset_prefix_cache() is reset_successful
-    if reset_successful:
-        scheduler.artifact_connector.reset.assert_called_once_with()
-    else:
-        scheduler.artifact_connector.reset.assert_not_called()

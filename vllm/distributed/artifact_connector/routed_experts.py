@@ -187,6 +187,8 @@ def publish_routed_experts(
     *,
     batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
     block_size: int,
+    retain_keys: Sequence[str] = (),
+    release_keys: Sequence[str] = (),
 ) -> None:
     """Publish immutable full R3 blocks."""
     objects = []
@@ -209,4 +211,8 @@ def publish_routed_experts(
                     payload=array.tobytes(order="C"),
                 )
             )
-    store.put(objects)
+    store.put(
+        objects,
+        retain_keys=retain_keys,
+        release_keys=release_keys,
+    )
