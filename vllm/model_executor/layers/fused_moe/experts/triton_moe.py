@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
+    dispatch_fused_moe_kernel,
     invoke_fused_moe_triton_kernel,
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
@@ -213,7 +214,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace1 = (M, topk, max(activation_out_dim, K))
+        workspace1 = (M, topk, activation_out_dim)
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -567,6 +568,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
 
 class TritonWNA16Experts(TritonExperts):
+    allow_cuda_wna16 = False
+
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -610,6 +613,41 @@ class TritonWNA16Experts(TritonExperts):
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
+
+    def _invoke_wna16_kernel(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        c: torch.Tensor,
+        b_scale: torch.Tensor | None,
+        b_zp: torch.Tensor | None,
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        mul_routed_weight: bool,
+        top_k: int,
+        config: dict[str, int],
+        compute_type: tl.dtype,
+    ) -> None:
+        invoke_fused_moe_wna16_triton_kernel(
+            a,
+            b,
+            c,
+            b_scale,
+            b_zp,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            mul_routed_weight,
+            top_k,
+            config,
+            compute_type=compute_type,
+            use_int8_w8a16=self.quant_config.use_int8_w8a16,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            block_shape=self.block_shape,
         )
 
     def apply(
@@ -666,6 +704,7 @@ class TritonWNA16Experts(TritonExperts):
             self.quant_config.config_name(hidden_states.dtype),
             num_tokens,
             block_shape=self.block_shape,
+            allow_cuda_wna16=self.allow_cuda_wna16,
         )
 
         if hidden_states.dtype == torch.bfloat16:
@@ -696,7 +735,7 @@ class TritonWNA16Experts(TritonExperts):
             topk_ids, config["BLOCK_SIZE_M"], num_align_experts, expert_map
         )
 
-        invoke_fused_moe_wna16_triton_kernel(
+        self._invoke_wna16_kernel(
             hidden_states,
             w1,
             intermediate_cache1,
@@ -709,10 +748,7 @@ class TritonWNA16Experts(TritonExperts):
             False,  # mul_routed_weights
             top_k_num,
             config,
-            compute_type=compute_type,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            block_shape=self.block_shape,
+            compute_type,
         )
 
         self.activation(
@@ -729,7 +765,7 @@ class TritonWNA16Experts(TritonExperts):
             self.block_shape,
         )
 
-        invoke_fused_moe_wna16_triton_kernel(
+        self._invoke_wna16_kernel(
             qintermediate_cache2,
             w2,
             intermediate_cache3,
@@ -742,11 +778,69 @@ class TritonWNA16Experts(TritonExperts):
             not apply_router_weight_on_input,
             1,
             config,
-            compute_type=compute_type,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            block_shape=self.block_shape,
+            compute_type,
         )
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)
+
+
+class CudaOrTritonWNA16Experts(TritonWNA16Experts):
+    """WNA16 experts with shape-dependent CUDA/Triton dispatch."""
+
+    allow_cuda_wna16 = True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda()
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key in (
+            kInt4Static,
+            kInt4Static32,
+            kInt4StaticAsym,
+            kInt4Static32Asym,
+        )
+
+    def _invoke_wna16_kernel(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        c: torch.Tensor,
+        b_scale: torch.Tensor | None,
+        b_zp: torch.Tensor | None,
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        mul_routed_weight: bool,
+        top_k: int,
+        config: dict[str, int],
+        compute_type: tl.dtype,
+    ) -> None:
+        dispatch_fused_moe_kernel(
+            a,
+            b,
+            c,
+            None,
+            b_scale,
+            b_zp,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            mul_routed_weight,
+            top_k,
+            config,
+            compute_type=compute_type,
+            use_fp8_w8a8=False,
+            use_int8_w8a8=False,
+            use_int8_w8a16=self.quant_config.use_int8_w8a16,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            per_channel_quant=self.per_act_token_quant,
+            block_shape=self.block_shape,
+        )
