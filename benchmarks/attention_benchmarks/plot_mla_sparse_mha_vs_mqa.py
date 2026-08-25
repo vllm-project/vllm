@@ -99,7 +99,7 @@ def plot_curve(args: argparse.Namespace) -> None:
         if not points:
             raise ValueError(f"No paired pure-prefill results for TP{tp}")
         q_lens, ratios = zip(*points)
-        label = f"TP{tp} ({64 // tp} local heads)"
+        label = f"FlashMLA TP{tp} ({64 // tp} local heads)"
         (line,) = axis.plot(q_lens, ratios, marker="o", markersize=4, label=label)
         crossover = estimate_last_crossover(points)
         if crossover is None:
@@ -114,6 +114,33 @@ def plot_curve(args: argparse.Namespace) -> None:
             textcoords="offset points",
             color=line.get_color(),
         )
+
+    flashinfer_data = read_results(
+        args.input_dir / "tp8_flashinfer.csv",
+        args.input_dir / "tp8_flashinfer_extended.csv",
+    )
+    flashinfer_points = sorted(
+        (q_len, routes["mqa"] / routes["mha"])
+        for (q_len, seq_len), routes in flashinfer_data.items()
+        if q_len == seq_len
+        and set(routes) == {"mha", "mqa"}
+        and all(math.isfinite(value) for value in routes.values())
+    )
+    if flashinfer_points:
+        q_lens, ratios = zip(*flashinfer_points)
+        axis.plot(
+            q_lens,
+            ratios,
+            marker="s",
+            markersize=4,
+            linestyle="--",
+            label="FlashInfer TP8 (8 local heads)",
+        )
+        crossover = estimate_last_crossover(flashinfer_points)
+        if crossover is None:
+            print(f"FlashInfer TP8: no crossover through {q_lens[-1]} tokens")
+        else:
+            print(f"FlashInfer TP8: MHA -> MQA crossover at {crossover:.0f} tokens")
 
     axis.axhline(1, color="black", linewidth=1.2, linestyle="--")
     axis.set_xscale("log", base=2)
