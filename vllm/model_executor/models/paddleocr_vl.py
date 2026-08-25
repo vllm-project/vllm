@@ -882,7 +882,12 @@ class SiglipVisionTransformer(nn.Module):
 
 class SiglipVisionModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        # Skip the SigLIP attention pooling head and packing pos embedding
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+        # The SigLIP attention pooling head and packing pos embedding are
         # present in the checkpoint but absent from this vision tower.
         orig_to_new_substr={
             "head.attention": None,
@@ -890,11 +895,6 @@ class SiglipVisionModel(nn.Module):
             "head.mlp": None,
             "head.probe": None,
             "packing_position_embedding": None,
-        },
-        orig_to_new_stacked={
-            ".q_proj": (".qkv_proj", "q"),
-            ".k_proj": (".qkv_proj", "k"),
-            ".v_proj": (".qkv_proj", "v"),
         },
     )
 

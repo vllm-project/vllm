@@ -352,6 +352,7 @@ class AutoWeightsLoader:
         base_prefix: str,
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
+        applied_mappers: tuple["WeightsMapper", ...] = (),
     ) -> Iterable[str]:
         if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             return
@@ -374,10 +375,18 @@ class AutoWeightsLoader:
                     )
 
         # If the module has a `hf_to_vllm_mapper` attribute, apply it to the weights.
+        # Models commonly alias the backbone's mapper onto the outer class so that
+        # LoRA and quantization see the same names, which puts the same object on
+        # both. Applying it once per level would rewrite already-mapped names (e.g.
+        # a `.w1 -> .w13` stacked entry would go on to produce `.w133`), so skip a
+        # mapper that an ancestor already applied.
         if not callable(getattr(module, "load_weights", None)):
             module_mapper = getattr(module, "hf_to_vllm_mapper", None)
-            if module_mapper is not None:
+            if module_mapper is not None and not any(
+                m is module_mapper for m in applied_mappers
+            ):
                 weights = module_mapper.apply(weights)
+                applied_mappers = (*applied_mappers, module_mapper)
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
@@ -391,7 +400,7 @@ class AutoWeightsLoader:
 
             if child_prefix in child_modules:
                 yield from self._load_module(
-                    prefix, child_modules[child_prefix], child_weights
+                    prefix, child_modules[child_prefix], child_weights, applied_mappers
                 )
             elif child_prefix in child_params:
                 if self._can_skip(prefix):
@@ -453,6 +462,10 @@ class AutoWeightsLoader:
         # Ignore unexpected biases (typically from GPTQ models)
         self.ignore_unexpected_suffixes.append(".bias")
 
+        # A model that passes its own `hf_to_vllm_mapper` here has already applied
+        # it, so descendants sharing that object must not apply it again.
+        applied_mappers = () if mapper is None else (mapper,)
+
         mapper = mapper or WeightsMapper()
         # Many models store quant_config in the base model instead of the causal model.
         # We look at the causal model's direct children for this reason.
@@ -468,7 +481,9 @@ class AutoWeightsLoader:
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
-        autoloaded_weights = set(self._load_module("", self.module, weights))
+        autoloaded_weights = set(
+            self._load_module("", self.module, weights, applied_mappers)
+        )
         self._check_skipped_aliases(autoloaded_weights)
         return autoloaded_weights
 
