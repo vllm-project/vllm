@@ -37,6 +37,21 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
+
+
+def _fp8_context_gather_enabled() -> bool:
+    return os.environ.get(
+        "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER",
+        "0",
+    ).lower() in ("1", "true", "auto")
+
+
+def _uses_bf16_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype == "bfloat16" or (
+        kv_cache_dtype == "auto" and torch.get_default_dtype() == torch.bfloat16
+    )
+
+
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
@@ -68,7 +83,10 @@ if current_platform.is_rocm():
         v_cache_stride0,
         v_cache_stride1,
         v_cache_stride2,
+        KV_SCALE_STRIDE: tl.constexpr,
         DEQUANT: tl.constexpr,
+        QUANT: tl.constexpr,
+        FP8_MAX_VALUE: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
@@ -112,14 +130,27 @@ if current_platform.is_rocm():
             k_reg = tl.load(key_cache_ptr_offset + col_offsets)
             v_reg = tl.load(value_cache_ptr_offset + col_offsets)
             if DEQUANT:
-                k_scale = tl.load(k_scale_ptr)
-                v_scale = tl.load(v_scale_ptr)
+                k_scale = tl.load(k_scale_ptr + head_id * KV_SCALE_STRIDE)
+                v_scale = tl.load(v_scale_ptr + head_id * KV_SCALE_STRIDE)
                 k_reg = (k_reg.to(tl.float32) * k_scale).to(
                     key_ptr_offset.dtype.element_ty
                 )
                 v_reg = (v_reg.to(tl.float32) * v_scale).to(
                     value_ptr_offset.dtype.element_ty
                 )
+            elif QUANT:
+                k_scale = tl.load(k_scale_ptr + head_id * KV_SCALE_STRIDE)
+                v_scale = tl.load(v_scale_ptr + head_id * KV_SCALE_STRIDE)
+                k_reg = tl.clamp(
+                    k_reg.to(tl.float32) / k_scale,
+                    -FP8_MAX_VALUE,
+                    FP8_MAX_VALUE,
+                ).to(key_ptr_offset.dtype.element_ty)
+                v_reg = tl.clamp(
+                    v_reg.to(tl.float32) / v_scale,
+                    -FP8_MAX_VALUE,
+                    FP8_MAX_VALUE,
+                ).to(value_ptr_offset.dtype.element_ty)
             tl.store(key_ptr_offset + col_offsets, k_reg)
             tl.store(value_ptr_offset + col_offsets, v_reg)
 
@@ -166,11 +197,26 @@ if current_platform.is_rocm():
         dequant: bool,
         kv_cache_layout: str,
         total_tokens: int,
+        quantize: bool = False,
     ):
         assert kv_cache_layout in ["NHD", "SHUFFLE"], (
             "kv_cache_layout only supports NHD, SHUFFLE"
         )
+        assert not (dequant and quantize), (
+            "gather cache cannot quantize and dequantize simultaneously"
+        )
+        assert not quantize or kv_cache_layout == "NHD", (
+            "gather-time quantization only supports the NHD cache layout"
+        )
+        if quantize:
+            assert key_cache.dtype == value_cache.dtype == torch.bfloat16
+            assert key.dtype == value.dtype == current_platform.fp8_dtype()
         head_dim = key.shape[2]
+        kv_scale_stride = 0
+        if kv_cache_layout == "NHD" and (dequant or quantize):
+            assert k_scales.shape == v_scales.shape
+            assert k_scales.numel() in (1, key_cache.shape[2])
+            kv_scale_stride = int(k_scales.numel() > 1)
         x = 16 // key_cache.element_size()
         # assert dequant is True, "Currently, we only support "\
         # "gather cache with dequant"
@@ -209,7 +255,10 @@ if current_platform.is_rocm():
             v_strides[0],
             v_strides[1],
             v_strides[2],
+            KV_SCALE_STRIDE=kv_scale_stride,
             DEQUANT=dequant,
+            QUANT=quantize,
+            FP8_MAX_VALUE=torch.finfo(key.dtype).max,
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
             BLOCK_SIZE=head_dim,
@@ -449,17 +498,22 @@ class AiterFlashAttentionMetadataBuilder(
                 )
                 self.aot_sliding_window = sliding_window_config
 
-        direct_context_mode = os.environ.get(
-            "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER",
-            "0",
-        ).lower()
         self.direct_fp8_context_gather = (
             found_layer
             and supports_prequantized_qkv
-            and direct_context_mode in ("1", "true", "auto")
-            and is_quantized_kv_cache(self.cache_config.cache_dtype)
+            and _fp8_context_gather_enabled()
+            and (
+                is_quantized_kv_cache(self.cache_config.cache_dtype)
+                or kv_cache_spec.dtype == torch.bfloat16
+            )
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
+        if self.direct_fp8_context_gather:
+            logger.info_once(
+                "Using an FP8 context workspace for ROCm AITER chunked prefill "
+                "(KV cache dtype: %s)",
+                kv_cache_spec.dtype,
+            )
         workspace_dtype = (
             current_platform.fp8_dtype()
             if self.direct_fp8_context_gather
@@ -859,7 +913,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and self.logits_soft_cap == 0.0
             and self.sliding_window == (-1, -1)
             and self.sinks is None
-            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                or (
+                    _uses_bf16_kv_cache(self.kv_cache_dtype)
+                    and _fp8_context_gather_enabled()
+                )
+            )
         )
 
         if attn_type != AttentionType.DECODER:
@@ -1009,11 +1069,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
         token_to_batch = chunk_context_metadata.token_to_batch
         total_token_per_batch = chunk_context_metadata.total_token_per_batch
         key_fetched, value_fetched = workspace[0], workspace[1]
-        direct_fp8_context_gather = (
+        fp8_context_gather = (
             prequantized_qkv is not None
-            and is_quantized_kv_cache(self.kv_cache_dtype)
             and key_fetched.dtype == current_platform.fp8_dtype()
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+        quantize_context = fp8_context_gather and not is_quantized_kv_cache(
+            self.kv_cache_dtype
         )
         chunked_output = None
         chunked_lse = None
@@ -1031,19 +1093,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 seq_starts=chunk_starts[chunk_idx],
                 dequant=(
                     is_quantized_kv_cache(self.kv_cache_dtype)
-                    and not direct_fp8_context_gather
+                    and not fp8_context_gather
                 ),
                 kv_cache_layout="SHUFFLE"
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
                 total_tokens=total_token_per_batch[chunk_idx],
+                quantize=quantize_context,
             )
 
             chunk_query = query
             chunk_key = key_fetched
             chunk_value = value_fetched
             chunk_q_descale = chunk_k_descale = chunk_v_descale = None
-            if direct_fp8_context_gather:
+            if fp8_context_gather:
                 assert prequantized_qkv is not None
                 batch_size = cu_seqlens_q.numel() - 1
                 descale_shape = (batch_size, self.num_kv_heads)
@@ -1138,7 +1201,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if not self.supports_prequantized_qkv_input:
             raise ValueError(
                 "Prequantized QKV input requires gfx950, head size 256, "
-                "FP8 KV cache, full causal attention, and no sinks or soft cap"
+                "a supported KV cache, full causal attention, and no sinks "
+                "or soft cap"
             )
         return self._forward(
             layer,

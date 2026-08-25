@@ -177,10 +177,22 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
     )
 
 
-def test_aiter_backend_directly_gathers_fp8_context(monkeypatch):
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "cache_dtype", "expected_quantize"),
+    [
+        ("fp8", torch.float8_e4m3fn, False),
+        ("auto", torch.bfloat16, True),
+    ],
+)
+def test_aiter_backend_gathers_context_for_fp8_attention(
+    monkeypatch,
+    kv_cache_dtype,
+    cache_dtype,
+    expected_quantize,
+):
     impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
     impl.num_kv_heads = 1
-    impl.kv_cache_dtype = "fp8"
+    impl.kv_cache_dtype = kv_cache_dtype
     impl.scale = 1.0
     impl.sliding_window = (-1, -1)
     impl.alibi_slopes = None
@@ -251,8 +263,8 @@ def test_aiter_backend_directly_gathers_fp8_context(monkeypatch):
         query=query,
         key=key,
         value=value,
-        key_cache=torch.empty((1, 1, 1, 16)),
-        value_cache=torch.empty((1, 1, 1, 16)),
+        key_cache=torch.empty((1, 1, 1, 16), dtype=cache_dtype),
+        value_cache=torch.empty((1, 1, 1, 16), dtype=cache_dtype),
         output=torch.empty_like(query),
         cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
         max_seqlen_q=2,
@@ -267,6 +279,7 @@ def test_aiter_backend_directly_gathers_fp8_context(monkeypatch):
 
     assert gather_kwargs is not None
     assert gather_kwargs["dequant"] is False
+    assert gather_kwargs["quantize"] is expected_quantize
     assert len(attention_calls) == 2
     context_call = attention_calls[1]
     assert context_call["q"].data_ptr() == prequantized.query.data_ptr()
@@ -275,3 +288,45 @@ def test_aiter_backend_directly_gathers_fp8_context(monkeypatch):
     assert context_call["q_descale"] is prequantized.query_descale
     torch.testing.assert_close(context_call["k_descale"], k_scale.reshape(1, 1))
     torch.testing.assert_close(context_call["v_descale"], v_scale.reshape(1, 1))
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "model_dtype", "direct_context_gather", "expected"),
+    [
+        ("fp8", torch.bfloat16, False, True),
+        ("auto", torch.bfloat16, False, False),
+        ("auto", torch.bfloat16, True, True),
+        ("auto", torch.float16, True, False),
+        ("bfloat16", torch.float16, True, True),
+        ("float16", torch.bfloat16, True, False),
+    ],
+)
+def test_aiter_backend_prequantized_qkv_cache_support(
+    monkeypatch,
+    kv_cache_dtype,
+    model_dtype,
+    direct_context_gather,
+    expected,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.platforms.rocm",
+        SimpleNamespace(on_gfx950=lambda: True),
+    )
+    monkeypatch.setattr(torch, "get_default_dtype", lambda: model_dtype)
+    if direct_context_gather:
+        monkeypatch.setenv("VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER", "1")
+    else:
+        monkeypatch.delenv("VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER", raising=False)
+
+    impl = rocm_aiter_fa.AiterFlashAttentionImpl(
+        num_heads=16,
+        head_size=256,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+    assert impl.supports_prequantized_qkv_input is expected
