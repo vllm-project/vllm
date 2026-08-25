@@ -18,7 +18,7 @@ ActivationFn = Callable[[_T], _T]
 @dataclass(frozen=True)
 class PoolingParamsUpdate:
     requires_token_ids: bool = False
-    """Set this flag to enable prompt token IDs for your pooler."""
+    """Set this flag to enable CPU prompt token IDs for your pooler."""
 
     def __or__(self, other: "PoolingParamsUpdate") -> "PoolingParamsUpdate":
         return PoolingParamsUpdate(
