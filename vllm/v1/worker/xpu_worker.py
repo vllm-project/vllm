@@ -65,9 +65,7 @@ class XPUWorker(Worker):
             if parallel_config.data_parallel_external_lb:
                 if tp_pp_pcp_world_size < visible_device_count:
                     # A node can host multiple complete TP/PP/PCP replicas.
-                    local_dp_capacity = (
-                        visible_device_count // tp_pp_pcp_world_size
-                    )
+                    local_dp_capacity = visible_device_count // tp_pp_pcp_world_size
                 elif tp_pp_pcp_world_size == visible_device_count:
                     # A node hosts exactly one complete TP/PP/PCP replica.
                     local_dp_capacity = 1
@@ -90,9 +88,7 @@ class XPUWorker(Worker):
                             "exceeds the number of visible XPU devices "
                             f"({visible_device_count})."
                         )
-                    local_dp_capacity = (
-                        visible_device_count // tp_pp_pcp_world_size
-                    )
+                    local_dp_capacity = visible_device_count // tp_pp_pcp_world_size
                 dp_local_rank = parallel_config.data_parallel_index % local_dp_capacity
 
             self.local_rank += dp_local_rank * tp_pp_pcp_world_size
