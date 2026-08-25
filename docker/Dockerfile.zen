@@ -62,7 +62,7 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/test/cuda.in requirements/test/zen.in
 
 RUN sed -i '/mamba_ssm/d'                  requirements/test/zen.in && \
-    sed -i 's/^torch==.*/torch==2.11.0/g'  requirements/test/zen.in && \
+    sed -i 's/^torch==.*/torch==2.13.0/g'  requirements/test/zen.in && \
     sed -i 's/torchaudio.*/torchaudio/g'   requirements/test/zen.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/test/zen.in && \
     # zentorch parity: keep sentence-transformers pinned where vllm-test-deps did.
