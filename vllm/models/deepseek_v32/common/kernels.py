@@ -561,9 +561,14 @@ def fused_norm_rope(
     if pcp_world_size > 1:
         if mla_peer_ptrs is None or mla_peer_ptrs.numel() != pcp_world_size:
             raise ValueError("mla_peer_ptrs must have one pointer per PCP rank")
-        if has_indexer and indexer_k_cache is not None:
-            if indexer_peer_ptrs is None or indexer_peer_ptrs.numel() != pcp_world_size:
-                raise ValueError("indexer_peer_ptrs must have one pointer per PCP rank")
+        if (
+            has_indexer
+            and indexer_k_cache is not None
+            and (
+                indexer_peer_ptrs is None or indexer_peer_ptrs.numel() != pcp_world_size
+            )
+        ):
+            raise ValueError("indexer_peer_ptrs must have one pointer per PCP rank")
     if mla_peer_ptrs is None:
         mla_peer_ptrs = torch.zeros(1, dtype=torch.int64, device=device)
     if indexer_peer_ptrs is None:

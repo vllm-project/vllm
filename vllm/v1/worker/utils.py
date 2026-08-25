@@ -386,7 +386,8 @@ def allocate_kv_cache(
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
-    groups overlay each other, so tensors may address the same bytes.
+    groups overlay each other, so tensors may address the same bytes. Callers may
+    provide a custom allocator for the single backing buffer.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
