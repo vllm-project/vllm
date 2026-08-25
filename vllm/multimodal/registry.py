@@ -20,6 +20,10 @@ from .cache import (
     ShmObjectStoreReceiverCache,
     ShmObjectStoreSenderCache,
 )
+from .mooncake_cache import (
+    MooncakeProcessorReceiverCache,
+    MooncakeProcessorSenderCache,
+)
 from .processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -275,7 +279,7 @@ class MultiModalRegistry:
     def _get_cache_type(
         self,
         vllm_config: "VllmConfig",
-    ) -> Literal[None, "processor_only", "lru", "shm"]:
+    ) -> Literal[None, "processor_only", "lru", "shm", "mooncake"]:
         model_config = vllm_config.model_config
         if not self.supports_multimodal_inputs(model_config):
             return None
@@ -284,6 +288,13 @@ class MultiModalRegistry:
         mm_config = model_config.get_multimodal_config()
         if mm_config.mm_processor_cache_gb <= 0:
             return None
+
+        cache_type = mm_config.mm_processor_cache_type
+
+        # A shared store is addressed by hash rather than mirrored against one
+        # engine process, so it does not need the IPC shadow to line up.
+        if cache_type == "mooncake":
+            return cache_type
 
         # Check if IPC caching is supported.
         parallel_config = vllm_config.parallel_config
@@ -295,8 +306,7 @@ class MultiModalRegistry:
         if not is_ipc_supported:
             return "processor_only"
 
-        mm_config = model_config.get_multimodal_config()
-        return mm_config.mm_processor_cache_type
+        return cache_type
 
     def processor_cache_from_config(
         self,
@@ -312,6 +322,8 @@ class MultiModalRegistry:
             return MultiModalProcessorSenderCache(vllm_config.model_config)
         elif cache_type == "shm":
             return ShmObjectStoreSenderCache(vllm_config)
+        elif cache_type == "mooncake":
+            return MooncakeProcessorSenderCache(vllm_config.model_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -336,6 +348,8 @@ class MultiModalRegistry:
             return None
         elif cache_type == "lru":
             return MultiModalReceiverCache(vllm_config.model_config)
+        elif cache_type == "mooncake":
+            return MooncakeProcessorReceiverCache(vllm_config.model_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -346,7 +360,7 @@ class MultiModalRegistry:
     ) -> BaseMultiModalReceiverCache | None:
         """Return a `BaseMultiModalReceiverCache` for the worker process."""
         cache_type = self._get_cache_type(vllm_config)
-        if cache_type in (None, "processor_only", "lru"):
+        if cache_type in (None, "processor_only", "lru", "mooncake"):
             return None
         elif cache_type == "shm":
             return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)

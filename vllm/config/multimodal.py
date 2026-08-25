@@ -65,7 +65,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 
 MMEncoderTPMode = Literal["weights", "data"]
-MMCacheType = Literal["shm", "lru"]
+MMCacheType = Literal["shm", "lru", "mooncake"]
 VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
 MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]
@@ -163,7 +163,10 @@ class MultiModalConfig:
     Set to `0` to disable this cache completely (not recommended)."""
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
-    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache. If
+    `mooncake`, use a Mooncake object store shared across processes and nodes,
+    configured through the `mm_processor_cache` section of the JSON file named
+    by `MOONCAKE_CONFIG_PATH`."""
     mm_hasher_algorithm: MMHasherAlgorithm = Field(
         default_factory=_get_mm_hasher_algorithm
     )
