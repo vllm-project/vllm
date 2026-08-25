@@ -10,6 +10,9 @@ path.
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     can_use_fused_kda_chunk,
     fused_kda_chunk,
@@ -42,6 +45,9 @@ def chunk_kda_prefill(
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
     checkpoint_state_indices: torch.Tensor | None = None,
+    state_cache: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run chunk KDA from raw gate and beta projections.
 
@@ -57,6 +63,11 @@ def chunk_kda_prefill(
         checkpoint_offsets: per-sequence token offset to snapshot at, ``0``
             for none.
         checkpoint_state_indices: optional per-sequence destination row.
+        state_cache: the paged recurrent state. When given, the fused backend
+            reads and writes it in place and neither a gather nor a scatter is
+            needed around this call; the returned final state is ``None``.
+        state_indices: per-sequence cache row.
+        has_initial_state: per-sequence flag; false starts from a zero state.
 
     Returns:
         The output and, when requested, the final recurrent state.
@@ -78,9 +89,26 @@ def chunk_kda_prefill(
 
     if checkpoint_offsets is not None and not fused:
         raise NotImplementedError(
-            "The KDA prefill checkpoint export needs kda_prefill_backend=fused for "
-            "ROCm"
+            "The KDA prefill checkpoint export needs kda_prefill_backend=fused for ROCm"
         )
+    # Checked here rather than in the backend so both paths reject the same
+    # arguments.
+    if state_cache is not None:
+        if initial_state is not None or output_final_state:
+            raise ValueError("state_cache replaces initial_state/output_final_state")
+        if state_indices is None or has_initial_state is None:
+            raise ValueError("state_cache needs state_indices and has_initial_state")
+
+    # Only the fused walk addresses the paged rows directly. The Triton path
+    # gathers the rows it needs and scatters the results back here, so callers
+    # pass the cache the same way for either backend.
+    scatter_to: torch.Tensor | None = None
+    if state_cache is not None and not fused:
+        initial_state = gather_initial_states(
+            state_cache, state_indices, has_initial_state
+        )
+        output_final_state = True
+        scatter_to, state_cache = state_cache, None
 
     if fused:
         # Restated for the type checker; `fused` already implies all three.
@@ -119,6 +147,9 @@ def chunk_kda_prefill(
             checkpoint_state=checkpoint_state,
             checkpoint_offsets=checkpoint_offsets,
             checkpoint_state_indices=checkpoint_state_indices,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
         )
 
     o, final_state = chunk_kda_with_fused_gate(
@@ -141,4 +172,8 @@ def chunk_kda_prefill(
     if out is not None and o.data_ptr() != out.data_ptr():
         out.copy_(o)
         o = out
+    if scatter_to is not None:
+        assert state_indices is not None
+        scatter_to[state_indices.long()] = final_state
+        return o, None
     return o, final_state

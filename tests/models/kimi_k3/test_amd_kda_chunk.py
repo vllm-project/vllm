@@ -602,3 +602,203 @@ def test_triton_fallback_refuses_a_checkpoint_export() -> None:
             checkpoint_state=_checkpoint_buffer(1),
             checkpoint_offsets=torch.tensor([64], device="cuda", dtype=torch.int32),
         )
+
+
+# ---------------------------------------------------------------------------
+# Paged recurrent state
+#
+# Each sequence reads its initial state from a row of the paged cache and
+# writes its final state back to the same row. These check that the result
+# matches the dense initial_state/final_state pair, that a sequence marked
+# cold starts from zeros rather than from whatever its row held, and that rows
+# no sequence owns are left untouched.
+# ---------------------------------------------------------------------------
+
+
+def _paged_cache(inp: dict, warm: list[bool], rows: list[int], slots: int):
+    """A cache holding each sequence's h0 at its row, a fill pattern elsewhere."""
+    cache = torch.full(
+        (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
+        -7.0,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    idx = torch.tensor(rows, device="cuda", dtype=torch.int32)
+    for n, row in enumerate(rows):
+        # A cold row keeps its fill pattern, which must not reach the walk.
+        if warm[n]:
+            cache[row] = inp["h0"][n]
+    return cache, idx, torch.tensor(warm, device="cuda", dtype=torch.bool)
+
+
+def _run_paged(inp: dict, cache, idx, warm, use_fused: bool, **kw):
+    from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
+
+    return chunk_kda_prefill(
+        q=inp["q"].clone(),
+        k=inp["k"].clone(),
+        v=inp["v"].clone(),
+        raw_g=inp["raw_g"].clone(),
+        raw_beta=inp["raw_beta"],
+        A_log=inp["A_log"],
+        g_bias=inp["dt_bias"],
+        lower_bound=LOWER_BOUND,
+        state_cache=cache,
+        state_indices=idx,
+        has_initial_state=warm,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=inp["cu"],
+        use_fused_chunk=use_fused,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize("use_fused", [False, True])
+@pytest.mark.parametrize("seqlens", [[512], [2048], [320, 64], [513, 64, 1]])
+def test_paged_state_matches_the_dense_pair(
+    use_fused: bool, seqlens: list[int]
+) -> None:
+    """A paged cache must give the same result as the dense pair."""
+    _requires_kernel()
+    inp = _inputs(seqlens, seed=11)
+    n = len(seqlens)
+    rows = [3 * i + 5 for i in range(n)]
+    cache, idx, warm = _paged_cache(inp, [True] * n, rows, slots=3 * n + 12)
+    before = cache.clone()
+
+    o_ref, ht_ref = _run(inp, use_fused=use_fused)
+    o_got, ht_got = _run_paged(inp, cache, idx, warm, use_fused=use_fused)
+
+    assert ht_got is None, "the final state is in the cache, not returned"
+    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+
+    untouched = torch.ones(cache.shape[0], dtype=torch.bool, device="cuda")
+    untouched[idx.long()] = False
+    assert torch.equal(cache[untouched], before[untouched]), (
+        "a row no sequence owns was written"
+    )
+
+
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_cold_rows_start_from_zero_not_from_cache_junk(use_fused: bool) -> None:
+    """`has_initial_state=False` must ignore whatever the row already holds."""
+    _requires_kernel()
+    seqlens = [256, 256, 256]
+    inp = _inputs(seqlens, seed=12)
+    warm = [True, False, True]
+    rows = [4, 9, 1]
+    cache, idx, warm_t = _paged_cache(inp, warm, rows, slots=16)
+
+    # The dense reference zeroes exactly the cold sequences' initial states.
+    ref = dict(inp)
+    ref["h0"] = inp["h0"].clone()
+    ref["h0"][1] = 0.0
+    o_ref, ht_ref = _run(ref, use_fused=use_fused)
+    o_got, _ = _run_paged(inp, cache, idx, warm_t, use_fused=use_fused)
+
+    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.parametrize("groups", [2, 4])
+def test_paged_state_survives_the_group_split(groups: int, monkeypatch) -> None:
+    """At G>1 the read and the write are different blocks of one launch."""
+    _requires_kernel()
+    _force_groups(monkeypatch, groups)
+    inp = _inputs([1024, 512], seed=13)
+    rows = [6, 2]
+    cache, idx, warm = _paged_cache(inp, [True, True], rows, slots=12)
+
+    o_ref, ht_ref = _run(inp, use_fused=True)
+    o_got, _ = _run_paged(inp, cache, idx, warm, use_fused=True)
+
+    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+
+
+def test_paged_state_and_checkpoint_export_together() -> None:
+    """The checkpoint lands in its own row while the walk owns the state row."""
+    _requires_kernel()
+    inp = _inputs([1024], seed=14)
+    cache, idx, warm = _paged_cache(inp, [True], [3], slots=12)
+    ckidx = torch.tensor([8], device="cuda", dtype=torch.int32)
+
+    o_ref, ht_ref = _run(inp, use_fused=True)
+    prefix = _prefix_inputs(inp, 0, 512)
+    _, ck_ref = _run(prefix, use_fused=True)
+
+    o_got, _ = _run_paged(
+        inp,
+        cache,
+        idx,
+        warm,
+        use_fused=True,
+        checkpoint_state=cache,
+        checkpoint_offsets=torch.tensor([512], device="cuda", dtype=torch.int32),
+        checkpoint_state_indices=ckidx,
+    )
+    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[ckidx.long()], ck_ref, rtol=5e-3, atol=5e-3)
+
+
+def test_paged_state_rejects_a_dense_initial_state() -> None:
+    """The two ways of passing the state are mutually exclusive."""
+    _requires_kernel()
+    inp = _inputs([256], seed=15)
+    cache, idx, warm = _paged_cache(inp, [True], [1], slots=4)
+    with pytest.raises(ValueError, match="replaces initial_state"):
+        _run_paged(
+            inp,
+            cache,
+            idx,
+            warm,
+            use_fused=True,
+            initial_state=inp["h0"].clone(),
+        )
+
+
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
+    """A mamba page may pad stride(0); only each state row is dense.
+
+    The real `recurrent_state` is not a contiguous tensor, so a kernel that
+    assumes a packed ``H * V * K`` row stride addresses the wrong rows. The
+    other cases in this file all build a contiguous cache, which cannot
+    exercise that.
+    """
+    _requires_kernel()
+    seqlens = [1024, 512]
+    inp = _inputs(seqlens, seed=21)
+    n = len(seqlens)
+    row = NUM_HEADS * HEAD_DIM * HEAD_DIM
+    slots, pad = 16, 512
+    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=torch.float32)
+    cache = raw.as_strided(
+        (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
+        (row + pad, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
+    )
+    assert not cache.is_contiguous() and cache[0].is_contiguous()
+
+    rows = [11, 3]
+    idx = torch.tensor(rows, device="cuda", dtype=torch.int32)
+    warm = torch.ones(n, dtype=torch.bool, device="cuda")
+    for i, r in enumerate(rows):
+        cache[r] = inp["h0"][i]
+    before = raw.clone()
+
+    o_ref, ht_ref = _run(inp, use_fused=use_fused)
+    o_got, ht_got = _run_paged(inp, cache, idx, warm, use_fused=use_fused)
+
+    assert ht_got is None
+    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+
+    # The padding between rows, and every unowned row, must be untouched.
+    untouched = torch.ones(slots, dtype=torch.bool, device="cuda")
+    untouched[idx.long()] = False
+    assert torch.equal(raw[untouched], before[untouched])
+    assert torch.equal(raw[idx.long(), row:], before[idx.long(), row:]), (
+        "the kernel wrote into the inter-row padding"
+    )

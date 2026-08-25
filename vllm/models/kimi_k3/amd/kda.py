@@ -35,9 +35,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
-    gather_initial_states,
-)
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
@@ -552,14 +549,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     prefill_has_initial_state = has_initial_state
                     nd_tok = 0
 
-                initial_state = gather_initial_states(
-                    recurrent_state,
-                    prefill_state_indices,
-                    prefill_has_initial_state,
-                )
                 (
                     core_attn_out_non_spec,
-                    last_recurrent_state,
+                    _,
                 ) = chunk_kda_prefill(
                     q=q_ns,
                     k=k_ns,
@@ -569,8 +561,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     A_log=self.A_log,
                     g_bias=self.dt_bias,
                     lower_bound=self.gate_lower_bound,
-                    initial_state=initial_state,
-                    output_final_state=True,
+                    state_cache=recurrent_state,
+                    state_indices=prefill_state_indices,
+                    has_initial_state=prefill_has_initial_state,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
@@ -578,8 +571,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     use_fused_chunk=use_fused_chunk,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                 )
-                # Init cache
-                recurrent_state[prefill_state_indices] = last_recurrent_state
+                # chunk_kda_prefill updates `recurrent_state` in place, so
+                # there is no final state to write back here.
 
                 if direct:
                     # Both slices already landed in core_attn_out.

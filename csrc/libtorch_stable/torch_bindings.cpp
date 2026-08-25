@@ -554,7 +554,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor cu_seqlens, Tensor chunk_offsets, float scale, "
       "Tensor(b!)? group_state, int groups, "
       "Tensor(c!)? checkpoint_state=None, Tensor? checkpoint_offsets=None, "
-      "Tensor? checkpoint_state_indices=None) -> ()");
+      "Tensor? checkpoint_state_indices=None, Tensor(d!)? state_cache=None, "
+      "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

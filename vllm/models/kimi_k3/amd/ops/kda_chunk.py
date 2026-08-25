@@ -205,6 +205,9 @@ def fused_kda_chunk(
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
     checkpoint_state_indices: torch.Tensor | None = None,
+    state_cache: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run the chunk recurrence and the output projection in one launch.
 
@@ -225,7 +228,23 @@ def fused_kda_chunk(
             rather than rely on the store happening.
         checkpoint_state_indices: optional int32 ``[N]`` destination row per
             sequence. A negative row disables the export for that sequence.
+        state_cache: the paged recurrent state, fp32
+            ``[slots, H, 128, 128]``. When given, the walk reads sequence
+            ``n``'s initial state from row ``state_indices[n]`` and writes its
+            final state back to the same row, which removes the gather and the
+            scatter that otherwise bracket this kernel. Replaces
+            ``initial_state`` / ``output_final_state``, and the returned final
+            state is then ``None`` because it is already in the cache.
+        state_indices: int32 ``[N]`` cache row per sequence.
+        has_initial_state: bool ``[N]``; a false entry starts that sequence
+            from a zero state and its cache row is read only, never before the
+            walk writes it.
     """
+    if state_cache is not None:
+        if initial_state is not None or output_final_state:
+            raise ValueError("state_cache replaces initial_state/output_final_state")
+        if state_indices is None or has_initial_state is None:
+            raise ValueError("state_cache needs state_indices and has_initial_state")
     num_seqs = cu_seqlens.numel() - 1
     final_state = None
     if output_final_state:
@@ -268,5 +287,8 @@ def fused_kda_chunk(
         None
         if checkpoint_state_indices is None
         else checkpoint_state_indices.to(torch.int32),
+        state_cache,
+        None if state_indices is None else state_indices.to(torch.int32),
+        has_initial_state,
     )
     return out, final_state
