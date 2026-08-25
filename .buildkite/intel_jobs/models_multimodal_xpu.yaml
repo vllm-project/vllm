@@ -24,7 +24,8 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
+    'pip install av &&
+    cd tests &&
     pytest -v -s models/multimodal/generation/test_common.py -m core_model -k qwen2 || true &&
     pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model || true'
 - label: 'Multi-Modal Models (Standard) 2: qwen3 + gemma'
@@ -131,7 +132,9 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
+    'pip install av matplotlib ftfy &&
+    pip install open-clip-torch --no-deps &&
+    cd tests &&
     pytest -v -s models/multimodal/processing/test_tensor_schema.py || true'
 - label: Multi-Modal Accuracy Eval (Small Models)
   device: intel_gpu
@@ -179,7 +182,8 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
+    'pip install av matplotlib ftfy &&
+    cd tests &&
     pytest -v -s models/multimodal/generation -m not core_model --ignore models/multimodal/generation/test_common.py || true &&
     pytest -v -s models/multimodal/test_mapping.py || true'
 - label: Multi-Modal Models (PPL)
@@ -272,5 +276,6 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
+    'pip install av matplotlib ftfy &&
+    cd tests &&
     pytest -v -s models/multimodal/pooling -m not core_model || true'

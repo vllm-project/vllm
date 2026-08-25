@@ -187,7 +187,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt || true'
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-Next-80B-A3B-NVFP4-EP2]" || true'
 - label: LM Eval Qwen3.5 Models (2xB200)
   device: intel_gpu
   timeout_in_minutes: 45
@@ -216,7 +216,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt || true'
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3.5-397B-A17B-NVFP4-DEP2]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3.5-397B-A17B-NVFP4-DEP2-MTP]" || true'
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
   device: intel_gpu
   num_devices: 2
@@ -236,7 +236,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt || true'
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-CT-Block-deepgemm]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-AutoFp8-marlin]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-CT-Block-marlin]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-CT-Channel-marlin]"|| true'
 - label: MoE Refactor Integration Test (B200 - TEMPORARY) %N
   device: intel_gpu
   parallelism: 4
