@@ -1849,15 +1849,11 @@ def test_compute_num_cpu_blocks_uses_heaviest_worker() -> None:
     light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
     heavy = _make_kv_cache_config(num_gpu_blocks, num_groups=2)
 
-    heavy_only = SimpleCPUOffloadScheduler.compute_num_cpu_blocks(
-        [heavy], cpu_capacity
-    )
+    heavy_only = SimpleCPUOffloadScheduler.compute_num_cpu_blocks([heavy], cpu_capacity)
     aligned = SimpleCPUOffloadScheduler.compute_num_cpu_blocks(
         [light, heavy], cpu_capacity
     )
-    light_only = SimpleCPUOffloadScheduler.compute_num_cpu_blocks(
-        [light], cpu_capacity
-    )
+    light_only = SimpleCPUOffloadScheduler.compute_num_cpu_blocks([light], cpu_capacity)
 
     assert aligned == heavy_only
     assert aligned < light_only

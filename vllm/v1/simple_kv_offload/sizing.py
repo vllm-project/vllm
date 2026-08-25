@@ -84,9 +84,7 @@ def sync_num_offload_blocks_across_workers(num_offload_blocks: int) -> int:
     if world_group.world_size <= 1:
         return num_offload_blocks
 
-    blocks_tensor = torch.tensor(
-        [num_offload_blocks], dtype=torch.int64, device="cpu"
-    )
+    blocks_tensor = torch.tensor([num_offload_blocks], dtype=torch.int64, device="cpu")
     dist.all_reduce(blocks_tensor, group=world_group.cpu_group, op=dist.ReduceOp.MIN)
     synced = int(blocks_tensor.item())
     if synced != num_offload_blocks:

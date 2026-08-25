@@ -149,7 +149,9 @@ class Executor(ABC):
         return self.collective_rpc("determine_available_memory")
 
     def get_simple_cpu_offload_num_blocks(self) -> int | None:
-        values = self.collective_rpc("get_simple_cpu_offload_num_cpu_blocks")
+        values: list[int | None] = self.collective_rpc(
+            "get_simple_cpu_offload_num_cpu_blocks"
+        )
         nums = [value for value in values if value is not None]
         if not nums:
             return None

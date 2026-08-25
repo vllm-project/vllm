@@ -163,9 +163,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
                 kv_cache_config, vllm_config
             )
-            worker_kv_cache_configs = (
-                vllm_config.cache_config.worker_kv_cache_configs
-            )
+            worker_kv_cache_configs = vllm_config.cache_config.worker_kv_cache_configs
             aligned_num_cpu_blocks = (
                 vllm_config.cache_config.simple_cpu_offload_num_blocks
             )
