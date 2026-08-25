@@ -85,6 +85,11 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 ARG VLLM_BUILD_VERSION=0.0.0.dev0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_BUILD_VERSION}
 
+# 记录本镜像中 Router GEMM / vLLM 代码的来源。GitLab CI 传当前
+# CI_COMMIT_SHA；Router GEMM 是 vLLM 源码的一部分，没有独立 Git 仓库。
+ARG VLLM_SOURCE_SHA=
+ENV VLLM_SOURCE_SHA=${VLLM_SOURCE_SHA}
+
 # 注意: 不要用 /workspace 作为 WORKDIR — GitLab k8s runner 的 CI_PROJECT_DIR
 # 也是 /workspace, CI 里 kaniko 用 --ignore-path=/workspace 保护 runner 挂载卷,
 # 这会连带把镜像内 /workspace 下的编辑模式安装源码也从最终 layer 剔除,
@@ -92,10 +97,11 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_BUILD_VERSION}
 WORKDIR /vllm-workspace
 COPY . vllm/
 
-# 内部 GitLab 凭证 (base 阶段就需要, 见下方 RUN 的说明)。
-# GITLAB_TOKEN 由 .gitlab-ci.yml 经 --build-arg 注入; 无默认值, 未配置直接构建失败。
-ARG INTERNAL_GITLAB_HOST=gitlab-cn-beijing.siflow.cn
+# 内部 GitLab 凭证和 FA 源码版本 (base 阶段就需要)。
+# 全部由 .gitlab-ci.yml 经 --build-arg 注入；仓库地址/ref 不在镜像定义中默认。
 ARG GITLAB_TOKEN=
+ARG VLLM_FLASH_ATTN_GIT_REPO
+ARG VLLM_FLASH_ATTN_GIT_REF
 
 # vLLM 官方 "use an existing PyTorch installation" 流程:
 # use_existing_torch.py 去掉 requirements 里的 torch 钉版 → 复用镜像自带 torch;
@@ -103,27 +109,35 @@ ARG GITLAB_TOKEN=
 # --system: 装进镜像自带的系统 python (Ubuntu 24.04 /usr/bin/python3, PEP 668)
 #
 # 为什么这一步需要 GITLAB_TOKEN:
-#   cmake/external_projects/vllm_flash_attn.cmake 把 vllm-flash-attn 指向内部仓库
-#   ubiq-kernels/inference/flash-attention (visibility=internal)。这个 clone 由 CMake
-#   FetchContent 在 pip install 内部发起, URL 硬编码在 .cmake 里, 没有插入凭证的入口,
+#   cmake/external_projects/vllm_flash_attn.cmake 会从
+#   VLLM_FLASH_ATTN_GIT_REPO 拉取固定的 VLLM_FLASH_ATTN_GIT_REF。这个 clone 由 CMake
+#   FetchContent 在 pip install 内部发起，
 #   匿名 clone 必然失败: "fatal: could not read Username ... No such device or address"。
-#   用 git 的 url.<带 token 地址>.insteadOf 重写, 让 git 自己补凭证 —— .cmake 里的
-#   URL 与 commit 一个字都不用改, 开发者本地非 docker 构建 (走自己的 git 凭证) 也不受影响。
+#   用 git 的 url.<带 token 地址>.insteadOf 重写，让 git 自己补凭证。
 #
 # 凭证不落盘到镜像:
 #   kaniko 不支持 BuildKit 的 secret mount, 只能走 build-arg。这里用 GIT_CONFIG_GLOBAL
 #   把"全局" git 配置重定向到临时文件 (不碰 /root/.gitconfig), RUN 结束无论成败都删掉,
 #   token 不会残留在任何镜像层里 (镜像层是叠加的, 后续层 rm 掉也仍能从前面层提取)。
 RUN cd vllm && \
-    : "${GITLAB_TOKEN:?GITLAB_TOKEN is required (set in GitLab CI/CD Variables): vllm-flash-attn 来自 internal 仓库 ${INTERNAL_GITLAB_HOST}/ubiq-kernels/inference/flash-attention, 匿名 clone 必然失败}" && \
+    : "${GITLAB_TOKEN:?GITLAB_TOKEN is required (set in GitLab CI/CD Variables): vllm-flash-attn 来自 internal 仓库，匿名 clone 必然失败}" && \
+    : "${VLLM_FLASH_ATTN_GIT_REPO:?VLLM_FLASH_ATTN_GIT_REPO is required (set in GitLab CI/CD Variables)}" && \
+    : "${VLLM_FLASH_ATTN_GIT_REF:?VLLM_FLASH_ATTN_GIT_REF is required (set in GitLab CI/CD Variables)}" && \
+    flash_attn_gitlab_host="${VLLM_FLASH_ATTN_GIT_REPO#https://}" && \
+    flash_attn_gitlab_host="${flash_attn_gitlab_host%%/*}" && \
+    test -n "${flash_attn_gitlab_host}" && \
+    export VLLM_FLASH_ATTN_GIT_REPO VLLM_FLASH_ATTN_GIT_REF && \
     export GIT_CONFIG_GLOBAL=/tmp/.gitconfig.build && \
     git config --global \
-        url."https://oauth2:${GITLAB_TOKEN}@${INTERNAL_GITLAB_HOST}/".insteadOf \
-        "https://${INTERNAL_GITLAB_HOST}/" && \
+        url."https://oauth2:${GITLAB_TOKEN}@${flash_attn_gitlab_host}/".insteadOf \
+        "https://${flash_attn_gitlab_host}/" && \
     python use_existing_torch.py && \
     uv pip install --system -r requirements/build.txt && \
     uv pip install --system --no-build-isolation -e . -v; \
     rc=$?; rm -f /tmp/.gitconfig.build; exit $rc
+
+# 与 !70 前 SiFlow 验证镜像一致，在运行时保留 FA 构建 SHA 供核验。
+ENV FA3_BUILD_SHA=${VLLM_FLASH_ATTN_GIT_REF}
 
 # 让 pip show/pip list 与 vllm.__version__ 直接显示构建来源, 而非 setuptools_scm 的
 # 0.0.0.dev0+... 格式。base 阶段写入 "base(<commit>)"; release 阶段(update) 会在其后
@@ -135,8 +149,8 @@ RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python vllm/docker/stamp_vllm_versio
     else echo "VLLM_VERSION_STAMP 未设置, 保持 setuptools_scm 生成的版本"; fi
 
 # 注: 内部 pretrain/transformers 已挪到 Dockerfile.update (与 lmcache 同层, 便于按需
-# 更新分支/commit 而不必重建 base)。base 内需要 GITLAB_TOKEN 的只有 vllm-flash-attn
-# (internal 仓库, 见上方 pip install 那步); hpc-ops 目前是 public, 匿名 clone 即可。
+# 更新分支/commit 而不必重建 base)。base 内 FA 和 hpc-ops 均可以指向
+# internal/private 仓库，两个 clone 层都使用临时 git config 注入 GITLAB_TOKEN。
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 额外推理加速 / 调试组件: py-spy, instanttensor, hpc-ops, DeepGEMM, DeepEP(+pplx)
@@ -156,9 +170,19 @@ ARG HPC_OPS_GIT_REPO
 ARG HPC_OPS_GIT_REF
 RUN : "${HPC_OPS_GIT_REPO:?HPC_OPS_GIT_REPO is required (set in GitLab CI/CD Variables)}" && \
     : "${HPC_OPS_GIT_REF:?HPC_OPS_GIT_REF is required (set in GitLab CI/CD Variables)}" && \
+    : "${GITLAB_TOKEN:?GITLAB_TOKEN is required for the configured hpc-ops repository}" && \
+    hpc_ops_gitlab_host="${HPC_OPS_GIT_REPO#https://}" && \
+    hpc_ops_gitlab_host="${hpc_ops_gitlab_host%%/*}" && \
+    test -n "${hpc_ops_gitlab_host}" && \
+    export GIT_CONFIG_GLOBAL=/tmp/.gitconfig.hpc-ops-build && \
+    git config --global \
+        url."https://oauth2:${GITLAB_TOKEN}@${hpc_ops_gitlab_host}/".insteadOf \
+        "https://${hpc_ops_gitlab_host}/" && \
     VLLM_DOCKER_BUILD_CONTEXT=1 bash vllm/tools/install_hpc_ops.sh \
         --repo "${HPC_OPS_GIT_REPO}" \
-        --ref "${HPC_OPS_GIT_REF}"
+        --ref "${HPC_OPS_GIT_REF}"; \
+    rc=$?; rm -f /tmp/.gitconfig.hpc-ops-build; exit $rc
+ENV HPC_OPS_BUILD_SHA=${HPC_OPS_GIT_REF}
 
 # deep* kernel 仅支持 Hopper/Blackwell, 编译 arch 覆盖为 9.0a/10.0a
 # (与官方 docker/Dockerfile 一致; base 默认的 "8.9 ..." 含 Ada, DeepEP 不支持)
@@ -166,11 +190,13 @@ ARG DEEP_KERNELS_CUDA_ARCH="9.0a 10.0a"
 
 # DeepGEMM (deepseek-ai): 复用仓库自带脚本从源码编译并装进系统 python。
 # VLLM_DOCKER_BUILD_CONTEXT=1 让脚本走 `uv pip install --system`;
-# CUDA 版本由脚本按 nvcc 自动探测; ref 留空则用脚本内置默认 commit。
-ARG DEEPGEMM_GIT_REF=
-RUN VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}" \
+# CUDA 版本由脚本按 nvcc 自动探测；ref 由 CI/CD Variable 强制传入。
+ARG DEEPGEMM_GIT_REF
+RUN : "${DEEPGEMM_GIT_REF:?DEEPGEMM_GIT_REF is required (set in GitLab CI/CD Variables)}" && \
+    VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="${DEEP_KERNELS_CUDA_ARCH}" \
     bash vllm/tools/install_deepgemm.sh \
-        ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
+        --ref "${DEEPGEMM_GIT_REF}"
+ENV DEEPGEMM_BUILD_SHA=${DEEPGEMM_GIT_REF}
 
 # pplx-kernels + DeepEP (deepseek-ai): 复用仓库自带脚本源码编译 (--mode install)。
 # 脚本会下载 NVSHMEM 并从 github 克隆源码编译, 需构建机能访问外网。

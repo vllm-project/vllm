@@ -29,9 +29,8 @@
 #   Dockerfile 无默认值, 未配置直接构建失败:
 #   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected);
 #                         image-build clone transformers/lmcache/flashinfer 要用;
-#                         base-image-build 也要用 —— vllm-flash-attn 指向 internal 仓库
-#                         ubiq-kernels/inference/flash-attention, 由 CMake FetchContent
-#                         在 pip install 内部 clone, 没有凭证会 "could not read Username"。
+#                         base-image-build 的 FA 和 HPC 也可能指向 internal/private
+#                         仓库，没有凭证会 "could not read Username"。
 #                         ⚠️ 该变量若勾了 Protected, 要构建的分支必须是 Protected branch,
 #                         否则 job 里拿到空值, Dockerfile 会直接报错退出。
 #   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git (必填)
@@ -42,10 +41,17 @@
 #   LMCACHE_COMMIT        commit hash
 #     LMCACHE_BRANCH / LMCACHE_COMMIT 至少配一个, 都空报错;
 #     两个都配则校验 commit 必须在 branch 上, 通过后以 commit 为准
+#   FLASHINFER_REPO_URL  FlashInfer 仓库地址；必填
+#   FLASHINFER_BRANCH    FlashInfer 分支；必填
+#   FLASHINFER_COMMIT    可选；建议固定为已验证的完整 commit SHA
 #
 #   base-image-build 额外需要:
-#   HPC_OPS_GIT_REPO    hpc-ops 仓库地址；必填，不在仓库内提供默认值
-#   HPC_OPS_GIT_REF     hpc-ops commit/tag/branch/ref；必填，建议固定为完整 commit SHA
+#   VLLM_FLASH_ATTN_GIT_REPO  vLLM FlashAttention 仓库地址；必填
+#   VLLM_FLASH_ATTN_GIT_REF   vLLM FlashAttention 完整 commit SHA；必填
+#   HPC_OPS_GIT_REPO          hpc-ops 仓库地址；必填
+#   HPC_OPS_GIT_REF           hpc-ops 完整 commit SHA；必填
+#   DEEPGEMM_GIT_REF          Router GEMM 依赖的 DeepGEMM 完整 commit SHA；必填
+#   上述仓库/ref 均不在 CI 或 Dockerfile.base 中提供默认值。
 #
 # Optional variables:
 #   FEISHU_WEBHOOK_URL  飞书机器人 webhook (未配置则跳过通知; 勿硬编码进仓库)
@@ -100,7 +106,8 @@ variables:
   NVCC_THREADS: "8"
   # 目标 GPU 架构: 8.9=Ada, 9.0=Hopper, 10.0/12.0=Blackwell
   CUDA_ARCH_LIST: "8.9 9.0 10.0 12.0"
-  # hpc-ops 仓库地址与固定 ref 均由 GitLab 项目 CI/CD Variables 提供。
+  # FA / hpc-ops / Router DeepGEMM 的仓库或固定 ref 均由
+  # GitLab 项目 CI/CD Variables 提供。
   # CPU 可跑的单元测试子集 (iquest parser + 轻量顶层测试)
   # TODO: tests/reasoning/test_iquest_reasoning_parser.py tests/tool_parsers/test_iquest_coder_tool_parser.py
   UNIT_TEST_PATHS: >-
@@ -345,8 +352,11 @@ base-image-build:
   script:
     - *kaniko-auth
     - |
+      : "${VLLM_FLASH_ATTN_GIT_REPO:?VLLM_FLASH_ATTN_GIT_REPO is required; configure it in GitLab Settings > CI/CD > Variables}"
+      : "${VLLM_FLASH_ATTN_GIT_REF:?VLLM_FLASH_ATTN_GIT_REF is required; configure it in GitLab Settings > CI/CD > Variables}"
       : "${HPC_OPS_GIT_REPO:?HPC_OPS_GIT_REPO is required; configure it in GitLab Settings > CI/CD > Variables}"
       : "${HPC_OPS_GIT_REF:?HPC_OPS_GIT_REF is required; configure it in GitLab Settings > CI/CD > Variables}"
+      : "${DEEPGEMM_GIT_REF:?DEEPGEMM_GIT_REF is required; configure it in GitLab Settings > CI/CD > Variables}"
       KANIKO_EXIT=0
       /kaniko/executor \
         --context "${CI_PROJECT_DIR}" \
@@ -356,8 +366,12 @@ base-image-build:
         --build-arg "nvcc_threads=${NVCC_THREADS}" \
         --build-arg "torch_cuda_arch_list=${CUDA_ARCH_LIST}" \
         --build-arg "GITLAB_TOKEN=${GITLAB_TOKEN}" \
+        --build-arg "VLLM_SOURCE_SHA=${CI_COMMIT_SHA}" \
+        --build-arg "VLLM_FLASH_ATTN_GIT_REPO=${VLLM_FLASH_ATTN_GIT_REPO}" \
+        --build-arg "VLLM_FLASH_ATTN_GIT_REF=${VLLM_FLASH_ATTN_GIT_REF}" \
         --build-arg "HPC_OPS_GIT_REPO=${HPC_OPS_GIT_REPO}" \
         --build-arg "HPC_OPS_GIT_REF=${HPC_OPS_GIT_REF}" \
+        --build-arg "DEEPGEMM_GIT_REF=${DEEPGEMM_GIT_REF}" \
         --build-arg "VLLM_BUILD_VERSION=0.0.0.dev0+${SHORT_SHA}" \
         --build-arg "VLLM_VERSION_STAMP=base(${SHORT_SHA})" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \

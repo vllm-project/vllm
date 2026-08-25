@@ -28,6 +28,38 @@ if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
   set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
+# Source location and immutable revision are provided by the caller. Internal
+# repository coordinates must not be embedded in the source tree. Environment
+# variables take precedence so Docker build args can flow through pip/CMake.
+set(VLLM_FLASH_ATTN_GIT_REPO "" CACHE STRING
+    "vLLM FlashAttention Git repository")
+set(VLLM_FLASH_ATTN_GIT_REF "" CACHE STRING
+    "Immutable vLLM FlashAttention source commit")
+if(DEFINED ENV{VLLM_FLASH_ATTN_GIT_REPO}
+   AND NOT "$ENV{VLLM_FLASH_ATTN_GIT_REPO}" STREQUAL "")
+  set(VLLM_FLASH_ATTN_GIT_REPO "$ENV{VLLM_FLASH_ATTN_GIT_REPO}"
+      CACHE STRING "vLLM FlashAttention Git repository" FORCE)
+endif()
+if(DEFINED ENV{VLLM_FLASH_ATTN_GIT_REF}
+   AND NOT "$ENV{VLLM_FLASH_ATTN_GIT_REF}" STREQUAL "")
+  set(VLLM_FLASH_ATTN_GIT_REF "$ENV{VLLM_FLASH_ATTN_GIT_REF}"
+      CACHE STRING "Immutable vLLM FlashAttention source commit" FORCE)
+endif()
+
+if(NOT VLLM_FLASH_ATTN_SRC_DIR)
+  if(VLLM_FLASH_ATTN_GIT_REPO STREQUAL "")
+    message(FATAL_ERROR
+      "VLLM_FLASH_ATTN_GIT_REPO must be set when VLLM_FLASH_ATTN_SRC_DIR is not used")
+  endif()
+  string(LENGTH "${VLLM_FLASH_ATTN_GIT_REF}"
+         VLLM_FLASH_ATTN_GIT_REF_LENGTH)
+  if(NOT VLLM_FLASH_ATTN_GIT_REF_LENGTH EQUAL 40
+     OR NOT VLLM_FLASH_ATTN_GIT_REF MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR
+      "VLLM_FLASH_ATTN_GIT_REF must be a full lowercase 40-character commit")
+  endif()
+endif()
+
 if(VLLM_FLASH_ATTN_SRC_DIR)
   FetchContent_Declare(
           vllm-flash-attn SOURCE_DIR 
@@ -37,11 +69,8 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://gitlab-cn-beijing.siflow.cn/ubiq-kernels/inference/flash-attention.git
-          # fa/vllm contains the fused KV-sink implementation, including
-          # sliding-window/local attention support. Pin the integration commit
-          # so builds remain reproducible as the branch advances.
-          GIT_TAG eacd906d81a4e425c3c8f4376b8d6ab8c1d6255c
+          GIT_REPOSITORY "${VLLM_FLASH_ATTN_GIT_REPO}"
+          GIT_TAG "${VLLM_FLASH_ATTN_GIT_REF}"
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
