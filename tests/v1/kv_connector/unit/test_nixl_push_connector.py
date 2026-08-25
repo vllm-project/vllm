@@ -15,7 +15,7 @@ requiring a real NIXL agent or network:
 * The worker matches D registrations against P finished blocks (both
   scenario directions) and forwards non-PUSH_REG NIXL notifs to the main
   thread's ``_get_new_notifs``.
-* ``get_finished`` enqueues evictions for the writer.
+* ``get_transfer_results`` enqueues evictions for the writer.
 """
 
 from __future__ import annotations
@@ -32,6 +32,9 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -740,21 +743,19 @@ class TestPushWriterNotifs:
         assert notified == set()
         assert request_id in w._recving_transfers
 
-    def test_get_finished_evicts_completed_state(self):
-        """``get_finished`` should enqueue evictions and wake the writer."""
+    def test_get_transfer_results_evicts_completed_state(self):
+        """Transfer completion should enqueue evictions and wake the writer."""
         w = _StubWriterWorker.fresh()
 
-        # Stub the base ``get_finished`` to return one done_sending entry.
-        # Patch via the MRO's parent class.
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=({"req-done"}, set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(finished_sending={"req-done"}),
         ):
-            done_sending, done_recving = w.get_finished()
+            results = w.get_transfer_results()
 
-        assert "req-done" in done_sending
-        assert done_recving == set()
+        assert results.finished_sending == {"req-done"}
+        assert results.finished_recving == set()
         # Eviction enqueued for the writer.
         evicted = []
         while True:
@@ -926,19 +927,21 @@ class TestPushWriterNegative:
         assert len(w._pending_d_registrations) == 1
         assert w.start_push_calls == []
 
-    def test_get_finished_enqueues_eviction_for_each_done_request(self):
-        """``get_finished`` must enqueue an eviction for every request
+    def test_get_transfer_results_enqueues_each_completed_request(self):
+        """``get_transfer_results`` must enqueue every completed request
         in ``done_sending`` so the writer can drop stale matching state.
         Unlike the happy-path test, this verifies the *cardinality*: N
         completed requests -> N evictions, in order."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=({"req-1", "req-2", "req-3"}, set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(
+                finished_sending={"req-1", "req-2", "req-3"}
+            ),
         ):
-            done_sending, _ = w.get_finished()
-        assert done_sending == {"req-1", "req-2", "req-3"}
+            results = w.get_transfer_results()
+        assert results.finished_sending == {"req-1", "req-2", "req-3"}
 
         evicted: list[str] = []
         while True:
@@ -948,22 +951,46 @@ class TestPushWriterNegative:
                 break
         assert sorted(evicted) == ["req-1", "req-2", "req-3"]
 
-    def test_get_finished_with_no_completions_does_not_enqueue_eviction(self):
+    def test_empty_transfer_results_do_not_enqueue_eviction(self):
         """If there's nothing newly done, no eviction should be enqueued.
         The wake event IS still set because ``get_finished`` always wakes
         the writer to drain notifs."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=(set(), set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(),
         ):
-            done_sending, done_recving = w.get_finished()
-        assert done_sending == set()
-        assert done_recving == set()
+            results = w.get_transfer_results()
+        assert results.finished_sending == set()
+        assert results.finished_recving == set()
         assert w._evict_finished_inbox.qsize() == 0
         # Wake set so the writer drains NIXL notifs even when idle.
         assert w._push_writer_wake.is_set()
+
+    def test_failed_push_transfer_finishes_sending(self):
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.check_xfer_state.return_value = "ERR"
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()
+        w._sending_transfers["req-failed"] = [17]
+        w._reqs_to_send["req-failed"] = time.perf_counter() + 30
+        w._reqs_to_process.add("req-failed")
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(),
+        ):
+            results = w.get_transfer_results()
+
+        assert results.finished_sending == {"req-failed"}
+        assert results.finished_recving == set()
+        assert "req-failed" not in w._sending_transfers
+        assert "req-failed" not in w._reqs_to_send
+        assert "req-failed" not in w._reqs_to_process
+        w.nixl_wrapper.release_xfer_handle.assert_called_once_with(17)
 
     def test_get_new_notifs_unknown_request_is_logged_and_skipped(self, caplog):
         """A completion notif for a request the worker doesn't know
@@ -1158,6 +1185,7 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_region_group_ids[engine_id] = [0]
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}

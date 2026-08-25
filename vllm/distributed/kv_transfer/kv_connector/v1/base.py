@@ -34,8 +34,8 @@ The class provides the following primitives:
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
 
-        get_finished() - called with ids of finished requests, returns
-            ids of requests that have completed async sending/recving.
+        get_transfer_results() - returns async send/receive completions and
+            receive failures in one snapshot.
         build_connector_worker_meta() - builds metadata to be sent
             back to the scheduler-side connector
 """
@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -80,6 +81,19 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVConnectorTransferResults:
+    """Asynchronous transfer completions from one worker snapshot.
+
+    Failed receives also appear in ``finished_recving`` so the scheduler can
+    release the request from its transfer wait state.
+    """
+
+    finished_sending: set[str] = field(default_factory=set)
+    finished_recving: set[str] = field(default_factory=set)
+    failed_recving: set[str] = field(default_factory=set)
 
 
 class SupportsHMA(ABC):
@@ -368,6 +382,16 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        """Return completed sends, receives, and receive failures together."""
+        finished_sending, finished_recving = self.get_finished(finished_req_ids)
+        return KVConnectorTransferResults(
+            finished_sending=set(finished_sending or ()),
+            finished_recving=set(finished_recving or ()),
+        )
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
         Get the set of block IDs that failed to load.
@@ -380,9 +404,9 @@ class KVConnectorBase_V1(ABC):
             - Applies to both sync- and async-loading requests.
             - Async loading: failed blocks may be reported in any forward pass
               up to and including the pass where the request ID is returned by
-              `get_finished()`. Even if failures occur, the request must still
-              be reported via `get_finished()`, and the failed block IDs must
-              appear here no later than that same pass.
+              `get_transfer_results()`. Even if failures occur, the request
+              must still be reported as finished receiving, and the failed
+              block IDs must appear here no later than that same pass.
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """

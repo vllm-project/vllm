@@ -3,7 +3,7 @@
 import multiprocessing as mp
 import os
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -188,22 +188,26 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
-        reserved_blocks: int = 0,
+        reserved_blocks: int | Sequence[int] = 0,
+        reserved_host_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        allow_hisparse_host_import: bool = False,
     ):
         ret = original_allocate_slots_fn(
-            self,
-            request,
-            num_new_tokens,
-            num_new_computed_tokens,
-            new_computed_blocks,
-            num_lookahead_tokens,
-            num_external_computed_tokens,
-            delay_cache_blocks,
-            num_encoder_tokens,
-            full_sequence_must_fit,
-            reserved_blocks,
-            has_scheduled_reqs,
+            self=self,
+            request=request,
+            num_new_tokens=num_new_tokens,
+            num_new_computed_tokens=num_new_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+            num_lookahead_tokens=num_lookahead_tokens,
+            num_external_computed_tokens=num_external_computed_tokens,
+            delay_cache_blocks=delay_cache_blocks,
+            num_encoder_tokens=num_encoder_tokens,
+            full_sequence_must_fit=full_sequence_must_fit,
+            reserved_blocks=reserved_blocks,
+            reserved_host_blocks=reserved_host_blocks,
+            has_scheduled_reqs=has_scheduled_reqs,
+            allow_hisparse_host_import=allow_hisparse_host_import,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[

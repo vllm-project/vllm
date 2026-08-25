@@ -56,6 +56,14 @@ class StreamingUpdate:
         )
 
 
+class HiSparseImportTarget(enum.Enum):
+    """Where an in-flight external prefix is being imported."""
+
+    NONE = enum.auto()
+    DEVICE = enum.auto()
+    HOST = enum.auto()
+
+
 class Request:
     def __init__(
         self,
@@ -101,6 +109,10 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # The host-backed layout decision persists for the request lifetime.
+        self.hisparse_host_import = False
+        # The transient landing target is consumed when the import completes.
+        self.hisparse_import_target = HiSparseImportTarget.NONE
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 
