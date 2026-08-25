@@ -134,7 +134,7 @@ class LogprobsProcessor:
         assert self.num_prompt_logprobs is not None
         assert self.prompt_logprobs is not None
 
-        token_ids, logprobs, ranks, _ = prompt_logprobs_tensors
+        token_ids, logprobs, ranks, *_ = prompt_logprobs_tensors
 
         # Recover shapes.
         num_prompt_tokens, num_logprobs = logprobs.shape
