@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -192,15 +193,13 @@ class PCPManager:
             rank_offset += segment.num_tokens
         return segments
 
-    def _get_rank_segments(
+    def _iter_rank_chunks(
         self,
         rank: int,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-        query_start_loc_np: np.ndarray,
-    ) -> list[RankSegment]:
-        """Build one rank's attention-compatible DualChunkSwap rows.
+    ) -> Iterator[tuple[int, int, int]]:
+        """Yield ``(request index, query offset, length)`` for one PCP rank.
 
         PCP=4 partitions each prefill into eight chunks:
 
@@ -210,14 +209,11 @@ class PCPManager:
             rank 2:          2           5
             rank 3:              3   4
         """
-        rank_segments = []
-        rank_offset = 0
         num_chunks = 2 * self.pcp_world_size
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
             if query_len == 0:
                 continue
-            global_batch_start = int(query_start_loc_np[global_batch_req_idx])
             chunk_indices: tuple[int, ...]
             if bool(is_prefilling[global_batch_req_idx]):
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
@@ -231,17 +227,31 @@ class PCPManager:
                 chunk_len = min(chunk_size, query_len - chunk_offset)
                 if chunk_len <= 0:
                     continue
-                chunk_start = global_batch_start + chunk_offset
-                rank_segments.append(
-                    RankSegment(
-                        global_batch_req_idx=global_batch_req_idx,
-                        global_batch_slice=slice(chunk_start, chunk_start + chunk_len),
-                        rank_local_batch_slice=slice(
-                            rank_offset, rank_offset + chunk_len
-                        ),
-                    )
+                yield global_batch_req_idx, chunk_offset, chunk_len
+
+    def _get_rank_segments(
+        self,
+        rank: int,
+        num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> list[RankSegment]:
+        rank_segments = []
+        rank_offset = 0
+        for global_batch_req_idx, chunk_offset, chunk_len in self._iter_rank_chunks(
+            rank, num_scheduled_tokens, is_prefilling
+        ):
+            global_batch_start = int(query_start_loc_np[global_batch_req_idx])
+            chunk_start = global_batch_start + chunk_offset
+            rank_segments.append(
+                RankSegment(
+                    global_batch_req_idx=global_batch_req_idx,
+                    global_batch_slice=slice(chunk_start, chunk_start + chunk_len),
+                    rank_local_batch_slice=slice(rank_offset, rank_offset + chunk_len),
                 )
-                rank_offset += chunk_len
+            )
+            rank_offset += chunk_len
         return self._reorder_segments(
             rank_segments,
             num_computed_tokens,
@@ -282,6 +292,11 @@ class PCPManager:
         hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
         if padded_num_tokens is None:
             padded_num_tokens = max(per_rank_num_tokens)
+        elif padded_num_tokens < max(per_rank_num_tokens):
+            raise ValueError(
+                "PCP padded token count is smaller than the largest rank-local "
+                f"batch: {padded_num_tokens} < {max(per_rank_num_tokens)}."
+            )
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
@@ -318,14 +333,21 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    @staticmethod
-    def _get_cudagraph_padded_num_tokens(
-        input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode,
-    ) -> int | None:
-        if cudagraph_mode == CUDAGraphMode.NONE:
-            return None
-        return input_batch.num_tokens_after_padding
+    def get_num_tokens_for_dispatch(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> int:
+        """Return the largest real rank-local batch before graph padding."""
+        return max(
+            sum(
+                chunk_len
+                for _, _, chunk_len in self._iter_rank_chunks(
+                    rank, num_scheduled_tokens, is_prefilling
+                )
+            )
+            for rank in range(self.pcp_world_size)
+        )
 
     @property
     def input_buffers(self) -> InputBuffers:
@@ -335,7 +357,7 @@ class PCPManager:
     def partition_batch(
         self,
         input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        padded_num_tokens: int | None = None,
     ) -> InputBatch:
         assert self._req_states is not None
         assert self._input_buffers is not None
@@ -347,11 +369,6 @@ class PCPManager:
         global_batch = input_batch
         self._global_batch = global_batch
 
-        num_tokens_after_padding = self._get_cudagraph_padded_num_tokens(
-            global_batch,
-            cudagraph_mode,
-        )
-
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
@@ -361,7 +378,7 @@ class PCPManager:
             num_computed_tokens,
             is_prefilling,
             global_batch.query_start_loc_np,
-            padded_num_tokens=num_tokens_after_padding,
+            padded_num_tokens=padded_num_tokens,
         )
 
         local_segments = segments_by_rank[self.pcp_rank]
@@ -411,9 +428,7 @@ class PCPManager:
 
         num_local_tokens = int(local_num_scheduled_tokens.sum())
         num_local_tokens_padded = (
-            max(per_rank_num_tokens)
-            if num_tokens_after_padding is None
-            else num_tokens_after_padding
+            max(per_rank_num_tokens) if padded_num_tokens is None else padded_num_tokens
         )
         fresh_prefills = int(
             np.count_nonzero(is_prefilling & (num_computed_tokens == 0))
@@ -652,13 +667,13 @@ class PCPManager:
 def maybe_partition_pcp_batch(
     manager: PCPManager | None,
     input_batch: InputBatch,
-    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    padded_num_tokens: int | None = None,
 ) -> InputBatch:
     if manager is None:
         return input_batch
     return manager.partition_batch(
         input_batch,
-        cudagraph_mode=cudagraph_mode,
+        padded_num_tokens=padded_num_tokens,
     )
 
 

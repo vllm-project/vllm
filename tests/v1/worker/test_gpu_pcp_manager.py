@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
@@ -66,30 +63,47 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
-def test_global_cudagraph_padding_is_disabled_for_none():
-    input_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4)
-
-    assert (
-        PCPManager._get_cudagraph_padded_num_tokens(input_batch, CUDAGraphMode.NONE)
-        is None
-    )
-
-
 @pytest.mark.parametrize(
-    "cudagraph_mode",
+    ("pcp_world_size", "num_scheduled_tokens", "is_prefilling", "expected"),
     [
-        CUDAGraphMode.PIECEWISE,
-        CUDAGraphMode.FULL,
-        CUDAGraphMode.FULL_DECODE_ONLY,
-        CUDAGraphMode.FULL_AND_PIECEWISE,
+        (2, [8], [True], 4),
+        (2, [7], [True], 4),
+        (2, [3], [False], 3),
+        (2, [3, 8], [False, True], 7),
+        (4, [2, 9], [False, True], 5),
     ],
 )
-def test_graph_modes_use_global_cudagraph_padding(cudagraph_mode):
-    input_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4)
-    assert PCPManager._get_cudagraph_padded_num_tokens(input_batch, cudagraph_mode) == 4
-
-    input_batch.num_tokens_after_padding = input_batch.num_tokens
-    assert (
-        PCPManager._get_cudagraph_padded_num_tokens(input_batch, cudagraph_mode)
-        == input_batch.num_tokens
+def test_num_tokens_for_dispatch_uses_largest_pcp_rank(
+    pcp_world_size, num_scheduled_tokens, is_prefilling, expected
+):
+    manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=0,
+        device=torch.device("cpu"),
     )
+
+    actual = manager.get_num_tokens_for_dispatch(
+        np.asarray(num_scheduled_tokens, dtype=np.int32),
+        np.asarray(is_prefilling, dtype=np.bool_),
+    )
+
+    assert actual == expected
+
+
+def test_graph_padding_cannot_be_smaller_than_largest_pcp_rank(monkeypatch):
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        dcp_world_size=1,
+    )
+    monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
+
+    with pytest.raises(ValueError, match="smaller than the largest rank-local batch"):
+        manager._build_batch_layout(
+            num_scheduled_tokens=np.ones(3, dtype=np.int32),
+            num_computed_tokens=np.full(3, 16, dtype=np.int32),
+            is_prefilling=np.zeros(3, dtype=np.bool_),
+            query_start_loc_np=np.arange(4, dtype=np.int32),
+            padded_num_tokens=2,
+        )
