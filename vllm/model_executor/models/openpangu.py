@@ -677,18 +677,14 @@ class OpenPanguSinkAttention(nn.Module):
                     },
                 )
             else:
-                self.register_buffer(
-                    "param_sink_value",
-                    torch.zeros(
-                        (
-                            self.param_sink_number,
-                            self.num_kv_heads,
-                            self.v_channels,
-                        ),
-                        device=current_platform.current_device(),
-                        dtype=config.torch_dtype,
+                self.param_sink_value = torch.zeros(
+                    (
+                        self.param_sink_number,
+                        self.num_kv_heads,
+                        self.v_channels,
                     ),
-                    persistent=False,
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
                 )
         # To enable dummy run with out weight
         self.post_weight_load()

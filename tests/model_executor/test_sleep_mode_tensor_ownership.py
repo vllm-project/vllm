@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformers import Gemma3nTextConfig, LlamaConfig
+from transformers import Gemma3nTextConfig
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
@@ -65,12 +65,6 @@ SLEEP_MODEL_CASES = (
         revision="refs/pr/17",
         trust_remote_code=True,
     ),
-    SleepModelCase(
-        name="openpangu",
-        architecture="PanguEmbeddedForCausalLM",
-        model=None,
-        tensor_names=("param_sink_value",),
-    ),
 )
 
 
@@ -98,25 +92,6 @@ def _create_local_model_config(case: SleepModelCase, model_dir: Path) -> str:
             laurel_rank=16,
             activation_sparsity_pattern=[0.0, 0.0, 0.0],
         )
-    elif case.name == "openpangu":
-        config = LlamaConfig(
-            architectures=[case.architecture],
-            vocab_size=128,
-            hidden_size=64,
-            intermediate_size=128,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=256,
-            tie_word_embeddings=False,
-        )
-        config.param_sink_number = 16
-        config.param_sink_with_value = False
-        config.param_sink_scalar = None
-        config.param_sink_of_head_dim = False
-        config.qk_nope_dim = 16
-        config.qk_rope_dim = 16
-        config.v_channels = 32
     else:
         raise AssertionError(f"No local config builder for {case.name}")
 
@@ -128,7 +103,8 @@ def _create_local_model_config(case: SleepModelCase, model_dir: Path) -> str:
 def _sleep_test_hf_overrides(hf_config, *, model_arch: str):
     hf_config = dummy_hf_overrides(hf_config, model_arch=model_arch)
     if model_arch == "FireRedASR2ForConditionalGeneration":
-        hf_config.audio_encoder_conf.update(
+        audio_encoder_conf = getattr(hf_config, "audio_encoder_conf", {})
+        audio_encoder_conf.update(
             {
                 "idim": 80,
                 "n_layers_enc": 1,
@@ -138,6 +114,7 @@ def _sleep_test_hf_overrides(hf_config, *, model_arch: str):
                 "pe_maxlen": 64,
             }
         )
+        hf_config.audio_encoder_conf = audio_encoder_conf
     if (
         model_arch == "Ernie4_5_VLMoeForConditionalGeneration"
         and getattr(hf_config, "im_patch_id", None) is None
@@ -190,10 +167,6 @@ def _get_sleep_tensor_targets(
                 ("_visual_token_ids_tensor_cache",),
             ),
         )
-    if model_name == "openpangu":
-        from vllm.model_executor.models.openpangu import OpenPanguSinkAttention
-
-        return ((OpenPanguSinkAttention, ("param_sink_value",)),)
     raise AssertionError(f"No sleep tensor targets for {model_name}")
 
 

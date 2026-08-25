@@ -152,10 +152,7 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        # Attention.__init__ reaches CustomOp.__init__ through the cooperative
-        # MRO of StaticSinkAttention(Attention, CustomOp). Calling it again
-        # would run nn.Module.__init__ twice and clear the attention modules
-        # and registered quant-scale buffers created above.
+        CustomOp.__init__(self)
 
         self.sink_len = sink_len
         self.sink_populated = False
