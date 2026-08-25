@@ -42,9 +42,11 @@ BACKENDS_TO_TEST = [
 ]
 
 
-def _actual_backend(backend) -> AttentionBackendEnum:
+def _actual_backend(backend: AttentionBackendEnum | str) -> AttentionBackendEnum:
     """Resolve pseudo-backends (FLEX_ATTENTION_SLOW) to their real enum."""
-    if backend == "FLEX_ATTENTION_SLOW":
+    if isinstance(backend, str):
+        if backend != "FLEX_ATTENTION_SLOW":
+            raise ValueError(f"Unknown pseudo-backend: {backend}")
         return AttentionBackendEnum.FLEX_ATTENTION
     return backend
 
@@ -266,7 +268,7 @@ def _clone_kv_cache_in_layout(
 
 
 def run_attention_backend(
-    backend: AttentionBackendEnum,
+    backend: AttentionBackendEnum | str,
     kv_cache_spec: FullAttentionSpec,
     layer_names: list[str],
     vllm_config,
@@ -283,9 +285,7 @@ def run_attention_backend(
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
-    use_direct_block_mask = not current_platform.is_rocm() and is_torch_equal_or_newer(
-        "2.9.0.dev0"
-    )
+    use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
         use_direct_block_mask = False
     backend = _actual_backend(backend)
@@ -377,7 +377,7 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[AttentionBackendEnum],
+    backend_to_test: list[AttentionBackendEnum | str],
     mask_mod,
     *,
     causal: bool = True,
@@ -655,7 +655,7 @@ def _test_backend_correctness(
         )
 
         # Check numerical similarity
-        def error_msg(msg: str, backend_name: str):
+        def error_msg(msg: str, backend_name: AttentionBackendEnum | str):
             return f"[{backend_name}] output differs from SDPA baseline. {msg}"
 
         torch.testing.assert_close(
@@ -1046,13 +1046,23 @@ if current_platform.is_rocm():
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
         AttentionBackendEnum.FLEX_ATTENTION,
         AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
     ]
 else:
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
         AttentionBackendEnum.FLASH_ATTN,
         AttentionBackendEnum.FLEX_ATTENTION,
         AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
     ]
+
+# Encoder-only FlexAttention always uses the slow builder, so the pseudo-backend
+# would run an identical implementation twice.
+SLIDING_WINDOW_ENCODER_BACKENDS_TO_TEST = [
+    backend
+    for backend in SLIDING_WINDOW_BACKENDS_TO_TEST
+    if backend != "FLEX_ATTENTION_SLOW"
+]
 
 
 @pytest.mark.parametrize(
@@ -1162,7 +1172,7 @@ def test_sliding_window_encoder_backend_correctness(
     _test_backend_correctness(
         batch_spec,
         model,
-        SLIDING_WINDOW_BACKENDS_TO_TEST,
+        SLIDING_WINDOW_ENCODER_BACKENDS_TO_TEST,
         sliding_window_mask_mod_fn,
         causal=False,
         attn_type=AttentionType.ENCODER_ONLY,
@@ -1173,6 +1183,7 @@ def test_sliding_window_encoder_backend_correctness(
 NON_CAUSAL_BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
     AttentionBackendEnum.FLEX_ATTENTION,
+    "FLEX_ATTENTION_SLOW",
 ]
 
 if current_platform.is_rocm():
