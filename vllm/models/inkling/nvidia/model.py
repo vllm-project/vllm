@@ -369,11 +369,16 @@ class InklingModel(nn.Module, EagleModelMixin):
             return IntermediateTensors({"hidden_states": hidden_states})
         if pending is not None:
             # Final RS/sconv/AG + residual add fused with the final rmsnorm.
-            norm_out = _sconv_add_norm(
+            norm_out, post_mlp_hidden = _sconv_add_norm(
                 pending[0], hidden_states, pending[1], self.norm, positions
-            )[0]
+            )
             assert norm_out is not None
             hidden_states = norm_out
+            # The last layer's aux capture (in the loop) misses its deferred
+            # MLP; use the post-MLP pre-norm state so targets match inference.
+            n = self.end_layer - self.start_layer
+            if len(aux_hidden_states) > 0 and n in self.aux_hidden_state_layers:
+                aux_hidden_states[-1] = post_mlp_hidden
         else:
             hidden_states = self.norm(hidden_states)
 
