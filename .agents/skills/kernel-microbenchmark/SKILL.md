@@ -5,29 +5,18 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
 
 # Kernel Microbenchmark
 
-Turn kernel performance questions into controlled, reproducible artifacts:
-minimal repros, benchmarks, ablations, generated-code inspection, and concise
-conclusions.
-
 ## Workflow
 
-1. Identify the question: correctness failure, hang, generated-code issue, or
-   performance delta.
-2. Read the current file and diff before changing anything. If the user asks
-   for inspection only, do not edit their file.
-3. Create an isolated repro or benchmark when the existing harness is noisy.
-   Put reusable kernel performance work in `benchmarks/kernels/`; use a scratch
-   location for disposable experiments. Do not add one-off benchmarks under
-   `tests/`.
-4. Check correctness before timing and keep tolerances explicit.
-5. Time only the operation under study. Exclude allocation, compilation,
+1. Create an isolated repro or benchmark when the existing harness is noisy.
+2. Check correctness before timing and keep tolerances explicit.
+3. Time only the operation under study. Exclude allocation, compilation,
    random input generation, logging, and host-device transfers unless they are
    the target.
-6. Compare against a baseline and report enough metadata to reproduce the
+4. Compare against a baseline and report enough metadata to reproduce the
    result: GPU, dtype, shape, command, branch or commit, and relevant env vars.
-7. Treat explanations as hypotheses until backed by an artifact such as an
+5. Treat explanations as hypotheses until backed by an artifact such as an
    ablation, generated PTX or SASS, profiler output, or controlled benchmark.
-8. Summarize experiments as `Question / Change / Correctness / Result /
+6. Summarize experiments as `Question / Change / Correctness / Result /
    Observation / Next` when a durable note is useful.
 
 ## Benchmark Defaults
