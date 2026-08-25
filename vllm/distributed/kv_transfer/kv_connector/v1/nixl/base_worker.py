@@ -2830,12 +2830,13 @@ class NixlBaseConnectorWorker:
             self._host_stager = HostWriteStager(
                 desc_lens=desc_lens,
                 host_addrs=host_addrs,
+                host_buffers=list(self.host_xfer_buffers.values()),
                 device=torch.device(f"cuda:{self.device_id}"),
                 nixl_wrapper=self.nixl_wrapper,
                 memory_type=self.nixl_memory_type,
                 backends=self.nixl_backends,
                 stage_bytes=stage_bytes,
-                num_slots=max(envs.VLLM_NIXL_HOST_STAGE_SLOTS, 1),
+                num_slots=envs.VLLM_NIXL_HOST_STAGE_SLOTS,
             )
         except Exception:
             logger.exception(

@@ -1478,12 +1478,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Device staging budget for NIXL reads whose local KV destination is host
     # memory. UCX has no efficient same-node remote-device to local-host path
     # and falls back to TCP loopback; staging through device memory composes
-    # two fast legs instead. Set to 0 to disable and read into host directly.
+    # two fast legs instead. The buffer is allocated lazily only for same-host
+    # reads into an explicitly configured host KV buffer. Set to 0 to disable.
     "VLLM_NIXL_HOST_STAGE_BYTES": lambda: int(
         os.getenv("VLLM_NIXL_HOST_STAGE_BYTES", str(1024 * 1024 * 1024))
     ),
-    "VLLM_NIXL_HOST_STAGE_SLOTS": lambda: int(
-        os.getenv("VLLM_NIXL_HOST_STAGE_SLOTS", "4")
+    "VLLM_NIXL_HOST_STAGE_SLOTS": lambda: max(
+        int(os.getenv("VLLM_NIXL_HOST_STAGE_SLOTS", "4")), 1
     ),
     # Strategy to pack the data parallel ranks for Ray.
     # Available options:

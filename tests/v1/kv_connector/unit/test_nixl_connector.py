@@ -1884,6 +1884,7 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
     worker._host_stager_init_attempted = False
     worker.use_host_buffer = True
     worker.src_blocks_data = np.array([[1_000, 16, 0]], dtype=np.uint64)
+    worker.host_xfer_buffers = {"layer": torch.empty(16, dtype=torch.uint8)}
     worker.device_id = 0
     worker.nixl_wrapper = MagicMock()
     worker.nixl_memory_type = "VRAM"

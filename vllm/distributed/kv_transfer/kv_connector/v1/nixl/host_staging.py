@@ -9,7 +9,6 @@ destination. Requests complete only after every chunk reaches host memory.
 
 from __future__ import annotations
 
-import ctypes
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,26 +20,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_CUDA_MEMCPY_DEVICE_TO_HOST = 2
 _SHUTDOWN_POLL_INTERVAL_S = 0.001
-
-
-def _load_cudart() -> ctypes.CDLL | None:
-    for name in ("libcudart.so", "libcudart.so.13", "libcudart.so.12"):
-        try:
-            lib = ctypes.CDLL(name)
-        except OSError:
-            continue
-        lib.cudaMemcpyAsync.restype = ctypes.c_int
-        lib.cudaMemcpyAsync.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_int,
-            ctypes.c_void_p,
-        ]
-        return lib
-    return None
 
 
 class _Pool:
@@ -79,9 +59,6 @@ class _Pool:
         ]
         descs = nixl_wrapper.get_xfer_descs(blocks, memory_type)
         self.handle = nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
-        self.stage_ptrs = np.array(
-            [base + i * desc_len for i in range(total_descs)], dtype=np.uint64
-        )
         self.slots = [
             _Slot(
                 pool=self,
@@ -129,6 +106,7 @@ class HostWriteStager:
         *,
         desc_lens: np.ndarray,
         host_addrs: np.ndarray,
+        host_buffers: list[torch.Tensor],
         device: torch.device,
         nixl_wrapper: Any,
         memory_type: str,
@@ -139,14 +117,28 @@ class HostWriteStager:
         self.desc_lens = desc_lens
         self.host_addrs = host_addrs
         self.nixl_wrapper = nixl_wrapper
-
-        cudart = _load_cudart()
-        if cudart is None:
-            raise RuntimeError(
-                "host KV write staging requires libcudart for device-to-host "
-                "copies; set VLLM_NIXL_HOST_STAGE_BYTES=0 to disable"
+        self._host_storages: list[torch.UntypedStorage] = []
+        self._host_storage_ids = np.full(len(host_addrs), -1, dtype=np.int64)
+        self._host_storage_offsets = np.empty(len(host_addrs), dtype=np.uint64)
+        end_addrs = host_addrs + desc_lens.astype(np.uint64)
+        seen_storage_addrs: set[int] = set()
+        for host_buffer in host_buffers:
+            storage = host_buffer.untyped_storage()
+            storage_addr = storage.data_ptr()
+            if storage_addr in seen_storage_addrs:
+                continue
+            seen_storage_addrs.add(storage_addr)
+            storage_id = len(self._host_storages)
+            self._host_storages.append(storage)
+            matches = (
+                (self._host_storage_ids < 0)
+                & (host_addrs >= storage_addr)
+                & (end_addrs <= storage_addr + storage.nbytes())
             )
-        self._cudart: ctypes.CDLL = cudart
+            self._host_storage_ids[matches] = storage_id
+            self._host_storage_offsets[matches] = host_addrs[matches] - storage_addr
+        if np.any(self._host_storage_ids < 0):
+            raise ValueError("host staging descriptor is outside its KV buffer")
 
         lengths = sorted({int(x) for x in np.unique(desc_lens)})
         per_pool_bytes = max(stage_bytes // len(lengths), 1)
@@ -242,17 +234,18 @@ class HostWriteStager:
         with torch.cuda.stream(stream):
             try:
                 for j, local_id in enumerate(local_ids):
-                    rc = self._cudart.cudaMemcpyAsync(
-                        ctypes.c_void_p(int(self.host_addrs[local_id])),
-                        ctypes.c_void_p(int(pool.stage_ptrs[slot.desc_ids[j]])),
-                        ctypes.c_size_t(pool.desc_len),
-                        ctypes.c_int(_CUDA_MEMCPY_DEVICE_TO_HOST),
-                        ctypes.c_void_p(stream.cuda_stream),
+                    storage_id = self._host_storage_ids[local_id]
+                    destination = torch.empty(0, dtype=torch.uint8, device="cpu").set_(
+                        self._host_storages[storage_id],
+                        int(self._host_storage_offsets[local_id]),
+                        (pool.desc_len,),
+                        (1,),
                     )
-                    if rc != 0:
-                        raise RuntimeError(
-                            f"cudaMemcpyAsync failed staging host KV read: rc={rc}"
-                        )
+                    stage_id = int(slot.desc_ids[j])
+                    source = pool.buffer.narrow(
+                        0, stage_id * pool.desc_len, pool.desc_len
+                    )
+                    destination.copy_(source, non_blocking=True)
             finally:
                 slot.event.record(stream)
 
