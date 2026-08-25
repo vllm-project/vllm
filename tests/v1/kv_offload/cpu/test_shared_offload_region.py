@@ -177,10 +177,12 @@ def _mp_race_construct_and_write(
             rank=rank,
             kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            defer_population=mmap_barrier is not None,
         )
         if mmap_barrier is not None:
             mmap_barrier.wait()
             region.unlink()
+            region.populate()
         t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
         done_queue.put(
@@ -573,6 +575,7 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
     assert exc_info.value.errno == errno.EIO
+    assert not os.path.exists(_mmap_path(iid))
 
 
 # ---------------------------------------------------------------------------

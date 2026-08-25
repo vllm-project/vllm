@@ -178,10 +178,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                         rank=rank,
                         kv_bytes_per_block=self.kv_bytes_per_chunk,
                         cpu_page_size=self.cpu_page_size_per_worker,
+                        defer_population=True,
                     )
                 finally:
                     _get_mmap_barrier_group().barrier()
                 mmap_region.unlink()
+                mmap_region.populate()
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,

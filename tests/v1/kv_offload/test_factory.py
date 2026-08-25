@@ -376,6 +376,7 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     barrier_group = MagicMock()
     barrier_group.barrier.side_effect = lambda: events.append("barrier")
     region.unlink.side_effect = lambda: events.append("unlink")
+    region.populate.side_effect = lambda: events.append("populate")
 
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
@@ -392,9 +393,10 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
 
     assert region_calls[0]["engine_id"] == "test-engine"
     assert region_calls[0]["kv_bytes_per_block"] == worker_kv_bytes_per_block * 4
+    assert region_calls[0]["defer_population"] is True
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
-    assert events == ["map", "barrier", "unlink", "worker"]
+    assert events == ["map", "barrier", "unlink", "populate", "worker"]
 
 
 def test_cpu_spec_mmap_failure_still_enters_barrier(monkeypatch):
