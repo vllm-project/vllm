@@ -57,6 +57,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -191,39 +192,16 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
         if inputs.mm_data_items:
-            if isinstance(inputs.prompt, str):
-                if len(inputs.prompt) > 0:
-                    raise ValueError(
-                        "SigLIP accepts text-only or image-only inputs, not both! "
-                        "You must pass an image with an empty text prompt."
-                    )
+            special_tokens = self.info.get_tokenizer().all_special_ids
+            if all(tok in special_tokens for tok in inputs.prompt):
+                inputs.prompt = []
             else:
-                special_tokens = self.info.get_tokenizer().all_special_ids
-                if all(tok in special_tokens for tok in inputs.prompt):
-                    inputs.prompt = []
-                else:
-                    raise ValueError(
-                        "SigLIP accepts text-only or image-only inputs, not both! "
-                        "You must pass an image with an empty token prompt."
-                    )
-
-            # For multi-modal data, the prompt after processing should
-            # only contain the dummy image tokens
-            inputs.tokenization_kwargs = {
-                **inputs.tokenization_kwargs,
-                "add_special_tokens": False,
-            }
+                raise ValueError(
+                    "SigLIP accepts text-only or image-only inputs, not both! "
+                    "You must pass an image with an empty token prompt."
+                )
 
         return super().apply(inputs, timing_ctx)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_mm_fields_config(
         self,
@@ -738,6 +716,16 @@ class SiglipVisionTransformer(nn.Module):
         )
         self.last_hs_proc = partial(self.maybe_layer_norm_and_apply_head)
 
+        drops = dict[str, None]()
+        if self.post_layernorm is None:
+            drops["post_layernorm."] = None
+        if self.head is None:
+            drops["head."] = None
+        if drops:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix=drops
+            )
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype
@@ -797,12 +785,7 @@ class SiglipVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        if self.head is None:
-            skip_prefixes.append("head.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         layer_count = len(self.encoder.layers)
 
@@ -912,6 +895,8 @@ class SiglipTextEmbeddings(nn.Module):
 class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
+
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     @classmethod
@@ -959,7 +944,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
-        self._is_text_input = True
+        # Set in embed_input_ids; consumed by forward.
+        self._has_text_tokens = True
+        self._mm_token_mask: torch.Tensor | None = None
 
     def get_text_features(
         self,
@@ -1104,8 +1091,12 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._is_text_input = (
-            multimodal_embeddings is None or len(multimodal_embeddings) == 0
+        has_mm_embeddings = (
+            multimodal_embeddings is not None and len(multimodal_embeddings) > 0
+        )
+        self._mm_token_mask = is_multimodal
+        self._has_text_tokens = dual_encoder_has_text_tokens(
+            has_mm_embeddings, is_multimodal
         )
 
         if multimodal_embeddings is None or is_multimodal is None:
@@ -1137,9 +1128,11 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             raise RuntimeError("PP is not supported for this model")
 
         # Multimodal inputs (image embeddings)
-        if not self._is_text_input:
+        assert inputs_embeds is not None
+        if not self._has_text_tokens:
             return inputs_embeds
 
+        vision_embeds = inputs_embeds
         # NOTE: inputs_embeds in model runner has size text_config.projection_size
         # (instead of text_config.hidden_size) to accommodate image embeddings
         hidden_size = self.text_embed_dim
@@ -1149,13 +1142,15 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             # No need to handle this case for now
             raise NotImplementedError
 
-        return self.get_text_features(input_ids, positions, inputs_embeds)
+        text_features = self.get_text_features(input_ids, positions, inputs_embeds)
+        return merge_dual_encoder_text_and_vision(
+            text_features, vision_embeds, self._mm_token_mask
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale.", "logit_bias."],
         )
 
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

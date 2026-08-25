@@ -183,6 +183,56 @@ class TestImageContentBlocks:
 
 
 # ======================================================================
+# vllm_xargs pass-through
+# ======================================================================
+
+
+class TestVllmXargs:
+    def test_vllm_xargs_passed_through(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": 7,
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.vllm_xargs == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": 7,
+        }
+
+    def test_vllm_xargs_reaches_sampling_params_with_kv_transfer(self):
+        kv_transfer_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": "kept",
+            },
+            kv_transfer_params=kv_transfer_params,
+        )
+
+        converted = _convert(request)
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert converted.kv_transfer_params == kv_transfer_params
+        assert sampling_params.extra_args == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": "kept",
+            "kv_transfer_params": kv_transfer_params,
+        }
+
+
+# ======================================================================
 # tool_result content handling
 # ======================================================================
 
@@ -975,6 +1025,7 @@ def _make_stream_chunk(
     *,
     delta: DeltaMessage | None = None,
     finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
     choices: list[ChatCompletionResponseStreamChoice] | None = None,
     usage: UsageInfo | None = None,
 ) -> str:
@@ -984,6 +1035,7 @@ def _make_stream_chunk(
                 index=0,
                 delta=delta or DeltaMessage(),
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
             )
         ]
     chunk = ChatCompletionStreamResponse(
@@ -1461,6 +1513,103 @@ class TestCacheSalt:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         handler.create_messages.assert_not_awaited()
+
+
+class TestStopSequenceReason:
+    """When generation stops because a configured stop string matched, the
+    Anthropic Messages API must report ``stop_reason="stop_sequence"`` and echo
+    the matched string in ``stop_sequence``. vLLM surfaces the matched string in
+    the OpenAI choice's ``stop_reason`` field (a str) while ``finish_reason``
+    stays ``"stop"``. A natural EOS (stop_reason None) or a stop token id (int)
+    must still map to ``end_turn``.
+    """
+
+    def test_non_streaming_stop_string_maps_to_stop_sequence(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason="</tool>",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "stop_sequence"
+        assert result.stop_sequence == "</tool>"
+
+    def test_non_streaming_natural_eos_maps_to_end_turn(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "end_turn"
+        assert result.stop_sequence is None
+
+    def test_non_streaming_stop_token_id_maps_to_end_turn(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason=128009,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "end_turn"
+        assert result.stop_sequence is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_stop_string_maps_to_stop_sequence(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="hi"),
+                usage=UsageInfo(prompt_tokens=5, total_tokens=5, completion_tokens=0),
+            )
+            yield _make_stream_chunk(finish_reason="stop", stop_reason="</tool>")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
+        assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
 
 
 # ======================================================================
