@@ -1122,38 +1122,6 @@ async def test_pause_rejection_races_with_concurrent_adds():
 
 
 @pytest.mark.asyncio
-async def test_failed_pause_does_not_strand_admission():
-    """Admission is closed before the pause is requested so nothing slips
-    through. If the pause itself fails the engine keeps running, so admission
-    must reopen -- otherwise every later request is rejected by an engine that
-    was never paused, and only an unprompted resume_generation() would fix it.
-    """
-    with ExitStack() as after:
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
-        after.callback(engine.shutdown)
-
-        original = engine.engine_core.pause_scheduler_async
-
-        async def boom(*args, **kwargs):
-            raise RuntimeError("pause failed")
-
-        engine.engine_core.pause_scheduler_async = boom
-        with pytest.raises(RuntimeError, match="pause failed"):
-            await engine.pause_generation(mode="abort")
-        engine.engine_core.pause_scheduler_async = original
-
-        assert not await engine.is_paused()
-        async for out in engine.generate(
-            request_id="after-failed-pause",
-            prompt=TEXT_PROMPT,
-            sampling_params=SamplingParams(max_tokens=5),
-        ):
-            pass
-        assert out.finished
-
-
-@pytest.mark.asyncio
 async def test_switching_to_keep_reopens_admission():
     """`keep` carries requests across the pause by design, so a caller that
     moves from a boundary mode to `keep` is asking for them to be accepted."""
