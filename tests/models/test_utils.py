@@ -243,3 +243,33 @@ def test_module_mapper_is_not_reapplied_on_recursion():
 
     assert loaded == {"model.ab.weight"}
     assert torch.all(mod.model.ab.weight == 1.0)
+
+
+class ModuleWithExtendedMapper(torch.nn.Module):
+    """Mimics a model that extends its backbone's mapper instead of aliasing it.
+
+    The outer mapper is a distinct object, so the shared rules can only be
+    recognised by the rules themselves.
+    """
+
+    hf_to_vllm_mapper = ModuleWithSharedMapper.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"dropped.": None}
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.hf_to_vllm_mapper = ModuleWithSharedMapper.hf_to_vllm_mapper
+        self.model.ab = torch.nn.Linear(2, 4, bias=False)
+
+
+@pytest.mark.cpu_test
+def test_extended_module_mapper_does_not_reapply_inherited_rules():
+    """Extending a backbone's mapper must not re-run its rules on recursion."""
+    mod = ModuleWithExtendedMapper()
+
+    weights = [("model.a.weight", torch.ones(4, 2)), ("dropped.thing", torch.ones(1))]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
+
+    assert loaded == {"model.ab.weight"}
+    assert torch.all(mod.model.ab.weight == 1.0)
