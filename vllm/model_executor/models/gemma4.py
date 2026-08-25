@@ -1532,11 +1532,6 @@ class Gemma4ForCausalLM(
             # under `...moe.*`.
             ".moe.experts.gate_up_proj": ".moe.gate_up_proj",
             ".moe.experts.down_proj": ".moe.down_proj",
-            # Skip multimodal weights — handled by the multimodal wrapper.
-            "audio_tower.": None,
-            "vision_tower.": None,
-            "embed_audio.": None,
-            "embed_vision.": None,
         },
     )
     # Note: qkv_proj packing applies to non-k_eq_v layers (sliding

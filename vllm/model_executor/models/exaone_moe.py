@@ -558,5 +558,4 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 "_input_scale",
             ],
         )
-        mtp_drop = WeightsMapper(orig_to_new_prefix={"mtp.": None})
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | mtp_drop)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
