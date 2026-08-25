@@ -922,13 +922,20 @@ class AsyncLLM(EngineClient):
         # of events from caller's pov.
         await asyncio.sleep(0.02)
 
+    async def _reopen_admission_if_servable(self) -> None:
+        """Reopen admission iff the engine can actually serve.
+
+        The engine's ``is_sleeping`` is "scheduler paused OR executor memory
+        not resident", so its negation is exactly "fully servable" -- a
+        partial wake or a resume while asleep leaves admission closed.
+        """
+        if not await self.engine_core.is_sleeping_async():
+            self._reject_while_paused = None
+
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
         await self.engine_core.resume_scheduler_async()
-        # Resuming the scheduler does not make a sleeping executor's memory
-        # resident, so admission stays closed until wake_up.
-        if not await self.engine_core.is_sleeping_async():
-            self._reject_while_paused = None
+        await self._reopen_admission_if_servable()
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
@@ -1077,10 +1084,7 @@ class AsyncLLM(EngineClient):
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
-        # A partial wake leaves the scheduler paused (see EngineCore.wake_up),
-        # so keep rejecting until all executor memory is resident again.
-        if not await self.engine_core.is_scheduler_paused_async():
-            self._reject_while_paused = None
+        await self._reopen_admission_if_servable()
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)

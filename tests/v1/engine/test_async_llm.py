@@ -1187,6 +1187,12 @@ async def test_resume_while_asleep_keeps_rejecting():
         with pytest.raises(EnginePausedError):
             await _add(engine, "after-resume-while-asleep")
 
+        # A partial wake after that resume must not reopen admission either:
+        # the scheduler is already unpaused, but KV cache is still absent.
+        await engine.wake_up(tags=["weights"])
+        with pytest.raises(EnginePausedError):
+            await _add(engine, "after-partial-wake-while-resumed")
+
         await engine.wake_up()
         async for out in engine.generate(
             request_id="after-wake",
