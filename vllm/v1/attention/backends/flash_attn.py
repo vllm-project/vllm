@@ -87,9 +87,10 @@ class FlashAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
     ]
+    head_size_v: int | None = None
 
-    @staticmethod
-    def _get_fa4_hd256_block_size() -> int | None:
+    @classmethod
+    def _get_fa4_hd256_block_size(cls) -> int | None:
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None or vllm_config.model_config is None:
             return None
@@ -97,8 +98,12 @@ class FlashAttentionBackend(AttentionBackend):
         head_size = vllm_config.model_config.get_head_size()
         # No kv_cache_block_size: this call is what *decides* it.
         if (
-            uses_fa4_hd256_kernel(head_size)
-            and get_flash_attn_version(head_size=head_size, supports_fa4_hd256=True)
+            uses_fa4_hd256_kernel(head_size, cls.head_size_v)
+            and get_flash_attn_version(
+                head_size=head_size,
+                head_size_v=cls.head_size_v,
+                supports_fa4_hd256=True,
+            )
             == 4
         ):
             return FA4_HD256_PAGE_SIZE

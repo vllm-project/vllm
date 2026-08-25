@@ -6,6 +6,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -263,6 +264,7 @@ def _fa4_hd256_fallback_reason(
     they are not fallback reasons; see ``FA4_HD256_PAGE_SIZE``.
     """
     model_config = vllm_config.model_config if vllm_config is not None else None
+    cache_config = vllm_config.cache_config if vllm_config is not None else None
     if has_sinks:
         return "attention sinks"
     if requires_softcap or (
@@ -272,6 +274,8 @@ def _fa4_hd256_fallback_reason(
         and getattr(model_config.hf_text_config, "attn_logit_softcapping", None)
     ):
         return "logits soft capping"
+    if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
+        return f"quantized KV cache dtype {cache_config.cache_dtype}"
     if kv_cache_block_size is not None and kv_cache_block_size % FA4_HD256_PAGE_SIZE:
         # A larger multiple is fine: the KV cache group is then split into
         # FA4_HD256_PAGE_SIZE-token kernel pages (select_common_block_size).

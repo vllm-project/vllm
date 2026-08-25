@@ -592,7 +592,13 @@ def _blackwell(vllm_config=None):
 
 
 def _hd256_config(
-    *, is_mm_prefix_lm=False, rswa_window=None, dcp_size=1, softcap=None, head_size=256
+    *,
+    is_mm_prefix_lm=False,
+    rswa_window=None,
+    dcp_size=1,
+    softcap=None,
+    head_size=256,
+    cache_dtype="auto",
 ):
     vllm_config = MagicMock()
     vllm_config.attention_config.flash_attn_version = None
@@ -600,6 +606,7 @@ def _hd256_config(
     vllm_config.model_config.rswa_window = rswa_window
     vllm_config.model_config.hf_text_config.attn_logit_softcapping = softcap
     vllm_config.model_config.get_head_size.return_value = head_size
+    vllm_config.cache_config.cache_dtype = cache_dtype
     vllm_config.parallel_config.decode_context_parallel_size = dcp_size
     return vllm_config
 
@@ -627,6 +634,8 @@ def _hd256_config(
         ({}, {"rswa_window": 512}, 2),
         ({}, {"dcp_size": 2}, 2),
         ({}, {"softcap": 50.0}, 2),
+        # Quantized KV caches are not supported by the dedicated kernel.
+        ({}, {"cache_dtype": "fp8"}, 2),
         # Only (256, 256) hits the dedicated kernel; head-dim combinations FA4
         # can serve keep the generic forward and its 16-token pages.
         ({"head_size": 128, "kv_cache_block_size": 16}, {}, 4),
@@ -652,23 +661,35 @@ def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
 
 @blackwell_only
 @pytest.mark.parametrize(
-    "config_kwargs,expected",
+    "backend_name,config_kwargs,expected",
     [
-        ({}, 128),
+        ("FLASH_ATTN", {}, 128),
         # A model that falls back keeps the generic advertisement, so it does
         # not pay a 128-token page (and lose --block-size < 128) for nothing.
-        ({"softcap": 50.0}, 16),
-        ({"head_size": 128}, 16),
+        ("FLASH_ATTN", {"softcap": 50.0}, 16),
+        ("FLASH_ATTN", {"head_size": 128}, 16),
+        ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16),
+        # DiffKV's (256, 128) shape uses generic FA4, not the dedicated kernel.
+        ("FLASH_ATTN_DIFFKV", {}, 16),
     ],
 )
-def test_fa4_hd256_block_size_advertisement(config_kwargs: dict, expected: int):
+def test_fa4_hd256_block_size_advertisement(
+    backend_name: str, config_kwargs: dict, expected: int
+):
     from vllm.v1.attention.backend import MultipleOf
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.attention.backends.flash_attn_diffkv import (
+        FlashAttentionDiffKVBackend,
+    )
 
+    backend = {
+        "FLASH_ATTN": FlashAttentionBackend,
+        "FLASH_ATTN_DIFFKV": FlashAttentionDiffKVBackend,
+    }[backend_name]
     vllm_config = _hd256_config(**config_kwargs)
     with _blackwell(vllm_config):
-        (size,) = FlashAttentionBackend.get_supported_kernel_block_sizes()
-        preferred = FlashAttentionBackend.get_preferred_block_size(16)
+        (size,) = backend.get_supported_kernel_block_sizes()
+        preferred = backend.get_preferred_block_size(16)
     assert preferred == expected
     if expected == 128:
         assert size == 128
