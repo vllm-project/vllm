@@ -92,14 +92,38 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_BUILD_VERSION}
 WORKDIR /vllm-workspace
 COPY . vllm/
 
+# 内部 GitLab 凭证 (base 阶段就需要, 见下方 RUN 的说明)。
+# GITLAB_TOKEN 由 .gitlab-ci.yml 经 --build-arg 注入; 无默认值, 未配置直接构建失败。
+ARG INTERNAL_GITLAB_HOST=gitlab-cn-beijing.siflow.cn
+ARG GITLAB_TOKEN=
+
 # vLLM 官方 "use an existing PyTorch installation" 流程:
 # use_existing_torch.py 去掉 requirements 里的 torch 钉版 → 复用镜像自带 torch;
 # 编辑模式安装, 编译产物 (*.so) 落在 /workspace/vllm/vllm/ 源码树内。
 # --system: 装进镜像自带的系统 python (Ubuntu 24.04 /usr/bin/python3, PEP 668)
+#
+# 为什么这一步需要 GITLAB_TOKEN:
+#   cmake/external_projects/vllm_flash_attn.cmake 把 vllm-flash-attn 指向内部仓库
+#   ubiq-kernels/inference/flash-attention (visibility=internal)。这个 clone 由 CMake
+#   FetchContent 在 pip install 内部发起, URL 硬编码在 .cmake 里, 没有插入凭证的入口,
+#   匿名 clone 必然失败: "fatal: could not read Username ... No such device or address"。
+#   用 git 的 url.<带 token 地址>.insteadOf 重写, 让 git 自己补凭证 —— .cmake 里的
+#   URL 与 commit 一个字都不用改, 开发者本地非 docker 构建 (走自己的 git 凭证) 也不受影响。
+#
+# 凭证不落盘到镜像:
+#   kaniko 不支持 BuildKit 的 secret mount, 只能走 build-arg。这里用 GIT_CONFIG_GLOBAL
+#   把"全局" git 配置重定向到临时文件 (不碰 /root/.gitconfig), RUN 结束无论成败都删掉,
+#   token 不会残留在任何镜像层里 (镜像层是叠加的, 后续层 rm 掉也仍能从前面层提取)。
 RUN cd vllm && \
+    : "${GITLAB_TOKEN:?GITLAB_TOKEN is required (set in GitLab CI/CD Variables): vllm-flash-attn 来自 internal 仓库 ${INTERNAL_GITLAB_HOST}/ubiq-kernels/inference/flash-attention, 匿名 clone 必然失败}" && \
+    export GIT_CONFIG_GLOBAL=/tmp/.gitconfig.build && \
+    git config --global \
+        url."https://oauth2:${GITLAB_TOKEN}@${INTERNAL_GITLAB_HOST}/".insteadOf \
+        "https://${INTERNAL_GITLAB_HOST}/" && \
     python use_existing_torch.py && \
     uv pip install --system -r requirements/build.txt && \
-    uv pip install --system --no-build-isolation -e . -v
+    uv pip install --system --no-build-isolation -e . -v; \
+    rc=$?; rm -f /tmp/.gitconfig.build; exit $rc
 
 # 让 pip show/pip list 与 vllm.__version__ 直接显示构建来源, 而非 setuptools_scm 的
 # 0.0.0.dev0+... 格式。base 阶段写入 "base(<commit>)"; release 阶段(update) 会在其后
@@ -111,7 +135,8 @@ RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python vllm/docker/stamp_vllm_versio
     else echo "VLLM_VERSION_STAMP 未设置, 保持 setuptools_scm 生成的版本"; fi
 
 # 注: 内部 pretrain/transformers 已挪到 Dockerfile.update (与 lmcache 同层, 便于按需
-# 更新分支/commit 而不必重建 base)。hpc-ops 在 base 中从内部仓库按 commit 构建。
+# 更新分支/commit 而不必重建 base)。base 内需要 GITLAB_TOKEN 的只有 vllm-flash-attn
+# (internal 仓库, 见上方 pip install 那步); hpc-ops 目前是 public, 匿名 clone 即可。
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 额外推理加速 / 调试组件: py-spy, instanttensor, hpc-ops, DeepGEMM, DeepEP(+pplx)

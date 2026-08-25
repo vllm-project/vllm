@@ -28,7 +28,12 @@
 #   image-build (release/update) 需要 (从私有仓库 clone transformers + lmcache, 可编辑安装):
 #   Dockerfile 无默认值, 未配置直接构建失败:
 #   GITLAB_TOKEN          带 read_repository 的 PAT/deploy token (Masked, 建议 Protected);
-#                         image-build clone transformers 和 lmcache 都要用
+#                         image-build clone transformers/lmcache/flashinfer 要用;
+#                         base-image-build 也要用 —— vllm-flash-attn 指向 internal 仓库
+#                         ubiq-kernels/inference/flash-attention, 由 CMake FetchContent
+#                         在 pip install 内部 clone, 没有凭证会 "could not read Username"。
+#                         ⚠️ 该变量若勾了 Protected, 要构建的分支必须是 Protected branch,
+#                         否则 job 里拿到空值, Dockerfile 会直接报错退出。
 #   TRANSFORMER_REPO_URL  仓库地址, 如 https://gitlab-cn-beijing.siflow.cn/pretrain/transformers.git (必填)
 #   TRANSFORMER_BRANCH    分支名, 如 feat_baseline (必填)
 #   TRANSFORMER_COMMIT    可选; 空则停在分支 HEAD
@@ -348,6 +353,7 @@ base-image-build:
         --build-arg "max_jobs=${MAX_JOBS}" \
         --build-arg "nvcc_threads=${NVCC_THREADS}" \
         --build-arg "torch_cuda_arch_list=${CUDA_ARCH_LIST}" \
+        --build-arg "GITLAB_TOKEN=${GITLAB_TOKEN}" \
         --build-arg "HPC_OPS_GIT_REPO=${HPC_OPS_GIT_REPO}" \
         --build-arg "HPC_OPS_GIT_REF=${HPC_OPS_GIT_REF}" \
         --build-arg "VLLM_BUILD_VERSION=0.0.0.dev0+${SHORT_SHA}" \
