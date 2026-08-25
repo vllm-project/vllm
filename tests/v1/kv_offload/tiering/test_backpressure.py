@@ -10,7 +10,7 @@ observes store completions and their apparent latency.
 
 import time
 from collections.abc import Iterable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -140,6 +140,78 @@ class TestDefaultConfig:
         cfg = EMABackpressureDetector.default_config("fs", locality="LOCAL")
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
+
+
+class TestIdleDecay:
+    """Tests for EMA idle decay — recovery from pressure without completions."""
+
+    def _make_detector(self, **kwargs):
+        defaults = dict(
+            high_water_s=_BP_HIGH_WATER_S,
+            low_water_s=_BP_LOW_WATER_S,
+            decay_half_life_s=2.0,
+        )
+        defaults.update(kwargs)
+        return EMABackpressureDetector(**defaults)
+
+    def test_ema_decays_while_under_pressure(self):
+        bp = self._make_detector()
+        bp._completions = _BP_WARMUP
+        bp._ema = _BP_HIGH_WATER_S * 2
+        bp._under_pressure = True
+        bp._last_update = time.monotonic()
+
+        with patch("time.monotonic", return_value=bp._last_update + 4.1):
+            # ~2.05 half-lives → EMA * 0.24, well below low water (500)
+            assert bp.is_under_pressure() is False
+            assert bp.store_latency_ema < _BP_LOW_WATER_S
+
+    def test_ema_stays_pressured_if_not_enough_decay(self):
+        bp = self._make_detector()
+        bp._completions = _BP_WARMUP
+        bp._ema = _BP_HIGH_WATER_S * 4
+        bp._under_pressure = True
+        bp._last_update = time.monotonic()
+
+        with patch("time.monotonic", return_value=bp._last_update + 2.0):
+            # 2s = 1 half-life → EMA * 0.5 = HIGH * 2, still above LOW
+            assert bp.is_under_pressure() is True
+            assert bp.store_latency_ema == pytest.approx(_BP_HIGH_WATER_S * 2, rel=0.01)
+
+    def test_no_decay_before_warmup(self):
+        bp = self._make_detector()
+        bp._ema = _BP_HIGH_WATER_S * 2
+        bp._under_pressure = True
+        bp._last_update = time.monotonic()
+
+        with patch("time.monotonic", return_value=bp._last_update + 10.0):
+            # Still in warmup (_completions=0 < _warmup_completions),
+            # so decay should not be applied in is_under_pressure.
+            assert bp.is_under_pressure() is True
+            assert bp.store_latency_ema == _BP_HIGH_WATER_S * 2
+
+    def test_decay_applied_before_new_sample(self):
+        bp = self._make_detector()
+        bp._completions = _BP_WARMUP
+        bp._ema = _BP_HIGH_WATER_S * 2
+        bp._under_pressure = True
+        t0 = time.monotonic()
+        bp._last_update = t0
+
+        # After 4s (2 half-lives), EMA decays to HIGH*0.5 before new sample.
+        block_bytes = 16
+        fast_s_per_mib = 0.0
+        with patch("time.monotonic", return_value=t0 + 4.0):
+            bp.on_store_completed(0.0, block_bytes)
+            decayed = _BP_HIGH_WATER_S * 2 * 0.25
+            expected = _BP_EMA_ALPHA * fast_s_per_mib + (1 - _BP_EMA_ALPHA) * decayed
+            assert bp.store_latency_ema == pytest.approx(expected, rel=0.01)
+
+    def test_reset_clears_last_update(self):
+        bp = self._make_detector()
+        bp._last_update = time.monotonic()
+        bp.reset()
+        assert bp._last_update == 0.0
 
 
 class TestBackpressure:
@@ -276,6 +348,7 @@ class TestBackpressure:
         # Set EMA between low and high water marks (in s/MiB).
         mid = (_BP_LOW_WATER_S + _BP_HIGH_WATER_S) / 2
         bp.store_latency_ema = mid
+        bp._last_update = time.monotonic()
 
         # Raw seconds that produce `mid` s/MiB for a given number of blocks.
         def mid_latency_s(num_blocks: int) -> float:
@@ -292,6 +365,7 @@ class TestBackpressure:
 
         # When under pressure, mid-range EMA should not deactivate.
         bp._under_pressure = True
+        bp._last_update = time.monotonic()
         keys2 = to_keys(range(10, 12))
         # Force-submit since pressure is on (cascade would skip).
         for k in keys2:

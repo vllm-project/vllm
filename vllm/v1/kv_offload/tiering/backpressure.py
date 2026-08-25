@@ -145,6 +145,13 @@ class EMABackpressureDetector(BackpressureDetector):
     # to the mean of the warmup samples to avoid cold-start false positives.
     DEFAULT_WARMUP_COMPLETIONS = 3
 
+    # When under pressure and no completions arrive, the EMA decays
+    # toward zero so the detector can eventually recover.  The half-life
+    # controls how quickly: after this many seconds of silence the EMA
+    # halves.  With a 2 s half-life and high_water=0.005, an EMA frozen
+    # at 0.010 reaches low_water=0.001 in ~6.6 s.
+    DEFAULT_DECAY_HALF_LIFE_S = 2.0
+
     LOCAL_HIGH_WATER_S = 0.005
     LOCAL_LOW_WATER_S = 0.001
 
@@ -174,6 +181,7 @@ class EMABackpressureDetector(BackpressureDetector):
         low_water_s: float,
         alpha: float = DEFAULT_ALPHA,
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
+        decay_half_life_s: float = DEFAULT_DECAY_HALF_LIFE_S,
         policy: BackpressurePolicy | None = None,
     ):
         super().__init__(policy=policy)
@@ -188,6 +196,7 @@ class EMABackpressureDetector(BackpressureDetector):
         self._high = high_water_s
         self._low = low_water_s
         self._warmup_completions = warmup_completions
+        self._decay_half_life_s = decay_half_life_s
         # Exponential moving average of store latency in seconds.
         self._ema: float = 0.0
         # Whether the tier is currently considered under pressure.
@@ -196,22 +205,48 @@ class EMABackpressureDetector(BackpressureDetector):
         self._completions: int = 0
         # Samples collected during warmup; used to seed the EMA.
         self._warmup_samples: list[float] = []
+        # Monotonic timestamp of the last EMA update; used for idle decay.
+        self._last_update: float = 0.0
+
+    def _apply_idle_decay(self) -> None:
+        """Decay the EMA toward zero based on elapsed idle time.
+
+        Uses the formula ``ema * 0.5^(dt / half_life)`` so the EMA
+        halves every ``decay_half_life_s`` seconds of silence.  This
+        lets the detector recover from pressure when no stores are
+        attempted (and therefore no completions arrive to update the
+        EMA organically).
+        """
+        now = time.monotonic()
+        dt = now - self._last_update
+        if dt <= 0 or self._decay_half_life_s <= 0:
+            return
+        self._ema *= 0.5 ** (dt / self._decay_half_life_s)
+        self._last_update = now
 
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None:
+        now = time.monotonic()
         s_per_mib = elapsed_s / (num_bytes / self._MIB)
         self._completions += 1
         if self._completions <= self._warmup_completions:
             self._warmup_samples.append(s_per_mib)
             if self._completions == self._warmup_completions:
                 self._ema = sum(self._warmup_samples) / len(self._warmup_samples)
+                self._last_update = now
             return
+        self._apply_idle_decay()
         self._ema = self._alpha * s_per_mib + (1 - self._alpha) * self._ema
+        self._last_update = now
         if self._ema > self._high:
             self._under_pressure = True
         elif self._ema < self._low:
             self._under_pressure = False
 
     def is_under_pressure(self) -> bool:
+        if self._under_pressure and self._completions >= self._warmup_completions:
+            self._apply_idle_decay()
+            if self._ema < self._low:
+                self._under_pressure = False
         return self._under_pressure
 
     def reset(self) -> None:
@@ -219,6 +254,7 @@ class EMABackpressureDetector(BackpressureDetector):
         self._under_pressure = False
         self._completions = 0
         self._warmup_samples.clear()
+        self._last_update = 0.0
         self._policy.reset()
 
     @property
