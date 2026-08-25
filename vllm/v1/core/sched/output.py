@@ -48,6 +48,16 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # Streaming: token ranges evicted this step; the worker replays them to
+    # slice its position arrays in lockstep with the scheduler.
+    evicted_token_ranges: list[tuple[int, int]] | None = None
+    # Streaming: True on a re-prefill reset (worker drops position state and
+    # recomputes positions from 0).
+    is_reprefill: bool = False
+    # Streaming, 1D-RoPE (text) sessions: cumulative evicted width. A text
+    # token's RoPE position is its index plus this offset.
+    position_offset: int = 0
+
     @classmethod
     def from_request(
         cls,
@@ -57,6 +67,15 @@ class NewRequestData:
         uses_mrope: bool = False,
         uses_xdrope: bool = False,
     ) -> "NewRequestData":
+        # Drain the streaming side-channels the scheduler set on the request.
+        evicted_token_ranges: list[tuple[int, int]] | None = None
+        pending = getattr(request, "pending_evicted_token_ranges", None)
+        if pending:
+            evicted_token_ranges = list(pending)
+            pending.clear()
+        is_reprefill = bool(getattr(request, "pending_reprefill", False))
+        if is_reprefill:
+            request.pending_reprefill = False
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -74,6 +93,9 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            evicted_token_ranges=evicted_token_ranges,
+            is_reprefill=is_reprefill,
+            position_offset=getattr(request, "position_offset", 0),
         )
 
     @property

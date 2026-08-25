@@ -46,6 +46,13 @@ class CachedRequestState:
     mrope_positions: torch.Tensor | None = None
     mrope_position_delta: int | None = None
 
+    # Highest position number currently in this request's KV cache
+    # (streaming sessions only; -1/None otherwise).
+    max_cached_position: int | None = None
+    # 1D-RoPE (text) streaming sessions: index -> RoPE position offset
+    # (cumulative evicted width). 0 for everything else.
+    position_offset: int = 0
+
     xdrope_positions: torch.Tensor | None = None
 
     lora_request: LoRARequest | None = None
