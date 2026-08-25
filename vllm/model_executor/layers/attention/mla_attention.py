@@ -2391,6 +2391,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
+                assert seq_lens is not None, (
+                    "MLA DCP decode requires seq_lens on CommonAttentionMetadata"
+                )
+                if dcp_local_seq_lens is None:
+                    dcp_local_seq_lens = get_dcp_local_seq_lens(
+                        seq_lens,
+                        dcp_size=self.dcp_world_size,
+                        dcp_rank=get_dcp_group().rank_in_group,
+                        cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    )
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
 

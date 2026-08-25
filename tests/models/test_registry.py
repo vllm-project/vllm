@@ -118,6 +118,8 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
         # in V1.
         # ("MLPSpeculatorPreTrainedModel", False, False),
         ("DeepseekV2ForCausalLM", True, False),
+        ("KimiLinearForCausalLM", True, False),
+        ("KimiK3ForConditionalGeneration", True, False),
         ("Qwen2VLForConditionalGeneration", True, True),
     ],
 )

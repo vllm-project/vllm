@@ -152,3 +152,21 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 
     assert unpadded.shape == q.shape
     torch.testing.assert_close(unpadded, q)
+
+
+def test_lse_unpadding_preserves_head_order():
+    num_heads = 12
+    q = torch.arange(num_heads, dtype=torch.float32).view(1, num_heads, 1)
+    padded_lse = AiterMLAHelper.get_mla_padded_q(num_heads, q).squeeze(-1)
+
+    unpadded_lse = AiterMLAHelper.get_mla_unpadded_lse(num_heads, padded_lse)
+
+    assert unpadded_lse.shape == (1, num_heads)
+    torch.testing.assert_close(unpadded_lse, q.squeeze(-1))
+
+
+def test_dcp_decode_routes_using_gathered_head_count(monkeypatch, gluon_available):
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_max_bh16_heads", lambda: 32)
+
+    assert AiterMLAHelper.use_gluon_decode(8, 1, "bfloat16", dcp_world_size=4)
+    assert not AiterMLAHelper.use_gluon_decode(96, 1, "bfloat16", dcp_world_size=4)

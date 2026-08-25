@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import inspect
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Final
@@ -56,6 +58,13 @@ def _get_mla_gluon():
                 "Gluon MLA kernel (mla_gluon or mla_decode_gluon) when decode "
                 "heads are fewer than 16."
             ) from unified_import_error
+
+
+@functools.lru_cache(maxsize=1)
+def _get_aiter_mla_decode():
+    from aiter.mla import mla_decode_fwd
+
+    return mla_decode_fwd
 
 
 @functools.lru_cache(maxsize=1)
@@ -135,6 +144,27 @@ def _gluon_mla_decode_supported() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return on_gfx950()
+
+
+@functools.lru_cache(maxsize=1)
+def _gluon_mla_wrapper_source() -> str | None:
+    try:
+        return inspect.getsource(_get_mla_gluon())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _gluon_mla_max_bh16_heads() -> int:
+    """Largest head count the installed Gluon MLA bh16 regimes accept."""
+    fallback = AiterMLAHelper._AITER_MIN_MLA_HEADS
+    source = _gluon_mla_wrapper_source()
+    if source is None:
+        return fallback
+    match = re.search(r"requires nhead <= (\d+)", source)
+    if match is None:
+        return fallback
+    return max(fallback, int(match.group(1)))
 
 
 def _aiter_mla_small_head_mode() -> str:
@@ -311,6 +341,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
+        self._decode_num_heads = self.num_heads * self.dcp_world_size
 
         # reorder_batch_threshold is the largest query length decode can be
         # handed, and already accounts for the drafting scheme. A method-name
@@ -354,7 +385,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # Keep metadata sizing consistent with the padded tensor shape passed
         # to mla_decode_fwd.
         self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
-            self.num_heads
+            self._decode_num_heads
         )
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
@@ -665,7 +696,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             ]
         )
         use_gluon_decode = AiterMLAHelper.use_gluon_decode(
-            self.num_heads, int(max_qo_len), self._kv_cache_dtype_str
+            self._decode_num_heads,
+            int(max_qo_len),
+            self._kv_cache_dtype_str,
+            self.dcp_world_size,
         )
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -740,9 +774,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # decode is qlen==1, verify is qlen>1 -- and cover both Gluon entries.
         has_persistent_metadata = False
         use_persistent_metadata = (
-            not AiterMLAHelper.use_gluon_decode(
-                self.num_heads, max_qo_len, self._kv_cache_dtype_str
-            )
+            not use_gluon_decode
             and not AiterMLAHelper.use_gluon_verify(
                 self.num_heads, max_qo_len, self._kv_cache_dtype_str
             )
@@ -750,7 +782,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
             and (
-                self.num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+                self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
                 or max_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
             )
@@ -944,22 +976,40 @@ class AiterMLAHelper:
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
-        if num_heads == m:
-            return o
-        if m % num_heads == 0:
-            return o[:, :: m // num_heads, :]
-        # Undo the tile-padding from get_mla_padded_q: the real heads are the
-        # first num_heads.
-        return o[:, :num_heads, :]
+        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, o)
 
     @staticmethod
-    def use_gluon_decode(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
+    def _get_mla_unpadded_heads(num_heads: int, tensor: torch.Tensor) -> torch.Tensor:
+        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        if num_heads == m:
+            return tensor
+        if m % num_heads == 0:
+            return tensor[:, :: m // num_heads, ...]
+        return tensor[:, :num_heads, ...]
+
+    @staticmethod
+    def get_mla_unpadded_lse(num_heads: int, lse: torch.Tensor) -> torch.Tensor:
+        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse)
+
+    @staticmethod
+    def _gluon_max_heads(dcp_world_size: int) -> int:
+        if dcp_world_size > 1:
+            return _gluon_mla_max_bh16_heads()
+        return AiterMLAHelper._AITER_MIN_MLA_HEADS - 1
+
+    @staticmethod
+    def use_gluon_decode(
+        num_heads: int,
+        max_qo_len: int,
+        kv_cache_dtype: str,
+        dcp_world_size: int = 1,
+    ) -> bool:
         # Small-head (<16) single-token decode takes either the Gluon kernel or
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
-        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
-        if num_heads >= m or max_qo_len != 1:
+        if max_qo_len != 1:
+            return False
+        if num_heads > AiterMLAHelper._gluon_max_heads(dcp_world_size):
             return False
         # Gluon's only fp8-KV regime, bh16bn128, is a bf16-query kernel with a
         # hardcoded scale that asserts batch_size == 1, so it cannot serve a
@@ -973,7 +1023,7 @@ class AiterMLAHelper:
         gluon_supported = _gluon_mla_decode_supported()
         if mode == "gluon":
             return gluon_supported
-        return m % num_heads == 0 and gluon_supported
+        return AiterMLAHelper._AITER_MIN_MLA_HEADS % num_heads == 0 and gluon_supported
 
     @staticmethod
     def use_gluon_verify(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
@@ -994,6 +1044,12 @@ class AiterMLAHelper:
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
+    can_return_lse_for_decode: bool = True
+
+    @property
+    def _decode_num_heads(self) -> int:
+        return self.num_heads * self.dcp_world_size
+
     def __init__(
         self,
         num_heads: int,
@@ -1023,6 +1079,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_args,
         )
         AiterMLAHelper.check_num_heads_validity(num_heads)
+        AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -1253,7 +1310,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             )
             kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
             mla_gluon = _get_mla_gluon()
-            mla_gluon(
+            need_lse = self.dcp_world_size > 1
+            gluon_kwargs = dict(
                 q_nope=q_nope,
                 q_pe=q_pe,
                 kv_c=kv_buffer,
@@ -1267,7 +1325,17 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 kv_scale=1.0,
                 min_kv_seq_len=decode.min_kv_seq_len,
             )
-            return o, None
+            if need_lse:
+                gluon_kwargs["return_lse"] = True
+            gluon_ret = mla_gluon(**gluon_kwargs)
+            lse = gluon_ret[1] if isinstance(gluon_ret, tuple) else None
+            if need_lse:
+                assert lse is not None, (
+                    "aiter mla_gluon(return_lse=True) returned no LSE; upgrade "
+                    "aiter to a build with Gluon decode LSE support."
+                )
+                lse = lse.reshape(B, num_q_heads)
+            return o, lse
 
         # 12-head (<16) multi-token verify (DSpark): the asm path has no
         # gqa<16, qseqlen>1 kernel. Flatten each verify token to its own
@@ -1357,8 +1425,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
 
-        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        assert q.shape[1] == self._decode_num_heads, (
+            "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
+            f"{self._decode_num_heads}, got {q.shape[1]}"
+        )
+        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self._decode_num_heads, q)
+        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
         o = torch.empty(
             B,
             mla_num_heads,
@@ -1390,17 +1462,46 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 reduce_partial_map=attn_metadata.reduce_partial_map,
             )
 
-        rocm_aiter_ops.mla_decode_fwd(
-            mla_padded_q,
-            kv_buffer,
-            o,
-            self.scale,
-            decode.qo_indptr,
-            decode.max_qo_len,
-            decode.paged_kv_indptr,
-            decode.paged_kv_indices,
-            decode.paged_kv_last_page_len,
-            **mla_kwargs,
-        )
+        lse = None
+        if self.dcp_world_size > 1:
+            if decode.max_qo_len != 1:
+                raise NotImplementedError(
+                    "ROCM_AITER_MLA DCP supports only single-token decode"
+                )
+            # The vLLM custom-op wrapper exposes only the in-place output and
+            # drops AITER's LSE, which the cross-shard merge needs.
+            _, lse = _get_aiter_mla_decode()(
+                mla_padded_q,
+                kv_buffer.view(-1, 1, 1, mla_padded_q.shape[-1]),
+                o,
+                decode.qo_indptr,
+                decode.paged_kv_indptr,
+                decode.paged_kv_indices,
+                decode.paged_kv_last_page_len,
+                decode.max_qo_len,
+                sm_scale=self.scale,
+                return_lse=True,
+                **mla_kwargs,
+            )
+            assert lse is not None, (
+                "aiter mla_decode_fwd(return_lse=True) returned no LSE; upgrade "
+                "aiter to a build with decode LSE support."
+            )
+        else:
+            rocm_aiter_ops.mla_decode_fwd(
+                mla_padded_q,
+                kv_buffer,
+                o,
+                self.scale,
+                decode.qo_indptr,
+                decode.max_qo_len,
+                decode.paged_kv_indptr,
+                decode.paged_kv_indices,
+                decode.paged_kv_last_page_len,
+                **mla_kwargs,
+            )
 
-        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, o), None
+        output = AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o)
+        if lse is not None:
+            lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
+        return output, lse
