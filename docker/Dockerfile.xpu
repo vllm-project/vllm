@@ -192,6 +192,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     PKG_CONFIG_PATH=/opt/ucx/lib/pkgconfig \
     LD_LIBRARY_PATH=/opt/ucx/lib \
     python -m pip wheel --no-deps . -w /tmp/nixl_wheels/ && \
+    find /opt/ucx -type f \( -name '*.a' -o -name '*.la' \) -delete && \
     rm -rf /opt/ucx/{include,share,etc} /opt/ucx/lib/cmake \
            /tmp/ucx_source /tmp/nixl_source
 
