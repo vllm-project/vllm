@@ -166,6 +166,66 @@ impl WireNdArray {
     pub(crate) fn extract_aux_frame(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         self.data.extract_aux_frame(aux_frames, threshold);
     }
+
+    /// Resolve an auxiliary-frame reference into owned raw bytes.
+    pub(crate) fn resolve_aux_frame<Frame>(&mut self, frames: &[Frame]) -> Result<(), String>
+    where
+        Frame: AsRef<[u8]>,
+    {
+        let WireArrayData::AuxIndex(index) = &self.data else {
+            return Ok(());
+        };
+        let index = *index;
+        let frame = frames
+            .get(index)
+            .ok_or_else(|| format!("tensor auxiliary frame index {index} is out of range"))?;
+        self.data = WireArrayData::RawView(Bytes::copy_from_slice(frame.as_ref()));
+        Ok(())
+    }
+
+    /// Decode a floating-point tensor into float32 values.
+    pub fn to_f32_vec(&self) -> Result<Vec<f32>, String> {
+        let data = self
+            .data
+            .as_raw_view()
+            .ok_or_else(|| "tensor auxiliary frame was not resolved".to_string())?;
+        let numel = self
+            .shape
+            .checked_numel()
+            .ok_or_else(|| format!("tensor shape product overflows usize: {:?}", self.shape))?;
+
+        let values = match self.dtype.as_str() {
+            "float32" => decode_chunks(data, numel, f32::from_ne_bytes),
+            "float16" => decode_chunks(data, numel, |bytes| {
+                f16::from_bits(u16::from_ne_bytes(bytes)).to_f32()
+            }),
+            "bfloat16" => decode_chunks(data, numel, |bytes| {
+                bf16::from_bits(u16::from_ne_bytes(bytes)).to_f32()
+            }),
+            dtype => return Err(format!("unsupported pooling output dtype {dtype:?}")),
+        }?;
+        Ok(values)
+    }
+}
+
+fn decode_chunks<const N: usize, T>(
+    data: &[u8],
+    numel: usize,
+    decode: impl Fn([u8; N]) -> T,
+) -> Result<Vec<T>, String> {
+    let expected_len = numel
+        .checked_mul(N)
+        .ok_or_else(|| "tensor byte length overflows usize".to_string())?;
+    if data.len() != expected_len {
+        return Err(format!(
+            "tensor data length {} does not match expected byte length {expected_len}",
+            data.len()
+        ));
+    }
+    Ok(data
+        .chunks_exact(N)
+        .map(|chunk| decode(chunk.try_into().expect("chunks_exact ensures length")))
+        .collect())
 }
 
 /// Validate that the number of elements implied by the shape matches the length
@@ -343,5 +403,34 @@ mod tests {
     fn constructors_validate_shape_product() {
         let err = WireNdArray::from_f32(vec![2, 2], vec![1.0, 2.0]).unwrap_err();
         assert!(err.contains("does not match shape"));
+    }
+
+    #[test]
+    fn floating_point_tensors_decode_to_f32() {
+        let f32_tensor = WireNdArray::from_f32(vec![2], vec![1.0, -2.5]).unwrap();
+        assert_eq!(f32_tensor.to_f32_vec().unwrap(), vec![1.0, -2.5]);
+
+        let f16_tensor =
+            WireNdArray::from_f16(vec![2], vec![f16::from_f32(1.0), f16::from_f32(-2.5)]).unwrap();
+        assert_eq!(f16_tensor.to_f32_vec().unwrap(), vec![1.0, -2.5]);
+
+        let bf16_tensor =
+            WireNdArray::from_bf16(vec![2], vec![bf16::from_f32(1.0), bf16::from_f32(-2.5)])
+                .unwrap();
+        assert_eq!(bf16_tensor.to_f32_vec().unwrap(), vec![1.0, -2.5]);
+    }
+
+    #[test]
+    fn resolve_aux_frame_uses_one_based_message_index() {
+        let mut tensor = WireNdArray {
+            dtype: "float32".to_string(),
+            shape: vec![2],
+            data: WireArrayData::AuxIndex(1),
+        };
+        let bytes = [1.0_f32, -2.5].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
+
+        tensor.resolve_aux_frame(&[Vec::new(), bytes]).unwrap();
+
+        assert_eq!(tensor.to_f32_vec().unwrap(), vec![1.0, -2.5]);
     }
 }
