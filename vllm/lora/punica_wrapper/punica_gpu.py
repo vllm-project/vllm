@@ -13,6 +13,7 @@ import torch
 
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
@@ -326,6 +327,37 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs=True,
         )
         y = y.view_as(y_org)
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor | None:
+        self._full_linear_indices(y)
+        adapter_y = torch.empty(
+            (x.size(0), weight_stacked.size(-2)),
+            dtype=torch.float32,
+            device=x.device,
+        )
+        lora_shrink(
+            x,
+            [weight_stacked],
+            adapter_y.unsqueeze(0),
+            *self.prompt_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
+            1.0,
+        )
+        result = self._select_full_linear_output(
+            y, adapter_y, bias_stacked, module_enabled
+        )
+        if current_platform.can_update_inplace():
+            y.copy_(result)
+            return None
+        return result
 
     def moe_lora_align_block_size(
         self,
