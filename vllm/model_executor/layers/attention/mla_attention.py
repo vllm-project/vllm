@@ -1635,26 +1635,32 @@ _DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
 }
 _DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
 
-_GLM5_MASKED_MHA_PURE_PREFILL_MAX_QUERY_LEN = {
-    1: 8 * 1024,
-    2: 20 * 1024,
-    4: 48 * 1024,
-    8: 112 * 1024,
-}
-_GLM5_MASKED_MHA_CONTEXT_THRESHOLDS = {
-    2: ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
-    4: (
-        (8 * 1024, 4 * 1024),
-        (16 * 1024, 8 * 1024),
-        (24 * 1024, 16 * 1024),
-        (34 * 1024, 32 * 1024),
-    ),
-    8: (
-        (8 * 1024, 4 * 1024),
-        (16 * 1024, 8 * 1024),
-        (32 * 1024, 16 * 1024),
-        (48 * 1024, 32 * 1024),
-    ),
+_GLM5_MASKED_MHA_THRESHOLDS = {
+    "FLASHMLA_SPARSE": {
+        1: (8 * 1024, ()),
+        2: (
+            20 * 1024,
+            ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
+        ),
+        4: (
+            48 * 1024,
+            (
+                (8 * 1024, 4 * 1024),
+                (16 * 1024, 8 * 1024),
+                (24 * 1024, 16 * 1024),
+                (34 * 1024, 32 * 1024),
+            ),
+        ),
+        8: (
+            112 * 1024,
+            (
+                (8 * 1024, 4 * 1024),
+                (16 * 1024, 8 * 1024),
+                (32 * 1024, 16 * 1024),
+                (48 * 1024, 32 * 1024),
+            ),
+        ),
+    }
 }
 
 
@@ -1669,17 +1675,16 @@ def _use_masked_mha(
     has_context: bool,
 ) -> bool:
     if (qk_head_dim, v_head_dim) == (256, 256):
-        if backend_name != "FLASHMLA_SPARSE":
+        backend_thresholds = _GLM5_MASKED_MHA_THRESHOLDS.get(backend_name)
+        if backend_thresholds is None:
             return False
+        glm5_thresholds = backend_thresholds.get(tensor_parallel_size)
+        if glm5_thresholds is None:
+            return False
+        pure_prefill_max_query_len, context_thresholds = glm5_thresholds
         if not has_context:
-            max_query_len = _GLM5_MASKED_MHA_PURE_PREFILL_MAX_QUERY_LEN.get(
-                tensor_parallel_size
-            )
-            return max_query_len is not None and query_len <= max_query_len
-        for (
-            max_seq_len,
-            context_min_query_len,
-        ) in _GLM5_MASKED_MHA_CONTEXT_THRESHOLDS.get(tensor_parallel_size, ()):
+            return query_len <= pure_prefill_max_query_len
+        for max_seq_len, context_min_query_len in context_thresholds:
             if seq_len <= max_seq_len:
                 return query_len >= context_min_query_len
         return False
