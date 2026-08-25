@@ -48,6 +48,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
+    PreemptionVictim,
     RequestQueue,
     SchedulingPolicy,
     create_request_queue,
@@ -218,6 +219,16 @@ class Scheduler(SchedulerInterface):
         except ValueError as e:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
+            ) from e
+        # Preemption-victim selection policy (independent of admission policy).
+        try:
+            self.preemption_victim = PreemptionVictim(
+                self.scheduler_config.preemption_victim
+            )
+        except ValueError as e:
+            raise ValueError(
+                f"Unknown preemption victim policy: "
+                f"{self.scheduler_config.preemption_victim}"
             ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
@@ -846,21 +857,38 @@ class Scheduler(SchedulerInterface):
                     ):
                         break
 
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
+                    # The request cannot be scheduled. Select a victim to
+                    # preempt. LCF and PRIORITY may pick a request already
+                    # scheduled this step, so they share the remove +
+                    # bookkeeping path below and differ only in the key; FCFS
+                    # keeps the last-admitted pop() fast path.
+                    if self.preemption_victim == PreemptionVictim.LCF:
+                        # Least-computed-first: evict the running request with
+                        # the smallest sunk compute to minimize wasted
+                        # recompute on the preempted request.
+                        victim = min(
+                            self.running,
+                            key=lambda r: r.num_computed_tokens,
+                        )
+                    elif self.policy == SchedulingPolicy.PRIORITY:
+                        victim = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                     else:
-                        preempted_req = self.running[-1]
+                        victim = None
+
+                    preempted_req = self.running[-1] if victim is None else victim
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
+                    if victim is None:
+                        self.running.pop()
+                    else:
+                        # Record the index of the preemption victim to
+                        # maintain accurate loop state.
                         victim_index = self.running.index(preempted_req)
                         del self.running[victim_index]
                         if victim_index < req_index:
@@ -885,8 +913,6 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
-                    else:
-                        preempted_req = self.running.pop()
 
                     self._preempt_request(
                         preempted_req,
