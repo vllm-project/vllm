@@ -48,6 +48,8 @@ class Coverage:
 
 
 def _call_name(func: ast.expr) -> str | None:
+    """Return a call's bare function/method name, e.g. `foo` for both
+    `foo(...)` and `obj.foo(...)`; `None` for anything else callable."""
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):
@@ -56,6 +58,9 @@ def _call_name(func: ast.expr) -> str | None:
 
 
 def _is_pytest_mark_distributed(func: ast.expr) -> bool:
+    """True for the `pytest.mark.distributed` attribute chain specifically,
+    disambiguating it from any other `*.distributed(...)` call `_call_name`
+    would also match (e.g. `torch.distributed(...)`)."""
     return (
         isinstance(func, ast.Attribute)
         and func.attr == "distributed"
@@ -65,6 +70,9 @@ def _is_pytest_mark_distributed(func: ast.expr) -> bool:
 
 
 def _extract_int_kwarg(call: ast.Call, names: tuple[str, ...]) -> int | None:
+    """Return the literal int passed to `call` under any keyword in `names`,
+    falling back to the first literal-int positional arg (covers
+    `multi_gpu_test(4)` as well as `multi_gpu_test(num_gpus=4)`)."""
     for kw in call.keywords:
         if (
             kw.arg in names
@@ -114,6 +122,9 @@ def find_gpu_requirements() -> dict[str, int]:
 
 
 def _strip_env_prefix(cmd: str) -> str:
+    """Strip leading inline env-var assignments (e.g. `VLLM_USE_V1=1 pytest
+    ...` -> `pytest ...`) so the pytest-token search below isn't fooled by
+    an `=`-containing value that happens to precede the real command."""
     while True:
         m = _ENV_PREFIX_RE.match(cmd)
         if not m:
