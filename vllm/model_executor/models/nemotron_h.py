@@ -29,10 +29,14 @@ import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.logger import init_logger
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    FP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -41,6 +45,7 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -48,11 +53,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    FP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -125,9 +125,7 @@ class NemotronHReLU2Fp8Quant(CustomOp):
     def __init__(self) -> None:
         super().__init__(enforce_enable=True)
 
-    def forward_native(
-        self, x: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         fp8_min, fp8_max = get_fp8_min_max()
         # The unfused path stores the ReLU2 result as BF16 before static FP8
         # quantization. Preserve that rounding point in registers.
@@ -196,9 +194,7 @@ class NemotronHMLP(nn.Module):
             down_quant_method.fp8_linear, FP8ScaledMMLinearKernel
         )
         quant_key = (
-            down_quant_method.fp8_linear.input_quant_key()
-            if fp8_scaled_mm
-            else None
+            down_quant_method.fp8_linear.input_quant_key() if fp8_scaled_mm else None
         )
         static_fp8 = quant_key == kFp8StaticTensorSym
         self.use_fused_relu2_fp8_quant = (
