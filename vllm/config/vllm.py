@@ -572,7 +572,7 @@ class VllmConfig:
         )
 
     @property
-    def is_encoder_only(self) -> bool:
+    def is_mm_encoder_only(self) -> bool:
         mm_config = (
             self.model_config.multimodal_config
             if self.model_config is not None
@@ -1126,6 +1126,10 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
 
+        # Models may have supplied their own DCP defaults above; anything still
+        # unset falls back to the stock ones.
+        self.parallel_config.set_dcp_defaults()
+
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
@@ -1671,6 +1675,8 @@ class VllmConfig:
                 "Remove VLLM_USE_V2_MODEL_RUNNER=0."
             )
 
+        self._validate_batch_sharded_sampling()
+
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -1777,6 +1783,16 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+
+        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
+            # Such an instance publishes encoder embeddings and runs no language
+            # model, so it holds no KV cache for prefix caching to reuse and its
+            # coordinator would have no group to manage.
+            logger.info(
+                "Disabling prefix caching: this instance runs the "
+                "multi-modal encoder only."
+            )
+            self.cache_config.enable_prefix_caching = False
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
@@ -2537,6 +2553,57 @@ class VllmConfig:
             unsupported.append("KV sharing fast prefill")
 
         return unsupported
+
+    def _validate_batch_sharded_sampling(self) -> None:
+        """Validate `enable_batch_sharded_sampling` against the rest of the config."""
+        if not self.parallel_config.enable_batch_sharded_sampling:
+            # Default to False if not set.
+            self.parallel_config.enable_batch_sharded_sampling = False
+            return
+
+        blockers: list[str] = []
+        tp_size = self.parallel_config.tensor_parallel_size
+
+        if not self.use_v2_model_runner:
+            blockers.append("it is only implemented by Model Runner V2")
+
+        if tp_size <= 1:
+            blockers.append("tensor_parallel_size is 1, so there is nothing to shard")
+        elif self.scheduler_config.max_num_seqs < tp_size:
+            # Requests are assigned to ranks whole, so fewer slots than ranks
+            # leaves some ranks without work in every step.
+            blockers.append(
+                f"max_num_seqs ({self.scheduler_config.max_num_seqs}) is below "
+                f"tensor_parallel_size ({tp_size})"
+            )
+
+        if self.model_config is not None and self.model_config.max_logprobs < 0:
+            # max_logprobs == -1 allows vocab-size logprob requests, which the
+            # fixed-width logprobs gather cannot reasonably size for.
+            blockers.append("max_logprobs is -1, allowing vocab-size logprob requests")
+
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification
+        ):
+            # Adaptive verification picks the per-request draft split on the GPU,
+            # so cu_num_logits_np is only an upper bound, while the shard plan is
+            # built from that CPU array. The two disagree once the budget binds.
+            # TODO(TheEpicDolphin): Support adaptive verification with batch-sharded
+            # sampling.
+            blockers.append(
+                "it does not yet work with adaptive verification, which decides "
+                "the per-request logits counts on the GPU, where the CPU-side "
+                "shard plan cannot see them"
+            )
+
+        if blockers:
+            raise ValueError(
+                "Batch-sharded sampling was explicitly enabled via "
+                "the --enable-batch-sharded-sampling flag, but is not supported "
+                "in this configuration for the following reason(s): "
+                f"{'; '.join(blockers)}."
+            )
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
