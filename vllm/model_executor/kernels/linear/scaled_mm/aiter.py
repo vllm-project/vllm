@@ -506,13 +506,17 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ),
             )
 
+        # The (16, 16) weight preshuffle needs N % 16 == 0; the 128-wide
+        # block scales need K % 128 == 0. N need not be a multiple of 128: the
+        # kernel handles a partial last N block (DeepSeek's fused_qkv_a_proj,
+        # N = 2112, is the case that matters).
         n, k = config.weight_shape
-        if not (n % 128 == 0 and k % 128 == 0):
+        if not (n % 16 == 0 and k % 128 == 0):
             return (
                 False,
                 (
-                    f"requires N and K dimensions divisible by 128, received "
-                    f"N={n} and K={k}."
+                    f"requires N divisible by 16 and K divisible by 128, "
+                    f"received N={n} and K={k}."
                 ),
             )
 
@@ -559,11 +563,11 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         assert (
             weight.dim() == 2
             and weight.dtype == current_platform.fp8_dtype()
-            and weight.shape[0] % 128 == 0
+            and weight.shape[0] % 16 == 0
             and weight.shape[1] % 128 == 0
         ), (
             "AiterPreshuffledFp8BlockScaledMMKernel requires a 2D fp8 weight "
-            "with N and K divisible by 128."
+            "with N divisible by 16 and K divisible by 128."
         )
 
         shuffled_weight = rocm_aiter_ops.shuffle_weight(

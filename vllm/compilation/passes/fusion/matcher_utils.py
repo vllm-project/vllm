@@ -313,6 +313,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
         is_tma_aligned: bool = False,
+        transpose_scale: bool = False,
     ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
@@ -323,6 +324,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.is_e8m0 = is_e8m0
         self.match_rocm_aiter = match_rocm_aiter
         self.is_tma_aligned = is_tma_aligned
+        self.transpose_scale = transpose_scale
 
         if match_rocm_aiter:
             assert not quant_key.scale.group_shape.is_per_tensor(), (
@@ -370,7 +372,9 @@ class MatcherQuantFP8(MatcherCustomOp):
                 scale=scale,
             )
         else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+            return self.QUANT_OP(  # type: ignore[no-any-return]
+                input, quant_key_group_shape.col, self.transpose_scale
+            )
 
     def forward_custom(
         self,
