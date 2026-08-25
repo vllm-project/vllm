@@ -54,6 +54,7 @@ SLEEP_MODEL_CASES = (
         architecture="VoxtralForConditionalGeneration",
         model="mistralai/Voxtral-Mini-3B-2507",
         tensor_names=("mel_filters",),
+        revision="3060fe34b35ba5d44202ce9ff3c097642914f8f3",
         tokenizer_mode="mistral",
     ),
     SleepModelCase(
@@ -111,7 +112,11 @@ def _sleep_test_hf_overrides(hf_config, *, model_arch: str):
                 "n_head": 1,
                 "d_model": 32,
                 "kernel_size": 3,
-                "pe_maxlen": 64,
+                # MM profiling uses the repository's real feature extractor
+                # and can produce roughly 750 encoder frames. Keep the real
+                # positional-encoding capacity instead of shrinking it with
+                # the number of test decoder tokens.
+                "pe_maxlen": 5000,
             }
         )
         hf_config.audio_encoder_conf = audio_encoder_conf
