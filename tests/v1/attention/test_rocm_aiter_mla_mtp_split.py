@@ -270,9 +270,7 @@ def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
     mtp_qlen = 8
     num_reqs = 8
     active_seq_len = 1032
-    seq_lens = torch.tensor(
-        [active_seq_len] + [0] * (num_reqs - 1), dtype=torch.int32
-    )
+    seq_lens = torch.tensor([active_seq_len] + [0] * (num_reqs - 1), dtype=torch.int32)
     query_start_loc = torch.tensor(
         [0, mtp_qlen] + [mtp_qlen] * (num_reqs - 1), dtype=torch.int32
     )
