@@ -248,14 +248,26 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-# The current Rubin prerelease PyTorch wheel carries an unused CUDA 13.5
-# libcurand SONAME dependency. CUDA 13.4's libcurand provides the same ABI used
-# by this wheel, so satisfy the loader without replacing the CUDA 13.4 toolkit.
+# CUDA 13.4 Rubin images need a compatibility link for the prerelease
+# PyTorch wheel's libcurand.so.11 dependency. CUDA 13.5 must use its native
+# libcurand.so.11 instead.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
-            -print -quit) \
-        && test -n "${CURAND_LIBRARY}" \
-        && ln -sf "${CURAND_LIBRARY}" /usr/local/cuda/lib64/libcurand.so.11 \
+        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
+        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ln -sf "${CURAND_LIBRARY}" \
+                /usr/local/cuda/lib64/libcurand.so.11; \
+        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
+        else \
+            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+            exit 1; \
+        fi \
         && printf '%s\n' \
             /opt/venv/lib \
             "/opt/venv/lib/python${PYTHON_VERSION}/site-packages/nvpl/lib" \
@@ -512,8 +524,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 
 # Build Triton from source when a repository is configured. Triton 3.8 pins
-# ptxas-blackwell 13.3, which cannot assemble SM107; the build-time override
-# avoids bundling it, and the final stage links CUDA 13.4 ptxas instead.
+# ptxas-blackwell 13.3, which cannot assemble SM107. Rubin CUDA 13.4 and 13.5
+# builds use their SM107-capable system ptxas during the wheel build and at
+# runtime.
 COPY tools/build_triton_from_source.sh /tmp/build_triton_from_source.sh
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=cache,id=triton-source-${TARGETARCH},target=/root/.triton,sharing=locked \
@@ -533,9 +546,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         dnf clean all; \
         rm -rf /var/cache/dnf; \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
-        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] \
-            && [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
-            export TRITON_PTXAS_BLACKWELL_PATH=/usr/local/cuda/bin/ptxas; \
+        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+            case "${CUDA_MAJOR_MINOR}" in \
+                13.4|13.5) \
+                    export TRITON_PTXAS_BLACKWELL_PATH=/usr/local/cuda/bin/ptxas \
+                    ;; \
+                *) \
+                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+                    exit 1 \
+                    ;; \
+            esac; \
         fi; \
         TRITON_WORKSPACE="${TRITON_WORKSPACE}" \
         MAX_JOBS="${max_jobs:-}" \
@@ -717,6 +737,11 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
+# Keep the output image's CUDA metadata aligned with the selected toolkit.
+# This also normalizes prerelease base images with four-component metadata for
+# OCI runtimes that evaluate NVIDIA's CUDA driver requirement.
+ENV CUDA_VERSION=${CUDA_VERSION}
+
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
@@ -779,14 +804,27 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     rm -rf /var/lib/apt/lists/*
 
-# See the matching CUDA 13.4 compatibility comment in the build stage. DeepEP
-# expects NCCL directly under its configured /usr prefix, while Ubuntu installs
-# it in a multiarch subdirectory.
+# Apply the CUDA 13.4-only libcurand compatibility link described in the build
+# stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
+# under its configured /usr prefix, while Ubuntu installs it in a multiarch
+# subdirectory.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
-            -print -quit) \
-        && test -n "${CURAND_LIBRARY}" \
-        && ln -sf "${CURAND_LIBRARY}" /usr/local/cuda/lib64/libcurand.so.11 \
+        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
+        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ln -sf "${CURAND_LIBRARY}" \
+                /usr/local/cuda/lib64/libcurand.so.11; \
+        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
+        else \
+            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+            exit 1; \
+        fi \
         && NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
         && test -n "${NCCL_LIBRARY}" \
         && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
@@ -1214,13 +1252,20 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,from=extensions-build,source=/tmp/triton_from_source_workspace/dist,target=/tmp/triton-source-dist,ro \
     if [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
-        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] \
-            && [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
-            TRITON_SYSTEM_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-            TRITON_EXPECTED_PTXAS_VERSION="${CUDA_MAJOR_MINOR}" \
-                bash /tmp/install_triton_from_source.sh \
-                    /tmp/triton-source-dist \
-                    /tmp/triton-source-wheel.sha256; \
+        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+            case "${CUDA_MAJOR_MINOR}" in \
+                13.4|13.5) \
+                    TRITON_SYSTEM_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+                    TRITON_EXPECTED_PTXAS_VERSION="${CUDA_MAJOR_MINOR}" \
+                        bash /tmp/install_triton_from_source.sh \
+                            /tmp/triton-source-dist \
+                            /tmp/triton-source-wheel.sha256 \
+                    ;; \
+                *) \
+                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+                    exit 1 \
+                    ;; \
+            esac; \
         else \
             bash /tmp/install_triton_from_source.sh \
                 /tmp/triton-source-dist \
