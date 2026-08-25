@@ -37,11 +37,23 @@ def _expected_probs(
     estimator: OnlineAcceptanceEstimator,
     logits: torch.Tensor,
     steps: torch.Tensor,
+    temperature: torch.Tensor,
 ) -> torch.Tensor:
-    top2 = logits.float().topk(2, dim=-1).values
-    margin = (top2[:, 0] - top2[:, 1]).clamp(max=40.0)
+    """logit(q_max) by a different route than the kernel takes.
+
+    The kernel shifts by the max and drops the unit term; here the argmax is
+    masked out and the complement is reduced with logsumexp, so agreement is
+    evidence about the value rather than about a shared formula.
+    """
+    temp = torch.where(temperature > 0, temperature, torch.ones_like(temperature))
+    scaled = logits.double() / temp[:, None].double()
+    top = scaled.max(dim=-1)
+    rest = scaled.scatter(1, top.indices[:, None], float("-inf"))
+    feature = (top.values - torch.logsumexp(rest, dim=-1)).clamp(-40.0, 40.0)
     weight, bias = estimator.coefficients[0], estimator.coefficients[1]
-    return torch.sigmoid(weight[steps] * margin + bias[steps])
+    return torch.sigmoid(
+        weight[steps].double() * feature + bias[steps].double()
+    ).float()
 
 
 @pytest.mark.parametrize("tokens_per_req", [1, NUM_STEPS])
@@ -72,9 +84,12 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
     logits = torch.randn(idx_mapping.shape[0], VOCAB_SIZE, device=device) * 4.0
 
     confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
-    estimator.predict(logits, idx_mapping, draft_step, confidence_probs)
+    temperature = torch.rand(MAX_NUM_REQS, device=device) + 0.5
+    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
 
-    expected = _expected_probs(estimator, logits, steps.long())
+    expected = _expected_probs(
+        estimator, logits, steps.long(), temperature[idx_mapping.long()]
+    )
     torch.testing.assert_close(
         estimator.predictions[idx_mapping.long(), steps.long()],
         expected,
@@ -101,10 +116,13 @@ def test_predict_skips_cudagraph_padded_rows():
     logits = torch.randn(num_reqs + num_padded, VOCAB_SIZE, device=device) * 4.0
 
     confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
-    estimator.predict(logits, idx_mapping, draft_step, confidence_probs)
+    temperature = torch.rand(MAX_NUM_REQS, device=device) + 0.5
+    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
 
     live = (slots.long(), torch.full((num_reqs,), 1, device=device))
-    expected = _expected_probs(estimator, logits[:num_reqs], live[1])
+    expected = _expected_probs(
+        estimator, logits[:num_reqs], live[1], temperature[slots.long()]
+    )
     torch.testing.assert_close(
         estimator.predictions[live], expected, atol=2e-3, rtol=2e-3
     )
@@ -121,16 +139,16 @@ def test_predict_skips_cudagraph_padded_rows():
 REFIT_NUM_REQS = 512
 
 
-def _drive_round(estimator, margins, num_accepted, slots):
+def _drive_round(estimator, features, num_accepted, slots):
     """Feed one step's graded drafts through predict's buffers into `step`."""
-    estimator.margins[slots.long()] = margins
+    estimator.features[slots.long()] = features
     estimator.predictions[slots.long()] = torch.sigmoid(
-        estimator.coefficients[0] * margins + estimator.coefficients[1]
+        estimator.coefficients[0] * features + estimator.coefficients[1]
     )
     estimator.step(
         slots,
         (num_accepted + 1).to(torch.int32),
-        (margins.shape[1] - num_accepted).to(torch.int32),
+        (features.shape[1] - num_accepted).to(torch.int32),
     )
 
 
@@ -150,15 +168,15 @@ def test_refit_recovers_a_shared_slope_and_per_position_intercepts():
     estimator.REFIT_INTERVAL = 5
     slots = torch.arange(REFIT_NUM_REQS, device=device, dtype=torch.int32)
     for _ in range(60):
-        margins = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device) * 8.0
-        accepted = torch.rand_like(margins) < torch.sigmoid(
-            true_slope * margins + true_bias
+        features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device) * 8.0
+        accepted = torch.rand_like(features) < torch.sigmoid(
+            true_slope * features + true_bias
         )
         # Verification stops at the first rejection, so a position's label is
         # conditional on every shallower one having been accepted.
         num_accepted = (~accepted).float().argmax(dim=1)
         num_accepted[accepted.all(dim=1)] = NUM_STEPS
-        _drive_round(estimator, margins, num_accepted, slots)
+        _drive_round(estimator, features, num_accepted, slots)
 
     slope, bias = estimator.coefficients[0], estimator.coefficients[1]
     assert torch.allclose(slope, slope[0]), "the slope must be shared"
@@ -184,8 +202,8 @@ def test_refit_survives_a_position_with_no_observations():
     # Every request is rejected at position 1, so positions 2+ are never graded.
     num_accepted = torch.ones(REFIT_NUM_REQS, device=device)
     for _ in range(20):
-        margins = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device) * 8.0
-        _drive_round(estimator, margins, num_accepted, slots)
+        features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device) * 8.0
+        _drive_round(estimator, features, num_accepted, slots)
 
     assert estimator.coefficients.isfinite().all()
     assert not torch.equal(estimator.coefficients[0], before[0]), "slope never moved"
@@ -235,3 +253,38 @@ def test_step_damping_scales_with_the_evidence():
 
     # A round with no observations at all must leave the coefficients alone.
     assert refit_with(0.0) == (0.0, 0.0)
+
+
+def test_feature_ignores_which_token_was_drawn():
+    """The score must depend on the draft distribution, not on the draw.
+
+    This is what keeps rejection sampling lossless: if the score read the drawn
+    token, trimming a draft would condition on the token being trimmed and tilt
+    the emitted distribution toward the drafter's confident modes. ``predict``
+    takes no token argument, and this pins that -- two rows with identical
+    logits must score identically no matter what was sampled from them.
+    """
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    estimator = _make_estimator(device)
+
+    row = torch.randn(VOCAB_SIZE, device=device) * 4.0
+    logits = row.expand(2, VOCAB_SIZE).contiguous()
+    idx_mapping = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    draft_step = torch.tensor(0, device=device, dtype=torch.int32)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
+
+    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
+    assert estimator.features[0, 0] == estimator.features[1, 0]
+
+    # And the value is the top token's log-odds, not the top-2 margin.
+    scaled = row.double()
+    top = scaled.max(dim=-1)
+    rest = scaled.scatter(0, top.indices[None], float("-inf"))
+    torch.testing.assert_close(
+        estimator.features[0, 0].double(),
+        (top.values - torch.logsumexp(rest, dim=-1)).clamp(-40.0, 40.0),
+        atol=2e-3,
+        rtol=2e-3,
+    )
