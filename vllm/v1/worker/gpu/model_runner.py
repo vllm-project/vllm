@@ -94,6 +94,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
@@ -1539,17 +1540,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         cudagraph_stats = None
-        if not dummy_run and self.observability_config.cudagraph_metrics:
-            cudagraph_stats = CUDAGraphStat(
-                num_unpadded_tokens=num_toks,
-                num_padded_tokens=batch_desc.num_tokens,
-                num_paddings=batch_desc.num_tokens - num_toks,
-                runtime_mode=str(batch_desc.cg_mode),
-            )
-
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
+            if self.observability_config.cudagraph_metrics:
+                cudagraph_stats = make_cudagraph_stats(batch_desc, num_toks)
             assert batch_req_state is not None
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc
