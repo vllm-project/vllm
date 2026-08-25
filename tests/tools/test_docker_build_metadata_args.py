@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
+ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
 
 
 def run_helper(
@@ -165,7 +166,7 @@ def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
 
 
 def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
-    ci_bake = (REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh").read_text()
+    ci_bake = ROCM_CI_BAKE.read_text()
 
     for expected in (
         "requirements/common.txt",
@@ -174,3 +175,35 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         "docker/Dockerfile.rocm",
     ):
         assert expected in ci_bake
+
+
+def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    git.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; git_fetch_with_timeout --quiet origin HEAD',
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == [
+        "fetch",
+        "--no-auto-maintenance",
+        "--quiet",
+        "origin",
+        "HEAD",
+    ]
