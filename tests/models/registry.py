@@ -329,9 +329,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         min_transformers_version="5.9.0",
     ),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
-    "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
-        "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
-    ),
+    "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct"),
     "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
@@ -938,7 +936,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
-        hf_overrides={"num_experts": 0},
         min_transformers_version="5.13",
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
