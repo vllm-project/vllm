@@ -54,6 +54,11 @@ _DUMMY_ARGS = [
     "dummy",
 ]
 
+# Name the server registers the model under; requests must use this
+# name (vLLM does not serve the load-time model name once
+# --served-model-name is set).
+SERVED_MODEL_NAME = "m"
+
 
 # ---------------------------------------------------------------------------
 # Server harness
@@ -102,7 +107,7 @@ def server(
         "--port",
         str(port),
         "--served-model-name",
-        "m",
+        SERVED_MODEL_NAME,
         *(base + (extra_args or [])),
     ]
     proc = subprocess.Popen(
