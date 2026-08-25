@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from packaging.version import Version
 import torch
 
 import vllm.envs as envs
@@ -764,6 +765,7 @@ def _w8a8_triton_block_scaled_mm(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    FORCE_FP8_DOT_UPCAST: tl.constexpr = False,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and
@@ -794,6 +796,9 @@ def _w8a8_triton_block_scaled_mm(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        if FORCE_FP8_DOT_UPCAST:
+            a = a.to(tl.float32)
+            b = b.to(tl.float32)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
@@ -952,6 +957,14 @@ def w8a8_triton_block_scaled_mm(
             "num_stages": 2,
         }
 
+    force_fp8_dot_upcast = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1151
+
+        force_fp8_dot_upcast = on_gfx1151() and Version(
+            triton.__version__
+        ) < Version("3.8.0")
+
     def grid(META):
         return (
             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -978,6 +991,7 @@ def w8a8_triton_block_scaled_mm(
         As.stride(-1),
         Bs.stride(1),
         Bs.stride(0),
+        FORCE_FP8_DOT_UPCAST=force_fp8_dot_upcast,
         **config,
     )
 
