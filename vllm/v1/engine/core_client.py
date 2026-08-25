@@ -177,6 +177,22 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    def add_streaming_prompt_request(self, request: EngineCoreRequest) -> None:
+        raise NotImplementedError
+
+    def append_streaming_prompt_tokens(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        raise NotImplementedError
+
+    def finalize_streaming_prompt(self, request_id: str) -> dict[str, int | bool | str]:
+        raise NotImplementedError
+
+    def get_streaming_prompt_metrics(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        raise NotImplementedError
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         raise NotImplementedError
 
@@ -265,6 +281,26 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        raise NotImplementedError
+
+    async def add_streaming_prompt_request_async(
+        self, request: EngineCoreRequest
+    ) -> None:
+        raise NotImplementedError
+
+    async def append_streaming_prompt_tokens_async(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        raise NotImplementedError
+
+    async def finalize_streaming_prompt_async(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        raise NotImplementedError
+
+    async def get_streaming_prompt_metrics_async(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
         raise NotImplementedError
 
     async def profile_async(
@@ -369,6 +405,23 @@ class InprocClient(EngineCoreClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
         self.engine_core.add_request(req, request_wave)
+
+    def add_streaming_prompt_request(self, request: EngineCoreRequest) -> None:
+        req, request_wave = self.engine_core.preprocess_add_request(request)
+        self.engine_core.add_streaming_prompt_request(req, request_wave)
+
+    def append_streaming_prompt_tokens(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        return self.engine_core.append_streaming_prompt_tokens(request_id, token_ids)
+
+    def finalize_streaming_prompt(self, request_id: str) -> dict[str, int | bool | str]:
+        return self.engine_core.finalize_streaming_prompt(request_id)
+
+    def get_streaming_prompt_metrics(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return self.engine_core.get_streaming_prompt_metrics(request_id)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -978,6 +1031,26 @@ class SyncMPClient(MPClient):
             self.engines_running = True
         self._send_input(EngineCoreRequestType.ADD, request)
 
+    def add_streaming_prompt_request(self, request: EngineCoreRequest) -> None:
+        if self.is_dp:
+            self.engines_running = True
+        self._send_input(EngineCoreRequestType.ADD_STREAMING_PROMPT, request)
+
+    def append_streaming_prompt_tokens(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        return self.call_utility(
+            "append_streaming_prompt_tokens", request_id, token_ids
+        )
+
+    def finalize_streaming_prompt(self, request_id: str) -> dict[str, int | bool | str]:
+        return self.call_utility("finalize_streaming_prompt", request_id)
+
+    def get_streaming_prompt_metrics(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return self.call_utility("get_streaming_prompt_metrics", request_id)
+
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
@@ -1220,6 +1293,30 @@ class AsyncMPClient(MPClient):
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
+
+    async def add_streaming_prompt_request_async(
+        self, request: EngineCoreRequest
+    ) -> None:
+        request.client_index = self.client_index
+        await self._send_input(EngineCoreRequestType.ADD_STREAMING_PROMPT, request)
+        self._ensure_output_queue_task()
+
+    async def append_streaming_prompt_tokens_async(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        return await self.call_utility_async(
+            "append_streaming_prompt_tokens", request_id, token_ids
+        )
+
+    async def finalize_streaming_prompt_async(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return await self.call_utility_async("finalize_streaming_prompt", request_id)
+
+    async def get_streaming_prompt_metrics_async(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return await self.call_utility_async("get_streaming_prompt_metrics", request_id)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
@@ -1493,6 +1590,26 @@ class DPAsyncMPClient(AsyncMPClient):
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
         if not self.engines_running:
             # Notify coordinator that we're sending a request
+            req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
+            await self.first_req_send_socket.send(req_msg)
+
+        await to_await
+
+        self._ensure_output_queue_task()
+
+    async def add_streaming_prompt_request_async(
+        self, request: EngineCoreRequest
+    ) -> None:
+        self._ensure_stats_update_task()
+
+        request.current_wave = self.current_wave
+        request.client_index = self.client_index
+
+        chosen_engine = self.get_core_engine_for_request(request)
+        to_await = self._send_input(
+            EngineCoreRequestType.ADD_STREAMING_PROMPT, request, chosen_engine
+        )
+        if not self.engines_running:
             req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
             await self.first_req_send_socket.send(req_msg)
 

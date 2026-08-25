@@ -230,6 +230,16 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # Streaming prompt prefill state.
+        #
+        # A streaming-prompt request can grow its prompt before decode starts.
+        # The scheduler may prefill appended prompt tokens while decode is not
+        # finalized, but workers must not return user-visible sampled tokens
+        # until finalize_streaming_prompt() is called.
+        self.streaming_prompt = False
+        self.streaming_prompt_finalized = True
+        self.streaming_prompt_appended_tokens = 0
+
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
@@ -360,6 +370,25 @@ class Request:
             return self.request_id < other.request_id
         return id(self) < id(other)
 
+    def append_streaming_prompt_token_ids(self, token_ids: list[int]) -> None:
+        """Append prompt tokens to an unfinalized streaming-prompt request."""
+        if not self.streaming_prompt:
+            raise RuntimeError("append requires a streaming-prompt request")
+        if self.streaming_prompt_finalized:
+            raise RuntimeError("cannot append tokens after streaming prompt finalize")
+        if self.prompt_token_ids is None:
+            raise RuntimeError("streaming prompt append requires prompt_token_ids")
+        if self.prompt_embeds is not None:
+            raise RuntimeError("streaming prompt append does not support prompt_embeds")
+        if not token_ids:
+            return
+
+        self.prompt_token_ids.extend(token_ids)
+        self._all_token_ids.extend(token_ids)
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.streaming_prompt_appended_tokens += len(token_ids)
+        self.update_block_hashes()
+
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
@@ -368,6 +397,7 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     WAITING_FOR_STREAMING_REQ = enum.auto()
+    WAITING_FOR_STREAMING_PROMPT = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
