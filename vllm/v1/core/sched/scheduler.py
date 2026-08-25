@@ -1418,6 +1418,11 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            if (
+                request.prefill_stats is not None
+                and request.num_computed_tokens < request.num_prompt_tokens
+            ):
+                request.prefill_stats.num_prefill_chunks += 1
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
             if self.defer_block_free:

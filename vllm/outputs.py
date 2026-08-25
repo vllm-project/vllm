@@ -13,7 +13,11 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
+from vllm.v1.metrics.stats import (
+    PrefillStats,
+    RequestSpecDecodeMetrics,
+    RequestStateStats,
+)
 
 logger = init_logger(__name__)
 
@@ -126,6 +130,8 @@ class RequestOutput:
         num_cached_tokens: The number of tokens with prefix cache hit.
         num_cache_creation_tokens: Prompt tokens currently counted as local
             prefix-cache writes for this request.
+        prefill_stats: Per-request prompt/KV telemetry emitted when prefill
+            completes.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
     """
@@ -145,6 +151,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
+        prefill_stats: PrefillStats | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -167,6 +174,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.num_cache_creation_tokens = num_cache_creation_tokens
+        self.prefill_stats = prefill_stats
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
 
@@ -176,6 +184,8 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        if self.prefill_stats is None:
+            self.prefill_stats = next_output.prefill_stats
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -214,7 +224,8 @@ class RequestOutput:
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
-            f"num_cache_creation_tokens={self.num_cache_creation_tokens})"
+            f"num_cache_creation_tokens={self.num_cache_creation_tokens}, "
+            f"prefill_stats={self.prefill_stats})"
         )
 
 

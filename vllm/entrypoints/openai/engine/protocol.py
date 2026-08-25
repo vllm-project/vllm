@@ -151,12 +151,29 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     per_step_drafted: list[int] | None = None
 
 
+class PrefixCacheMetrics(OpenAIBaseModel):
+    """Experimental per-request prompt/KV telemetry."""
+
+    num_computed_tokens: int
+    num_cached_tokens: int
+    num_local_cached_tokens: int
+    num_external_cached_tokens: int
+    num_cache_creation_tokens: int
+    num_new_full_blocks: int
+    num_block_allocations: int
+    num_block_evictions: int
+    num_prefill_chunks: int
+    prefill_time_ms: float | None = None
+
+
 class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    # Experimental, subject to change.
+    prefix_cache: PrefixCacheMetrics | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
 

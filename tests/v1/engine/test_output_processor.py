@@ -22,12 +22,13 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 
 
 def _ref_convert_id_to_token(
@@ -44,6 +45,56 @@ def _ref_convert_id_to_token(
       String representation of input token id
     """
     return tokenizer.decode([token_id]) or ""
+
+
+def test_prefill_stats_propagate_to_request_output():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-internal",
+        external_req_id="request-external",
+        prompt_token_ids=[1, 2, 3, 4],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            output_kind=RequestOutputKind.DELTA,
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+
+    prefill_stats = PrefillStats(
+        num_prompt_tokens=4,
+        num_computed_tokens=2,
+        num_cached_tokens=2,
+        num_local_cached_tokens=1,
+        num_external_cached_tokens=1,
+        num_cache_creation_tokens=2,
+        num_new_full_blocks=1,
+        num_block_allocations=2,
+        num_block_evictions=1,
+        num_prefill_chunks=2,
+    )
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[42],
+                finish_reason=FinishReason.LENGTH,
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+
+    assert len(processed.request_outputs) == 1
+    request_output = processed.request_outputs[0]
+    assert isinstance(request_output, RequestOutput)
+    assert request_output.request_id == "request-external"
+    assert request_output.prefill_stats is prefill_stats
+    assert request_output.prefill_stats.num_block_evictions == 1
 
 
 @pytest.mark.parametrize(
