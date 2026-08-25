@@ -78,9 +78,7 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
   as a minimal single-GPU FlashInfer CUPTI timing pattern.
 - Use
   [benchmarks/multi_gpu_gemm_rs.py](benchmarks/multi_gpu_gemm_rs.py) as a
-  minimal distributed CUDA-graph timing pattern. It is derived from vLLM's
-  `benchmarks/kernels/benchmark_kimi_k3_gemm_rs_ar.py` without its model,
-  custom-kernel, or symmetric-memory dependencies.
+  minimal distributed CUDA-graph timing pattern.
 
 Adapt the operation, cases, work formula, and correctness tolerances rather
 than copying either example unchanged.
