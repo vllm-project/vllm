@@ -163,7 +163,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
+    async def sleep(self, level: int = 1) -> None:
         """Sleep the engine"""
         ...
 

@@ -5,7 +5,7 @@ import copy
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -22,8 +22,10 @@ from vllm.config import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.exceptions import EngineNotPausedError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -608,3 +610,50 @@ def test_encoder_instance_zero_kv_cache(
         assert not engine_core.scheduler.ec_connector.is_producer, (
             "Consumer instance EC connector should be consumer"
         )
+
+
+def _sleepable_engine_core(paused: bool) -> EngineCore:
+    """A bare EngineCore holding just the state sleep() touches."""
+    core = object.__new__(EngineCore)
+    core.model_executor = MagicMock()
+    core.scheduler = MagicMock()
+    core.scheduler.pause_state = (
+        PauseState.PAUSED_NEW if paused else PauseState.UNPAUSED
+    )
+    core.scheduler.has_requests.return_value = False
+    core.batch_queue = None
+    core._reset_caches = MagicMock()
+    return core
+
+
+def test_sleep_requires_completed_pause():
+    """sleep() owns memory state only: without a completed pause it must
+    refuse rather than quiesce on the caller's behalf (RFC #51476)."""
+    core = _sleepable_engine_core(paused=False)
+    with pytest.raises(EngineNotPausedError):
+        EngineCore.sleep(core, level=1)
+    core.model_executor.sleep.assert_not_called()
+
+
+def test_sleep_releases_memory_without_touching_requests():
+    core = _sleepable_engine_core(paused=True)
+    assert EngineCore.sleep(core, level=1) is None
+    core.model_executor.sleep.assert_called_once_with(1)
+    core._reset_caches.assert_called_once()
+    core.scheduler.finish_requests.assert_not_called()
+    core.scheduler.set_pause_state.assert_not_called()
+
+
+def test_sleep_rejects_inflight_dp_pause():
+    """A kick-started DP pause consensus keeps engines_running True until
+    all ranks agree; sleep must refuse to unmap memory before that."""
+    core = object.__new__(EngineCoreProc)
+    core.model_executor = MagicMock()
+    core.scheduler = MagicMock()
+    core.scheduler.pause_state = PauseState.PAUSED_NEW
+    core.scheduler.has_requests.return_value = False
+    core.batch_queue = None
+    core.engines_running = True
+    with pytest.raises(EngineNotPausedError):
+        EngineCoreProc.sleep(core, level=1)
+    core.model_executor.sleep.assert_not_called()

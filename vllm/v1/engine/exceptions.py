@@ -9,6 +9,13 @@ class EngineGenerateError(VLLMServerError):
     pass
 
 
+class EngineNotPausedError(VLLMServerError):
+    """Raised by sleep() when generation has not been paused first.
+    Recoverable: complete a pause_generation() call, then retry."""
+
+    pass
+
+
 class EngineDeadError(VLLMServerError):
     """Raised when the EngineCore dies. Unrecoverable."""
 

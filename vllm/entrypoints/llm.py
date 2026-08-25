@@ -725,8 +725,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         This method renders chat conversations and adds the resulting requests
         to the engine queue. Use wait_for_completion() to get results. To
         guarantee that all requests are queued before scheduling starts, pause
-        scheduling with sleep(level=0) before calling this method and resume it
-        with wake_up(tags=["scheduling"]) afterward.
+        scheduling with pause_generation() before calling this method and
+        resume it with resume_generation() afterward.
 
         Args:
             messages: A sequence of conversations or a single conversation.
@@ -800,16 +800,32 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def pause_generation(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        """Pause generation and decide the fate of existing requests
+        ("abort" / "keep"). Required before [sleep][vllm.LLM.sleep].
+
+        Args:
+            mode: How to handle existing requests. "abort" finishes them
+                immediately; "keep" freezes them until resume.
+            clear_cache: Whether to clear KV and prefix caches after pausing.
         """
-        Put the engine to sleep. The engine should not process any requests.
-        The caller should guarantee that no requests are being processed
-        during the sleep period, before `wake_up` is called.
+        self.llm_engine.pause_generation(mode, clear_cache)
+
+    def resume_generation(self) -> None:
+        """Resume generation after [pause_generation][vllm.LLM.pause_generation]."""
+        self.llm_engine.resume_generation()
+
+    def sleep(self, level: int = 1):
+        """
+        Release GPU memory until [wake_up][vllm.LLM.wake_up] is called.
+        Requires a completed [pause_generation][vllm.LLM.pause_generation]
+        first, which owns request fate and quiescence; sleep only moves
+        memory (RFC #51476).
 
         Args:
             level: The sleep level.
-                - Level 0: Pause scheduling but continue accepting requests.
-                           Requests are queued but not processed.
                 - Level 1: Offload model weights to CPU, discard KV cache.
                            The content of kv cache is forgotten. Good for
                            sleeping and waking up the engine to run the same
@@ -820,10 +836,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
-            mode: How to handle any existing requests, can be "abort", "wait",
-                or "keep".
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level)
 
     def wake_up(self, tags: list[str] | None = None):
         """
@@ -836,7 +850,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 `("weights", "kv_cache", "scheduling")`. If None, all memory
                 is reallocated. wake_up should be called with all tags
                 (or None) before the engine is used again.
-                Use tags=["scheduling"] to resume from level 0 sleep.
+                tags=["scheduling"] also resumes a paused scheduler.
         """
         self.llm_engine.wake_up(tags)
 

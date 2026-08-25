@@ -22,8 +22,7 @@ router = APIRouter()
 async def sleep(raw_request: Request):
     # get POST params
     level = raw_request.query_params.get("level", "1")
-    mode = raw_request.query_params.get("mode", "abort")
-    await engine_client(raw_request).sleep(int(level), mode)
+    await engine_client(raw_request).sleep(int(level))
     # FIXME: in v0 with frontend multiprocessing, the sleep command
     # is sent but does not finish yet when we return a response.
     return Response(status_code=200)

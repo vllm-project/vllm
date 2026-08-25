@@ -124,7 +124,7 @@ def _run_vllm_requests(
     outputs = None
     if not use_beam_search:
         if prequeue_requests:
-            llm.sleep(level=0, mode="abort")
+            llm.pause_generation(mode="abort")
 
         start = time.perf_counter()
         if do_profile:
@@ -139,7 +139,7 @@ def _run_vllm_requests(
                     use_tqdm=True,
                 )
             finally:
-                llm.wake_up(tags=["scheduling"])
+                llm.resume_generation()
             outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
         else:
             outputs = llm.generate(
@@ -275,7 +275,7 @@ def _run_vllm_chat_requests(
         )
 
     if prequeue_requests:
-        llm.sleep(level=0, mode="abort")
+        llm.pause_generation(mode="abort")
 
     start = time.perf_counter()
     if do_profile:
@@ -285,7 +285,7 @@ def _run_vllm_chat_requests(
         try:
             llm.enqueue_chat(prompts, sampling_params, use_tqdm=True)
         finally:
-            llm.wake_up(tags=["scheduling"])
+            llm.resume_generation()
         outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
     else:
         outputs = llm.chat(prompts, sampling_params, use_tqdm=True)  # type: ignore[arg-type]
