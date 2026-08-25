@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base worker-side logic for the NIXL connector."""
 
+import contextlib
 import itertools
 import logging
 import math
@@ -2958,6 +2959,10 @@ class NixlBaseConnectorWorker:
         self.xfer_stats.record_failed_transfer()
         if self._host_stager is not None:
             self._host_stager.abort(req_id)
+            if req_id in self._host_stager.active_req_ids:
+                with self._failed_recv_lock:
+                    self._failed_recv_pending.add(req_id)
+                return
         with self._failed_recv_lock:
             if self._recving_transfers.get(req_id):
                 self._failed_recv_pending.add(req_id)
@@ -3380,7 +3385,8 @@ class NixlBaseConnectorWorker:
             )
 
     def __del__(self):
-        self.shutdown()
+        with contextlib.suppress(Exception):
+            self.shutdown()
 
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
