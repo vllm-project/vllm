@@ -224,7 +224,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         op: str,
     ) -> None:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
-        block_ids_array = np.asarray(block_ids, dtype=np.int32)
+        # NIXL takes indices as int32; a wider dtype silently costs a conversion.
+        assert block_ids.dtype == np.int32
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
         nixl_files = [
@@ -249,7 +250,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         xfer_handle = self._agent.make_prepped_xfer(
             op,
             self._dram_prepped_handle,
-            block_ids_array,
+            block_ids,
             obj_handle,
             np.arange(len(nixl_files), dtype=np.int32),
         )

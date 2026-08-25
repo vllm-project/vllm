@@ -133,11 +133,9 @@ class NixlBaseConnectorWorker:
             # read across all regions, same for [3], but group0-group1 blocks will
             # always differ (different areas). Therefore we can just flatten the
             # block_ids and compute the descs ids for all groups at once.
-            if len(block_ids) == 1:
-                block_arr = np.asarray(block_ids[0], dtype=np.int32)
-            else:
-                block_arr = np.concatenate(block_ids, dtype=np.int32)
-            block_arr = block_arr[None, :]
+            block_arr = np.concatenate(
+                [np.asarray(g, dtype=np.int32) for g in block_ids]
+            )[None, :]
             region_ids = np.arange(self.num_regions, dtype=np.int32)[:, None]
             return (region_ids * num_blocks + block_arr).ravel()
 
