@@ -148,6 +148,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                retention_interval=kv_cache_config.prefix_cache_retention_interval,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
