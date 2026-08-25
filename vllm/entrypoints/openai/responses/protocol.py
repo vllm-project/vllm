@@ -623,7 +623,11 @@ class ResponsesRequest(OpenAIBaseModel):
                     if tool.get("type") == "namespace":
                         namespace = tool.get("name")
                         for namespaced_tool in tool.get("tools", []):
-                            namespaced_name = namespaced_tool.get("name")
+                            namespaced_name = (
+                                namespaced_tool.get("name")
+                                if isinstance(namespaced_tool, dict)
+                                else getattr(namespaced_tool, "name", None)
+                            )
                             tool_names.add(namespaced_name)
                             tool_names.add(f"{namespace}__{namespaced_name}")
                     else:
