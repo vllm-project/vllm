@@ -247,6 +247,9 @@ class PagedShmTensorIPC:
                 # which releases the SHM read reference.
                 # We'd better not call close_read here, so that we can avoid syncing
                 # the swap_blocks_batch stream.
+
+                self.client.wait_write()
+
                 tensor_gpu = self.client.read(
                     pshm_tensor.uuid,
                     device=device,

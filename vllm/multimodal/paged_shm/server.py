@@ -33,7 +33,7 @@ from .constants import (
     OPEN_WRITE,
     POLL_INTERVAL,
     SHUTDOWN,
-    WAIT_WRITE,
+    WAIT_FOR_READABLE,
 )
 from .manager import PagedShmManager
 from .storage import PagedShmStorage
@@ -86,10 +86,10 @@ class PagedShmServer:
         # Set of UUIDs that have at least one pending open_read waiter
         self._open_read_pending: set[str] = set()
 
-        # Per‑uuid priority queues for pending WAIT_WRITE requests.
-        self.wait_for_write_completion: dict[str, PriorityQueue] = {}
-        # Set of UUIDs that have at least one pending wait_write waiter
-        self._wait_write_pending: set[str] = set()
+        # Per‑uuid priority queues for pending WAIT_FOR_READABLE requests.
+        self.wait_for_readable_completion: dict[str, PriorityQueue] = {}
+        # Set of UUIDs that have at least one pending wait_for_readable waiter
+        self._wait_readable_pending: set[str] = set()
 
         # Read token storage: token -> real_uuid
         self._read_tokens: dict[str, str] = {}
@@ -174,38 +174,38 @@ class PagedShmServer:
                     self.wait_for_open_read.pop(u, None)
                     self._open_read_pending.discard(u)
 
-    def clean_expired_wait_write(
+    def clean_expired_wait_readable(
         self, socket: zmq.Socket, uuid: str | None = None
     ) -> None:
         """
-        Clean expired entries from wait_write queues.
+        Clean expired entries from wait_for_readable queues.
         If uuid is given, only that queue is cleaned; otherwise all pending queues.
         """
         if uuid is not None:
-            q = self.wait_for_write_completion.get(uuid)
+            q = self.wait_for_readable_completion.get(uuid)
             if q is not None:
                 empty = self._clean_expired_queue(
                     q,
                     socket,
-                    "TimeoutError: wait_write timed out",
+                    "TimeoutError: wait_for_readable timed out",
                 )
                 if empty:
-                    self.wait_for_write_completion.pop(uuid, None)
-                    self._wait_write_pending.discard(uuid)
+                    self.wait_for_readable_completion.pop(uuid, None)
+                    self._wait_readable_pending.discard(uuid)
         else:
-            for u in list(self._wait_write_pending):
-                q = self.wait_for_write_completion.get(u)
+            for u in list(self._wait_readable_pending):
+                q = self.wait_for_readable_completion.get(u)
                 if q is None:
-                    self._wait_write_pending.discard(u)
+                    self._wait_readable_pending.discard(u)
                     continue
                 empty = self._clean_expired_queue(
                     q,
                     socket,
-                    "TimeoutError: wait_write timed out",
+                    "TimeoutError: wait_for_readable timed out",
                 )
                 if empty:
-                    self.wait_for_write_completion.pop(u, None)
-                    self._wait_write_pending.discard(u)
+                    self.wait_for_readable_completion.pop(u, None)
+                    self._wait_readable_pending.discard(u)
 
     # ------------------------------------------------------------------
     # Periodic maintenance (cleanup + deferred request processing)
@@ -217,7 +217,7 @@ class PagedShmServer:
         """
         self.clean_expired_open_write(socket)
         self.clean_expired_open_read(socket)
-        self.clean_expired_wait_write(socket)
+        self.clean_expired_wait_readable(socket)
         self.defer_open_write(socket)
 
     # ------------------------------------------------------------------
@@ -245,16 +245,16 @@ class PagedShmServer:
                     )
         self._open_read_pending.clear()
 
-        # 3. Clean all pending wait_write waiters
-        for u in list(self._wait_write_pending):
-            q = self.wait_for_write_completion.pop(u, None)
+        # 3. Clean all pending wait_for_readable waiters
+        for u in list(self._wait_readable_pending):
+            q = self.wait_for_readable_completion.pop(u, None)
             if q is not None:
                 while not q.empty():
                     _, identity = q.get()
                     self._send_response(
                         socket, identity, ERROR, "Cleaned by debug_cleanup"
                     )
-        self._wait_write_pending.clear()
+        self._wait_readable_pending.clear()
 
         # 4. Purge all tokens (forcefully)
         if self._read_tokens:
@@ -370,9 +370,11 @@ class PagedShmServer:
                 return None
             return self._open_read(real_uuid)
 
-    def wait_write(self, data: bytes, identity: bytes) -> str | None:
+    def wait_for_readable(self, data: bytes, identity: bytes) -> str | None:
         """
-        Wait for an item to become readable. Supports read tokens.
+        Wait for an item to become readable (i.e., write completed).
+        Supports read tokens. Returns OK response if immediately readable,
+        otherwise queues the request.
         """
         req = json.loads(data)
         uuid_or_token = req["uuid"]
@@ -394,8 +396,8 @@ class PagedShmServer:
         if timeout < 0:
             timeout = self.max_timeout
         deadline = time.monotonic() + timeout
-        q = self.wait_for_write_completion.setdefault(real_uuid, PriorityQueue())
-        self._wait_write_pending.add(real_uuid)
+        q = self.wait_for_readable_completion.setdefault(real_uuid, PriorityQueue())
+        self._wait_readable_pending.add(real_uuid)
         q.put((deadline, identity))
         return None
 
@@ -485,13 +487,13 @@ class PagedShmServer:
             self._open_read_pending.discard(uuid)
         # else still being written – keep queue
 
-    def defer_wait_write(self, socket: zmq.Socket, uuid: str) -> None:
+    def defer_wait_readable(self, socket: zmq.Socket, uuid: str) -> None:
         """
-        Wake up pending WAIT_WRITE waiters for the given UUID.
+        Wake up pending WAIT_FOR_READABLE waiters for the given UUID.
         """
-        q = self.wait_for_write_completion.get(uuid)
+        q = self.wait_for_readable_completion.get(uuid)
         if q is None or q.empty():
-            self._wait_write_pending.discard(uuid)
+            self._wait_readable_pending.discard(uuid)
             return
 
         try:
@@ -500,16 +502,16 @@ class PagedShmServer:
             while not q.empty():
                 _, ident = q.get()
                 self._send_response(socket, ident, ERROR, "UUID not found")
-            self.wait_for_write_completion.pop(uuid, None)
-            self._wait_write_pending.discard(uuid)
+            self.wait_for_readable_completion.pop(uuid, None)
+            self._wait_readable_pending.discard(uuid)
             return
 
         if info["ref_count"] >= 0:
             while not q.empty():
                 _, identity = q.get()
                 self._send_response(socket, identity, OK, _OK_RESPONSE)
-            self.wait_for_write_completion.pop(uuid, None)
-            self._wait_write_pending.discard(uuid)
+            self.wait_for_readable_completion.pop(uuid, None)
+            self._wait_readable_pending.discard(uuid)
         # else still being written
 
     # ------------------------------------------------------------------
@@ -788,9 +790,9 @@ def _zmq_server(
                     )
                 continue
 
-            if command == WAIT_WRITE:
+            if command == WAIT_FOR_READABLE:
                 try:
-                    result = server.wait_write(payloads[0].decode(), identity)
+                    result = server.wait_for_readable(payloads[0].decode(), identity)
                     if result is not None:
                         server._send_response(socket, identity, OK, result)
                 except (ValueError, RuntimeError) as e:
@@ -798,7 +800,7 @@ def _zmq_server(
                         socket, identity, ERROR, f"{type(e).__name__}: {e}"
                     )
                 except Exception as e:
-                    logger.exception("Unexpected error in WAIT_WRITE")
+                    logger.exception("Unexpected error in WAIT_FOR_READABLE")
                     server._send_response(
                         socket, identity, ERROR, f"Internal error: {e}"
                     )
@@ -816,15 +818,15 @@ def _zmq_server(
                             socket, ident, ERROR, "Item deleted while waiting"
                         )
                     server._open_read_pending.discard(uuid)
-                # Wait write waiters
-                q = server.wait_for_write_completion.pop(uuid, None)
+                # Wait_for_readable waiters
+                q = server.wait_for_readable_completion.pop(uuid, None)
                 if q is not None:
                     while not q.empty():
                         _, ident = q.get()
                         server._send_response(
                             socket, ident, ERROR, "Item deleted while waiting"
                         )
-                    server._wait_write_pending.discard(uuid)
+                    server._wait_readable_pending.discard(uuid)
 
                 # 2. Now perform deletion
                 try:
@@ -868,16 +870,17 @@ def _zmq_server(
                 logger.exception("Unexpected error in command %s", command)
                 server._send_response(socket, identity, ERROR, f"Internal error: {e}")
 
-            # After CLOSE_WRITE, wake up waiting readers and waiters for that UUID
+            # After CLOSE_WRITE,
+            # wake up waiting readers and wait_for_readable waiters for that UUID
             if command == CLOSE_WRITE:
                 try:
                     close_req = json.loads(payloads[0].decode())
                     uuid = close_req.get("uuid")
                     if uuid:
                         server.clean_expired_open_read(socket, uuid)
-                        server.clean_expired_wait_write(socket, uuid)
+                        server.clean_expired_wait_readable(socket, uuid)
                         server.defer_open_read(socket, uuid)
-                        server.defer_wait_write(socket, uuid)
+                        server.defer_wait_readable(socket, uuid)
                 except Exception:
                     # Fall back to global cleanup (already done at top of loop)
                     pass

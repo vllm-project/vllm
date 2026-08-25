@@ -61,7 +61,7 @@ from .constants import (
     OK,
     OPEN_READ,
     OPEN_WRITE,
-    WAIT_WRITE,
+    WAIT_FOR_READABLE,
 )
 from .storage import PagedShmStorage
 from .types import ShmAllocation, ShmWriteRequest
@@ -556,10 +556,10 @@ class PagedShmClient(_BaseClient):
         """
         self._request(CLOSE_READ, uuid_or_token)
 
-    def wait_write(self, uuid_or_token: str, timeout: float = 0.0) -> None:
+    def wait_for_readable(self, uuid_or_token: str, timeout: float = 0.0) -> None:
         """Wait for an item to become readable. Does NOT acquire a read lock."""
         payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
-        self._request(WAIT_WRITE, payload)
+        self._request(WAIT_FOR_READABLE, payload)
 
     def delete(self, uuid: str) -> None:
         """Delete an item and free its blocks immediately."""

@@ -848,14 +848,14 @@ class TestTimeout:
         client.close_write(uuid)
         client.delete(uuid)
 
-    def test_wait_write_timeout_expires(self, client):
+    def test_wait_for_readable_timeout_expires(self, client):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
         )
         start = time.perf_counter()
         with pytest.raises(RuntimeError, match="Server error"):
-            client.wait_write(uuid, timeout=0.5)
+            client.wait_for_readable(uuid, timeout=0.5)
         elapsed = time.perf_counter() - start
         assert elapsed >= 0.4
         client.close_write(uuid)
@@ -993,19 +993,19 @@ class TestPreAllocatedBlocks:
 
 
 # ---------------------------------------------------------------------------
-# wait_write
+# wait_for_readable
 # ---------------------------------------------------------------------------
 
 
-class TestWaitWrite:
-    def test_wait_write_immediate_when_readable(self, client):
+class TestWaitForReadable:
+    def test_wait_for_readable_immediate_when_readable(self, client):
         uuid = _unique_uuid()
         data = b"test data"
         client.write(uuid, data)
-        client.wait_write(uuid, timeout=0.0)
+        client.wait_for_readable(uuid, timeout=0.0)
         client.delete(uuid)
 
-    def test_wait_write_blocks_until_close_write(self, client):
+    def test_wait_for_readable_blocks_until_close_write(self, client):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
@@ -1018,23 +1018,25 @@ class TestWaitWrite:
         close_thread = threading.Thread(target=_close_writer)
         close_thread.start()
 
-        client.wait_write(uuid, timeout=5.0)
+        client.wait_for_readable(uuid, timeout=5.0)
         close_thread.join()
         client.delete(uuid)
 
-    def test_wait_write_timeout_zero_raises(self, client):
+    def test_wait_for_readable_timeout_zero_raises(self, client):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
         )
         try:
             with pytest.raises(RuntimeError, match="Server error"):
-                client.wait_write(uuid, timeout=0.0)
+                client.wait_for_readable(uuid, timeout=0.0)
         finally:
             client.close_write(uuid)
             client.delete(uuid)
 
-    def test_wait_write_timeout_positive_succeeds_after_close_write(self, client):
+    def test_wait_for_readable_timeout_positive_succeeds_after_close_write(
+        self, client
+    ):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
@@ -1047,11 +1049,11 @@ class TestWaitWrite:
         close_thread = threading.Thread(target=_close_writer)
         close_thread.start()
 
-        client.wait_write(uuid, timeout=5.0)
+        client.wait_for_readable(uuid, timeout=5.0)
         close_thread.join()
         client.delete(uuid)
 
-    def test_wait_write_timeout_negative_infinite(self, client):
+    def test_wait_for_readable_timeout_negative_infinite(self, client):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
@@ -1064,11 +1066,11 @@ class TestWaitWrite:
         close_thread = threading.Thread(target=_close_writer)
         close_thread.start()
 
-        client.wait_write(uuid, timeout=-1.0)
+        client.wait_for_readable(uuid, timeout=-1.0)
         close_thread.join()
         client.delete(uuid)
 
-    def test_wait_write_multiple_waiters(self, client):
+    def test_wait_for_readable_multiple_waiters(self, client):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
@@ -1081,7 +1083,7 @@ class TestWaitWrite:
         def _waiter():
             nonlocal done_count
             try:
-                client.wait_write(uuid, timeout=5.0)
+                client.wait_for_readable(uuid, timeout=5.0)
                 done_count += 1
             except Exception as e:
                 errors.append(e)
@@ -1100,12 +1102,12 @@ class TestWaitWrite:
         assert done_count == num_waiters
         client.delete(uuid)
 
-    def test_wait_write_nonexistent_uuid(self, client):
+    def test_wait_for_readable_nonexistent_uuid(self, client):
         uuid = _unique_uuid()
         with pytest.raises(RuntimeError, match="Server error"):
-            client.wait_write(uuid, timeout=0.0)
+            client.wait_for_readable(uuid, timeout=0.0)
 
-    def test_wait_write_then_open_read(self, client):
+    def test_wait_for_readable_then_open_read(self, client):
         uuid = _unique_uuid()
         data = b"test wait then read"
         size = len(data)
@@ -1122,7 +1124,7 @@ class TestWaitWrite:
         write_thread = threading.Thread(target=_write_and_close)
         write_thread.start()
 
-        client.wait_write(uuid, timeout=5.0)
+        client.wait_for_readable(uuid, timeout=5.0)
         result = client.read(uuid)
         assert result.tobytes() == data
 
@@ -1179,7 +1181,7 @@ class TestReadToken:
 
         client.delete(uuid)
 
-    def test_token_with_wait_write(self, client):
+    def test_token_with_wait_for_readable(self, client):
         uuid = _unique_uuid()
         data = b"token+wait test"
         size = len(data)
@@ -1196,7 +1198,7 @@ class TestReadToken:
         t = threading.Thread(target=_write_and_close)
         t.start()
 
-        client.wait_write(token, timeout=5.0)
+        client.wait_for_readable(token, timeout=5.0)
 
         alloc1 = client.open_read(token, timeout=0.0)
         assert alloc1.size == len(data)
@@ -1239,7 +1241,7 @@ class TestReadToken:
 
         client.delete(uuid)
 
-    def test_token_info_and_wait_write_do_not_consume(self, client):
+    def test_token_info_and_wait_for_readable_do_not_consume(self, client):
         uuid = _unique_uuid()
         data = b"dummy"
         size = len(data)
@@ -1258,7 +1260,7 @@ class TestReadToken:
         t = threading.Thread(target=_write_and_close)
         t.start()
 
-        client.wait_write(token, timeout=5.0)
+        client.wait_for_readable(token, timeout=5.0)
         t.join()
 
         alloc = client.open_read(token, timeout=0.0)
@@ -1420,7 +1422,7 @@ class TestDeleteWithWaiters:
         assert "err" in err_holder
         assert "deleted" in str(err_holder["err"]).lower()
 
-    def test_delete_clears_pending_wait_write(self, client):
+    def test_delete_clears_pending_wait_for_readable(self, client):
         uuid = _unique_uuid()
         client.open_write(
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
@@ -1431,7 +1433,7 @@ class TestDeleteWithWaiters:
 
         def waiter():
             try:
-                client.wait_write(uuid, timeout=5.0)
+                client.wait_for_readable(uuid, timeout=5.0)
                 result_holder["done"] = True
             except Exception as e:
                 err_holder["err"] = e
