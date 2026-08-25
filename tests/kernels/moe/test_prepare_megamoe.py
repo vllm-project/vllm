@@ -62,9 +62,7 @@ def test_prepare_nvfp4_megamoe_inputs(
     x_sf = torch.empty(
         (num_tokens, hidden_size // 64), dtype=torch.int32, device="cuda"
     )
-    staged_topk_ids = torch.empty(
-        (num_tokens, top_k), dtype=torch.int64, device="cuda"
-    )
+    staged_topk_ids = torch.empty((num_tokens, top_k), dtype=torch.int64, device="cuda")
     staged_topk_weights = torch.empty_like(topk_weights)
     prepare_nvfp4_megamoe_inputs(
         hidden_states,
