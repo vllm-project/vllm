@@ -6,7 +6,8 @@ The module is mostly a thin wrapper around the official ``cohere`` SDK
 types plus a few local additions:
 
 * :class:`CohereError` envelope.
-* :class:`CohereChatV2Request` (model required, ``max_tokens`` non-negative).
+* :class:`CohereChatV2Request` (model and messages required,
+  ``max_tokens`` non-negative).
 * :class:`CohereChatV2Response` plus the usage / logprob helpers.
 * The streaming event subclasses that bake a wire-format ``type``
   discriminator into ``model_dump()`` so SSE consumers can demux on it.
@@ -33,6 +34,7 @@ from vllm.entrypoints.cohere.protocol import (
     ToolCallStartEvent,
     ToolPlanDeltaEvent,
 )
+from vllm.exceptions import VLLMValidationError
 
 # ======================================================================
 # CohereError
@@ -52,16 +54,28 @@ class TestCohereError:
 
 class TestCohereChatV2Request:
     def test_empty_model_rejected(self):
-        with pytest.raises(ValidationError, match="model is required"):
+        with pytest.raises(VLLMValidationError, match="model is required") as exc_info:
             CohereChatV2Request(model="", messages=[{"role": "user", "content": "hi"}])
+        assert exc_info.value.parameter == "model"
+        assert exc_info.value.value is None
 
     def test_negative_max_tokens_rejected(self):
-        with pytest.raises(ValidationError, match="non-negative"):
+        with pytest.raises(VLLMValidationError, match="non-negative") as exc_info:
             CohereChatV2Request(
                 model="m",
                 messages=[{"role": "user", "content": "hi"}],
                 max_tokens=-1,
             )
+        assert exc_info.value.parameter == "max_tokens"
+        assert exc_info.value.value == -1
+
+    def test_empty_messages_rejected(self):
+        with pytest.raises(
+            VLLMValidationError, match="messages must contain at least one message"
+        ) as exc_info:
+            CohereChatV2Request(model="m", messages=[])
+        assert exc_info.value.parameter == "messages"
+        assert exc_info.value.value is None
 
     def test_zero_max_tokens_allowed(self):
         # Zero is allowed (the docs allow 0 -> return prompt only).
