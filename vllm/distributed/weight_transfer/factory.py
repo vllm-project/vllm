@@ -234,6 +234,12 @@ WeightTransferEngineFactory.register_engine(
     "SparseNCCLWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "sharded_rdt",
+    "vllm.distributed.weight_transfer.sharded_rdt_engine",
+    "ShardedRDTWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -252,4 +258,10 @@ WeightTransferTrainerFactory.register_engine(
     "sparse_nccl",
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "sharded_rdt",
+    "vllm.distributed.weight_transfer.sharded_rdt_trainer",
+    "ShardedRDTTrainerWeightTransferEngine",
 )

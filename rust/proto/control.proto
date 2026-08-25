@@ -55,6 +55,7 @@ message ParallelismInfo {
   uint32 data_parallel_size = 3;
   uint32 data_parallel_rank = 4;
   uint32 decode_context_parallel_size = 5;
+  uint64 world_size = 6;
 }
 
 message GetModelInfoRequest {}

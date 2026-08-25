@@ -285,7 +285,10 @@ class ArceeForCausalLM(
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_substr={
+            "gate_proj": None,
+        },
     )
     # Map fused module names to their submodule components
     # (for quantization and LoRA)
@@ -356,11 +359,7 @@ class ArceeForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights into the model (delegates to inner model and handles
         tied embeddings)."""
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-            skip_substrs=["gate_proj"],
-        )
+        loader = AutoWeightsLoader(self)
         # AutoWeightLoader handles weight name remapping, including fusing
         # separate q_proj, k_proj, v_proj into qkv_proj
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
