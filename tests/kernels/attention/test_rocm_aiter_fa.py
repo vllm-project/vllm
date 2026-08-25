@@ -909,3 +909,94 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         rtol=rtol,
     )
     torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize("per_head_scale", [False, True])
+def test_aiter_mha_gather_bf16_kv_to_fp8(per_head_scale):
+    """Gather-time quantization matches the regular FP8 cache conversion."""
+    _assert_aiter_supported()
+    if not current_platform.supports_fp8():
+        pytest.skip("FP8 not supported on this hardware")
+
+    from vllm.v1.attention.backends.rocm_aiter_fa import cp_mha_gather_cache
+
+    fp8_dtype = current_platform.fp8_dtype()
+    num_kv_heads = 2
+    head_size = 128
+    kv_len = BLOCK_SIZE + 5
+    block_tables = torch.tensor([[3, 1]], dtype=torch.int32)
+    token_to_batch = torch.zeros(kv_len, dtype=torch.int32)
+    cu_seq_lens = torch.tensor([0, kv_len], dtype=torch.int32)
+    seq_starts = torch.zeros(1, dtype=torch.int32)
+    key_cache = torch.randn(
+        4,
+        BLOCK_SIZE,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+    )
+    value_cache = torch.randn_like(key_cache)
+    gathered_key = torch.empty(
+        kv_len,
+        num_kv_heads,
+        head_size,
+        dtype=fp8_dtype,
+    )
+    gathered_value = torch.empty_like(gathered_key)
+    if per_head_scale:
+        k_scale = torch.tensor([0.25, 0.5], dtype=torch.float32)
+        v_scale = torch.tensor([0.5, 0.125], dtype=torch.float32)
+    else:
+        k_scale = torch.tensor([0.25], dtype=torch.float32)
+        v_scale = torch.tensor([0.5], dtype=torch.float32)
+
+    cp_mha_gather_cache(
+        key_cache=key_cache,
+        value_cache=value_cache,
+        key=gathered_key,
+        value=gathered_value,
+        block_tables=block_tables,
+        k_scales=k_scale,
+        v_scales=v_scale,
+        cu_seqlens_kv=cu_seq_lens,
+        token_to_batch=token_to_batch,
+        seq_starts=seq_starts,
+        dequant=False,
+        kv_cache_layout="NHD",
+        total_tokens=kv_len,
+        quantize=True,
+    )
+
+    expected_key = key_cache[block_tables[0]].reshape(-1, num_kv_heads, head_size)[
+        :kv_len
+    ]
+    expected_value = value_cache[block_tables[0]].reshape(-1, num_kv_heads, head_size)[
+        :kv_len
+    ]
+    fp8_max = torch.finfo(fp8_dtype).max
+    k_scale_broadcast = k_scale.view(1, -1, 1)
+    v_scale_broadcast = v_scale.view(1, -1, 1)
+    expected_key = torch.clamp(
+        expected_key.float() / k_scale_broadcast,
+        -fp8_max,
+        fp8_max,
+    ).to(fp8_dtype)
+    expected_value = torch.clamp(
+        expected_value.float() / v_scale_broadcast,
+        -fp8_max,
+        fp8_max,
+    ).to(fp8_dtype)
+
+    torch.testing.assert_close(
+        gathered_key.float(),
+        expected_key.float(),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        gathered_value.float(),
+        expected_value.float(),
+        rtol=0,
+        atol=0,
+    )
