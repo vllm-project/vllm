@@ -622,7 +622,11 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not self.block_pool.reset_prefix_cache():
+        num_reserved_blocks = sum(
+            manager.num_reserved_blocks
+            for manager in self.coordinator.single_type_managers
+        )
+        if not self.block_pool.reset_prefix_cache(num_reserved_blocks):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformers import Gemma3nTextConfig
+from transformers import Gemma3nTextConfig, LlamaConfig
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
@@ -65,6 +65,12 @@ SLEEP_MODEL_CASES = (
         revision="refs/pr/17",
         trust_remote_code=True,
     ),
+    SleepModelCase(
+        name="openpangu",
+        architecture="PanguEmbeddedForCausalLM",
+        model=None,
+        tensor_names=("param_sink_value",),
+    ),
 )
 
 
@@ -92,6 +98,25 @@ def _create_local_model_config(case: SleepModelCase, model_dir: Path) -> str:
             laurel_rank=16,
             activation_sparsity_pattern=[0.0, 0.0, 0.0],
         )
+    elif case.name == "openpangu":
+        config = LlamaConfig(
+            architectures=[case.architecture],
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=256,
+            tie_word_embeddings=False,
+        )
+        config.param_sink_number = 16
+        config.param_sink_with_value = False
+        config.param_sink_scalar = None
+        config.param_sink_of_head_dim = False
+        config.qk_nope_dim = 16
+        config.qk_rope_dim = 16
+        config.v_channels = 32
     else:
         raise AssertionError(f"No local config builder for {case.name}")
 
@@ -173,6 +198,10 @@ def _get_sleep_tensor_targets(
                 ("_visual_token_ids_tensor_cache",),
             ),
         )
+    if model_name == "openpangu":
+        from vllm.model_executor.models.openpangu import OpenPanguSinkAttention
+
+        return ((OpenPanguSinkAttention, ("param_sink_value",)),)
     raise AssertionError(f"No sleep tensor targets for {model_name}")
 
 
