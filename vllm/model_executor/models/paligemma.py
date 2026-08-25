@@ -216,8 +216,9 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()
-        newline_prompt = "\n"
-        newline_token_id = tokenizer.encode(newline_prompt)[-1]  # 108
+        vocab = tokenizer.get_vocab()
+        newline_token_id = vocab["\n"]
+
         # Force to add newline at the end of prompt for paligemma's format
         # This step can NOT be replacemented by current PromptUpdate methods
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
