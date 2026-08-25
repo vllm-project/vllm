@@ -151,6 +151,35 @@ async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
     .expect("send outputs");
 }
 
+async fn reply_utility_bool(
+    dealer: &mut DealerSocket,
+    push: &mut PushSocket,
+    expected_method: &str,
+    result: bool,
+) {
+    let frames = recv_engine_message(dealer).await;
+    assert_eq!(frames[0].as_ref(), &[0x03]);
+    let payload = decode_value(&frames[1]).expect("decode utility payload");
+    let fields = payload.as_array().expect("utility payload array");
+    let call_id = fields[1].as_u64().expect("utility call id");
+    assert_eq!(fields[2].as_str(), Some(expected_method));
+    send_outputs(
+        push,
+        UtilityCallOutput {
+            output: UtilityOutput {
+                call_id: call_id.into(),
+                failure_message: None,
+                result: Some(UtilityResultEnvelope::without_type_info(Value::Boolean(
+                    result,
+                ))),
+            },
+            ..Default::default()
+        }
+        .into(),
+    )
+    .await;
+}
+
 async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
@@ -1560,6 +1589,151 @@ async fn control_reports_server_and_model_info() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn control_lora_lifecycle_selects_adapter_for_generation() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-lora".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    reply_utility_bool(dealer, push, "add_lora", true).await;
+
+                    let frames = recv_engine_message(dealer).await;
+                    assert_eq!(frames[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&frames[1]).expect("decode generation request");
+                    let lora = request.lora_request.expect("generation LoRA request");
+                    assert_eq!(lora.lora_name, "adapter");
+                    assert_eq!(lora.lora_int_id, 1);
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            vec![(vec![b'!' as u32], Some(EngineCoreFinishReason::Stop))],
+                        ),
+                    )
+                    .await;
+
+                    reply_utility_bool(dealer, push, "remove_lora", true).await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel.clone());
+    let mut inference_client = InferenceClient::new(channel);
+    let loaded = control_client
+        .load_lora(pb::LoadLoraRequest {
+            lora_name: "adapter".to_string(),
+            source_path: "adapter".to_string(),
+        })
+        .await
+        .expect("load LoRA")
+        .into_inner();
+    assert_eq!(
+        loaded.adapter.as_ref().map(|adapter| adapter.lora_id),
+        Some(1)
+    );
+
+    let duplicate = control_client
+        .load_lora(pb::LoadLoraRequest {
+            lora_name: "adapter".to_string(),
+            source_path: "adapter".to_string(),
+        })
+        .await
+        .expect_err("duplicate LoRA name should be rejected");
+    assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
+
+    let listed = control_client
+        .list_loras(pb::ListLorasRequest {})
+        .await
+        .expect("list LoRAs")
+        .into_inner();
+    assert_eq!(listed.adapters.len(), 1);
+    assert_eq!(listed.adapters[0].lora_name, "adapter");
+
+    inference_client
+        .generate(pb::GenerateRequest {
+            request_id: "grpc-lora-request".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 1,
+                ..Default::default()
+            }),
+            lora_name: "adapter".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("generate with LoRA");
+
+    let unloaded = control_client
+        .unload_lora(pb::UnloadLoraRequest {
+            lora_name: "adapter".to_string(),
+        })
+        .await
+        .expect("unload LoRA")
+        .into_inner();
+    assert_eq!(
+        unloaded.adapter.as_ref().map(|adapter| adapter.lora_id),
+        Some(1)
+    );
+    assert!(
+        control_client
+            .list_loras(pb::ListLorasRequest {})
+            .await
+            .expect("list LoRAs after unload")
+            .into_inner()
+            .adapters
+            .is_empty()
+    );
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn control_list_loras_requires_lora_enabled_engine() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-lora-disabled".to_vec(),
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            |_, _| boxed_test_future(async move {}),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel);
+    let status = control_client
+        .list_loras(pb::ListLorasRequest {})
+        .await
+        .expect_err("list should require LoRA support");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(status.message(), "engine was not started with LoRA enabled");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn control_forwards_weight_update_without_pause_guard() {
     let mut ready = default_ready_response();
     ready.weight_transfer_backend = Some("nccl".to_string());
@@ -1626,6 +1800,9 @@ async fn control_aggregates_multi_engine_capacity() {
     ready_0.max_model_len = 8_192;
     ready_0.num_gpu_blocks = 10;
     ready_0.effective_data_parallel_size = 2;
+    ready_0.tensor_parallel_size = 2;
+    ready_0.pipeline_parallel_size = 3;
+    ready_0.world_size = 12;
     ready_0.weight_transfer_backend = Some("nccl".to_string());
     ready_0.enable_sleep_mode = true;
     ready_0.supports_draft_weight_updates = true;
@@ -1634,6 +1811,9 @@ async fn control_aggregates_multi_engine_capacity() {
     ready_1.max_model_len = 4_096;
     ready_1.num_gpu_blocks = 20;
     ready_1.effective_data_parallel_size = 2;
+    ready_1.tensor_parallel_size = 2;
+    ready_1.pipeline_parallel_size = 3;
+    ready_1.world_size = 12;
     ready_1.data_parallel_rank = 1;
 
     let engine_tasks = [ready_0, ready_1].map(|ready| {
@@ -1684,7 +1864,9 @@ async fn control_aggregates_multi_engine_capacity() {
     assert!(rl.weight_transfer_backend.is_empty());
     assert!(!rl.sleep_mode_enabled);
     assert!(!rl.draft_weight_updates_enabled);
-    assert_eq!(server.parallelism.unwrap().data_parallel_size, 2);
+    let parallelism = server.parallelism.unwrap();
+    assert_eq!(parallelism.data_parallel_size, 2);
+    assert_eq!(parallelism.world_size, 12);
 
     drop(engine_tasks);
 }
