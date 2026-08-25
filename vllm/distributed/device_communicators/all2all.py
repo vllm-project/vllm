@@ -815,6 +815,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             comm_backend=CustomCommunicator(self.cpu_group),
         )
 
+        # Release cached allocator blocks before FlashInfer reserves the
+        # symmetric MNNVL fabric workspace.
+        torch.cuda.empty_cache()
+
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,
             max_num_tokens=self.max_num_tokens,
