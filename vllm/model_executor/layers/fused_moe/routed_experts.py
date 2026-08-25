@@ -1040,13 +1040,13 @@ class RoutedExperts(PluggableLayer):
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
             lora_base_layer_prefix: LoRA ``base_layer.`` prefix for the
-              ``weight_name`` (checkpoint) side
+                ``weight_name`` (checkpoint) side
             lora_base_layer_prefix_on_param_name: same, for the ``param_name``
-              side. Independent because ``get_expert_mapping`` resolves
-              ``param_name`` via ``getattr`` against this layer's bare
-              ``w13_weight``/``w2_weight`` (no prefix), while
-              ``make_expert_params_mapping`` indexes the model-wide
-              ``params_dict`` (prefix included).
+                side. Independent because ``get_expert_mapping`` resolves
+                ``param_name`` via ``getattr`` against this layer's bare
+                ``w13_weight``/``w2_weight`` (no prefix), while
+                ``make_expert_params_mapping`` indexes the model-wide
+                ``params_dict`` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
 
         Returns:
