@@ -84,6 +84,17 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         )
 
     @override
+    def model_returns_tuple(self) -> bool:
+        """Orthrus' diffusion forward returns a single hidden-states tensor.
+
+        The base class assumes a ``(last_hidden_states, hidden_states)`` pair
+        for every method outside a small allowlist, and unpacking a plain
+        ``[num_tokens, hidden_size]`` tensor into two names raises
+        "too many values to unpack" on the first propose() call.
+        """
+        return False
+
+    @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Keep the draft on the target's attention backend.
 
