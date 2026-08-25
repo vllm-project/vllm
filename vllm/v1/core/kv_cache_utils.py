@@ -720,9 +720,22 @@ def resolve_kv_cache_block_sizes(
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
+    def resolved_sizes(
+        scheduler_block_size: int,
+        hash_block_size: int,
+    ) -> tuple[int, int]:
+        if cache_config.enable_prefix_caching:
+            logger.info_once(
+                "Prefix caching enabled: minimum cacheable prefix is %d tokens "
+                "(prefix cache match unit); shared prefixes shorter than this "
+                "cannot produce cache hits.",
+                hash_block_size,
+            )
+        return scheduler_block_size, hash_block_size
+
     if len(groups) <= 1:
         bs = cache_config.block_size * dcp
-        return bs, bs
+        return resolved_sizes(bs, bs)
 
     group_block_sizes = [
         resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups
@@ -734,7 +747,7 @@ def resolve_kv_cache_block_sizes(
     # to the scheduler block size.
     connector_enabled = vllm_config.kv_transfer_config is not None
     if not (cache_config.enable_prefix_caching or connector_enabled):
-        return scheduler_block_size, scheduler_block_size
+        return resolved_sizes(scheduler_block_size, scheduler_block_size)
 
     # Mamba groups outside align mode break divisibility; back off to the
     # scheduler block size. Read the mode from the resolved group spec because
@@ -744,7 +757,7 @@ def resolve_kv_cache_block_sizes(
         for group in groups
         for spec in iter_layer_specs(group.kv_cache_spec)
     ):
-        return scheduler_block_size, scheduler_block_size
+        return resolved_sizes(scheduler_block_size, scheduler_block_size)
 
     hashing_sizes = [
         block_size
@@ -787,7 +800,7 @@ def resolve_kv_cache_block_sizes(
             "must align with each spec's per-state compression. "
             f"Got alignments={sorted(prefix_alignments)}."
         )
-    return scheduler_block_size, hash_block_size
+    return resolved_sizes(scheduler_block_size, hash_block_size)
 
 
 def get_request_block_hasher(

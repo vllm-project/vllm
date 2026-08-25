@@ -23,3 +23,5 @@ We describe two example workloads, where APC can provide huge performance benefi
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
+
+APC only reuses complete prefix-cache match units. At startup, vLLM logs the effective minimum cacheable prefix in tokens. Shared prefixes shorter than this value cannot produce cache hits. Hybrid attention/SSM models can use a much larger match unit than attention-only models because their attention and recurrent-state cache pages must be aligned. The logged value reflects the effective `--prefix-match-unit` when one is configured.
