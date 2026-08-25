@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
 )
@@ -36,7 +37,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+)
 
 
 class _RecordingBlockHashes:
@@ -173,7 +180,7 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
-        block_ids=([0, 1],),
+        block_ids=([1, 2],),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -183,7 +190,7 @@ def _make_multi_group_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMe
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
-        block_ids=([0, 1], [2, 3]),
+        block_ids=([1, 2], [3, 4]),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -517,7 +524,7 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -543,7 +550,7 @@ def test_store_sending_thread_delta_strides_with_local_phase():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -569,7 +576,7 @@ def test_tp_sharded_group_saves_every_block_on_every_rank():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -595,7 +602,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=16,
-            block_ids=([0],),
+            block_ids=([1],),
             block_hashes=[b"a0"],
             can_save=True,
         ),
@@ -614,7 +621,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -686,6 +693,69 @@ def test_partial_tail_offload_skips_null_source_blocks():
     assert addrs == [[0x1000 + 2 * 256], [0x1000 + 3 * 256]]
 
 
+def test_store_sending_thread_skips_null_sparse_group_blocks():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
+    )
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([512])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_mamba],
+    )
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([1, 2, 3], [NULL_BLOCK_ID, 4, NULL_BLOCK_ID]),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        ),
+    )
+
+    keys, addrs, _, _ = store.batch_put_from_multi_buffers.call_args.args
+    mamba_keys = [key for key in keys if "@group:1" in key]
+    assert [key.rsplit("@", 1)[-1] for key in mamba_keys] == [b"a1".hex()]
+    assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
+
+
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
     store = MagicMock()
     store.batch_is_exist.return_value = [1, 0, 0]
@@ -752,7 +822,7 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -859,7 +929,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=48,
-            block_ids=([0, 1, 2], [2, 1, 0]),
+            block_ids=([1, 2, 3], [3, 2, 1]),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
         ),
@@ -867,8 +937,8 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
 
     db0.prepare_value.assert_not_called()
     db1.prepare_value.assert_not_called()
-    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [0, 1, 2])
-    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [2, 1, 0])
+    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [1, 2, 3])
+    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [3, 2, 1])
 
     keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     assert [key.rsplit("@", 1)[-1] for key in keys] == [
@@ -877,7 +947,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         "6131",
         "6132",
     ]
-    assert addrs == [[0x1000], [0x1200], [0x2200], [0x2000]]
+    assert addrs == [[0x1100], [0x1300], [0x2400], [0x2200]]
     assert sizes == [[256], [256], [512], [512]]
 
 
@@ -1250,7 +1320,7 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
-    assert addrs == [[0x1000, 0x2000], [0x1100, 0x2100]]
+    assert addrs == [[0x1100, 0x2100], [0x1200, 0x2200]]
     assert sizes == [[256, 256], [256, 256]]
     assert config.group_ids == [
         "vllm-mooncake-store:test-model@6130",
@@ -1301,7 +1371,7 @@ def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6131",
     ]
-    assert addrs == [[0x1000], [0x1100], [0x3200], [0x3300]]
+    assert addrs == [[0x1100], [0x1200], [0x3300], [0x3400]]
     assert sizes == [[256], [256], [256], [256]]
     # Different vLLM KV cache groups for the same prefix chunk share the
     # same Mooncake lifecycle group id.
@@ -1935,7 +2005,7 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
         ReqMeta(
             req_id="r0",
             token_len_chunk=33,
-            block_ids=([0, 1, 2],),
+            block_ids=([1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
         ),
@@ -1974,7 +2044,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
-            block_ids=([0, 1],),
+            block_ids=([1, 2],),
             block_hashes=[b"a0", b"a1"],
             can_save=True,
         ),
@@ -2050,7 +2120,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
-            block_ids=([0, 1], list(range(8))),
+            block_ids=([1, 2], list(range(1, 9))),
             block_hashes=hs,
             can_save=True,
         ),
@@ -2126,7 +2196,7 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
-            block_ids=([0, 1], list(range(8))),
+            block_ids=([1, 2], list(range(1, 9))),
             block_hashes=hs,
             can_save=True,
         ),
@@ -2196,7 +2266,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
-            block_ids=([0], list(range(4))),
+            block_ids=([1], list(range(1, 5))),
             block_hashes=hs,
             can_save=True,
             token_ids=list(range(32)),
@@ -2222,7 +2292,7 @@ def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
     return ReqMeta(
         req_id="r0",
         token_len_chunk=token_len,
-        block_ids=(list(range(num_blocks)),),
+        block_ids=(list(range(1, num_blocks + 1)),),
         block_hashes=[f"a{i}".encode() for i in range(num_blocks)],
         can_save=True,
         token_ids=list(range(token_ids_start, token_len)),
@@ -2897,112 +2967,83 @@ def test_putting_consumer_queues_decode_save():
     assert req.current_event is event
 
 
-def test_register_kv_caches_blocks_first_single_segment():
-    """Blocks-first layout (FlashInfer/MLA): one segment per layer."""
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     num_blocks = 10
-    page_size_elements = 64
+    num_layers = 2
     worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-
-    # Shape: (num_blocks, page_size_elements) — blocks outermost, no outer_dims
-    tensor = torch.zeros(num_blocks, page_size_elements, dtype=torch.float16)
-    _register_with_mocked_threads(worker, {"layer0": tensor})
-
-    db = worker.token_dbs[0]
-    assert db.kv_caches_base_addr == [tensor.untyped_storage().data_ptr()]
-    assert db.block_len == [tensor.untyped_storage().nbytes() // num_blocks]
-    worker.store.register_buffer.assert_called_once_with(
-        tensor.untyped_storage().data_ptr(),
-        tensor.untyped_storage().nbytes(),
-    )
-
-
-def test_register_kv_caches_kv_first_two_segments():
-    """K/V-first layout (FlashAttn): two segments (K, V) per layer."""
-    num_blocks = 10
-    block_size_tokens = 16
-    num_kv_heads = 4
-    head_size = 8
-    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-
-    # Shape: (2, num_blocks, block_size, num_kv_heads, head_size) — K/V outermost
-    tensor = torch.zeros(
-        2,
-        num_blocks,
-        block_size_tokens,
-        num_kv_heads,
-        head_size,
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=8,
         dtype=torch.float16,
     )
-    _register_with_mocked_threads(worker, {"layer0": tensor})
-
-    db = worker.token_dbs[0]
-    seg_stride = tensor.stride(0) * tensor.element_size()
-    base = tensor.untyped_storage().data_ptr()
-    assert db.kv_caches_base_addr == [base, base + seg_stride]
-    assert db.block_len == [seg_stride // num_blocks] * 2
-
-
-def test_register_kv_caches_cross_layer_single_segment():
-    """Cross-layer tensor: single segment with block_len = page_size * num_layers."""
-    num_blocks = 10
-    num_layers = 4
-    per_layer_page_elements = 64  # elements per layer per block
-
-    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-
-    # Cross-layer blocks-first tensor: all layers packed into a single
-    # contiguous block.  Shape (num_blocks, num_layers * per_layer_page)
-    # mimics the physical layout after stride reordering.
-    total_page_elements = num_layers * per_layer_page_elements
-    tensor = torch.zeros(num_blocks, total_page_elements, dtype=torch.float16)
-
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreSendingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreRecvingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-    ):
-        # Use the cross-layer wrapper key, same as register_cross_layers_kv_caches
-        worker.register_kv_caches({"__cross_layer__": tensor})
-
-    db = worker.token_dbs[0]
-    assert len(db.kv_caches_base_addr) == 1
-    assert db.kv_caches_base_addr[0] == tensor.untyped_storage().data_ptr()
-
-    expected_block_len = tensor.untyped_storage().nbytes() // num_blocks
-    # block_len should be per_layer_page_size * num_layers
-    assert (
-        expected_block_len
-        == num_layers * per_layer_page_elements * tensor.element_size()
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
     )
-    assert len(db.block_len) == 1
-    assert db.block_len[0] == expected_block_len
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
-    # Also verify via register_cross_layers_kv_caches wrapper
-    worker2 = _make_bare_worker(num_gpu_blocks=num_blocks)
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreSendingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreRecvingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-    ):
-        worker2.register_cross_layers_kv_caches(tensor)
+    _register_with_mocked_threads(
+        worker,
+        {"layer0": caches[0], "__cross_layer__": caches[1]},
+    )
 
-    db2 = worker2.token_dbs[0]
-    assert db2.kv_caches_base_addr == db.kv_caches_base_addr
-    assert db2.block_len == db.block_len
+    db = worker.token_dbs[0]
+    if not layout.is_block_compact:
+        # Each head group is its own region, so a block spans L*H regions.
+        head_cache = caches[0][:, 0]
+        assert db.kv_caches_base_addr == [
+            cache[:, head_idx].data_ptr()
+            for cache in caches
+            for head_idx in range(cache.shape[1])
+        ]
+        assert db.block_len == [head_cache.stride(0) * head_cache.element_size()] * (
+            num_layers * caches[0].shape[1]
+        )
+    elif layout.is_layer_compact:
+        assert db.kv_caches_base_addr == [cache.data_ptr() for cache in caches]
+        assert db.block_len == [spec.page_size_bytes] * num_layers
+    else:
+        assert db.kv_caches_base_addr == [raw.data_ptr()]
+        assert db.block_len == [num_layers * spec.page_size_bytes]
+    worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+def test_register_kv_caches_separate_head_groups():
+    # LHBNC gives each head group its own region; the K/V split doubles heads.
+    layout = KVCacheLayout.LHBNC
+    num_blocks = 3
+    num_layers = 2
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=8,
+        dtype=torch.float16,
+        num_head_slots=2,
+        state_content_bytes=2 * 8 * 2,
+    )
+    layer_names = ["layer0", "__cross_layer__"]
+    worker._kv_cache_groups = [KVCacheGroupSpec(layer_names, spec)]
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+    )
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+
+    _register_with_mocked_threads(worker, dict(zip(layer_names, caches)))
+
+    head_block_bytes = caches[0].stride(0) * caches[0].element_size()
+    expected_addrs = [
+        cache[:, head_idx].data_ptr()
+        for cache in caches
+        for head_idx in range(cache.shape[1])
+    ]
+    db = worker.token_dbs[0]
+    assert db.kv_caches_base_addr == expected_addrs
+    assert db.block_len == [head_block_bytes] * len(expected_addrs)
+    worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
 # ---------------------------------------------------------------------------

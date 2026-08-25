@@ -172,7 +172,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/test_envs.py
-  - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
@@ -189,7 +188,6 @@ steps:
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
-  - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
@@ -321,18 +319,6 @@ steps:
   - pytest -v -s kernels/helion/
 
 #-----------------------------------------------------  mi250 · models / language  -----------------------------------------------------#
-
-- label: ":amd: (MI250) Language Models (MTEB)" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/language/pooling_mteb_test
-  commands:
-  - pytest -v -s models/language/pooling_mteb_test
 
 - label: ":amd: (MI250) Language Models (PPL)" # TBD
   timeout_in_minutes: 180
@@ -860,7 +846,7 @@ steps:
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
   - examples/rl/
-  - tests/examples/features/data_parallel/data_parallel_offline.py
+  - examples/features/data_parallel/data_parallel_offline.py
   - vllm/platforms/rocm.py
   commands:
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -1502,7 +1488,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
@@ -1962,6 +1948,19 @@ steps:
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
+
+- label: ":amd: (MI300) Language Models (MTEB)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+  - pytest -v -s models/language/pooling_mteb_test
 
 - label: ":amd: (MI300) Language Models (Extended Pooling)" # TBD
   timeout_in_minutes: 180
@@ -3375,7 +3374,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 - label: ":amd: (MI355) LM Eval Large Models" # TBD
   timeout_in_minutes: 180
