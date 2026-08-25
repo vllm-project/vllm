@@ -4905,6 +4905,45 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     assert not scheduler.has_finished_requests()
 
 
+def test_stale_finished_recving_is_ignored():
+    """A late finished_recving report for an already-removed request must not
+    crash the engine (see issue #53049: MultiConnector lacks per-connector
+    dedup for async loads, so a slow connector can report a completion for a
+    request the scheduler already finished via a faster connector)."""
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(
+            finished_recving={"unknown-request"}
+        ),
+    )
+
+    # Should not raise; the stale report is simply ignored.
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert "unknown-request" not in scheduler.finished_recving_kv_req_ids
+
+
+def test_stale_finished_sending_is_ignored():
+    """A late finished_sending report for an already-removed request must not
+    crash the engine (symmetric to the finished_recving case in #53049)."""
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(
+            finished_sending={"unknown-request"}
+        ),
+    )
+
+    # Should not raise; the stale report is simply ignored.
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+
 def test_scheduler_kv_connector_stats():
     """Test worker-side, scheduler-side, and combined KV connector stats."""
 
