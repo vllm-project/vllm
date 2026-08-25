@@ -371,12 +371,6 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise EngineDeadError()
 
-        if self._reject_while_paused is not None:
-            raise EnginePausedError(
-                f"Generation is paused (mode={self._reject_while_paused!r}); "
-                "retry after resume."
-            )
-
         is_pooling = isinstance(params, PoolingParams)
 
         if (
@@ -512,8 +506,8 @@ class AsyncLLM(EngineClient):
         ):
             self.check_admission(request_id=request.request_id)
 
-        # Re-check after input processing: a pause may have closed admission
-        # while this request was suspended in tokenization.
+        # Admission gate, past every await in the submission path: a pause
+        # landing while inputs were being processed is still caught here.
         if self._reject_while_paused is not None:
             raise EnginePausedError(
                 f"Generation is paused (mode={self._reject_while_paused!r}); "
