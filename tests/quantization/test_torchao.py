@@ -39,15 +39,24 @@ TORCHAO_VERSION_0_18_AVAILABLE = TORCHAO_AVAILABLE and version.parse(
     reason="Only fp8_fnuz supported on CDNA3 architecture",
 )
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_pre_quantized_model(vllm_runner):
-    with vllm_runner(
+def test_pre_quantized_model(monkeypatch, dist_init, workspace_init):
+    model, vllm_config = load_model_without_vllm_runner(
         "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.15.0",
+        OPTForCausalLM,
         quantization="torchao",
         dtype="bfloat16",
-        enforce_eager=True,
-    ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
-    assert output
+    )
+
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
