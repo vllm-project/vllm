@@ -112,10 +112,10 @@ class SharedExperts(torch.nn.Module):
         if self._mk_can_overlap_shared_experts():
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
-        # On ROCm, empirically only DP deployments benefit from the overlap.
-        overlap_is_beneficial = (
-            not current_platform.is_rocm()
-            or self._moe_config.moe_parallel_config.dp_size > 1
+        # On ROCm, empirically only DP-only deployments benefit from the overlap.
+        overlap_is_beneficial = not current_platform.is_rocm() or (
+            self._moe_config.moe_parallel_config.dp_size > 1
+            and self._moe_config.moe_parallel_config.tp_size == 1
         )
 
         should_run_shared_in_aux_stream = (
