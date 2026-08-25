@@ -283,14 +283,15 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_tokens_padded: int,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
-        num_query_per_req: int | None = None,
+        num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = False,
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        query_start_loc_gpu: torch.Tensor | None = None,
+        seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
-        assert num_query_per_req is None  # Omitted for DFlash, read from self instead
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
@@ -311,6 +312,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=causal,
             query_start_loc_np=query_start_loc_np,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            query_start_loc_gpu=query_start_loc_gpu,
+            seq_lens=seq_lens,
         )
 
     @torch.inference_mode()
