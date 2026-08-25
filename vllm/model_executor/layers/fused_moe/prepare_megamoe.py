@@ -173,8 +173,8 @@ def prepare_nvfp4_megamoe_inputs(
         raise ValueError(f"Unexpected NVFP4 scale output shape: {x_sf.shape}.")
     if x_sf.dtype != torch.int32:
         raise TypeError("NVFP4 scale output must have int32 dtype.")
-    if topk_idx_out.shape != topk_ids.shape or topk_idx_out.dtype != torch.int32:
-        raise ValueError("topk_idx_out must match topk shape and have int32 dtype.")
+    if topk_idx_out.shape != topk_ids.shape or topk_idx_out.dtype != torch.int64:
+        raise ValueError("topk_idx_out must match topk shape and have int64 dtype.")
     if (
         topk_weights_out.shape != topk_weights.shape
         or topk_weights_out.dtype != torch.float32
