@@ -89,7 +89,7 @@ from vllm.v1.worker.gpu.buffer_utils import (
     async_copy_to_gpu,
     set_default_max_concurrency,
 )
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
@@ -1247,19 +1247,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
-        dcp_local_seq_lens = None
-        if self.use_dcp:
-            # Prepare dcp local seq_lens.
-            prepare_dcp_local_seq_lens(
-                self.input_buffers.dcp_local_seq_lens,
-                self.input_buffers.seq_lens,
-                num_reqs,
-                self.dcp_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
-
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
@@ -1312,7 +1299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=batch_req_state.prefill_len_np,
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
@@ -1333,7 +1320,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
-        return pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+        input_batch = pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+        return input_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -1606,6 +1594,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
+            maybe_prepare_dcp_local_seq_lens(
+                input_batch,
+                self.input_buffers,
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
