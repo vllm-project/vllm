@@ -912,7 +912,9 @@ def test_parser_manager_uses_shared_engine_directly(monkeypatch):
     )
 
     assert parser_cls is not None
-    assert parser_cls is _CombinedTestEngine
+    assert issubclass(parser_cls, _CombinedTestEngine)
+    assert parser_cls.reasoning_parser_cls is _CombinedReasoningAdapter
+    assert parser_cls.tool_parser_cls is _CombinedToolAdapter
     parser = parser_cls(make_mock_tokenizer(_VOCAB))
     request = _make_delegating_request()
     reasoning, content, _ = parser.parse(
@@ -923,6 +925,66 @@ def test_parser_manager_uses_shared_engine_directly(monkeypatch):
     assert reasoning == "ab"
     assert content == "c"
     assert parser.count_reasoning_tokens([]) == 2
+
+
+def test_parser_manager_shared_engine_strict_tool_calling(monkeypatch):
+    """When reasoning and tool parser share an engine, strict tool calling
+    attaches the structural tag to the request during adjust_request."""
+    from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
+    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: Qwen3ParserReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: Qwen3EngineToolParser),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_coder",
+        reasoning_parser_name="qwen3",
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    assert parser_cls.tool_parser_cls is Qwen3EngineToolParser
+
+    tokenizer = make_mock_tokenizer(
+        {"<|im_start|>": 1, "<|im_end|>": 2, "<think>": 3, "</think>": 4}
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "assign",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "member": {"type": "string"},
+                        "objective": {"type": "string"},
+                    },
+                    "required": ["member", "objective"],
+                },
+            },
+        }
+    ]
+
+    for tool_choice in ("auto", "required"):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        adjusted = parser_cls(tokenizer, req.tools).adjust_request(req)
+        assert adjusted.structured_outputs is not None
+        assert adjusted.structured_outputs.structural_tag is not None
+        assert "assign" in adjusted.structured_outputs.structural_tag
 
 
 def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):

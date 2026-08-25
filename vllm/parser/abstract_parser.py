@@ -270,6 +270,47 @@ class Parser:
 
     # ========== Tool Parser Methods ==========
 
+    def _apply_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        tool_parser: ToolParser | None = None,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        tp = tool_parser if tool_parser is not None else self._tool_parser
+        if (
+            tp is None
+            or tp.structural_tag_model is None
+            or not request.tools
+        ):
+            return request
+
+        need_tool_calling = (
+            request.tool_choice == "auto"
+            or request.tool_choice == "required"
+            or isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
+        )
+        if not need_tool_calling:
+            return request
+
+        structure_tag = tp.get_structural_tag(
+            request,
+            reasoning=False,
+        )
+        if structure_tag is None:
+            return request
+
+        structural_tag = json.dumps(structure_tag.model_dump())
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=structural_tag,
+        )
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
+        return request
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
@@ -521,44 +562,6 @@ class DelegatingParser(Parser):
             request = self._apply_structural_tag(request)
         if self._tool_parser is not None:
             request = self._tool_parser.adjust_request(request)
-        return request
-
-    def _apply_structural_tag(
-        self, request: ChatCompletionRequest | ResponsesRequest
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        if (
-            self._tool_parser is None
-            or self._tool_parser.structural_tag_model is None
-            or not request.tools
-        ):
-            return request
-
-        need_tool_calling = (
-            request.tool_choice == "auto"
-            or request.tool_choice == "required"
-            or isinstance(
-                request.tool_choice,
-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
-            )
-        )
-        if not need_tool_calling:
-            return request
-
-        structure_tag = self._tool_parser.get_structural_tag(
-            request,
-            reasoning=False,
-        )
-        if structure_tag is None:
-            return request
-
-        structural_tag = json.dumps(structure_tag.model_dump())
-        request.structured_outputs = StructuredOutputsParams(
-            structural_tag=structural_tag,
-        )
-        if isinstance(request, ResponsesRequest):
-            request.text = None
-        else:
-            request.response_format = None
         return request
 
     def extract_reasoning_streaming(

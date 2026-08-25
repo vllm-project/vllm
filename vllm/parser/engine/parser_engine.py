@@ -205,6 +205,12 @@ class ParserEngine(Parser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         request.skip_special_tokens = False
+        if self.tool_parser_cls is not None and request.tools:
+            from vllm.tool_parsers.abstract_tool_parser import ToolParser
+
+            tool_parser = self.tool_parser_cls(self.model_tokenizer, self._tools)
+            request = self._apply_structural_tag(request, tool_parser=tool_parser)
+            request = ToolParser.adjust_request(tool_parser, request)
         return request
 
     def _preprocess_feed(

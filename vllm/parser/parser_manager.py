@@ -140,7 +140,14 @@ class ParserManager:
         reasoning_engine_cls = cls._get_parser_engine_cls(reasoning_parser_cls)
         tool_engine_cls = cls._get_parser_engine_cls(tool_parser_cls)
         if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
-            return reasoning_engine_cls
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _EngineParser(reasoning_engine_cls):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+
+            return _EngineParser
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser
