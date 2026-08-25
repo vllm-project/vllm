@@ -70,11 +70,12 @@ echo "============================================"
 # ---- Install bfcl-eval if missing ----
 if ! python3 -c "import bfcl_eval" 2>/dev/null; then
     echo "Installing bfcl-eval..."
-    pip install "bfcl-eval>=2025.10.20.1,<2026"
+    uv pip install "bfcl-eval>=2025.10.20.1,<2026"
 fi
 
 # ---- Cleanup handler ----
 SERVER_PID=""
+# shellcheck disable=SC2329  # invoked via `trap cleanup EXIT` below
 cleanup() {
     if [ -n "$SERVER_PID" ]; then
         echo "Stopping vLLM server (pid=$SERVER_PID)..."
@@ -100,7 +101,7 @@ SERVE_ARGS=(
     --tensor-parallel-size "$TP_SIZE"
     --max-model-len "$MAX_MODEL_LEN"
     --enforce-eager
-    --no-enable-prefix-caching
+    --enable-prefix-caching
 )
 
 # Append reasoning parser if specified

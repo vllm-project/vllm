@@ -227,7 +227,7 @@ def is_nyi_config(config: Config) -> bool:
         ) == 1
         return unsupported_quant_config
 
-    return not info.supports_expert_map
+    return False
 
 
 def generate_valid_test_cases(

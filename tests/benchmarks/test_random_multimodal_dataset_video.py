@@ -16,7 +16,7 @@ from vllm.benchmarks.datasets import RandomMultiModalDataset, SampleRequest
 @pytest.fixture(scope="session")
 def hf_tokenizer() -> PreTrainedTokenizerBase:
     """Use a small, commonly available tokenizer."""
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 @pytest.fixture

@@ -26,6 +26,8 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
     """
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+        self.suffix: str = init_kwargs.get("token_suffix") or ""
         super().__init__(tokenizer, *args, **kwargs)
 
         # First, If there is reasoning_effort in chat_kwargs,
@@ -52,12 +54,12 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
-        return "<think>"
+        return f"<think{self.suffix}>"
 
     @property
     def end_token(self) -> str:
         """The token that ends reasoning content."""
-        return "</think>"
+        return f"</think{self.suffix}>"
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if self._identity_parser is not None:

@@ -108,14 +108,14 @@ def test_register_quantization_config(caplog_vllm):
     assert get_quantization_config("custom_quant") == CustomQuantConfig
 
     # The quantization method `custom_quant` is already exists,
-    # should raise a warning when re-registering it.
-    with caplog_vllm.at_level(logging.WARNING):
+    # should raise a debug message when re-registering it.
+    with caplog_vllm.at_level(logging.DEBUG, logger="vllm"):
         register_quantization_config("custom_quant")(CustomQuantConfig)
 
     assert any(
         "The quantization method 'custom_quant' already exists" in message
         for message in caplog_vllm.messages
-    ), "Expected a warning when re-registering custom_quant"
+    ), "Expected a debug message when re-registering custom_quant"
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
-from vllm.v1.kv_offload.base import OffloadKey
+from typing_extensions import override
+
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
@@ -46,7 +48,7 @@ class ARCCachePolicy(CachePolicy):
     """
 
     def __init__(self, cache_capacity: int):
-        self.cache_capacity: int = cache_capacity
+        super().__init__(cache_capacity)
         self.target_t1_size: float = 0.0
         self.t1: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
         self.t2: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
@@ -54,19 +56,23 @@ class ARCCachePolicy(CachePolicy):
         self.b1: OrderedDict[OffloadKey, None] = OrderedDict()
         self.b2: OrderedDict[OffloadKey, None] = OrderedDict()
 
+    @override
     def get(self, key: OffloadKey) -> BlockStatus | None:
         return self.t1.get(key) or self.t2.get(key)
 
+    @override
     def insert(self, key: OffloadKey, block: BlockStatus) -> None:
         self.t1[key] = block
         self.b1.pop(key, None)
         self.b2.pop(key, None)
 
+    @override
     def remove(self, key: OffloadKey) -> None:
         if self.t1.pop(key, None) is None:
             self.t2.pop(key, None)
 
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    @override
+    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
             if key in self.t1:
                 block = self.t1.pop(key)
@@ -94,6 +100,7 @@ class ARCCachePolicy(CachePolicy):
                 # move to MRU position (end) to keep it fresh in the ghost list
                 self.b2.move_to_end(key)
 
+    @override
     def clear(self) -> None:
         self.t1.clear()
         self.t2.clear()
@@ -101,6 +108,7 @@ class ARCCachePolicy(CachePolicy):
         self.b2.clear()
         self.target_t1_size = 0.0
 
+    @override
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
@@ -112,37 +120,36 @@ class ARCCachePolicy(CachePolicy):
         candidates: list[
             tuple[OffloadKey, BlockStatus, bool]
         ] = []  # (key, block, from_t1)
-        already_selected: set[OffloadKey] = set()
         virtual_t1_size = len(self.t1)
+        # Keep the scans monotonic: restarting from the LRU end after every
+        # selection makes a batch eviction quadratic in the number of blocks.
+        t1_iter = iter(self.t1.items())
+        t2_iter = iter(self.t2.items())
+
+        def next_candidate(
+            entries: Iterator[tuple[OffloadKey, BlockStatus]],
+        ) -> tuple[OffloadKey, BlockStatus] | None:
+            for key, block in entries:
+                if block.ref_cnt == 0 and key not in protected:
+                    return key, block
+            return None
 
         for _ in range(n):
             candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
-                for key, block in self.t1.items():
-                    if (
-                        block.ref_cnt == 0
-                        and key not in protected
-                        and key not in already_selected
-                    ):
-                        candidate = (key, block, True)
-                        virtual_t1_size -= 1
-                        break
+                entry = next_candidate(t1_iter)
+                if entry is not None:
+                    candidate = (*entry, True)
+                    virtual_t1_size -= 1
 
             if candidate is None:
-                for key, block in self.t2.items():
-                    if (
-                        block.ref_cnt == 0
-                        and key not in protected
-                        and key not in already_selected
-                    ):
-                        candidate = (key, block, False)
-                        break
-                if candidate is None:
+                entry = next_candidate(t2_iter)
+                if entry is None:
                     return None
+                candidate = (*entry, False)
 
             candidates.append(candidate)
-            already_selected.add(candidate[0])
 
         # Apply all evictions now that we know n candidates exist.
         result: list[tuple[OffloadKey, BlockStatus]] = []

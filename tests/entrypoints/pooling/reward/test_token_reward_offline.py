@@ -8,7 +8,6 @@ import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
 
@@ -16,24 +15,21 @@ prompts = ["The chef prepared a delicious meal."]
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         trust_remote_code=True,
         seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup
@@ -45,9 +41,10 @@ def test_config(llm: LLM):
 
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
-        outputs = llm.reward(
+        outputs = llm.encode(
             prompts,
             pooling_params=PoolingParams(use_activation=use_activation),
+            pooling_task="token_classify",
             use_tqdm=False,
         )
         return torch.cat([x.outputs.data for x in outputs])

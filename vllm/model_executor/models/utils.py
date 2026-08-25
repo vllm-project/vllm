@@ -4,14 +4,13 @@
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, overload
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
 
 import regex as re
 import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
-from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -19,9 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -31,11 +28,19 @@ from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
-    async_tensor_h2d,
     direct_register_custom_op,
 )
 
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+    from transformers.conversion_mapping import WeightRenaming
+
+    from vllm.config.model import ModelConfig
+    from vllm.model_executor.layers.quantization import QuantizationConfig
+
 logger = init_logger(__name__)
+
+ShardId: TypeAlias = str | int | tuple[int, ...]
 
 
 @dataclass
@@ -44,20 +49,55 @@ class WeightsMapper:
 
     If a key maps to a value of `None`, the corresponding weight is ignored."""
 
+    orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            orig_to_new_renaming=[
+                *self.orig_to_new_renaming,
+                *other.orig_to_new_renaming,
+            ],
+            orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_stacked={
+                **self.orig_to_new_stacked,
+                **other.orig_to_new_stacked,
+            },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
 
     def _map_name(self, key: str) -> str | None:
+        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+        result = self._map_name_with_shard(key)
+        return result[0] if result is not None else None
+
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
+        """Map a weight name and extract any shard_id metadata.
+
+        Returns:
+            (mapped_name, shard_id) if the name should be kept.
+            None if the name should be dropped.
+        """
+        # Deprecation warnings
+        if key.endswith(".kv_scale"):
+            logger.warning_once(
+                "DEPRECATED. Found kv_scale in the checkpoint. "
+                "This format is deprecated in favor of separate k_scale and "
+                "v_scale tensors and will be removed in a future release. "
+                "Functionally, we will remap kv_scale to k_scale and duplicate "
+                "k_scale to v_scale"
+            )
+
+        for renaming in self.orig_to_new_renaming:
+            key, _ = renaming.rename_source_key(key)
+
         for pattern, new_key in self.orig_to_new_regex.items():
             if pattern.search(key):
                 if new_key is None:
@@ -71,6 +111,12 @@ class WeightsMapper:
                     return None
 
                 key = key.replace(substr, new_key, 1)
+
+        shard_id: ShardId | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
 
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
@@ -86,16 +132,19 @@ class WeightsMapper:
 
                 key = new_key.join(key.rsplit(suffix, 1))
 
-        return key
+        return key, shard_id
 
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        return (
-            (out_name, data)
-            for name, data in weights
-            if (out_name := self._map_name(name)) is not None
-        )
+        for name, data in weights:
+            result = self._map_name_with_shard(name)
+            if result is None:
+                continue
+            out_name, shard_id = result
+            if shard_id is not None:
+                data.shard_id = shard_id
+            yield out_name, data
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [
@@ -110,6 +159,41 @@ class WeightsMapper:
             for name, value in values.items()
             if (out_name := self._map_name(name)) is not None
         }
+
+    def get_rename_mapper(self) -> "WeightsMapper":
+        """Mapper variant keeping only the renames.
+
+        This is what consumers that *name* modules rather than load them need:
+        LoRA name parsing and the quantization config's layer lists.
+
+        Stacked maps are dropped so that constituent names (e.g. `q_proj`) survive
+        rather than being rewritten to the stacked vLLM name (`qkv_proj`). Mappings to
+        `None` are dropped because "do not load this weight" is meaningless to such a
+        consumer, and applying it would silently shrink a quantization config's ignore
+        list or make LoRA name parsing fail."""
+        remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
+        return replace(
+            self,
+            orig_to_new_regex=remove_none(self.orig_to_new_regex),
+            orig_to_new_substr=remove_none(self.orig_to_new_substr),
+            orig_to_new_stacked={},
+            orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
+            orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+        )
+
+
+def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
+    """Map each tied word embedding qualname to the first name it aliases."""
+    canonical = dict[int, str]()
+    aliased = dict[str, str]()
+    for prefix, submodule in module.named_modules(remove_duplicate=False):
+        if not isinstance(submodule, VocabParallelEmbedding):
+            continue
+        for name, param in submodule.named_parameters(remove_duplicate=False):
+            qualname = f"{prefix}.{name}" if prefix else name
+            if (first_name := canonical.setdefault(id(param), qualname)) != qualname:
+                aliased[qualname] = first_name
+    return aliased
 
 
 class AutoWeightsLoader:
@@ -129,32 +213,36 @@ class AutoWeightsLoader:
     """
 
     # Models trained using early version ColossalAI or quantized by
-    # GPTQModel may include these tensors in checkpoint. Skip them.
-    ROTARY_EMBEDS_UNUSED_WEIGHTS = [
-        "rotary_pos_emb.inv_freq",
-        "rotary_emb.inv_freq",
-        "rotary_emb.cos_cached",
-        "rotary_emb.sin_cached",
-    ]
+    # GPTQModel may include these tensors in checkpoint. Drop them.
+    REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER = WeightsMapper(
+        orig_to_new_substr={
+            "rotary_pos_emb.inv_freq": None,
+            "rotary_emb.inv_freq": None,
+            "rotary_emb.cos_cached": None,
+            "rotary_emb.sin_cached": None,
+        }
+    )
 
     def __init__(
         self,
         module: nn.Module,
         *,
-        skip_prefixes: list[str] | None = None,
-        skip_substrs: list[str] | None = None,
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
     ) -> None:
         super().__init__()
 
         self.module = module
-        self.skip_prefixes = skip_prefixes or []
-        self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
-        # update default skip_substrs
-        self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
+
+        # Weight tying makes two qualnames point at the same `nn.Parameter`
+        # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
+        # would write the same storage twice, so only the first name reached by
+        # module traversal is loaded and the rest are skipped.
+        self.aliased_params = _get_tied_embedding_params(module)
+        self._skipped_aliases = dict[str, str]()
+        self._loaded_params_are_complete = True
 
     def _groupby_prefix(
         self,
@@ -185,9 +273,7 @@ class AutoWeightsLoader:
         return ".".join((prefix, rest))
 
     def _can_skip(self, qualname: str) -> bool:
-        return any(qualname.startswith(p) for p in self.skip_prefixes) or any(
-            substr in qualname for substr in self.skip_substrs
-        )
+        return qualname in self.aliased_params
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
@@ -275,6 +361,7 @@ class AutoWeightsLoader:
                     logger.warning(
                         "Unable to collect loaded parameters for module %s", module
                     )
+                    self._loaded_params_are_complete = False
                 else:
                     yield from map(
                         lambda x: self._get_qualname(base_prefix, x),
@@ -292,11 +379,6 @@ class AutoWeightsLoader:
             prefix = self._get_qualname(base_prefix, child_prefix)
 
             if child_prefix in child_modules:
-                if self._can_skip(prefix + "."):
-                    logger.debug("Skipping module %s", prefix)
-
-                    continue
-
                 yield from self._load_module(
                     prefix, child_modules[child_prefix], child_weights
                 )
@@ -310,9 +392,7 @@ class AutoWeightsLoader:
                     prefix, child_params[child_prefix], child_weights
                 )
             else:
-                can_skip_module = self._can_skip(prefix + ".")
-                can_skip_param = self._can_skip(prefix)
-                if can_skip_module or can_skip_param:
+                if self._can_skip(prefix):
                     logger.debug("Skipping missing %s", prefix)
 
                     continue
@@ -343,22 +423,168 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
-        if mapper is not None:
-            weights = mapper.apply(weights)
-        # filter out weights with first-prefix/substr to skip in name
-        weights = (
-            (name, weight) for name, weight in weights if not self._can_skip(name)
-        )
+        # Ignore unexpected biases (typically from GPTQ models)
+        self.ignore_unexpected_suffixes.append(".bias")
+
+        mapper = mapper or WeightsMapper()
+        # Many models store quant_config in the base model instead of the causal model.
+        # We look at the causal model's direct children for this reason.
+        modules = (self.module, *self.module.children())
+        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
+        if quant_config := next(iterator, None):
+            # Get mappings and ignore prefixes for KV cache quantization scales
+            mapper |= quant_config.get_cache_scale_mapper()
+            ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
+            self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
+        mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
+
+        weights = mapper.apply(weights)
+        weights = self._filter_skipped(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
+        self._check_skipped_aliases(autoloaded_weights)
         return autoloaded_weights
+
+    def _filter_skipped(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            if (canonical := self.aliased_params.get(name)) is not None:
+                self._skipped_aliases[name] = canonical
+            if self._can_skip(name):
+                continue
+
+            yield name, weight
+
+    def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
+        """Guard against skipping an alias whose canonical name never loads."""
+        if not self._loaded_params_are_complete:
+            return
+        for alias, canonical in self._skipped_aliases.items():
+            if canonical not in autoloaded_weights:
+                raise ValueError(
+                    f"{alias!r} was skipped because it is tied to {canonical!r} "
+                    f"in {self.module._get_name()}, but {canonical!r} was not "
+                    "found in the checkpoint, so the tied weight is "
+                    "uninitialized."
+                )
+
+
+def maybe_fuse_shared_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    *,
+    n_routed_experts: int,
+    n_shared_experts: int,
+    ckpt_prefix: str = "mlp.shared_experts",
+    enabled: bool | None = None,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Route AITER fused-shared-expert checkpoint weights into fused slots.
+
+    When AITER fused-shared-experts is active, shared experts are packed into
+    the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
+    as a single (possibly widened) tensor; this splits it into
+    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
+    the `RoutedExperts` loader treats them as extra experts. Yields the input
+    unchanged when the fusion is inactive, so callers can wrap unconditionally.
+
+    Args:
+        weights: Iterable of `(name, tensor)` checkpoint pairs.
+        n_routed_experts: Number of routed experts; offsets the fused slots.
+        n_shared_experts: Number of shared experts packed into the tensor.
+        ckpt_prefix: Checkpoint module name of the shared experts.
+        enabled: Whether AITER fused-shared-experts is active. Defaults to
+            `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`; pass an
+            explicit value only when the model gates on something more (e.g.
+            quant-spec compatibility) and it must match its construction-time
+            decision.
+
+    Yields:
+        `(name, tensor)` pairs with shared experts routed to fused slots.
+    """
+    if enabled is None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    if not enabled:
+        yield from weights
+        return
+
+    # Match on the dotted boundary so e.g. "mlp.shared_expert." does not also
+    # catch a sibling "mlp.shared_expert_gate".
+    prefix = f"{ckpt_prefix}."
+    for name, loaded_weight in weights:
+        if prefix not in name:
+            yield name, loaded_weight
+            continue
+        # gate/up split on the output dim; down_proj on the input dim.
+        split_dim = 1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
+        total = loaded_weight.shape[split_dim]
+        if total % n_shared_experts != 0:
+            raise ValueError(
+                f"FSE shared-expert weight {name!r} has size {total} along axis "
+                f"{split_dim}, not divisible by n_shared_experts={n_shared_experts}."
+            )
+        chunk = total // n_shared_experts
+        for j in range(n_shared_experts):
+            sl = slice(j * chunk, (j + 1) * chunk)
+            if loaded_weight.ndim == 1:
+                chunk_weight = loaded_weight[sl]
+            elif split_dim == 0:
+                chunk_weight = loaded_weight[sl, :]
+            else:
+                chunk_weight = loaded_weight[:, sl]
+            yield (
+                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                chunk_weight,
+            )
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: "ModelConfig", weight_name: str
+) -> int | None:
+    """Return the MTP layer index a weight belongs to, or None.
+
+    Args:
+        config: The model config; must expose `num_hidden_layers` and,  for MTP
+            checkpoints, `num_nextn_predict_layers`.
+        weight_name: Checkpoint weight name to classify.
+
+    Returns:
+        The absolute layer index for an MTP-layer weight, else None.
+    """
+    if not (n := getattr(config, "num_nextn_predict_layers", 0)):
+        return None
+    base = config.num_hidden_layers
+    for i in range(n):
+        if weight_name.startswith((f"model.layers.{base + i}.", f"layers.{base + i}.")):
+            return base + i
+    return None
+
+
+def skip_spec_layers(
+    weights: Iterable[tuple[str, torch.Tensor]], config: "ModelConfig"
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
+
+    Args:
+        weights: Iterable of `(name, tensor)` checkpoint pairs.
+        config: The model config, passed to `get_spec_layer_idx_from_weight_name`.
+
+    Yields:
+        `(name, tensor)` pairs whose weight is not an MTP-layer weight.
+    """
+    return (
+        (name, w)
+        for name, w in weights
+        if get_spec_layer_idx_from_weight_name(config, name) is None
+    )
 
 
 def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: PretrainedConfig | None = None,
+    hf_config: "PretrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """
@@ -490,17 +716,6 @@ def _merge_multimodal_embeddings(
         raise ValueError("Error during index put operation") from e
 
     return inputs_embeds
-
-
-def isin_list(
-    elements: torch.Tensor,
-    test_elements_list: list[int],
-) -> torch.Tensor:
-    test_elements = async_tensor_h2d(
-        test_elements_list, dtype=torch.int64, device=elements.device
-    )
-
-    return torch.isin(elements, test_elements)
 
 
 class StageMissingLayer(nn.Module):
@@ -711,9 +926,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(
-    vllm_config: VllmConfig,
-) -> QuantizationConfig | None:
+def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target
@@ -823,7 +1036,10 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
 
     chunk = y.shape[0] // tp_size
     start = tp_rank * chunk
-    return torch.narrow(y, 0, start, chunk)
+    out = torch.narrow(y, 0, start, chunk)
+    # narrow() returns a view; clone when it aliases the input (no-pad case),
+    # since a functional custom op must not return a view of an input.
+    return out.clone() if y is x else out
 
 
 def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
@@ -892,3 +1108,25 @@ def scatter_output_slices(
         sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
         offset += n_tok
+
+
+def parse_diarized_timestamp(marker: str) -> float | None:
+    if (
+        not marker
+        or not marker.isascii()
+        or marker.count(".") > 1
+        or not marker.replace(".", "").isdigit()
+    ):
+        return None
+    return float(marker)
+
+
+def parse_diarized_speaker(speaker: str) -> str | None:
+    if (
+        len(speaker) < 2
+        or speaker[0] != "S"
+        or not speaker[1:].isascii()
+        or not speaker[1:].isdigit()
+    ):
+        return None
+    return speaker

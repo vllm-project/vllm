@@ -105,7 +105,6 @@ def test_cutlass_fp4_moe_no_graph(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
 
         cutlass_output = kernel.apply(
@@ -226,7 +225,6 @@ def test_cutlass_fp4_moe_swiglustep(
                 moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
 
         cutlass_output = kernel.apply(

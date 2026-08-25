@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -68,7 +68,7 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
@@ -345,7 +345,7 @@ class Step3TextModel(nn.Module):
             self.norm = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+            ["hidden_states", "residual"], config.hidden_size
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -422,9 +422,21 @@ class Step3TextModel(nn.Module):
         )
 
         expert_params_mapping = [
-            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
-            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
-            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.gate_proj.weight",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.up_proj.weight",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.down_proj.weight",
+                "w2",
+            ),
         ]
 
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]

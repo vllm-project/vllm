@@ -43,6 +43,13 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
+To rebuild only the Rust frontend binary:
+
+```bash
+./build_rust.sh          # release build
+./build_rust.sh --debug  # faster build for development
+```
+
 If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
@@ -64,6 +71,7 @@ uv pip install -e . --no-build-isolation
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
 
 For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
+For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
     vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
@@ -94,7 +102,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual mypy-3.10
+    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -294,8 +302,30 @@ review process:
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
 - Note that not all CI checks will be executed due to limited computational
-  resources. The reviewer will add `ready` label to the PR when the PR is
-  ready to merge or a full CI run is needed.
+  resources. Reviewers with write access and configured trusted contributors
+  can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when
+  CI signals are needed before a PR is ready. After the PR is approved or has
+  the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
+  or the corresponding `/amd-ci` variants. New commits do not start upstream
+  CI automatically.
+
+### Pull Request Limits and Escalation
+
+vLLM uses GitHub's [pull request limit](https://github.blog/open-source/maintainers/how-pull-request-limits-are-cutting-down-the-noise/)
+for contributors without write access. The current cap is 6 open PRs. If this
+blocks well-intentioned critical work, contact a committer to request bypass
+list access.
+
+If you need an expedited review for an important contribution, please email us
+at:
+
+<pr-review-request@vllm.ai>
+
+Using a verifiable company or university email, include:
+
+- your production or research use case
+- the problem you encountered
+- how your contribution addresses it
 
 ## Thank You
 

@@ -12,7 +12,9 @@ from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
     """Run a model with the given compilation config for E2E fusion tests."""
     compilation_config = (
         compile_config
@@ -54,7 +56,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     )
 
     # Fetch match table from each worker via RPC and sum across workers.
-    worker_tables = llm.llm_engine.engine_core.collective_rpc(
+    worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
         "get_compilation_match_table"
     )
     combined: defaultdict[str, int] = defaultdict(int)
@@ -79,6 +81,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "1" if use_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
 
         rocm_aiter_ops.refresh_env_variables()
@@ -87,14 +90,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         backend_name = attn_backend.backend.name.lower()
         requires_mla = "deepseek" in model_name.lower()
         is_mla = "mla" in backend_name
-        # DeepSeek V3.2 uses sparse MLA
-        requires_sparse = "v3.2" in model_name.lower()
-        is_sparse = "sparse" in backend_name
 
-        if requires_mla != is_mla or requires_sparse != is_sparse:
+        if requires_mla != is_mla:
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
+            )
+
+        if backend_name == "rocm_attn" and model_name == "openai/gpt-oss-20b":
+            pytest.skip(
+                "ROCM_ATTN does not support attention sinks (required by gpt-oss-20b)"
             )
 
         if attn_backend.backend.name == "FLASHINFER":
@@ -119,22 +124,6 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         # engine default max_num_batched_tokens is 16384. Warming up large
         # models (e.g. Llama-4-Scout-FP8) at 16384 tokens may trigger OOM.
         model_kwargs.setdefault("max_num_batched_tokens", 8192)
-
-        # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
-        # decompose_auto_functionalized when +rotary_embedding is forced into
-        # the compile graph. Disable qk_norm+rope fusion (which auto-enables
-        # +rotary_embedding) for this combo to avoid the known torch bug.
-        # TODO: remove once upstream torch fix lands.
-        if requires_sparse:
-            if "pass_config" in compilation_config:
-                compilation_config["pass_config"].enable_qk_norm_rope_fusion = False
-                matches_check = [m for m in matches_check if m != "norm_rope_fusion"]
-            # DSv3.2 sparse indexer uses persistent_topk with k=config.index_topk
-            # (2048 for the default config). max_model_len must be >= index_topk
-            # or the topk kernel raises "k out of range" at runtime.
-            model_kwargs["max_model_len"] = max(
-                model_kwargs.get("max_model_len", 0), 2048
-            )
 
         # Always compile the full graph instead of piecewise
         if not compilation_config["use_inductor_graph_partition"]:

@@ -27,6 +27,7 @@ physical experts.
 """
 
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -34,7 +35,9 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
+    GroupCoordinator,
     get_ep_group,
     get_eplb_group,
     get_node_count,
@@ -44,6 +47,8 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
+from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
@@ -56,6 +61,14 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+
+def _compute_eplb_load_stats(
+    num_tokens_per_rank: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    avg_tokens = num_tokens_per_rank.mean(dim=1).sum()
+    max_tokens = num_tokens_per_rank.max(dim=1).values.sum()
+    return avg_tokens, max_tokens
 
 
 @dataclass
@@ -205,6 +218,13 @@ class EplbModelState:
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
+    num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
+    """
+    Per-ubatch scalar int32 tensors holding the number of real (non-padding)
+    tokens.  Allocated once in :meth:`EplbState.add_model` so that device
+    pointers remain stable across CUDA-graph replays.  The router kernel
+    indexes this list with ``dbo_current_ubatch_id()``.
+    """
 
 
 class EplbState:
@@ -252,7 +272,7 @@ class EplbState:
         Shared scalar bool tensor for all layers.  Every
         :class:`EplbLayerState` holds a reference to the **same** object so
         a single ``.fill_()`` updates all layers at once.  Allocated on the
-        first call to :meth:`_init_should_record_tensor`.
+        first call to :meth:`_propagate_shared_tensors`.
         """
         self.is_async: bool = False
         """
@@ -269,14 +289,6 @@ class EplbState:
         self.cuda_device_index: int | None = None
         """
         CUDA device index for the async EPLB worker thread.
-        """
-        self.num_valid_physical_experts: int = 0
-        """
-        Number of valid physical experts.
-        This is the number of physical experts that are
-        actually mapped to logical experts. In elastic EP,
-        newly started EP ranks may not have physical experts
-        mapped yet.
         """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
@@ -439,18 +451,29 @@ class EplbState:
         self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
 
+        # num_ubatches is 0 when DBO is disabled.
+        num_ubatches = max(1, self.parallel_config.num_ubatches)
+        num_unpadded_tokens_tensors = [
+            torch.tensor(0, dtype=torch.int32, device=self.device)
+            for _ in range(num_ubatches)
+        ]
+
         model.set_eplb_state(
             expert_load_pass,
             logical_to_physical_map,
             logical_replica_count,
         )
-        self._init_should_record_tensor(model)
+        self._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
+        assert self.parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=self.parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights[0],
+            expert_weights=model.expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         model_state = EplbModelState(
@@ -466,9 +489,41 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
-        self.num_valid_physical_experts = model.num_physical_experts
+
+    def prepare_forward(
+        self,
+        model_config: ModelConfig,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        """Fill the per-[u]batch ``num_unpadded_tokens`` tensors before a
+        forward pass.
+
+        Args:
+            model_config: Identifies which ``EplbModelState`` to update.
+            num_unpadded_tokens: Total number of real (non-padding) tokens
+                in the batch.
+            ubatch_slices: When DBO is active, a list of
+                ``UBatchSlice`` objects describing each micro-batch's
+                token range.  When ``None``, only ``tensors[0]`` is filled.
+        """
+        model_state = self.model_states.get(compute_hash_cached(model_config))
+        if model_state is None or model_state.num_unpadded_tokens_tensors is None:
+            return
+        tensors = model_state.num_unpadded_tokens_tensors
+        if ubatch_slices is None:
+            tensors[0].fill_(num_unpadded_tokens)
+        else:
+            for i, ubatch_slice in enumerate(ubatch_slices):
+                ts = ubatch_slice.token_slice
+                # Real tokens in this ubatch: clamp the global count into
+                # the slice range so partially-filled ubatches get the
+                # correct count.
+                val = max(0, min(num_unpadded_tokens, ts.stop) - ts.start)
+                tensors[i].fill_(val)
 
     def step(
         self,
@@ -530,13 +585,15 @@ class EplbState:
                 # Compute balancedness ratio:
                 # for each layer:
                 #   (mean load across ranks) / (max load across ranks)
-                avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
-                max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+                avg_tokens_tensor, max_tokens_tensor = _compute_eplb_load_stats(
+                    num_tokens_per_rank
+                )
 
-                # Just to make type checker happy
-                tokens_tensors: list[float] = torch.stack(
-                    [avg_tokens_tensor, max_tokens_tensor]
-                ).tolist()
+                # This gpu/cpu sync only happens with expert stat logging enabled.
+                with gpu_sync_allowed():
+                    tokens_tensors: list[float] = torch.stack(
+                        [avg_tokens_tensor, max_tokens_tensor]
+                    ).tolist()
                 avg_tokens, max_tokens = tokens_tensors
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
@@ -633,11 +690,20 @@ class EplbState:
                 self._should_record_current_step(log_stats=log_stats)
             )
 
-    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
-        """Allocate (once) and propagate the shared ``should_record_tensor``.
+    def _propagate_shared_tensors(
+        self,
+        model: "MixtureOfExperts",  # type: ignore[name-defined]
+        num_unpadded_tokens_tensors: list[torch.Tensor],
+    ) -> None:
+        """Propagate shared tensors to every :class:`EplbLayerState`.
+
+        Allocates ``should_record_tensor`` on the first call and then
+        assigns both it and ``num_unpadded_tokens_tensors`` to every
+        MoE layer's :class:`EplbLayerState`.  All layers reference the
+        **same** objects so a single update is visible everywhere.
 
         Must be called after :meth:`model.set_eplb_state` so that each
-        layer's ``eplb_state`` is already populated with the tensor views.
+        layer's ``eplb_state`` is already populated.
         """
         layer_states = [
             layer.eplb_state
@@ -652,7 +718,9 @@ class EplbState:
             )
 
         for ls in layer_states:
-            ls.should_record_tensor = self.should_record_tensor
+            if ls is not None:
+                ls.should_record_tensor = self.should_record_tensor
+                ls.num_unpadded_tokens_tensors = num_unpadded_tokens_tensors
 
     def rearrange(
         self,
@@ -690,28 +758,28 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            expert_load_window = eplb_model_state.expert_load_window
+            physical_to_logical = eplb_model_state.physical_to_logical_map
+            invalid_idx = eplb_model_state.model.num_logical_experts
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
-                eplb_model_state.model.num_logical_experts,
+                invalid_idx + 1,
                 dtype=eplb_model_state.expert_load_window.dtype,
                 device=eplb_model_state.expert_load_window.device,
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=physical_to_logical.masked_fill(
+                    physical_to_logical < 0, invalid_idx
+                )
                 .unsqueeze(0)
                 .expand_as(expert_load_window)
                 .long(),
                 src=expert_load_window,
             )
 
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
+            global_expert_load_window = logical_expert_load_window[..., :-1].sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
@@ -751,32 +819,92 @@ class EplbState:
             self.model_states.values(), global_expert_load_windows
         ):
             if not self.is_async or is_profile:
-                # Get new expert mappings for the model
-                new_physical_to_logical_map = self.policy.rebalance_experts(
-                    global_expert_load_window.cpu(),
-                    num_replicas,
-                    num_groups,
-                    num_nodes,
-                    num_gpus,
-                    eplb_model_state.physical_to_logical_map.cpu(),
-                )
-
-                # Update expert weights
-                rearrange_expert_weights_inplace(
-                    eplb_model_state.physical_to_logical_map,
-                    new_physical_to_logical_map,
-                    eplb_model_state.model.expert_weights,
-                    ep_group,
-                    eplb_model_state.communicator,
-                    is_profile,
-                    rank_mapping,
-                )
-
-                if not is_profile:
-                    _commit_eplb_maps(
-                        eplb_model_state,
-                        new_physical_to_logical_map=new_physical_to_logical_map,
+                # Get new expert mappings for the model. The policy runs on the
+                # host, so the load window and current map have to come back.
+                with gpu_sync_allowed():
+                    new_physical_to_logical_map = self.policy.rebalance_experts(
+                        global_expert_load_window.cpu(),
+                        num_replicas,
+                        num_groups,
+                        num_nodes,
+                        num_gpus,
+                        eplb_model_state.physical_to_logical_map.cpu(),
                     )
+
+                skip_rearrange = False
+                if (
+                    current_platform.is_rocm()
+                    and not is_profile
+                    and rank_mapping is None
+                    and bool((eplb_model_state.physical_to_logical_map >= 0).all())
+                ):
+                    logical_loads = global_expert_load_window.float()
+                    ep_size = ep_group.size()
+
+                    def rank_load_imbalance(
+                        mapping: torch.Tensor,
+                        logical_loads: torch.Tensor = logical_loads,
+                        ep_size: int = ep_size,
+                    ) -> float:
+                        mapping = mapping.to(
+                            device=logical_loads.device,
+                            dtype=torch.long,
+                        )
+                        replica_counts = torch.zeros_like(logical_loads)
+                        replica_counts.scatter_add_(
+                            dim=1,
+                            index=mapping,
+                            src=torch.ones_like(mapping, dtype=logical_loads.dtype),
+                        )
+                        loads_per_replica = torch.gather(
+                            logical_loads / replica_counts.clamp_min(1),
+                            dim=1,
+                            index=mapping,
+                        )
+                        loads_per_rank = loads_per_replica.reshape(
+                            logical_loads.shape[0], ep_size, -1
+                        ).sum(dim=(0, 2))
+                        mean_load = loads_per_rank.mean()
+                        if mean_load == 0:
+                            return 1.0
+                        return (loads_per_rank.max() / mean_load).item()
+
+                    current_imbalance = rank_load_imbalance(
+                        eplb_model_state.physical_to_logical_map
+                    )
+                    proposed_imbalance = rank_load_imbalance(
+                        new_physical_to_logical_map
+                    )
+                    relative_improvement = (
+                        current_imbalance - proposed_imbalance
+                    ) / current_imbalance
+                    skip_rearrange = relative_improvement < 0.05
+                    if skip_rearrange and is_main_rank:
+                        logger.info(
+                            "[EPLB] Skip rearrange: imbalance %.4f -> "
+                            "%.4f (no material gain)",
+                            current_imbalance,
+                            proposed_imbalance,
+                        )
+
+                if not skip_rearrange:
+                    # Update expert weights
+                    rearrange_expert_weights_inplace(
+                        eplb_model_state.physical_to_logical_map,
+                        new_physical_to_logical_map,
+                        eplb_model_state.model.expert_weights,
+                        eplb_model_state.expert_buffer,
+                        ep_group,
+                        eplb_model_state.communicator,
+                        is_profile,
+                        rank_mapping,
+                    )
+
+                    if not is_profile:
+                        _commit_eplb_maps(
+                            eplb_model_state,
+                            new_physical_to_logical_map=new_physical_to_logical_map,
+                        )
 
                 if is_main_rank:
                     assert start_event is not None
@@ -819,6 +947,45 @@ class EplbState:
                 is_profile=is_profile,
             )
 
+    def drain_async(self) -> None:
+        """Drain in-flight async EPLB by consuming all remaining layer results.
+
+        Each pending result is acknowledged (consumed_event recorded) so the
+        async worker can proceed, but the transferred weights are intentionally
+        NOT applied — a full rearrange is expected to follow.
+
+        Ranks are kept in lockstep via _all_ranks_result_ready (all_reduce
+        on the EP CPU group).  The async worker's coordinated-stop collectives
+        use the separate EPLB group, so the two sets of collectives do not
+        interfere.
+
+        No-op when no async cycle is in progress (rebalanced=False).
+        """
+        if not self.is_async:
+            return
+        for model_key, ms in self.model_states.items():
+            needs_drain = ms.rebalanced
+            if needs_drain:
+                logger.info(
+                    "Draining async EPLB worker for model %s",
+                    model_key,
+                )
+            while ms.rebalanced:
+                if self._all_ranks_result_ready(ms):
+                    result = ms.pending_result
+                    assert result is not None
+                    if result.layer_idx == ms.model.num_moe_layers - 1:
+                        ms.rebalanced = False
+                    ms.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
+            if needs_drain:
+                logger.info(
+                    "Async EPLB worker drained for model %s",
+                    model_key,
+                )
+
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
         has_result = int(model_state.pending_result is not None)
@@ -844,8 +1011,9 @@ class EplbState:
         """
         All-reduce a list of tensors.
         """
+        ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
-            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
         assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
         assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
@@ -857,7 +1025,6 @@ class EplbState:
         shapes = [t.shape for t in tensor_list]
         concat_tensor = torch.cat(tensor_list, dim=0)
 
-        ep_group = get_ep_group().device_group
         all_reduce(concat_tensor, group=ep_group)
 
         all_reduce_list = []
@@ -885,7 +1052,6 @@ class EplbState:
         device: torch.device,
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
-        num_valid_physical_experts: int,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
@@ -895,12 +1061,24 @@ class EplbState:
             model=model,
             model_config=model_config,
         )
-        eplb_state.num_valid_physical_experts = num_valid_physical_experts
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_state.update_mapping(
+            model_config,
+            expanded_physical_to_logical,
+        )
+
+        return eplb_state
+
+    def update_mapping(
+        self,
+        model_config: ModelConfig,
+        expanded_physical_to_logical: torch.Tensor,
+    ) -> None:
+        eplb_model_state = self.model_states[model_config.compute_hash()]
         eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
-            expanded_physical_to_logical.cpu(), model.num_logical_experts
+            expanded_physical_to_logical.cpu(),
+            eplb_model_state.model.num_logical_experts,
         )
 
         max_num_replicas = eplb_model_state.logical_to_physical_map.shape[-1]
@@ -912,13 +1090,31 @@ class EplbState:
                 max_num_replicas - num_replicas,
             ),
             value=-1,
-        ).to(device)
-        logical_replica_count = logical_replica_count_cpu.to(device)
+        ).to(self.device)
+        logical_replica_count = logical_replica_count_cpu.to(self.device)
 
         eplb_model_state.logical_to_physical_map.copy_(logical_to_physical_map)
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
 
-        return eplb_state
+    def create_communicator(
+        self, model_config: ModelConfig, group_coordinator: GroupCoordinator
+    ) -> EplbCommunicator:
+        model_state = self.model_states[model_config.compute_hash()]
+        backend = self.parallel_config.eplb_config.communicator
+        assert backend is not None
+        return create_eplb_communicator(
+            group_coordinator,
+            backend,
+            model_state.model.expert_weights,
+            model_state.expert_buffer,
+        )
+
+    def update_communicator(
+        self,
+        model_config: ModelConfig,
+        communicator: EplbCommunicator,
+    ) -> None:
+        self.model_states[model_config.compute_hash()].communicator = communicator
 
 
 @dataclass
@@ -938,6 +1134,11 @@ class EplbLayerState:
     each rearrangement period: those steps would be overwritten in the
     sliding window before the next rearrangement, so recording them wastes
     GPU work.
+    """
+    num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
+    """
+    Reference to the parent :class:`EplbModelState`'s tensor list so the
+    router can read the correct per-[u]batch unpadded token count.
     """
 
     def set_layer_state(
@@ -1072,7 +1273,9 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    dst.copy_(new_src)
+    # The map is committed from the host once per layer per rearrangement.
+    with gpu_sync_allowed():
+        dst.copy_(new_src)
 
 
 def _commit_eplb_maps_for_layer(
@@ -1100,10 +1303,7 @@ def _commit_eplb_maps_for_layer(
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
     # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map[layer],
-    )
+    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
 
     # Commit logical_replica_count
     src = new_replica_count

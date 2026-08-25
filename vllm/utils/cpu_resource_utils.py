@@ -3,6 +3,7 @@
 
 import json
 import os
+import platform
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -48,6 +49,47 @@ class LogicalCPUInfo:
 class MemoryNodeInfo:
     total_memory: int = -1
     available_memory: int = -1
+
+
+def _read_int_file(path: str) -> int | None:
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+        if not value or value == "max":
+            return None
+        return int(value)
+    except (OSError, ValueError):
+        return None
+
+
+@cache
+def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
+    """Return (limit, usage) in bytes from cgroup, or (None, None).
+
+    Supports both cgroup v2 (unified) and v1. Returns (None, None) when
+    not running under a constrained cgroup (e.g. bare metal, or limit
+    reported as `max`/an unrealistically large value).
+    """
+    if sys.platform != "linux":
+        return None, None
+
+    # cgroup v2 unified hierarchy
+    v2_limit = _read_int_file("/sys/fs/cgroup/memory.max")
+    if v2_limit is not None:
+        v2_usage = _read_int_file("/sys/fs/cgroup/memory.current")
+        return v2_limit, v2_usage
+
+    # cgroup v1
+    v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if v1_limit is not None:
+        # cgroup v1 reports a huge sentinel (close to PAGE_COUNTER_MAX)
+        # when unlimited. Treat absurdly large values as "no limit".
+        if v1_limit >= (1 << 62):
+            return None, None
+        v1_usage = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        return v1_limit, v1_usage
+
+    return None, None
 
 
 def get_memory_affinity(pid: int = 0) -> list[int]:
@@ -114,6 +156,17 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
         free_memory + active_file_memory + inactive_file_memory + reclaimable_memory
     )
 
+    # Honor cgroup memory limit (containers / k8s pods). NUMA meminfo
+    # reflects host-wide numbers; without this, gpu_memory_utilization
+    # would be applied to host RAM instead of the pod's limit. cgroup
+    # does not expose per-NUMA-node limits, so we just clamp the totals
+    # against the pod-wide limit here.
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is not None and cgroup_limit < total_memory:
+        total_memory = cgroup_limit
+        cgroup_available = cgroup_limit - (cgroup_usage or 0)
+        available_memory = max(0, min(available_memory, cgroup_available))
+
     return MemoryNodeInfo(
         total_memory=total_memory,
         available_memory=available_memory,
@@ -164,9 +217,14 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         # For MacOS, no user-level CPU affinity and SMT, return all CPUs
         return _synthesize_cpu_list()
 
-    lscpu_output = subprocess.check_output(
-        "lscpu --json --extended=CPU,CORE,NODE --online", shell=True, text=True
-    )
+    if platform.machine() == "s390x":
+        lscpu_output = subprocess.check_output(
+            "lscpu -J -e=CPU,CORE,NODE,SOCKET,BOOK", shell=True, text=True
+        )
+    else:
+        lscpu_output = subprocess.check_output(
+            "lscpu --json --extended=CPU,CORE,NODE --online", shell=True, text=True
+        )
 
     # For platforms without NUMA, map bare `-` node to 0 so non-NUMA
     # systems keep the existing behavior from #39781.
@@ -181,11 +239,50 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         lscpu_output,
     )
 
+    if platform.machine() == "s390x":
+        # On s390x, use the best topology level as the abstract CPU group
+        # key via numa_node. The hierarchy is book > socket > core; prefer
+        # book, fall back to socket if only one book exists.
+        lscpu_output = re.sub(r'"book":\s*-\s*(,|\n|\})', r'"book": 0\1', lscpu_output)
+        lscpu_output = re.sub(
+            r'"socket":\s*-\s*(,|\n|\})', r'"socket": 0\1', lscpu_output
+        )
+
+        raw_cpus = json.loads(lscpu_output)["cpus"]
+        book_values = set()
+        socket_values = set()
+        for entry in raw_cpus:
+            book_values.add(LogicalCPUInfo._int(str(entry.get("book", "-1"))))
+            socket_values.add(LogicalCPUInfo._int(str(entry.get("socket", "-1"))))
+
+        # Pick the best partitioning level: book first, then socket
+        if len(book_values - {-1}) > 1:
+            group_key = "book"
+        elif len(socket_values - {-1}) > 1:
+            group_key = "socket"
+        else:
+            group_key = None
+
+        if group_key is not None:
+            logical_book_socket_list: list[LogicalCPUInfo] = []
+            for entry in raw_cpus:
+                cpu_id = LogicalCPUInfo._int(str(entry.get("cpu", "-1")))
+                core = LogicalCPUInfo._int(str(entry.get("core", "-1")))
+                group = LogicalCPUInfo._int(str(entry.get(group_key, "-1")))
+                if -1 not in (cpu_id, core, group):
+                    logical_book_socket_list.append(
+                        LogicalCPUInfo(id=cpu_id, physical_core=core, numa_node=group)
+                    )
+
+            if not logical_book_socket_list:
+                return _synthesize_cpu_list()
+            return logical_book_socket_list
+
     logical_cpu_list: list[LogicalCPUInfo] = json.loads(
         lscpu_output, object_hook=LogicalCPUInfo.json_decoder
     )["cpus"]
 
-    # Filter CPUs with invalid attributes
+    # Filter CPUs with invalid attributes (only require id, core, node)
     logical_cpu_list = [
         x for x in logical_cpu_list if -1 not in (x.id, x.physical_core, x.numa_node)
     ]

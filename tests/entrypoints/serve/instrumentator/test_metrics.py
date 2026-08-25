@@ -289,6 +289,17 @@ async def test_metrics_exist(
             continue
         assert metric in response.text
 
+    cache_config_samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        if family.name == "vllm:cache_config_info"
+        for sample in family.samples
+    ]
+    assert cache_config_samples
+    for sample in cache_config_samples:
+        assert sample.labels.get("kv_cache_size_tokens") not in (None, "None", "")
+        assert sample.labels.get("kv_cache_max_concurrency") not in (None, "None", "")
+
 
 @pytest.mark.asyncio
 async def test_abort_metrics_reset(
@@ -439,7 +450,7 @@ def test_metrics_exist_run_batch():
             [
                 sys.executable,
                 "-m",
-                "vllm.entrypoints.openai.run_batch",
+                "vllm.entrypoints.launchers.run_batch",
                 "-i",
                 input_file.name,
                 "-o",

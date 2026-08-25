@@ -49,6 +49,7 @@ for BACK in "${BACKENDS[@]}"; do
     --data-parallel-size 2 \
     --enable-expert-parallel \
     --enable-eplb \
+    --eplb-config '{"use_async": false}' \
     --trust-remote-code \
     --max-model-len 2048 \
     --all2all-backend "$BACK" \

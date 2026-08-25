@@ -26,11 +26,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
     SupportsHMA,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -38,6 +46,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from .data import MooncakeStoreConnectorMetadata
+from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
 
@@ -79,14 +88,6 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
-
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        extra_config = self._kv_transfer_config.kv_connector_extra_config
-        return (
-            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
-            == "true"
-        )
 
     @staticmethod
     def _validate_kv_cache_config(
@@ -131,9 +132,19 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None, "kv_cache_config is required"
-        self._validate_kv_cache_config(vllm_config, kv_cache_config)
-        self._kv_cache_config = kv_cache_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        save_decode_cache = extra_config.get("save_decode_cache", False)
+        # Capacity-only: contributes its segment to the store pool but transfers
+        # no KV, so the KV-cache-shape invariants below cannot be reached.
+        self._capacity_only = (
+            self.kv_role == "kv_consumer"
+            and not extra_config.get("enable_lookup", True)
+            and not save_decode_cache
+        )
+        if not self._capacity_only:
+            self._validate_kv_cache_config(vllm_config, kv_cache_config)
+        self._kv_cache_config = kv_cache_config
         self._kv_cache_events: MooncakeStoreKVEvents | None = None
 
         self.connector_scheduler: MooncakeStoreScheduler | None = None
@@ -146,6 +157,21 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
+    def shutdown(self):
+        """Release connector resources on teardown.
+
+        Closes the worker's MooncakeDistributedStore handle so its
+        TransferEngine and RDMA registrations are released. Invoked from the
+        engine's explicit shutdown path and as a backstop from ``__del__``;
+        a no-op on the scheduler role, which holds no store handle.
+        """
+        worker = getattr(self, "connector_worker", None)
+        if worker is not None:
+            worker.close()
+
+    def __del__(self):
+        self.shutdown()
+
     # ============================================================
     # Scheduler-side methods
     # ============================================================
@@ -154,7 +180,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -171,12 +197,24 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             request, blocks, num_external_tokens
         )
 
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_push_work()
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        assert self.connector_worker is not None
+        return self.connector_worker.build_connector_worker_meta()
 
     def request_finished(
         self,
@@ -190,10 +228,31 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
+        # An in-flight store job holds its own reference on the blocks it reads,
+        # so a finishing request never has to defer freeing them.
+        return False, None
+
+    def reset_cache(self) -> bool | None:
+        """Reset the external Mooncake store on prefix-cache reset.
+
+        Drains the worker send queue, then runs ``remove_all`` on the
+        Mooncake master. Caller must first pause generation (e.g.
+        ``pause_generation``) so no new puts are enqueued during drain.
+
+        Returns True on ack, False on failure, None for the worker role.
+        """
+        if self.role == KVConnectorRole.SCHEDULER:
+            assert self.connector_scheduler is not None
+            # Clear local references to keys we're about to wipe.
+            self.connector_scheduler.load_specs.clear()
+            self._kv_cache_events = None
+            return self.connector_scheduler.reset_store()
+        return None
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
+
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(
             kv_cache_events, MooncakeStoreKVEvents
@@ -222,16 +281,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type
-    ):
-        assert self.connector_worker is not None
-        assert (
-            self._kv_cache_config is not None
-            and len(self._kv_cache_config.kv_cache_groups) == 1
-        ), "Cross-layer KV cache does not supported with hybrid models"
-        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         # No-op: loads are issued in get_finished() for compute overlap.
@@ -263,6 +312,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def get_kv_connector_kv_cache_events(
         self,
     ) -> MooncakeStoreKVEvents | None:
@@ -274,3 +327,30 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         kv_events = MooncakeStoreKVEvents(num_workers=1)
         kv_events.add_events(events)
         return kv_events
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            MooncakeStoreConnectorStats(data=data)
+            if data is not None
+            else MooncakeStoreConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return MooncakeStorePromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )

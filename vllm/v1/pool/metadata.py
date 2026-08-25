@@ -7,9 +7,7 @@ import torch
 
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils.platform_utils import is_pin_memory_available
-
-pin_memory = is_pin_memory_available()
+from vllm.utils.torch_utils import PIN_MEMORY
 
 
 @dataclass
@@ -19,29 +17,40 @@ class PoolingCursor:
     prompt_lens_cpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
+    partial_prefill: bool
+    finished_mask: list[bool]
 
-    def __getitem__(self, indices: slice):
+    def __getitem__(self, indices: slice) -> "PoolingCursor":
+        prompt_lens_cpu = self.prompt_lens_cpu[indices]
+        seq_lens_cpu = self.seq_lens_cpu[indices]
+        num_scheduled_tokens_cpu = self.num_scheduled_tokens_cpu[indices]
+
         return PoolingCursor(
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
-            prompt_lens_cpu=self.prompt_lens_cpu[indices],
-            seq_lens_cpu=self.seq_lens_cpu[indices],
-            num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
+            prompt_lens_cpu=prompt_lens_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            partial_prefill=not torch.equal(prompt_lens_cpu, num_scheduled_tokens_cpu),
+            finished_mask=torch.eq(prompt_lens_cpu, seq_lens_cpu).tolist(),
         )
 
-    def is_partial_prefill(self):
-        return not torch.all(self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
+    def is_partial_prefill(self) -> bool:
+        return self.partial_prefill
 
-    def is_finished(self):
+    def is_finished(self) -> torch.Tensor:
         return self.prompt_lens_cpu == self.seq_lens_cpu
+
+    def get_finished_mask(self) -> list[bool]:
+        return self.finished_mask
 
 
 class PoolingStates:
-    def __init__(self):
+    def __init__(self) -> None:
         # for chunked prefill with ALL pooling
         self.hidden_states_cache: list[torch.Tensor] = []
 
-    def clean(self):
+    def clean(self) -> None:
         self.hidden_states_cache.clear()
 
 
@@ -64,11 +73,15 @@ class PoolingMetadata:
             for pooling_param in pooling_params
             if (task := pooling_param.task) is not None
         ]
-        assert len(pooling_params) == len(tasks)
+        if len(pooling_params) != len(tasks):
+            raise ValueError(
+                "Every pooling param must have a task set, but got "
+                f"{len(tasks)} tasks for {len(pooling_params)} pooling params"
+            )
 
         self.tasks = tasks
 
-    def __getitem__(self, indices: slice):
+    def __getitem__(self, indices: slice) -> "PoolingMetadata":
         return PoolingMetadata(
             prompt_lens=self.prompt_lens[indices],
             prompt_token_ids=None
@@ -88,9 +101,11 @@ class PoolingMetadata:
         self,
         prompt_token_ids: torch.Tensor | None,
     ) -> list[torch.Tensor]:
-        assert prompt_token_ids is not None, (
-            "Please set `requires_token_ids=True` in `get_pooling_updates`"
-        )
+        if prompt_token_ids is None:
+            raise ValueError(
+                "prompt_token_ids is required but was not set. "
+                "Please set `requires_token_ids=True` in `get_pooling_updates`"
+            )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
     def get_prompt_token_ids(self) -> list[torch.Tensor]:
@@ -101,7 +116,11 @@ class PoolingMetadata:
 
     def get_pooling_cursor(self) -> PoolingCursor:
         pooling_cursor = self.pooling_cursor
-        assert pooling_cursor is not None, "Should call `build_pooling_cursor` first"
+        if pooling_cursor is None:
+            raise RuntimeError(
+                "pooling_cursor has not been initialized. "
+                "Call `build_pooling_cursor` before accessing it"
+            )
 
         return pooling_cursor
 
@@ -111,16 +130,25 @@ class PoolingMetadata:
         seq_lens_cpu: torch.Tensor,
         device: torch.device,
         query_start_loc_gpu: torch.Tensor | None = None,
-    ):
+    ) -> None:
         n_seq = len(num_scheduled_tokens_np)
         prompt_lens = self.prompt_lens
 
-        assert len(prompt_lens) == n_seq
+        if len(prompt_lens) != n_seq:
+            raise ValueError(
+                f"prompt_lens length ({len(prompt_lens)}) does not match "
+                f"the number of sequences ({n_seq})"
+            )
 
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
+        prompt_lens_np = prompt_lens.numpy()
+        seq_lens_np = seq_lens_cpu.numpy()
         if query_start_loc_gpu is None:
             cumsum = torch.zeros(
-                n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
+                n_seq + 1,
+                dtype=torch.int64,
+                pin_memory=PIN_MEMORY,
+                device="cpu",
             )
             torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
             cumsum = cumsum.to(device, non_blocking=True)
@@ -143,4 +171,6 @@ class PoolingMetadata:
             prompt_lens_cpu=prompt_lens,
             seq_lens_cpu=seq_lens_cpu,
             num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            partial_prefill=not np.array_equal(prompt_lens_np, num_scheduled_tokens_np),
+            finished_mask=np.equal(prompt_lens_np, seq_lens_np).tolist(),
         )

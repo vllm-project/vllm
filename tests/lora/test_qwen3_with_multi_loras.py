@@ -6,10 +6,13 @@ This script contains:
 2. test multi loras request
 """
 
+import os
+
 import pytest
 
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
@@ -39,6 +42,18 @@ def format_chatml_messages(
     ]
 
 
+@pytest.fixture(autouse=True)
+def set_mrv2_env():
+    original = os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0")
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    yield
+
+    if original is None:
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+    else:
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = original
+
+
 def make_add_lora_request(name: str, path: str):
     global INCREASE_LORA_ID, LORA_NAME_ID_MAP
 
@@ -61,7 +76,6 @@ def test_multi_loras_with_tp_sync():
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-        enforce_eager=True,
         tensor_parallel_size=2,  # ensure tp >= 2
         max_cpu_loras=4,  # ensure max_cpu_loras >= 2
     )
@@ -167,7 +181,6 @@ def test_multiple_lora_requests():
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-        enforce_eager=True,
     )
     PROMPTS = ["Hello, my name is"] * 2
     LORA_NAME = "Alice"
@@ -180,7 +193,7 @@ def test_multiple_lora_requests():
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, lora_request=lora_request[:1])
 
     # Single LoRARequest should be applied to every prompt
@@ -203,7 +216,6 @@ def test_load_inplace_offline_reload(
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-        enforce_eager=True,
     )
     adapter_id = 1
     messages = format_chatml_messages(
@@ -254,7 +266,6 @@ def test_load_inplace_false_no_reload(
         max_lora_rank=LORA_RANK,
         max_model_len=512,
         gpu_memory_utilization=0.5,
-        enforce_eager=True,
     )
     adapter_id = 2
     messages = format_chatml_messages(

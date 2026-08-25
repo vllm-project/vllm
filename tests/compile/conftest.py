@@ -24,6 +24,7 @@ def mock_cuda_platform():
     def _mock_platform(is_cuda: bool = True, capability: tuple[int, int] | None = None):
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = is_cuda
+        mock_platform.is_xpu.return_value = False
         device_capability = (
             DeviceCapability(*capability) if capability is not None else None
         )
@@ -42,6 +43,28 @@ def mock_cuda_platform():
         mock_platform.is_device_capability_family.side_effect = (
             is_device_capability_family
         )
+        with patch("vllm.platforms.current_platform", mock_platform):
+            yield mock_platform
+
+    return _mock_platform
+
+
+@pytest.fixture
+def mock_xpu_platform():
+    """
+    Fixture that returns a factory for creating mocked XPU platforms.
+
+    Usage:
+        def test_something(mock_xpu_platform):
+            with mock_xpu_platform():
+                # test code
+    """
+
+    @contextmanager
+    def _mock_platform():
+        mock_platform = MagicMock()
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_xpu.return_value = True
         with patch("vllm.platforms.current_platform", mock_platform):
             yield mock_platform
 

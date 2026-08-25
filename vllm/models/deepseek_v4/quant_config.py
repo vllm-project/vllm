@@ -2,9 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Quantization config for DeepSeek V4."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
+
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
@@ -13,6 +19,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
 
 
 class DeepseekV4FP8Config(Fp8Config):
@@ -38,6 +49,8 @@ class DeepseekV4FP8Config(Fp8Config):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._resolved_expert_dtype: str | None = None
+        self._resolved_moe_quant_algo: str | None = None
+        self._nvfp4_config: ModelOptNvFp4Config | None = None
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
 
@@ -70,9 +83,53 @@ class DeepseekV4FP8Config(Fp8Config):
         # checkpoints (Flash-Base) store them as float32.
         return self.expert_dtype == "fp4"
 
+    def _resolve_moe_overrides(self) -> None:
+        if self._resolved_moe_quant_algo is not None:
+            return
+        try:
+            hf_config = get_current_vllm_config().model_config.hf_config
+        except Exception:
+            return
+        quant_cfg = getattr(hf_config, "quantization_config", None) or {}
+        algo = (quant_cfg.get("moe_quant_algo") or "").upper() or None
+        self._resolved_moe_quant_algo = algo or ""
+
+    @property
+    def moe_quant_algo(self) -> str:
+        self._resolve_moe_overrides()
+        return self._resolved_moe_quant_algo or ""
+
+    def _get_nvfp4_config(self) -> ModelOptNvFp4Config:
+        if self._nvfp4_config is None:
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptNvFp4Config,
+            )
+
+            self._nvfp4_config = ModelOptNvFp4Config(
+                is_checkpoint_nvfp4_serialized=True,
+                kv_cache_quant_algo=None,
+                exclude_modules=[],
+                group_size=16,
+            )
+        return self._nvfp4_config
+
     @classmethod
     def get_name(cls) -> QuantizationMethods:
         return "deepseek_v4_fp8"
+
+    @staticmethod
+    def _is_quark_mxfp4_ocp(hf_quant_cfg: dict) -> bool:
+        """True for AMD-Quark exports whose global scheme is MXFP4."""
+        weight = (hf_quant_cfg.get("global_quant_config") or {}).get("weight")
+        # A non-dict weight (e.g. a list of multiple specs) means not an OCP
+        # MXFP4 scheme (e.g. NVFP4 with 2-level scale).
+        if not isinstance(weight, dict):
+            return False
+        return (
+            weight.get("dtype") == "fp4"
+            and weight.get("qscheme") == "per_group"
+            and weight.get("group_size") == 32
+        )
 
     @classmethod
     def override_quantization_method(
@@ -80,7 +137,13 @@ class DeepseekV4FP8Config(Fp8Config):
     ) -> QuantizationMethods | None:
         if not (
             isinstance(hf_quant_cfg, dict)
-            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
+            and (
+                hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
+                or (
+                    hf_quant_cfg.get("quant_method") == "quark"
+                    and cls._is_quark_mxfp4_ocp(hf_quant_cfg)
+                )
+            )
         ):
             return None
         model_type = getattr(hf_config, "model_type", None)
@@ -88,8 +151,27 @@ class DeepseekV4FP8Config(Fp8Config):
             return "deepseek_v4_fp8"
         return None
 
+    @classmethod
+    def from_config(cls, config: dict) -> DeepseekV4FP8Config:
+        # Reroute AMD-Quark fused shared expert MXFP4 checkpoints onto the fp8
+        # path: the runtime layout matches the DeepSeek-native fp8 checkpoint,
+        # so translate the schema into format Fp8Config.from_config expects.
+        if config.get("quant_method") == "quark":
+            quark_exclude = config.get("exclude") or []
+            config = {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "scale_fmt": "ue8m0",
+                "weight_block_size": [128, 128],
+                "ignored_layers": [
+                    name for name in quark_exclude if isinstance(name, str)
+                ],
+            }
+        return cast("DeepseekV4FP8Config", super().from_config(config))
+
     def get_quant_method(self, layer, prefix):
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -97,10 +179,16 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
+                if self.moe_quant_algo == "NVFP4":
+                    from vllm.model_executor.layers.quantization.modelopt import (
+                        ModelOptNvFp4FusedMoE,
+                    )
+
+                    return ModelOptNvFp4FusedMoE(
+                        quant_config=self._get_nvfp4_config(),
+                        moe_config=layer.moe_config,
+                    )
                 return Mxfp4MoEMethod(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
-
-    def is_mxfp4_quant(self, prefix, layer):
-        return isinstance(layer, FusedMoE) and self.expert_dtype == "fp4"

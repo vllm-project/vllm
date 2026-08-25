@@ -12,6 +12,7 @@ import requests
 from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -83,7 +84,10 @@ async def test_show_version(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("version"))
     response.raise_for_status()
 
-    assert response.json() == {"version": VLLM_VERSION}
+    payload = response.json()
+    assert payload["version"] == VLLM_VERSION
+    if envs.VLLM_USE_RUST_FRONTEND:
+        assert payload["rust_frontend_version"] == VLLM_VERSION
 
 
 @pytest.mark.asyncio
