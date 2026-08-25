@@ -740,6 +740,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
+        num_tokens_across_dp = self.execute_model_state.num_tokens_across_dp
+        uniform_token_counts_across_dp = (
+            self.execute_model_state.uniform_token_counts_across_dp
+        )
         self.execute_model_state = None
 
         self.step_timing.forward_end()
@@ -784,6 +788,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     next_prefill_tokens=self.req_states.next_prefill_tokens,
                     temperature=self.sampler.sampling_states.temperature.gpu,
                     seeds=self.sampler.sampling_states.seeds.gpu,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    uniform_token_counts_across_dp=uniform_token_counts_across_dp,
                     dummy_run=True,
                     skip_attn_for_dummy_run=skip_attn,
                     mm_inputs=mm_inputs,
@@ -1520,16 +1526,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
-        batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
-            self.cudagraph_manager,
-            num_reqs,
-            num_toks,
-            uniform_tok_count,
-            self.dp_size,
-            self.dp_rank,
-            max_query_len=max_query_len,
-            need_eager=is_profile or skip_compiled,
-            num_active_loras=num_active_loras,
+        batch_desc, num_tokens_across_dp, uniform_token_counts_across_dp = (
+            dispatch_cg_and_sync_dp(
+                self.cudagraph_manager,
+                num_reqs,
+                num_toks,
+                uniform_tok_count,
+                self.dp_size,
+                self.dp_rank,
+                max_query_len=max_query_len,
+                need_eager=is_profile or skip_compiled,
+                num_active_loras=num_active_loras,
+            )
         )
 
         if batch_desc.num_tokens == 0:
@@ -1753,6 +1761,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings_by_layer=slot_mappings_by_layer,
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
+            num_tokens_across_dp=num_tokens_across_dp,
+            uniform_token_counts_across_dp=uniform_token_counts_across_dp,
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
@@ -1777,6 +1787,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
+        num_tokens_across_dp = self.execute_model_state.num_tokens_across_dp
+        uniform_token_counts_across_dp = (
+            self.execute_model_state.uniform_token_counts_across_dp
+        )
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
@@ -1898,6 +1912,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.req_states.next_prefill_tokens,
                     self.sampler.sampling_states.temperature.gpu,
                     self.sampler.sampling_states.seeds.gpu,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    uniform_token_counts_across_dp=uniform_token_counts_across_dp,
                     mm_inputs=mm_inputs,
                 )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
@@ -2042,6 +2058,8 @@ class ExecuteModelState(NamedTuple):
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
+    num_tokens_across_dp: torch.Tensor | None
+    uniform_token_counts_across_dp: int | None
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None

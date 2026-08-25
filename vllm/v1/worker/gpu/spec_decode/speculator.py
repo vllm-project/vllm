@@ -61,6 +61,7 @@ class BaseSpeculator(ABC):
         # [max_num_reqs]
         seeds: torch.Tensor,
         num_tokens_across_dp: torch.Tensor | None = None,
+        uniform_token_counts_across_dp: int | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,

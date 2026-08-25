@@ -336,6 +336,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # [max_num_reqs]
         seeds: torch.Tensor,
         num_tokens_across_dp: torch.Tensor | None = None,
+        uniform_token_counts_across_dp: int | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -438,7 +439,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
-        batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        batch_desc, num_tokens_across_dp, _ = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
             num_reqs,
             num_query_tokens,

@@ -220,6 +220,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # [max_num_reqs]
         seeds: torch.Tensor,
         num_tokens_across_dp: torch.Tensor | None = None,
+        uniform_token_counts_across_dp: int | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -279,7 +280,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             max_query_len,
             input_batch.has_prefill,
         )
-        prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        prefill_batch_desc, num_tokens_across_dp, _ = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
             num_tokens_padded,
@@ -287,6 +288,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            num_tokens_across_dp=num_tokens_across_dp,
+            uniform_token_counts_across_dp=uniform_token_counts_across_dp,
         )
 
         self._prepare_eplb_forward(num_tokens)
@@ -328,7 +331,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
-        decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        decode_batch_desc, num_tokens_across_dp, _ = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
             num_reqs,

@@ -151,6 +151,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # [max_num_reqs]
         seeds: torch.Tensor,
         num_tokens_across_dp: torch.Tensor | None = None,
+        uniform_token_counts_across_dp: int | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -191,7 +192,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         uniform_token_count = get_uniform_decode_token_count(
             num_reqs, num_tokens, max_query_len, input_batch.has_prefill
         )
-        batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        batch_desc, num_tokens_across_dp, _ = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
             input_batch.num_tokens_after_padding,
@@ -199,6 +200,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            num_tokens_across_dp=num_tokens_across_dp,
+            uniform_token_counts_across_dp=uniform_token_counts_across_dp,
         )
 
         # Rebuild the slot mappings and attention metadata.
