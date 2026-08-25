@@ -243,6 +243,9 @@ steps:
     DECODE_BLOCK_SIZE: "256"
     MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
+    # The V4 indexer only supports block-outermost layouts; let it pick.
+    PREFILLER_KV_LAYOUT: ""
+    DECODER_KV_LAYOUT: ""
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh

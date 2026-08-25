@@ -10,6 +10,8 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    MultiModalConfig,
+    ObservabilityConfig,
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -71,6 +73,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    per_request_spec_decode_metrics: str = "none",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -92,6 +95,8 @@ def create_scheduler(
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
     )
+    if use_ec_connector and ec_role == "ec_producer":
+        model_config.multimodal_config = MultiModalConfig()
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -175,6 +180,9 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        observability_config=ObservabilityConfig(
+            per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+        ),
     )
     if kv_cache_spec is None:
         kv_cache_spec = FullAttentionSpec(
