@@ -3,13 +3,49 @@
 
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import ModelConfig, VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
 )
+
+
+def _validate_qwen3_vl_weight_contract(
+    draft_model: nn.Module,
+    draft_model_config: ModelConfig,
+    target_vocab_size: int,
+) -> None:
+    if "Qwen3VLDSparkModel" not in (draft_model_config.architectures or []):
+        return
+
+    draft_input_vocab_size = draft_model_config.get_vocab_size()
+    draft_output_vocab_size = (
+        getattr(draft_model_config.hf_config, "draft_vocab_size", None)
+        or draft_input_vocab_size
+    )
+    if draft_input_vocab_size > target_vocab_size and not getattr(
+        draft_model, "has_own_embed_tokens", False
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark checkpoints with an expanded input vocabulary "
+            "must include embed_tokens weights."
+        )
+    if draft_output_vocab_size != target_vocab_size and not getattr(
+        draft_model, "has_own_lm_head", False
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark checkpoints with a reduced output vocabulary "
+            "must include lm_head weights."
+        )
+    if draft_output_vocab_size != target_vocab_size and not getattr(
+        draft_model, "has_own_draft_id_mapping", False
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark checkpoints with a reduced output vocabulary "
+            "must include a d2t token mapping."
+        )
 
 
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -52,11 +88,24 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     )
     target_inner = target_language_model.model
     draft_inner = draft_model.model
+    target_vocab_size = vllm_config.model_config.get_vocab_size()
+    draft_input_vocab_size = draft_model_config.get_vocab_size()
+    draft_output_vocab_size = (
+        getattr(draft_model_config.hf_config, "draft_vocab_size", None)
+        or draft_input_vocab_size
+    )
+    _validate_qwen3_vl_weight_contract(
+        draft_model, draft_model_config, target_vocab_size
+    )
 
     target_embed = getattr(target_inner, "embed_tokens", None)
     draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if target_embed is not None and _should_share(
-        draft_model, "has_own_embed_tokens", draft_embed, target_embed
+    if (
+        target_embed is not None
+        and draft_input_vocab_size <= target_vocab_size
+        and _should_share(
+            draft_model, "has_own_embed_tokens", draft_embed, target_embed
+        )
     ):
         if draft_embed is not None:
             del draft_inner.embed_tokens
@@ -64,8 +113,10 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)
-    if target_lm_head is not None and _should_share(
-        draft_model, "has_own_lm_head", draft_lm_head, target_lm_head
+    if (
+        target_lm_head is not None
+        and draft_output_vocab_size == target_vocab_size
+        and _should_share(draft_model, "has_own_lm_head", draft_lm_head, target_lm_head)
     ):
         if draft_lm_head is not None:
             del draft_model.lm_head

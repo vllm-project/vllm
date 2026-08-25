@@ -28,6 +28,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
+from vllm.config.speculative import _validate_qwen3_vl_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
@@ -37,6 +38,110 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _make_qwen3_vl_dspark_configs():
+    text_config = SimpleNamespace(
+        hidden_size=2048,
+        num_hidden_layers=48,
+        vocab_size=151936,
+    )
+    target_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            model_type="qwen3_vl_moe",
+            architectures=["Qwen3VLMoeForConditionalGeneration"],
+            text_config=text_config,
+        ),
+        hf_text_config=text_config,
+        architectures=["Qwen3VLMoeForConditionalGeneration"],
+    )
+    draft_hf_config = SimpleNamespace(
+        model_type="qwen3",
+        architectures=["Qwen3VLDSparkModel"],
+        hidden_size=2048,
+        intermediate_size=6144,
+        num_hidden_layers=1,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        block_size=4,
+        target_hidden_size=2048,
+        target_layer_ids=[11, 23, 35, 47],
+        eagle_aux_hidden_state_layer_ids=[12, 24, 36, 48],
+        use_aux_hidden_state=True,
+        markov_rank=8,
+        markov_head_type="vanilla",
+        sample_from_anchor=True,
+        dspark_bonus_anchor=False,
+        vocab_size=151936,
+        draft_vocab_size=151936,
+        mask_token_id=151669,
+        rope_parameters={"rope_type": "default", "rope_theta": 5000000.0},
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=draft_hf_config,
+        architectures=["Qwen3VLDSparkModel"],
+    )
+    return target_model_config, draft_model_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_vl_dspark_checkpoint_contract_is_accepted():
+    target_config, draft_config = _make_qwen3_vl_dspark_configs()
+    _validate_qwen3_vl_dspark(target_config, draft_config, 4)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_vl_dspark_rejects_generic_qwen3_architecture():
+    target_config, draft_config = _make_qwen3_vl_dspark_configs()
+    draft_config.hf_config.architectures = ["Qwen3DSparkModel"]
+    draft_config.architectures = ["Qwen3DSparkModel"]
+
+    with pytest.raises(ValueError, match="standalone draft checkpoint"):
+        _validate_qwen3_vl_dspark(target_config, draft_config, 4)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("model_type", "qwen3_vl", "model_type='qwen3'"),
+        ("block_size", 5, "trained block_size"),
+        ("target_hidden_size", 4096, "target_hidden_size"),
+        ("target_layer_ids", [11, 48], "zero-based text-layer"),
+        ("target_layer_ids", [23, 11], "strictly increasing"),
+        ("use_aux_hidden_state", False, "use_aux_hidden_state=true"),
+        ("markov_rank", 0, "markov_rank"),
+        ("markov_head_type", "gated", "markov_head_type='vanilla'"),
+        ("sample_from_anchor", False, "sample_from_anchor=true"),
+        ("vocab_size", 151935, "must cover the target vocabulary"),
+        ("draft_vocab_size", 151937, "must not exceed"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_qwen3_vl_dspark_rejects_incompatible_checkpoint_fields(field, value, error):
+    target_config, draft_config = _make_qwen3_vl_dspark_configs()
+    setattr(draft_config.hf_config, field, value)
+
+    with pytest.raises(ValueError, match=error):
+        _validate_qwen3_vl_dspark(target_config, draft_config, 4)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_vl_dspark_rejects_inconsistent_aux_layer_ids():
+    target_config, draft_config = _make_qwen3_vl_dspark_configs()
+    draft_config.hf_config.eagle_aux_hidden_state_layer_ids = [11, 23, 35, 47]
+
+    with pytest.raises(ValueError, match="target_layer_ids \\+ 1"):
+        _validate_qwen3_vl_dspark(target_config, draft_config, 4)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_vl_dspark_rejects_mrope_draft_positions():
+    target_config, draft_config = _make_qwen3_vl_dspark_configs()
+    draft_config.hf_config.rope_parameters["mrope_section"] = [24, 20, 20]
+
+    with pytest.raises(ValueError, match="logical 1-D RoPE"):
+        _validate_qwen3_vl_dspark(target_config, draft_config, 4)
 
 
 def test_compile_config_repr_succeeds():

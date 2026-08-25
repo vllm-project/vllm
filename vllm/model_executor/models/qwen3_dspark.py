@@ -182,4 +182,5 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             skip_substrs.append("draft_id_to_target_id")
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
+        self.has_own_draft_id_mapping = includes_draft_id_mapping
         self.model._build_fused_kv_buffers()

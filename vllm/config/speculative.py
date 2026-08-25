@@ -3,7 +3,7 @@
 
 import copy
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -76,6 +76,243 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+
+_QWEN3_VL_TARGET_MODEL_TYPES = frozenset({"qwen3_vl", "qwen3_vl_moe"})
+_QWEN3_VL_TARGET_ARCHITECTURES = frozenset(
+    {
+        "Qwen3VLForConditionalGeneration",
+        "Qwen3VLMoeForConditionalGeneration",
+    }
+)
+_QWEN3_VL_DSPARK_ARCHITECTURE = "Qwen3VLDSparkModel"
+
+
+def _is_qwen3_vl_target(model_config: ModelConfig) -> bool:
+    hf_config = model_config.hf_config
+    architectures = set(getattr(model_config, "architectures", ()) or ())
+    architectures.update(getattr(hf_config, "architectures", ()) or ())
+    return getattr(
+        hf_config, "model_type", None
+    ) in _QWEN3_VL_TARGET_MODEL_TYPES or bool(
+        architectures & _QWEN3_VL_TARGET_ARCHITECTURES
+    )
+
+
+def _get_nested_config_value(config: Any, section: str, name: str) -> Any:
+    nested_config = getattr(config, section, None)
+    if isinstance(nested_config, Mapping):
+        return nested_config.get(name)
+    return getattr(nested_config, name, None)
+
+
+def _get_qwen3_dspark_value(config: Any, name: str) -> Any:
+    for section in ("dflash_config", "eagle_config"):
+        value = _get_nested_config_value(config, section, name)
+        if value is not None:
+            return value
+    return getattr(config, name, None)
+
+
+def _require_positive_int(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(
+            f"Qwen3-VL DSpark requires a positive integer {field_name}; got {value!r}."
+        )
+    return value
+
+
+def _validate_qwen3_vl_dspark(
+    target_model_config: ModelConfig,
+    draft_model_config: ModelConfig,
+    num_speculative_tokens: int,
+) -> None:
+    """Validate the standalone Qwen3-VL DSpark checkpoint contract."""
+    if not _is_qwen3_vl_target(target_model_config):
+        return
+
+    draft_hf_config = draft_model_config.hf_config
+    draft_architectures = set(getattr(draft_model_config, "architectures", ()) or ())
+    draft_architectures.update(getattr(draft_hf_config, "architectures", ()) or ())
+    if _QWEN3_VL_DSPARK_ARCHITECTURE not in draft_architectures:
+        raise ValueError(
+            "Qwen3-VL DSpark requires a standalone draft checkpoint with "
+            f"architectures=['{_QWEN3_VL_DSPARK_ARCHITECTURE}']; generic "
+            "Qwen3DSparkModel checkpoints do not declare the Qwen3-VL hidden-state "
+            "contract."
+        )
+    if getattr(draft_hf_config, "model_type", None) != "qwen3":
+        raise ValueError(
+            "Qwen3-VL DSpark draft checkpoints must use model_type='qwen3' "
+            "because the draft is a text-only Qwen3 decoder."
+        )
+
+    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
+    if block_size is None:
+        block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
+    block_size = _require_positive_int(block_size, "block_size")
+    if num_speculative_tokens != block_size:
+        raise ValueError(
+            "Qwen3-VL DSpark requires num_speculative_tokens to match the "
+            f"trained block_size ({block_size}); got {num_speculative_tokens}."
+        )
+
+    target_text_config = getattr(target_model_config.hf_config, "text_config", None)
+    if target_text_config is None:
+        target_text_config = getattr(target_model_config, "hf_text_config", None)
+    if target_text_config is None:
+        raise ValueError("Qwen3-VL DSpark could not resolve the target text_config.")
+
+    target_hidden_size = _require_positive_int(
+        getattr(target_text_config, "hidden_size", None),
+        "target text hidden_size",
+    )
+    draft_target_hidden_size = getattr(draft_hf_config, "target_hidden_size", None)
+    if draft_target_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-VL DSpark draft target_hidden_size must match the target text "
+            f"hidden size ({target_hidden_size}); got {draft_target_hidden_size}."
+        )
+
+    for field_name in (
+        "hidden_size",
+        "intermediate_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_dim",
+    ):
+        _require_positive_int(
+            getattr(draft_hf_config, field_name, None),
+            f"draft {field_name}",
+        )
+
+    target_layer_ids = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "target_layer_ids"
+    )
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
+    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
+        raise ValueError(
+            "Qwen3-VL DSpark requires a non-empty target_layer_ids list in the "
+            "draft config."
+        )
+    if any(
+        not isinstance(layer_id, int) or isinstance(layer_id, bool)
+        for layer_id in target_layer_ids
+    ):
+        raise ValueError("Qwen3-VL DSpark target_layer_ids must contain only integers.")
+    if list(target_layer_ids) != sorted(set(target_layer_ids)):
+        raise ValueError(
+            "Qwen3-VL DSpark target_layer_ids must be unique and strictly increasing."
+        )
+    target_num_layers = _require_positive_int(
+        getattr(target_text_config, "num_hidden_layers", None),
+        "target text num_hidden_layers",
+    )
+    if target_layer_ids[0] < 0 or target_layer_ids[-1] >= target_num_layers:
+        raise ValueError(
+            "Qwen3-VL DSpark target_layer_ids must be zero-based text-layer "
+            f"indices in [0, {target_num_layers - 1}]; got {target_layer_ids}."
+        )
+
+    eagle_aux_layer_ids = getattr(
+        draft_hf_config, "eagle_aux_hidden_state_layer_ids", None
+    )
+    expected_aux_layer_ids = [layer_id + 1 for layer_id in target_layer_ids]
+    if eagle_aux_layer_ids is not None and (
+        not isinstance(eagle_aux_layer_ids, (list, tuple))
+        or list(eagle_aux_layer_ids) != expected_aux_layer_ids
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark eagle_aux_hidden_state_layer_ids must equal "
+            f"target_layer_ids + 1 ({expected_aux_layer_ids}); got "
+            f"{eagle_aux_layer_ids}."
+        )
+
+    if _get_qwen3_dspark_value(draft_hf_config, "use_aux_hidden_state") is not True:
+        raise ValueError(
+            "Qwen3-VL DSpark requires use_aux_hidden_state=true because visual "
+            "conditioning is supplied through target language-model hidden states."
+        )
+
+    _require_positive_int(getattr(draft_hf_config, "markov_rank", None), "markov_rank")
+    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
+    if markov_head_type != "vanilla":
+        raise ValueError(
+            "Qwen3-VL DSpark currently requires markov_head_type='vanilla'; "
+            f"got {markov_head_type!r}."
+        )
+
+    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
+    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
+    if sample_from_anchor is not True or bonus_anchor is not False:
+        raise ValueError(
+            "Qwen3-VL DSpark requires sample_from_anchor=true and "
+            "dspark_bonus_anchor=false."
+        )
+
+    target_vocab_size = _require_positive_int(
+        getattr(target_text_config, "vocab_size", None),
+        "target text vocab_size",
+    )
+    draft_input_vocab_size = _require_positive_int(
+        getattr(draft_hf_config, "vocab_size", None),
+        "draft input vocab_size",
+    )
+    if draft_input_vocab_size < target_vocab_size:
+        raise ValueError(
+            "Qwen3-VL DSpark draft input vocab_size must cover the target "
+            f"vocabulary ({target_vocab_size}); got {draft_input_vocab_size}."
+        )
+    draft_output_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None)
+    if draft_output_vocab_size is None:
+        draft_output_vocab_size = draft_input_vocab_size
+    draft_output_vocab_size = _require_positive_int(
+        draft_output_vocab_size, "draft output vocab_size"
+    )
+    if draft_output_vocab_size > target_vocab_size:
+        raise ValueError(
+            "Qwen3-VL DSpark draft_vocab_size must not exceed the target "
+            f"vocab_size ({target_vocab_size}); got {draft_output_vocab_size}."
+        )
+
+    noise_token_id = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "mask_token_id"
+    )
+    for field_name in (
+        "mask_token_id",
+        "dspark_noise_token_id",
+        "pard_token",
+        "ptd_token_id",
+    ):
+        if noise_token_id is None:
+            noise_token_id = getattr(draft_hf_config, field_name, None)
+    if (
+        not isinstance(noise_token_id, int)
+        or isinstance(noise_token_id, bool)
+        or not 0 <= noise_token_id < draft_input_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark requires a valid mask/noise token id within the "
+            f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
+        )
+
+    rope_configs = (
+        getattr(draft_hf_config, "rope_parameters", None),
+        getattr(draft_hf_config, "rope_scaling", None),
+    )
+    has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
+    has_mrope = has_mrope or any(
+        isinstance(rope_config, Mapping) and "mrope_section" in rope_config
+        for rope_config in rope_configs
+    )
+    if has_mrope:
+        raise ValueError(
+            "Qwen3-VL DSpark draft checkpoints must use logical 1-D RoPE and "
+            "must not copy the target model's mrope_section."
+        )
 
 
 @config
@@ -882,6 +1119,8 @@ class SpeculativeConfig:
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                    or _QWEN3_VL_DSPARK_ARCHITECTURE
+                    in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                 ):
                     self.method = "dspark"
@@ -933,6 +1172,8 @@ class SpeculativeConfig:
 
                 if self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
+                    and _QWEN3_VL_DSPARK_ARCHITECTURE
+                    not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
@@ -1025,6 +1266,13 @@ class SpeculativeConfig:
                             f"num_speculative_tokens={dspark_block_size} or "
                             "larger (e.g. 7)."
                         )
+
+                    assert self.target_model_config is not None
+                    _validate_qwen3_vl_dspark(
+                        self.target_model_config,
+                        self.draft_model_config,
+                        self.num_speculative_tokens,
+                    )
 
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
