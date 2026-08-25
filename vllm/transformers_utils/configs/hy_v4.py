@@ -36,7 +36,9 @@ class HYV4Config(PreTrainedConfig):
         index_topk: Maximum number of key positions selected by each DSA query.
         index_head_dim: Hidden dimension of each DSA indexer head.
         index_n_heads: Number of DSA indexer heads.
-        enable_lm_head_fp32: Whether the language-model head runs in float32.
+        enable_lm_head_fp32: Whether the language-model head emits float32
+            logits. Surfaced as ``head_dtype`` so `LogitsProcessor` accumulates
+            the projection into fp32 while the weight stays in the model dtype.
         enable_ihc: Whether independent Hyper-Connections are enabled.
         hc_mult: Number of hidden-state channels maintained by iHC.
         hc_magnitude: Scale applied to the iHC post-gating branch.
@@ -155,6 +157,14 @@ class HYV4Config(PreTrainedConfig):
                 else lt
                 for lt in self.layer_types
             ]
+
+        # `ModelConfig.head_dtype` reads this off the HF config, so an fp32 head
+        # needs no model-side dtype juggling: LogitsProcessor picks the
+        # `torch.mm(out_dtype=float32)` path and leaves the weight in the model
+        # dtype. Only fill it in when the checkpoint (or --hf-overrides) has not
+        # already pinned a value.
+        if self.enable_lm_head_fp32 and getattr(self, "head_dtype", None) is None:
+            self.head_dtype = "float32"
 
         super().__post_init__(**kwargs)
 

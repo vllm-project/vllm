@@ -551,9 +551,7 @@ class HYV4Model(nn.Module):
                     param = params_dict[name_mapped]
                     # Ask the weight loader whether it succeeded, otherwise we
                     # may skip experts that have other available replicas.
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
+                    weight_loader: Callable[..., typing.Any] = param.weight_loader
                     success = weight_loader(
                         param,
                         loaded_weight,
@@ -655,12 +653,14 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.model = HYV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.enable_lm_head_fp32 = getattr(self.config, "enable_lm_head_fp32", False)
         if get_pp_group().is_last_rank:
+            # The head stays in the model dtype; ``enable_lm_head_fp32`` is
+            # surfaced as ``head_dtype`` on the config (see HYV4Config), which
+            # makes LogitsProcessor accumulate the projection straight into
+            # fp32 instead of materializing an fp32 copy of the weight.
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
-                params_dtype=torch.float32 if self.enable_lm_head_fp32 else None,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -691,14 +691,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        if self.enable_lm_head_fp32:
-            # Keep the whole projection in fp32 so the head matches training.
-            with torch.autocast(device_type="cuda", enabled=False):
-                logits = self.logits_processor(
-                    self.lm_head, hidden_states.to(torch.float32)
-                )
-        else:
-            logits = self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
 
         if getattr(self.config, "soft_logits_capping", False):
             soft_cap = self.config.soft_logits_capping_logits

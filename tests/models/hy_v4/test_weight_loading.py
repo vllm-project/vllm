@@ -239,3 +239,119 @@ def test_fused_expert_scale_keeps_its_own_parameter() -> None:
         == f"{base}_scale_inv"
     )
     assert _resolve_fused_expert_param(base, "_scale_inv", {base: None}) is None
+
+
+class _StubModelOptConfig:
+    """Stands in for `ModelOptQuantConfigBase`, which keys off exclude_modules."""
+
+    def __init__(self, exclude_modules: list[str]) -> None:
+        self.exclude_modules = exclude_modules
+
+
+class _StubFp8Config:
+    """Stands in for `Fp8Config`, which keys off ignored_layers."""
+
+    def __init__(self, ignored_layers: list[str]) -> None:
+        self.ignored_layers = ignored_layers
+
+
+def test_quant_exclusions_remap_onto_the_attribute_the_config_uses() -> None:
+    """MTP exclusions must be remapped under whichever attribute is populated.
+
+    `is_layer_skipped` compares prefixes exactly, so a checkpoint-named entry
+    (`model.mtp_layers.0.mlp.gate`) never matches the draft module built at
+    `model.layers.<num_hidden_layers>.mlp.gate`. Reading only `ignored_layers`
+    silently skips the remap for ModelOpt checkpoints, and the excluded module
+    then gets a quant method whose scale stays at its `finfo(float32).min`
+    sentinel -- the layer produces garbage without raising.
+    """
+    from vllm.models.hy_v4.nvidia.mtp import _remap_mtp_quant_exclusions
+
+    checkpoint_entries = [
+        "lm_head",
+        "model.mtp_layers.0.eh_proj",
+        "model.mtp_layers.0.mlp.gate",
+        "model.mtp_layers.0.self_attn.linear_gate",
+    ]
+    draft_entries = [
+        "model.layers.78.eh_proj",
+        "model.layers.78.mlp.gate",
+        "model.layers.78.self_attn.linear_gate",
+    ]
+
+    modelopt = _StubModelOptConfig(list(checkpoint_entries))
+    remapped = _remap_mtp_quant_exclusions(modelopt, 78, 1)
+    assert remapped.exclude_modules == checkpoint_entries + draft_entries
+    # The backbone shares the config object with the target model.
+    assert modelopt.exclude_modules == checkpoint_entries
+
+    # Regression guard: the legacy fp8 attribute keeps working.
+    fp8 = _StubFp8Config(list(checkpoint_entries))
+    remapped = _remap_mtp_quant_exclusions(fp8, 78, 1)
+    assert remapped.ignored_layers == checkpoint_entries + draft_entries
+    assert not hasattr(remapped, "exclude_modules")
+
+
+def test_quant_exclusions_remap_preserves_wildcard_suffix() -> None:
+    """ModelOpt patterns may end in `*`; the remap must keep the wildcard.
+
+    `is_layer_excluded` runs the entries through `fnmatch`, so dropping the
+    trailing `*` would turn a subtree exclusion into an exact-match miss.
+    """
+    from vllm.models.hy_v4.nvidia.mtp import _remap_mtp_quant_exclusions
+
+    config = _StubModelOptConfig(["model.mtp_layers.0.mlp.experts*"])
+    remapped = _remap_mtp_quant_exclusions(config, 78, 1)
+
+    assert remapped.exclude_modules == [
+        "model.mtp_layers.0.mlp.experts*",
+        "model.layers.78.mlp.experts*",
+    ]
+
+
+def test_quant_exclusions_remap_is_a_noop_without_mtp_entries() -> None:
+    """A config with no MTP-named exclusions must be returned untouched."""
+    from vllm.models.hy_v4.nvidia.mtp import _remap_mtp_quant_exclusions
+
+    config = _StubModelOptConfig(["lm_head", "model.layers.0.mlp.gate"])
+    assert _remap_mtp_quant_exclusions(config, 78, 1) is config
+    assert _remap_mtp_quant_exclusions(None, 78, 1) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("enable_lm_head_fp32", [False, True])
+def test_lm_head_keeps_model_dtype_while_logits_follow_head_dtype(
+    tmp_path, dist_init, workspace_init, enable_lm_head_fp32: bool
+) -> None:
+    """An fp32 head must not promote the weight to fp32.
+
+    `enable_lm_head_fp32` is surfaced as `head_dtype`, which makes
+    `LogitsProcessor` accumulate the projection into fp32 via
+    `torch.mm(out_dtype=...)`. Materializing an fp32 weight instead would double
+    the lm_head memory and its GEMM bandwidth for no extra precision -- the
+    checkpoint weight is bf16 either way.
+    """
+    from vllm.models.hy_v4 import HYV4ForCausalLM
+
+    torch.set_default_dtype(torch.bfloat16)
+    hf_config = _hf_config(enable_ihc=True, sparse=False)
+    hf_config.enable_lm_head_fp32 = enable_lm_head_fp32
+    if enable_lm_head_fp32:
+        hf_config.head_dtype = "float32"
+    model_config = _model_config(tmp_path, hf_config)
+
+    expected_logits_dtype = torch.float32 if enable_lm_head_fp32 else model_config.dtype
+    assert model_config.head_dtype == expected_logits_dtype
+
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
+        model = HYV4ForCausalLM(vllm_config=vllm_config, prefix="")
+
+    assert model.lm_head.weight.dtype == model_config.dtype
+
+    hidden_states = torch.randn(
+        2, hf_config.hidden_size, device="cuda", dtype=model_config.dtype
+    )
+    with set_current_vllm_config(vllm_config):
+        logits = model.compute_logits(hidden_states)
+    assert logits.dtype == expected_logits_dtype

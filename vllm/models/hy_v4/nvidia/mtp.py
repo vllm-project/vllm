@@ -222,13 +222,17 @@ def _remap_mtp_quant_exclusions(
 ) -> QuantizationConfig | None:
     """Translate checkpoint-named MTP quant exclusions to draft prefixes.
 
-    ``modules_to_not_convert`` names MTP modules the way the checkpoint does
-    (``model.mtp_layers.0.self_attn.linear_gate``), while the draft model builds
-    them under ``model.layers.<num_hidden_layers + i>...``. ``is_layer_skipped``
-    compares prefixes for exact equality, so without this translation an
-    excluded MTP module gets an FP8 method even though its checkpoint weight is
-    BF16 with no ``weight_scale_inv`` companion: the scale then keeps its
-    ``finfo(float32).min`` sentinel and the layer silently produces garbage.
+    ``modules_to_not_convert`` / ``exclude_modules`` name MTP modules the way
+    the checkpoint does (``model.mtp_layers.0.self_attn.linear_gate``), while
+    the draft model builds them under ``model.layers.<num_hidden_layers + i>``.
+    ``is_layer_skipped`` compares prefixes for exact equality, so without this
+    translation an excluded MTP module gets a quant method even though its
+    checkpoint weight is BF16 with no ``weight_scale`` / ``weight_scale_inv``
+    companion: the scale then keeps its ``finfo(float32).min`` sentinel and the
+    layer silently produces garbage.
+
+    The list lives under a different attribute per config class, hence the
+    lookup over ``_MTP_QUANT_EXCLUSION_ATTRS``.
 
     Args:
         quant_config: The MTP quantization config to widen.
@@ -462,6 +466,28 @@ class HYV4MultiTokenPredictor(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.spec_step_idx: int = 0
 
+    def set_skip_topk(self, skip: bool) -> None:
+        """Toggle the draft indexer for ``index_share_for_mtp_iteration``.
+
+        The proposer clears the flag for draft step 0 so the MTP layer builds
+        its own top-k indices, then sets it for steps 1+ so they reuse what
+        step 0 wrote into the shared buffer instead of re-running the indexer.
+        """
+        for layer in self.layers.values():
+            layer.mtp_block.self_attn.skip_topk = skip
+
+    def compact_topk_indices(self, slot_ids: torch.Tensor) -> None:
+        """Move the top-k rows at ``slot_ids`` to the front of the buffer.
+
+        Step 0 writes one row per query token of the multi-token batch, while
+        steps 1+ decode a single token per request and index the buffer from 0.
+        Without this gather they would read another token's rows.
+        """
+        num_slots = slot_ids.numel()
+        if self.topk_indices_buffer is None or num_slots == 0:
+            return
+        self.topk_indices_buffer[:num_slots] = self.topk_indices_buffer[slot_ids]
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -489,10 +515,6 @@ class HYV4MultiTokenPredictor(nn.Module):
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
         lm_head = mtp_layer.shared_head.head
         proj_input = mtp_layer.shared_head(hidden_states)
-        # The shared lm_head may be fp32 when the target model enables an fp32
-        # head; keep the GEMM dtypes aligned.
-        if proj_input.dtype != lm_head.weight.dtype:
-            proj_input = proj_input.to(lm_head.weight.dtype)
         return self.logits_processor(lm_head, proj_input)
 
 
@@ -521,7 +543,11 @@ class HYV4MTP(nn.Module):
         self.sampler = Sampler()
 
     def set_topk_indices_buffer(self, topk_indices_buffer: torch.Tensor) -> None:
-        """Share the target sparse-index buffer with every draft consumer."""
+        """Share the target sparse-index buffer with every draft consumer.
+
+        Proposers that walk ``named_modules()`` instead of calling this reach
+        the same consumers via ``HYV4MLAAttention.topk_indices_buffer``.
+        """
         self.model.topk_indices_buffer = topk_indices_buffer
         for layer in self.model.layers.values():
             self_attn = layer.mtp_block.self_attn

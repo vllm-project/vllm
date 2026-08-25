@@ -510,6 +510,23 @@ class HYV4MLAAttention(nn.Module):
             **extra_impl_args,
         )
 
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        """The sparse top-k index buffer this layer reads from.
+
+        The real consumer is ``mla_attn.impl``, an ``AttentionImpl`` rather than
+        an ``nn.Module``, so a plain ``named_modules()`` walk cannot reach it.
+        The MTP proposer rebinds the draft layers onto the target model's buffer
+        through such a walk, so expose it here: without this the draft attention
+        would keep reading its own buffer while the indices it needs are written
+        to the target's.
+        """
+        return getattr(self.mla_attn.impl, "topk_indices_buffer", None)
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, buffer: torch.Tensor) -> None:
+        self.mla_attn.impl.topk_indices_buffer = buffer  # type: ignore[attr-defined]
+
     def _resolve_sink_backend(
         self, kv_cache_dtype: str
     ) -> type[AttentionBackend] | None:
