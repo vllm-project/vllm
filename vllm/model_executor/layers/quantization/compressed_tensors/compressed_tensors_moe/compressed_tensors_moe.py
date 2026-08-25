@@ -81,11 +81,11 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
             if not valid_format_and_bits:
                 raise ValueError(
-                    "For Fused MoE layers, only format: ",
-                    f"{CompressionFormat.pack_quantized.value} ",
-                    f" and bits: {WNA16_SUPPORTED_BITS} is supported ",
+                    "For Fused MoE layers, only format: "
+                    f"{CompressionFormat.pack_quantized.value} "
+                    f"and bits: {WNA16_SUPPORTED_BITS} is supported "
                     f"but got format: {CompressionFormat.pack_quantized.value} "
-                    f" and bits: {weight_quant.num_bits}",
+                    f"and bits: {weight_quant.num_bits}"
                 )
 
             # Native ROCm HIP kernels (RDNA3, etc.)
@@ -145,8 +145,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
             if not _is_valid_nvfp4_activations:
                 raise ValueError(
-                    "For NVFP4 weights, input quantization must also be NVFP4 format ",
-                    f"or None for NVFP4A16, found {input_quant}",
+                    "For NVFP4 weights, input quantization must also be NVFP4 "
+                    f"format or None for NVFP4A16, found {input_quant}"
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
                 layer.moe_config, layer_name, use_a16=(input_quant is None)
