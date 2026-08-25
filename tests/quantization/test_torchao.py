@@ -34,6 +34,17 @@ TORCHAO_VERSION_0_18_AVAILABLE = TORCHAO_AVAILABLE and version.parse(
 ) >= version.parse("0.18.0")
 
 
+# Fix for leaking `torch.set_float32_matmul_precision("high")`
+# https://github.com/pytorch/ao/blob/v0.17.0/torchao/quantization/utils.py#L696
+@pytest.fixture(autouse=True)
+def restore_float32_matmul_precision():
+    original_precision = torch.get_float32_matmul_precision()
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(original_precision)
+
+
 @pytest.mark.skipif(
     current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
     reason="Only fp8_fnuz supported on CDNA3 architecture",
