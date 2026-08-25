@@ -677,7 +677,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         )
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
-            if step_top_logprobs is None:
+            if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
                     token = format_token_id_placeholder(token_id)
                 else:
