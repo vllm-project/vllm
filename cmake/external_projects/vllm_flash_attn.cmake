@@ -1,3 +1,5 @@
+include(ExternalProject)
+
 # vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target
 # arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the
 # arches in the CUDA case (and instead set the gencodes on a per file basis)
@@ -30,19 +32,36 @@ if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
 if(VLLM_FLASH_ATTN_SRC_DIR)
-  FetchContent_Declare(
-          vllm-flash-attn SOURCE_DIR
-          ${VLLM_FLASH_ATTN_SRC_DIR}
-          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
+  set(VLLM_FLASH_ATTN_SOURCE_DIR "${VLLM_FLASH_ATTN_SRC_DIR}")
+  ExternalProject_Add(
+    vllm-flash-attn
+    SOURCE_DIR ${VLLM_FLASH_ATTN_SOURCE_DIR}
+    BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
+    CONFIGURE_COMMAND ${CMAKE_COMMAND}
+      -S <SOURCE_DIR>
+      -B <BINARY_DIR>
+      -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+      -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}/vllm
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
+    INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
   )
 else()
-  FetchContent_Declare(
-          vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG f3e1a4f74c99145c0717709860bf765de1703779
-          GIT_PROGRESS TRUE
-          # Don't share the vllm-flash-attn build between build types
-          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
+  set(VLLM_FLASH_ATTN_SOURCE_DIR
+      "${CMAKE_BINARY_DIR}/vllm-flash-attn-src")
+  ExternalProject_Add(
+    vllm-flash-attn
+    GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
+    GIT_TAG f3e1a4f74c99145c0717709860bf765de1703779
+    GIT_PROGRESS TRUE
+    SOURCE_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn-src
+    BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
+    CONFIGURE_COMMAND ${CMAKE_COMMAND}
+      -S <SOURCE_DIR>
+      -B <BINARY_DIR>
+      -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+      -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}/vllm
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
+    INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
   )
 endif()
 
@@ -54,8 +73,9 @@ install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" ALL_CO
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_COMPONENTS)
 
 # Fetch the vllm-flash-attn library
-FetchContent_MakeAvailable(vllm-flash-attn)
-message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
+ExternalProject_Get_Property(vllm-flash-attn SOURCE_DIR BINARY_DIR)
+message(STATUS "vllm-flash-attn source directory: ${SOURCE_DIR}")
+message(STATUS "vllm-flash-attn binary directory: ${BINARY_DIR}")
 
 # Restore the install prefix after FA's install rules
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
@@ -70,7 +90,7 @@ foreach(_FA_COMPONENT _vllm_fa2_C _vllm_fa3_C)
   # Copy vllm_flash_attn python files (except __init__.py and flash_attn_interface.py
   # which are source-controlled in vllm)
   install(
-    DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
+    DIRECTORY ${VLLM_FLASH_ATTN_SOURCE_DIR}/vllm_flash_attn/
     DESTINATION vllm/vllm_flash_attn
     COMPONENT ${_FA_COMPONENT}
     FILES_MATCHING PATTERN "*.py"
@@ -94,7 +114,7 @@ add_custom_target(_vllm_fa4_cutedsl_C)
 # vllm.vllm_flash_attn.cute to match our package structure.
 if(VLLM_FLASH_ATTN_SRC_DIR)
   install(CODE "
-    set(LINK_TARGET \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute\")
+    set(LINK_TARGET \"${VLLM_FLASH_ATTN_SOURCE_DIR}/flash_attn/cute\")
     set(LINK_NAME \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn/cute\")
     file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn\")
     file(REMOVE_RECURSE \"\${LINK_NAME}\")
@@ -102,9 +122,9 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
   " COMPONENT _vllm_fa4_cutedsl_C)
 else()
   install(CODE "
-    file(GLOB_RECURSE CUTE_PY_FILES \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute/*.py\")
+    file(GLOB_RECURSE CUTE_PY_FILES \"${VLLM_FLASH_ATTN_SOURCE_DIR}/flash_attn/cute/*.py\")
     foreach(SRC_FILE \${CUTE_PY_FILES})
-      file(RELATIVE_PATH REL_PATH \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute\" \${SRC_FILE})
+      file(RELATIVE_PATH REL_PATH \"${VLLM_FLASH_ATTN_SOURCE_DIR}/flash_attn/cute\" \${SRC_FILE})
       set(DST_FILE \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn/cute/\${REL_PATH}\")
       get_filename_component(DST_DIR \${DST_FILE} DIRECTORY)
       file(MAKE_DIRECTORY \${DST_DIR})
