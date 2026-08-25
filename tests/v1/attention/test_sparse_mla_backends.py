@@ -910,14 +910,25 @@ PREFILL_BATCH_SPECS = {
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize(
+    ("num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [
+        pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
+        pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
+    ],
+)
 def test_sparse_backend_prefill_correctness(
     default_vllm_config,
     dist_init,
     batch_name,
     kv_cache_dtype,
+    num_heads,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
     workspace_init,
 ):
-    """Test single-pass dense and masked MHA for sparse MLA prefill."""
+    """Test dense and masked MHA across supported sparse MLA dimensions."""
     backend_cls = FlashMLASparseBackend
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
@@ -925,11 +936,7 @@ def test_sparse_backend_prefill_correctness(
     dtype = torch.bfloat16
     block_size = 64
 
-    num_heads = 128
     kv_lora_rank = 512
-    qk_nope_head_dim = 128
-    qk_rope_head_dim = 64
-    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
     masked_mha = batch_name.startswith("masked_mha")
     topk_tokens = 200 if masked_mha else 512
