@@ -319,7 +319,6 @@ class BloomModel(nn.Module):
 class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={re.compile(r"^(?!transformer\.)"): "transformer."},
-        orig_to_new_prefix={"lm_head.weight": None},
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
