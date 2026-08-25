@@ -2585,7 +2585,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self._use_fused_mla_kv_concat = (
-            current_platform.is_cuda_alike()
+            current_platform.is_rocm()
             and hasattr(torch.ops._C, "fused_kimi_k3_mla_kv_concat")
             and qk_nope_head_dim == 128
             and qk_rope_head_dim == 64
