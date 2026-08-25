@@ -577,7 +577,9 @@ class Cosmos3EdgeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Cosmos3EdgeForCausalLM(
-                vllm_config=vllm_config,
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config, architectures=["NemotronHForCausalLM"]
+                ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
