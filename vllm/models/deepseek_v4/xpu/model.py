@@ -46,6 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -1183,6 +1184,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
                 if is_pp_missing_parameter(name, self):
                     break
+                if name not in params_dict:
+                    head, _, leaf = name.rpartition(".")
+                    suffixed = f"{head}.base_layer.{leaf}"
+                    if suffixed in params_dict:
+                        name = suffixed
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1237,6 +1243,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 else:
                     if is_pp_missing_parameter(name, self):
                         continue
+                    # Non-LoRA params on a LoRA-wrapped module live at
+                    # ``<head>.base_layer.<leaf>``; the checkpoint is plain.
+                    if name not in params_dict:
+                        head, _, leaf = name.rpartition(".")
+                        suffixed = f"{head}.base_layer.{leaf}"
+                        if suffixed in params_dict:
+                            name = suffixed
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -1273,6 +1286,10 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         # shared experts use Fp8LinearMethod's block scales, which
         # register as ``weight_scale_inv``.
         scale_regex = {
+            # ``.base_layer.``-namespace variant (LoRA-wrapped experts).
+            re.compile(
+                r"(\.experts\.\d+\.w[123]\.base_layer)\.scale$"
+            ): r"\1.weight_scale",
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
@@ -1281,6 +1298,10 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
         scale_regex = {
+            # ``.base_layer.``-namespace variant of the above.
+            re.compile(
+                r"(\.experts\.\d+\.w[123]\.base_layer)\.scale$"
+            ): r"\1.weight_scale_inv",
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
     return WeightsMapper(
@@ -1304,12 +1325,21 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+    }
+
+    # The MTP draft head is not LoRA-adapted.
+    lora_skip_prefixes = ["mtp."]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
