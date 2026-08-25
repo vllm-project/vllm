@@ -295,7 +295,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
-            self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
+            self.prefill_cudagraph_manager.run_fullgraph(
+                prefill_batch_desc, attn_metadata
+            )
         else:
             # The target model's attention metadata and slot mappings
             # can directly be used for draft prefill, because of the
@@ -494,7 +496,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert self.decode_cudagraph_manager is not None
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                self.decode_cudagraph_manager.run_fullgraph(batch_desc, attn_metadata)
             else:
                 self._generate_draft(
                     num_reqs,
@@ -540,7 +542,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc, attn_metadata)
             return
 
         self._generate_fused_drafts(

@@ -58,6 +58,8 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
             )
+            if not warmup:
+                self._record_attn_metadata_ptrs(desc, attn_metadata)
 
             return lambda cg_mode: forward_fn(
                 num_reqs,
