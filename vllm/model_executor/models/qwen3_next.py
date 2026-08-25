@@ -43,7 +43,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -300,14 +300,26 @@ class Qwen3NextAttention(nn.Module):
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
-        # TODO: support MRoPE
         mm_config = model_config.multimodal_config if model_config else None
         text_only = mm_config is None or mm_config.language_model_only
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
+        supports_mrope = bool(
+            type(self.rotary_emb) is MRotaryEmbedding
+            and mrope_section
+            and len(mrope_section) == 3
+            and sum(mrope_section) == self.rotary_emb.rotary_dim // 2
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+        )
+        supports_dtype = getattr(self.rotary_emb, "dtype", None) in (
+            torch.float16,
+            torch.bfloat16,
+        )
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
-            and text_only
+            and supports_dtype
+            and (text_only or supports_mrope)
         )
 
     def _project_qkv_gate(
@@ -325,22 +337,28 @@ class Qwen3NextAttention(nn.Module):
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            # mRoPE passes positions as (3, n_tokens) for T/H/W. Fusion is only
-            # enabled text-only, where the three rows are identical, so taking
-            # the T row is exact. (1D positions pass through.)
-            pos = positions[0] if positions.ndim == 2 else positions
+            if positions.ndim == 2 and not getattr(
+                self.rotary_emb, "mrope_section", None
+            ):
+                positions = positions[0]
             q, k, gate = fused_qk_rmsnorm_rope_gate(
                 q_gate,
                 k,
-                self.q_norm.weight.float() + 1.0,
-                self.k_norm.weight.float() + 1.0,
+                self.q_norm.weight,
+                self.k_norm.weight,
                 self.rotary_emb.cos_sin_cache,
-                pos,
+                positions,
                 self.q_norm.variance_epsilon,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
                 self.rotary_emb.rotary_dim,
+                norm_beta=1.0,
+                mrope_section=(
+                    getattr(self.rotary_emb, "mrope_section", None)
+                    if positions.ndim == 2
+                    else None
+                ),
             )
             return q, k, v, gate
 
