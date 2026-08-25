@@ -423,10 +423,11 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             context = context.replace(d, "")
         lang_prefix = ""
         if language is not None:
-            full_lang = cls.supported_languages.get(language, language)
-            for d in _chatml_delims:
-                full_lang = full_lang.replace(d, "")
-            lang_prefix = f"language {full_lang}{_ASR_TEXT_TAG}"
+            full_lang = cls.supported_languages.get(language)
+            if full_lang is not None:
+                for d in _chatml_delims:
+                    full_lang = full_lang.replace(d, "")
+                lang_prefix = f"language {full_lang}{_ASR_TEXT_TAG}"
 
         prompt_base = (
             f"<|im_start|>system\n{context}<|im_end|>\n"

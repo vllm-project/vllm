@@ -431,11 +431,11 @@ class InputProcessor:
             trace_headers=trace_headers,
             resumable=resumable,
             session_id=session_id,
-            segment_id=decoder_inputs.get("segment_id"),
-            truncate_to_token=decoder_inputs.get("truncate_to_token"),
-            audio_history_token_end=decoder_inputs.get("audio_history_token_end"),
-            new_audio_feature_count=decoder_inputs.get("new_audio_feature_count", 0),
-            final_segment=decoder_inputs.get("final_segment", False),
+            segment_id=decoder_input.get("segment_id"),
+            truncate_to_token=decoder_input.get("truncate_to_token"),
+            audio_history_token_end=decoder_input.get("audio_history_token_end"),
+            new_audio_feature_count=decoder_input.get("new_audio_feature_count", 0),
+            final_segment=decoder_input.get("final_segment", False),
         )
 
     def _validate_prompt_len(
