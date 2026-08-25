@@ -1013,17 +1013,18 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_data = w13_data.transpose(1, 2)
             w2_data = w2_data.transpose(1, 2)
 
+            # Scales are [E, N, K_scale]; shuffle_scale_moe expects [E, K_scale, N]
             w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
             w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
 
             w13_scale = shuffle_scale_moe(
-                w13_scale_raw.reshape(-1, w13_scale_raw.shape[-1]),
+                w13_scale_raw.transpose(1, 2),
                 arch="gfx1250",
                 preshuffle_factor=32,
                 scale_kwidth=8,
             )
             w2_scale = shuffle_scale_moe(
-                w2_scale_raw.reshape(-1, w2_scale_raw.shape[-1]),
+                w2_scale_raw.transpose(1, 2),
                 arch="gfx1250",
                 preshuffle_factor=32,
                 scale_kwidth=8,
