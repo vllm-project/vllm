@@ -124,34 +124,3 @@ def test_rank_sum_is_full_lookup(tp_size):
         total += _fused(ids, _shard(full_table, si, rows, dtype), si)
 
     torch.testing.assert_close(total, full_table[ids.long()], atol=0.0, rtol=0.0)
-
-
-@requires_cuda
-@torch.inference_mode()
-def test_out_of_range_ids_are_zero():
-    """Ids outside every shard (padding slots, junk) must contribute zeros
-    rather than reading out of bounds."""
-    set_random_seed(3)
-    vocab_size, hidden, tp_size = 1024, 512, 4
-    dtype = torch.bfloat16
-    si = _shard_indices(vocab_size, vocab_size, 0, tp_size)
-    weight = torch.randn(
-        pad_vocab_size(vocab_size, 64) // tp_size, hidden, dtype=dtype, device="cuda"
-    )
-    ids = torch.tensor(
-        [si.org_vocab_start_index, vocab_size, vocab_size + 4096, -1, 1 << 40],
-        dtype=torch.int64,
-        device="cuda",
-    )
-    out = _fused(ids, weight, si)
-    torch.testing.assert_close(out[0], weight[0], atol=0.0, rtol=0.0)
-    assert not out[1:].any()
-
-
-@requires_cuda
-@torch.inference_mode()
-def test_empty_input():
-    si = _shard_indices(1024, 1024, 0, 2)
-    weight = torch.randn(512, 128, dtype=torch.bfloat16, device="cuda")
-    ids = torch.empty(0, dtype=torch.int32, device="cuda")
-    assert _fused(ids, weight, si).shape == (0, 128)

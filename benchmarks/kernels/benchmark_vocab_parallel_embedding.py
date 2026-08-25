@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the TP > 1 input-embedding path of VocabParallelEmbedding.
 
-Three providers, all computing one rank's partial embedding (the all-reduce
+Two providers, both computing one rank's partial embedding (the all-reduce
 that follows is identical for each and is not measured):
 
-  eager     mask + id shift + int64 cast + F.embedding + masked_fill_
-  compiled  the same path under torch.compile(dynamic=True), i.e. what a
-            compiled vLLM model runs
+  unfused   mask + id shift + int64 cast + F.embedding + masked_fill_
   fused     the single fused CUDA kernel, _C::vocab_parallel_embedding
 
 With --use-cuda-graph each provider is captured into a CUDA graph and the
@@ -15,7 +13,6 @@ replay is timed, which is what a decode step actually costs.
 """
 
 import itertools
-import os
 
 import torch
 
@@ -39,7 +36,7 @@ def get_shard_indices(vocab_size, org_vocab_size, tp_rank, tp_size):
     )
 
 
-def embedding_eager(input_ids, weight, shard_indices):
+def embedding_reference(input_ids, weight, shard_indices):
     masked_input, input_mask = get_masked_input_and_mask(
         input_ids,
         shard_indices.org_vocab_start_index,
@@ -50,9 +47,6 @@ def embedding_eager(input_ids, weight, shard_indices):
     )
     output = torch.nn.functional.embedding(masked_input.long(), weight)
     return output.masked_fill_(input_mask.unsqueeze(-1), 0)
-
-
-embedding_compiled = torch.compile(embedding_eager, dynamic=True)
 
 
 def embedding_fused(input_ids, weight, shard_indices):
@@ -68,8 +62,7 @@ def embedding_fused(input_ids, weight, shard_indices):
 
 
 PROVIDERS = {
-    "eager": embedding_eager,
-    "compiled": embedding_compiled,
+    "unfused": embedding_reference,
     "fused": embedding_fused,
 }
 
@@ -110,12 +103,12 @@ def calculate_diff(vocab_size, hidden_size, tp_size, num_tokens):
         input_ids, weight, shard_indices = make_inputs(
             vocab_size, hidden_size, tp_size, num_tokens, dtype, tp_rank
         )
-        output_eager = embedding_eager(input_ids, weight, shard_indices)
+        output_reference = embedding_reference(input_ids, weight, shard_indices)
         output_fused = embedding_fused(input_ids, weight, shard_indices)
-        if not torch.equal(output_eager, output_fused):
+        if not torch.equal(output_reference, output_fused):
             print(f"❌ rank {tp_rank}: fused output differs")
             return
-    print(f"✅ fused matches the eager path on all {tp_size} ranks")
+    print(f"✅ fused matches the reference path on all {tp_size} ranks")
 
 
 tp_size_range = [2, 4, 8]
@@ -130,8 +123,8 @@ def get_benchmark(vocab_size, hidden_size, dtype, use_cuda_graph):
             x_vals=[list(_) for _ in configs],
             line_arg="provider",
             line_vals=list(PROVIDERS),
-            line_names=["Eager", "torch.compile", "Fused kernel"],
-            styles=[("blue", "-"), ("green", "-"), ("red", "-")],
+            line_names=["Unfused PyTorch", "Fused kernel"],
+            styles=[("green", "-"), ("red", "-")],
             ylabel="us",
             plot_name=(
                 f"vocab-parallel-embedding-perf-vocab{vocab_size}-"
@@ -185,8 +178,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-path",
         type=str,
-        default="./configs/vocab_parallel_embedding/",
-        help="Path to save the benchmark results",
+        default=None,
+        help="Optional path to save benchmark results",
     )
     args = parser.parse_args()
     dtype = getattr(torch, args.dtype)
@@ -198,7 +191,6 @@ if __name__ == "__main__":
         num_tokens=1024,
     )
 
-    os.makedirs(args.save_path, exist_ok=True)
     benchmark = get_benchmark(
         args.vocab_size, args.hidden_size, dtype, args.use_cuda_graph
     )
