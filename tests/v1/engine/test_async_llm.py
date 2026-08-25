@@ -1150,6 +1150,45 @@ async def test_pause_mid_tokenization_rejects():
 
 
 @pytest.mark.asyncio
+async def test_pause_mid_fanout_rejects_atomically():
+    """A pause landing between n>1 child submissions must reject the whole
+    request and reclaim the children admitted before it, so the request id
+    is immediately reusable after resume."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        original = engine.engine_core.add_request_async
+
+        async def close_after_submit(request):
+            await original(request)
+            engine._reject_while_paused = "abort"
+
+        engine.engine_core.add_request_async = close_after_submit
+        with pytest.raises(EnginePausedError):
+            await engine.add_request(
+                request_id="fanout",
+                prompt=TEXT_PROMPT,
+                params=SamplingParams(max_tokens=5, n=3),
+            )
+        engine.engine_core.add_request_async = original
+        assert not engine.output_processor.has_unfinished_requests()
+        assert not engine.output_processor.parent_requests
+
+        engine._reject_while_paused = None
+        collector = await engine.add_request(
+            request_id="fanout",
+            prompt=TEXT_PROMPT,
+            params=SamplingParams(max_tokens=5, n=3),
+        )
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60.0)
+            if out.finished:
+                break
+
+
+@pytest.mark.asyncio
 async def test_switching_to_keep_reopens_admission():
     """`keep` carries requests across the pause by design, so a caller that
     moves from a boundary mode to `keep` is asking for them to be accepted."""
