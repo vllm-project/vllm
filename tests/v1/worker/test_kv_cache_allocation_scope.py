@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 import vllm.v1.worker.gpu.attn_utils as attn_utils
+import vllm.v1.worker.gpu_model_runner as gpu_model_runner
 
 
 class _AllocationScope(AbstractContextManager):
@@ -50,6 +51,39 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         torch.device("cpu"),
         [],
         config,
+        kv_cache_allocation_context=scope,
+    )
+
+    assert result is kv_caches
+    assert not scope.active
+
+
+def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
+    scope = _AllocationScope()
+    kv_caches = {"layer": torch.empty(0)}
+
+    def allocate(*args, **kwargs):
+        assert scope.active
+        return kv_caches
+
+    def bind(*args, **kwargs):
+        assert not scope.active
+
+    monkeypatch.setattr(gpu_model_runner, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(gpu_model_runner, "bind_kv_cache", bind)
+
+    runner = SimpleNamespace(
+        device=torch.device("cpu"),
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
+        shared_kv_cache_layers={},
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        kv_caches=[],
+    )
+    result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
+        runner,
+        object(),
+        [],
         kv_cache_allocation_context=scope,
     )
 

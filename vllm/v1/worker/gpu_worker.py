@@ -689,16 +689,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        if self.use_v2_model_runner:
-            self.model_runner.initialize_kv_cache(  # type: ignore[call-arg]
-                kv_cache_config,
-                kv_cache_allocation_context=self._maybe_get_memory_pool_context(
-                    tag="kv_cache"
-                ),
-            )
-        else:
-            with self._maybe_get_memory_pool_context(tag="kv_cache"):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(
+                tag="kv_cache"
+            ),
+        )
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
