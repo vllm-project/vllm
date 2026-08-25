@@ -78,31 +78,47 @@ def make_full_mamba_manager(
     num_blocks: int = 32,
     use_eagle: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
+    include_draft_eagle_group: bool = False,
 ):
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["full"],
+            FullAttentionSpec(
+                block_size=full_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+                num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+            ),
+        ),
+    ]
+    if include_draft_eagle_group:
+        kv_cache_groups.append(
             KVCacheGroupSpec(
-                ["full"],
+                ["draft"],
                 FullAttentionSpec(
                     block_size=full_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
+                    non_causal=True,
                 ),
-            ),
-            KVCacheGroupSpec(
-                ["mamba"],
-                MambaSpec(
-                    block_size=mamba_block_size,
-                    shapes=(1, 1),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
-                    num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-                ),
-            ),
-        ],
+                is_eagle_group=True,
+            )
+        )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=kv_cache_groups,
     )
     scheduler_block_size = lcm(
         full_block_size * dcp_world_size,
@@ -131,6 +147,107 @@ def test_dcp_full_attention_enables_partial_hash_hits():
 
     assert manager.coordinator.enable_partial_hash_hits
     assert manager.coordinator._cache_hit_alignment_tokens == hash_block_size
+
+
+def test_dcp_fine_hit_retention_uses_hash_alignment_for_mamba():
+    """DCP must not floor Mamba's replay checkpoint to the enlarged full-attn
+    scheduler block.
+
+    Full-attention's effective block is 8 tokens under DCP4 while replicated
+    Mamba and hashing stay at 2. With latest-only retention, a 7-token prompt
+    has a reusable 6-token boundary. Flooring that boundary to 8 drops the
+    only Mamba checkpoint and collapses the reconciled hybrid hit to zero.
+    """
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=4,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=hash_block_size,
+        num_blocks=64,
+    )
+    manager.coordinator.retention_interval = 0
+
+    token_ids = list(range(7))
+    req0 = make_request("0", token_ids, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert num_computed == 0
+    assert manager.allocate_slots(req0, 6, 0, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", token_ids, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+
+
+@pytest.mark.parametrize(
+    ("hash_block_size", "expected_hit", "expected_chunk_ends"),
+    [
+        (128, 6144, [4608, 6144, 7552, 7621]),
+        (1536, 4608, [4608, 7621]),
+    ],
+)
+def test_dcp_eagle_retention_primes_first_mamba_consumer(
+    hash_block_size: int,
+    expected_hit: int,
+    expected_chunk_ends: list[int],
+):
+    """The first consumer reuses the EAGLE-adjusted Mamba checkpoint."""
+    block_size = 1536
+    manager = make_full_mamba_manager(
+        dcp_world_size=8,
+        hash_block_size=hash_block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+        num_blocks=128,
+        use_eagle=True,
+        include_draft_eagle_group=True,
+    )
+    manager.coordinator.retention_interval = 0
+    scheduler = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle=True,
+        hash_block_size=hash_block_size,
+        mamba_partial_cache_hit=hash_block_size < block_size,
+    )
+
+    token_ids = list(range(7621))
+    producer = make_request("producer", token_ids, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert num_computed == 0
+    chunk_ends = []
+    while producer.num_computed_tokens < len(token_ids):
+        num_new_tokens = Scheduler._mamba_block_aligned_split(
+            scheduler,
+            producer,
+            len(token_ids) - producer.num_computed_tokens,
+        )
+        assert num_new_tokens > 0
+        assert (
+            manager.allocate_slots(
+                producer,
+                num_new_tokens,
+                num_computed,
+                computed_blocks,
+            )
+            is not None
+        )
+        producer.num_computed_tokens += num_new_tokens
+        chunk_ends.append(producer.num_computed_tokens)
+        computed_blocks = None
+        num_computed = 0
+        manager.new_step_starts()
+    assert chunk_ends == expected_chunk_ends
+
+    manager.free(producer)
+    manager.new_step_starts()
+
+    first_consumer = make_request("consumer", token_ids, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(first_consumer)
+    assert num_computed == expected_hit
 
 
 @pytest.mark.parametrize("dcp_world_size", [1, 4])

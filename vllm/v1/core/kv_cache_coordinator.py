@@ -659,6 +659,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "cache managers require block-aligned lookups: %s.",
                     ", ".join(sorted(unsupported_partial_hit_managers)),
                 )
+        cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+        for manager in self.single_type_managers:
+            manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         self.verify_and_split_kv_cache_groups()
 
     @property
@@ -734,8 +737,31 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             return num_tokens
         return round_down(num_tokens, self.scheduler_block_size)
 
+    def _eagle_replay_boundaries(self, request: Request) -> tuple[int, ...]:
+        """Return Mamba states needed after the dense group applies EAGLE."""
+        max_hit_length = round_down(
+            request.num_prompt_tokens - 1,
+            self._cache_hit_alignment_tokens,
+        )
+        replay_boundaries: set[int] = set()
+        for group in self.attention_groups:
+            if not isinstance(group.spec, FullAttentionSpec) or not group.use_eagle:
+                continue
+            manager = self.single_type_managers[group.group_ids[0]]
+            drop_tokens = manager.block_size
+            if (
+                self.enable_partial_hash_hits
+                and manager.supports_fine_grained_hash_lookup
+                and manager.block_size > self.hash_block_size
+            ):
+                drop_tokens = self.hash_block_size
+            if (replay_boundary := max_hit_length - drop_tokens) > 0:
+                replay_boundaries.add(replay_boundary)
+        return tuple(sorted(replay_boundaries))
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
+        eagle_replay_boundaries = self._eagle_replay_boundaries(request)
         for manager in self.single_type_managers:
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -754,14 +780,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     num_finalized_computed_tokens,
                     cached_num_finalized_computed_tokens + manager.block_size,
                 )
-            # The manager already knows the fine hit granularity
-            # (``scheduler_block_size``); retention is passed separately so it
-            # can keep both the coarse segment tails and the fine replay
-            # boundary (which needs the fine value).
+            # The manager already knows its cache-hit alignment. Retention is
+            # passed separately so it can keep coarse segment tails and fine
+            # replay boundaries.
             manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
+                extra_reachable_boundaries=(
+                    eagle_replay_boundaries
+                    if isinstance(manager.kv_cache_spec, MambaSpec)
+                    else ()
+                ),
             )
 
     def find_longest_cache_hit(
