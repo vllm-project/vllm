@@ -5,6 +5,10 @@
 The server lifecycle follows PR #52144: the shared ``conftest.py`` server
 fixture is reused at module scope and both model-runner implementations are
 covered. Compound sleep/wake coverage remains in ``test_sleep_wake.py``.
+
+The real tensor-transfer test is parametrized over IPC and NCCL. IPC uses a
+colocated trainer/inference GPU; NCCL uses a separate trainer GPU and a local
+rendezvous port. Cases that cannot run on the available hardware are skipped.
 """
 
 import errno
@@ -28,12 +32,73 @@ from .conftest import (
 
 
 _SERVER_PORT_BASE = 8870
+_TENSOR_SERVER_PORT_BASE = 8890
+_NCCL_MASTER_PORT_BASE = 29600
+
+
+def _has_cuda() -> bool:
+    """Return whether the current test process can use CUDA."""
+    try:
+        import torch
+
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def _has_two_gpus() -> bool:
+    """Return whether NCCL can use a separate trainer GPU."""
+    try:
+        import torch
+
+        return torch.cuda.is_available() and torch.cuda.device_count() >= 2
+    except Exception:
+        return False
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
 def use_v2(request):
     """Run the HTTP tests with both model-runner implementations."""
     return request.param
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param(
+            ("ipc", {"rank": 0, "packed": False}),
+            id="IPC",
+            marks=pytest.mark.skipif(
+                not _has_cuda(),
+                reason="IPC weight transfer requires CUDA",
+            ),
+        ),
+        pytest.param(
+            (
+                "nccl",
+                {
+                    "rank": 0,
+                    "master_address": "127.0.0.1",
+                    "master_port": _NCCL_MASTER_PORT_BASE,
+                    "world_size": 2,
+                    "packed": False,
+                },
+            ),
+            id="NCCL",
+            marks=pytest.mark.skipif(
+                not _has_two_gpus(),
+                reason="NCCL weight transfer requires at least two GPUs",
+            ),
+        ),
+    ],
+)
+def weight_transfer_case(request, use_v2):
+    """Return one backend case, with unique NCCL ports per model runner."""
+    backend, init_info = request.param
+    init_info = dict(init_info)
+    if backend == "nccl":
+        init_info["master_port"] += int(use_v2)
+    return backend, init_info
 
 
 @pytest.fixture(scope="module")
@@ -47,11 +112,40 @@ def server_url(use_v2):
     with (
         patch.dict(os.environ, env_vars),
         server(
-            port=8870 + int(use_v2),
+            port=_SERVER_PORT_BASE + int(use_v2),
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
             ]
+        ) as url,
+    ):
+        yield url
+
+
+@pytest.fixture(scope="module")
+def tensor_server_url(use_v2, weight_transfer_case):
+    """Start a backend-configured server for the opt-in tensor test."""
+    backend, _ = weight_transfer_case
+    env_vars = {
+        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
+    }
+    if backend == "ipc":
+        # HTTP IPC payloads contain serialized CUDA handles.
+        env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    with (
+        patch.dict(os.environ, env_vars),
+        server(
+            port=(
+                _TENSOR_SERVER_PORT_BASE
+                + int(use_v2)
+                + (100 if backend == "nccl" else 0)
+            ),
+            extra_args=[
+                "--enable-prefix-caching",
+                "--enable-prompt-tokens-details",
+            ],
+            weight_transfer_config={"backend": backend},
         ) as url,
     ):
         yield url
@@ -63,6 +157,14 @@ def restore_unpaused_state(server_url):
     assert resume(server_url) == 200
     yield
     assert resume(server_url) == 200
+
+
+@pytest.fixture
+def restore_tensor_unpaused_state(tensor_server_url):
+    """Keep the backend-configured tensor server in the resumed state."""
+    assert resume(tensor_server_url) == 200
+    yield
+    assert resume(tensor_server_url) == 200
 
 
 @pytest.mark.usefixtures("restore_unpaused_state")
@@ -104,8 +206,15 @@ class TestWeightTransferProtocol:
         prompt = "The capital of France is"
         assert ok(gen(server_url, prompt=prompt)), "warm-up generation failed"
 
-        start_weight_update(server_url)
-        finish_weight_update(server_url)
+        start_response = start_weight_update(server_url)
+        if start_response.status_code == 200:
+            finish_response = finish_weight_update(server_url)
+            assert finish_response.status_code == 200, finish_response.text
+        else:
+            assert start_response.status_code in (400, 409, 500), (
+                f"unexpected start_weight_update status "
+                f"{start_response.status_code}: {start_response.text}"
+            )
 
         assert ok(gen(server_url, prompt=prompt)), (
             "generation failed after finish_weight_update; "
@@ -113,9 +222,9 @@ class TestWeightTransferProtocol:
         )
 
 
-@pytest.mark.usefixtures("restore_unpaused_state")
+@pytest.mark.usefixtures("restore_tensor_unpaused_state")
 class TestWeightUpdateWithTensors:
-    """Upload a complete alternate checkpoint and verify output changes."""
+    """Transfer an alternate checkpoint through a configured backend."""
 
     @pytest.fixture(autouse=True)
     def _require_alt_model(self):
@@ -128,53 +237,72 @@ class TestWeightUpdateWithTensors:
             )
         self.alt_model_path = alt_path
 
-    def test_weight_update_changes_output(self, server_url):
-        """Push all alternate weights and compare generation before and after."""
+    def test_weight_update_changes_output(
+        self,
+        tensor_server_url,
+        weight_transfer_case,
+    ):
+        """Push alternate weights and compare generation before and after."""
         try:
             import torch
             from transformers import AutoModelForCausalLM
         except ImportError:
             pytest.skip("transformers not available")
 
-        before = gen(server_url)
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is required for the real weight-transfer test")
+
+        backend, init_info = weight_transfer_case
+        torch.cuda.set_device(1 if backend == "nccl" else 0)
+        before = gen(tensor_server_url)
         assert ok(before), "generation before update failed"
         before_text = before["choices"][0]["text"]
 
         alt_model = AutoModelForCausalLM.from_pretrained(
             self.alt_model_path,
             torch_dtype=torch.bfloat16,
-        )
+        ).cuda()
 
-        start_weight_update(server_url)
-        for name, tensor in alt_model.named_parameters():
-            import pybase64 as base64
-
-            update_info = {
-                "name": name,
-                "dtype": str(tensor.dtype),
-                "shape": list(tensor.shape),
-                "data": base64.b64encode(
-                    tensor.cpu().contiguous().numpy().tobytes()
-                ).decode(),
-            }
-            response = requests.post(
-                f"{server_url}/update_weights",
-                json={"update_info": update_info},
-                timeout=30,
+        try:
+            from vllm.distributed.weight_transfer import (
+                HTTPVLLMWeightSyncClient,
+                ModuleSource,
+                WeightTransferTrainerFactory,
             )
-            assert response.status_code == 200, (
-                f"update_weights failed for {name}: {response.text}"
+            if backend == "ipc":
+                from vllm.distributed.weight_transfer.ipc_engine import (
+                    IPCTrainerInitInfo,
+                )
+
+                trainer_init_info = IPCTrainerInitInfo(**init_info)
+            else:
+                from vllm.distributed.weight_transfer.nccl_engine import (
+                    NCCLTrainerInitInfo,
+                )
+
+                trainer_init_info = NCCLTrainerInitInfo(**init_info)
+        except ImportError as exc:
+            pytest.skip(f"weight-transfer trainer dependencies unavailable: {exc}")
+
+        trainer = None
+        try:
+            trainer = WeightTransferTrainerFactory.trainer_init(
+                init_info=trainer_init_info,
+                client=HTTPVLLMWeightSyncClient(tensor_server_url),
+                source=ModuleSource(alt_model),
             )
+            trainer.send_weights()
+        finally:
+            if trainer is not None:
+                trainer.shutdown()
+            del alt_model
 
-        del alt_model
-        finish_weight_update(server_url)
-
-        after = gen(server_url)
+        after = gen(tensor_server_url)
         assert ok(after), "generation after weight update failed"
         assert after["choices"][0]["text"] != before_text, (
             "output did not change after pushing different weights"
         )
-        assert health(server_url) == 200
+        assert health(tensor_server_url) == 200
 
 
 def _has_sm100() -> bool:
@@ -277,7 +405,11 @@ class TestWeightUpdateProtocolErrors:
 
         try:
             body = response.json()
-            message = str(body.get("error", {}).get("message", "")).lower()
+            error = body.get("error", {})
+            error_message = (
+                error.get("message", "") if isinstance(error, dict) else error
+            )
+            message = str(body.get("detail", error_message)).lower()
             assert any(
                 keyword in message
                 for keyword in ("not configured", "weight transfer", "init", "config")
@@ -316,6 +448,3 @@ class TestWeightUpdateProtocolErrors:
         )
         assert health(server_url) == 200
         assert ok(gen(server_url)), "engine must generate after invalid finish"
-
-
-
