@@ -27,6 +27,7 @@ import uuid
 from collections import deque
 from unittest.mock import MagicMock, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -351,6 +352,50 @@ def test_save_caches_batches_multiple_hashes(make_worker):
     # Unassigned blocks untouched.
     for idx in (0, 2, 4, 5, 6, 7):
         assert torch.all(worker._region.blocks[idx] == sentinel)
+
+
+class _HighAddress:
+    """A device tensor reporting an address with the high bit set.
+
+    XPU USM allocations live up there and no host allocator will hand out such
+    an address, so naming one is the only way to reach the arithmetic. Every
+    attribute other than the address comes from the real tensor.
+    """
+
+    def __init__(self, real: torch.Tensor, address: int):
+        self._real = real
+        self._address = address
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def view(self, *args):
+        return self
+
+    def data_ptr(self) -> int:
+        return self._address
+
+
+@_requires_accelerator
+def test_save_descriptors_hold_high_bit_source_addresses(make_worker):
+    """Source addresses >= 2**63 survive into the descriptor buffers."""
+    worker = make_worker()
+    real = torch.zeros(2 * _HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE)
+    address = 2**64 - 8 * _BLOCK_SIZE_BYTES
+
+    # Two runs, so the second descriptor's address is an offset off the base.
+    worker.save_caches(
+        {"a": _HighAddress(real, address)}, "a", _meta(saves={"a": [1, 5]})
+    )
+
+    assert worker._save_count == 2
+    stored = worker._save_bufs.src_np[:2].astype(np.uint64)
+    assert list(stored) == [address, address + _BLOCK_SIZE_BYTES]
+
+    # The batch describes an address nothing may read from; drop it unflushed.
+    worker._save_bufs = None
+    worker._save_count = 0
+    worker._save_mm_hashes = []
 
 
 # ── start_load_caches ────────────────────────────────────────────────────────
