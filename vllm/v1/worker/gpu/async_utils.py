@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     LogprobsTensors,
@@ -130,9 +131,20 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.routed_experts = routed_experts
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+
+        # On XPU, waiting on a blocking cross-stream event can miss its wakeup
+        # and hang forever while the device is idle. Drain the copy stream
+        # directly instead; the overlapping copy_stream pipeline is otherwise
+        # unchanged, and the CUDA/ROCm path keeps the blocking event.
+        self._is_xpu = current_platform.is_xpu()
+        if self._is_xpu:
+            self.copy_event = None
+            self._sync_stream = copy_stream
+        else:
+            # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+            self.copy_event = torch.cuda.Event(blocking=True)
+            self._sync_stream = None
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -162,10 +174,14 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
-            self.copy_event.record(copy_stream)
+            if not self._is_xpu:
+                self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        self.copy_event.synchronize()
+        if self.copy_event is not None:
+            self.copy_event.synchronize()
+        else:
+            self._sync_stream.synchronize()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
