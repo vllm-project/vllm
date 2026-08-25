@@ -179,7 +179,7 @@ LaunchSubcommandBase = auto_mock("vllm.entrypoints.cli.launch", "LaunchSubcomman
 launch_description = auto_mock("vllm.entrypoints.cli.launch", "DESCRIPTION")
 RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
 sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
-openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
+openai_cli_args = auto_mock("vllm.entrypoints.launchers", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.launchers", "run_batch")
 
 if TYPE_CHECKING:

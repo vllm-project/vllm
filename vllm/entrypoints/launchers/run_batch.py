@@ -31,12 +31,10 @@ from vllm.config import config
 from vllm.connections import HTTPResponseSizeExceededError, global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launchers.api_server.entry import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.cli_args import BaseFrontendArgs
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
@@ -70,6 +68,9 @@ from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
+
+from .api_server.entry import init_app_state
+from .cli_args import BaseFrontendArgs
 
 logger = init_logger(__name__)
 

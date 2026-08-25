@@ -32,8 +32,8 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Response
 
-import vllm.entrypoints.openai.dp_supervisor as dp_sup
-from vllm.entrypoints.openai.dp_supervisor import (
+import vllm.entrypoints.launchers.dp_supervisor as dp_sup
+from vllm.entrypoints.launchers.dp_supervisor import (
     CHILD_EXIT_GRACE_S,
     DPSupervisor,
     _build_vllm_dp_server_args,
