@@ -62,7 +62,9 @@ def test_prepare_nvfp4_megamoe_inputs(
     x_sf = torch.empty(
         (num_tokens, hidden_size // 64), dtype=torch.int32, device="cuda"
     )
-    staged_topk_ids = torch.empty((num_tokens, top_k), dtype=torch.int32, device="cuda")
+    staged_topk_ids = torch.empty(
+        (num_tokens, top_k), dtype=torch.int64, device="cuda"
+    )
     staged_topk_weights = torch.empty_like(topk_weights)
     prepare_nvfp4_megamoe_inputs(
         hidden_states,
@@ -102,7 +104,7 @@ def test_prepare_nvfp4_megamoe_inputs_cuda_graph_replay() -> None:
     x_sf = torch.empty(
         (num_tokens, hidden_size // 64), dtype=torch.int32, device="cuda"
     )
-    staged_ids = torch.empty_like(ids)
+    staged_ids = torch.empty(ids.shape, dtype=torch.int64, device="cuda")
     staged_weights = torch.empty_like(weights)
 
     def run() -> None:
@@ -134,5 +136,5 @@ def test_prepare_nvfp4_megamoe_inputs_cuda_graph_replay() -> None:
         rtol=0,
         atol=0,
     )
-    torch.testing.assert_close(staged_ids, ids, rtol=0, atol=0)
+    torch.testing.assert_close(staged_ids, ids.to(torch.int64), rtol=0, atol=0)
     torch.testing.assert_close(staged_weights, weights, rtol=0, atol=0)

@@ -256,7 +256,7 @@ def test_modelopt_nvfp4_mega_moe_uses_cached_inverse_activation_global_scale():
     method._symm_buffer = SimpleNamespace(
         x=torch.empty((2, 4), dtype=torch.uint8),
         x_sf=torch.empty((2, 1), dtype=torch.int32),
-        topk_idx=torch.empty((2, 1), dtype=torch.int32),
+        topk_idx=torch.empty((2, 1), dtype=torch.int64),
         topk_weights=torch.empty((2, 1)),
     )
     method._deep_gemm = MagicMock()
