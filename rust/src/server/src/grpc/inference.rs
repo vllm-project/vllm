@@ -58,12 +58,14 @@ impl InferenceServiceImpl {
         } else {
             proto_request.model.clone()
         };
+        let lora_name = proto_request.lora_name.clone();
         let media_count = proto_request.media.len();
         let request_span = info_span!(
             "grpc_inference",
             %request_id,
             rpc,
             %model,
+            %lora_name,
             media_count,
             ?data_parallel_rank,
         );
@@ -75,6 +77,18 @@ impl InferenceServiceImpl {
                 convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
+
+            if !lora_name.is_empty() {
+                if !self.state.engine_core_client().ready_response().supports_lora {
+                    return Err(Status::failed_precondition(
+                        "engine was not started with LoRA enabled",
+                    ));
+                }
+                let resolution = self.state.resolve_model_with_loras(Some(&lora_name)).await;
+                text_request.lora_request = Some(resolution.lora_request.ok_or_else(|| {
+                    Status::not_found(format!("LoRA adapter `{lora_name}` is not loaded"))
+                })?);
+            }
 
             let media = convert::media_parts_from_request(media)?;
             if !media.is_empty() {
