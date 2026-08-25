@@ -1008,9 +1008,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_data = w13_weight.data.view(torch.uint8)
             w2_data = w2_weight.data.view(torch.uint8)
 
-            # Make column-major: transpose to [E, K, N] with K-contiguous
-            w13_data = w13_data.transpose(1, 2).contiguous()
-            w2_data = w2_data.transpose(1, 2).contiguous()
+            # Transpose to [E, K, N] — the view has stride(-2)==1 (column-major),
+            # which is what moe_gemm_a4w4 asserts.
+            w13_data = w13_data.transpose(1, 2)
+            w2_data = w2_data.transpose(1, 2)
 
             w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
             w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
