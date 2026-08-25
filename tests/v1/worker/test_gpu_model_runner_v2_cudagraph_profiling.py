@@ -43,6 +43,23 @@ class _FakeCudaGraphManager:
         return self._needs_capture
 
 
+class _FakeSpeculator:
+    def __init__(self, managers: list[_FakeCudaGraphManager]) -> None:
+        self.managers = managers
+        self.cleared = False
+
+    def get_cudagraph_managers(self) -> list[_FakeCudaGraphManager]:
+        # Model the interface that lets profiling discover every manager
+        # owned by a concrete speculator implementation.
+        return self.managers
+
+    def clear_cudagraph_managers(self) -> None:
+        # Model the profiling teardown that discards managers created for the
+        # temporary profiling pass.
+        self.managers.clear()
+        self.cleared = True
+
+
 def _make_profiling_runner(
     cudagraph_mode: CUDAGraphMode,
     *,
@@ -51,11 +68,17 @@ def _make_profiling_runner(
     piecewise_only: bool = False,
     captured_bytes: int = 7 << 30,
     mem_samples: list[int] | None = None,
+    speculator_managers: list[_FakeCudaGraphManager] | None = None,
 ) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=cudagraph_mode)
     runner.cudagraph_manager = _FakeCudaGraphManager(
         needs_capture, num_full_descs, piecewise_only
+    )
+    runner.speculator = (
+        _FakeSpeculator(speculator_managers)
+        if speculator_managers is not None
+        else None
     )
     runner.vllm_config = SimpleNamespace()
 
@@ -284,3 +307,81 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
         assert wrapper.graph_pool == GLOBAL_POOL
     finally:
         cgu.CUDAGraphWrapper._all_instances.discard(wrapper)
+
+
+def test_profile_cudagraph_memory_redirects_speculator_pools(monkeypatch):
+    """All CUDA graph managers must use the throwaway profiling pool."""
+    _patch_module(monkeypatch)
+
+    speculator_managers = [
+        _FakeCudaGraphManager(needs_capture=True, num_full_descs=2),
+        _FakeCudaGraphManager(needs_capture=True, num_full_descs=2),
+    ]
+    runner = _make_profiling_runner(
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+        speculator_managers=speculator_managers,
+    )
+
+    captured_pools: list[Any] = []
+
+    def _capture_model() -> int:
+        captured_pools.append(runner.cudagraph_manager.pool)
+        captured_pools.extend(
+            graph_manager.pool for graph_manager in speculator_managers
+        )
+        return 1 << 30
+
+    runner.capture_model = _capture_model
+
+    cgu.profile_cudagraph_memory(runner)
+
+    # Profiling graphs from both the target model and speculator must stay out
+    # of the persistent global pool; otherwise their later destruction can
+    # leave the global pool with use_count == 0 and break the real capture.
+    assert captured_pools == [
+        THROWAWAY_POOL,
+        THROWAWAY_POOL,
+        THROWAWAY_POOL,
+    ]
+
+
+def test_teardown_profiling_state_clears_speculator_cudagraph_managers(
+    monkeypatch,
+):
+    """Profiling CUDA graph managers must be discarded before real capture."""
+    speculator_managers = [
+        _FakeCudaGraphManager(needs_capture=True, num_full_descs=2),
+        _FakeCudaGraphManager(needs_capture=True, num_full_descs=2),
+    ]
+    speculator = _FakeSpeculator(speculator_managers)
+
+    runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.speculator = speculator
+    runner.cudagraph_manager = _FakeCudaGraphManager(
+        needs_capture=True, num_full_descs=2
+    )
+    runner.kv_caches = {}
+    runner.attn_groups = []
+    runner.kv_cache_config = object()
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.lora_config = None
+
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(cgu.gc, "collect", lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "maybe_remove_all_loras",
+        lambda _lora_config: None,
+    )
+
+    cgu._teardown_profiling_state(runner)
+
+    # The profiling managers capture against the temporary KV-cache state,
+    # so they must be released before initialize_kv_cache() creates fresh
+    # managers for the real runtime capture.
+    assert runner.cudagraph_manager is None
+    assert speculator.cleared
+    assert speculator.managers == []

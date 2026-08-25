@@ -34,6 +34,14 @@ class BaseSpeculator(ABC):
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
 
+    def get_cudagraph_managers(self) -> list[Any]:
+        """Return the CUDA graph managers owned by this speculator."""
+        return []
+
+    def clear_cudagraph_managers(self) -> None:
+        """Release CUDA graph managers created for profiling."""
+        return None
+
     @abstractmethod
     def capture(self) -> None:
         pass

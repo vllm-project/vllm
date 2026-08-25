@@ -110,6 +110,14 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.num_speculative_steps + 1,
         )
 
+    def get_cudagraph_managers(self) -> list[SpeculatorCudaGraphManager]:
+        if self.cudagraph_manager is None:
+            return []
+        return [self.cudagraph_manager]
+
+    def clear_cudagraph_managers(self) -> None:
+        self.cudagraph_manager = None
+
     def capture(self) -> None:
         logger.info("Capturing model for multi-module MTP speculator...")
         # Reset indices to zeros to prevent stale values from prior

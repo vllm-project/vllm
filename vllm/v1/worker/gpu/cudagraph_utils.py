@@ -729,13 +729,19 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     manager = runner.cudagraph_manager
     assert manager is not None
 
+    managers = [manager]
+    if runner.speculator is not None:
+        managers.extend(runner.speculator.get_cudagraph_managers())
+
     # Don't count profiling captures; the real capture_model() runs later.
     saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
     saved_capture_triggers = compilation_counter.num_gpu_runner_capture_triggers
     all_wrappers: list[Any] = []
     original_pools: dict[int, Any] = {}
     try:
-        if not manager.needs_capture():
+        if not managers or not any(
+            graph_manager.needs_capture() for graph_manager in managers
+        ):
             return 0
         # Capture all profiling graphs into a throwaway pool so their memory
         # is reclaimed on teardown rather than retained by the persistent
@@ -744,18 +750,24 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         # captured into the global pool and then discarded drop its use_count
         # to 0, and the real capture on the same pool trips the c10 allocator's
         # create_or_incref_pool assert ("use_count > 0 INTERNAL ASSERT FAILED").
-        manager.pool = current_platform.graph_pool_handle()
-        if manager.use_breakable_cg:
-            # The breakable runner is otherwise created lazily during capture,
-            # after the pool swap below, and would capture into the global
-            # pool. Create it now so its pool gets swapped too.
-            manager.init_breakable_cg_runner(runner.model)
+        throwaway_pool = current_platform.graph_pool_handle()
+        # All graph managers participate in capture_model(), including managers
+        # owned by the speculator. Profiling captures must use the throwaway pool
+        # so their destruction cannot leave the persistent global pool in an
+        # invalid state for the real capture.
+        for graph_manager in managers:
+            graph_manager.pool = throwaway_pool
+            if graph_manager.use_breakable_cg:
+                # The breakable runner is otherwise created lazily during capture,
+                # after the pool swap below, and would capture into the global
+                # pool. Create it now so its pool gets swapped too.
+                graph_manager.init_breakable_cg_runner(runner.model)
         all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
             BreakableCUDAGraphWrapper._all_instances
         )
         for wrapper in all_wrappers:
             original_pools[id(wrapper)] = wrapper.graph_pool
-            wrapper.graph_pool = manager.pool
+            wrapper.graph_pool = throwaway_pool
         manager._max_full_descs_to_capture = _FULL_GRAPH_PROFILING_SAMPLES
         mem_samples: list[int] = []
         manager._capture_mem_samples = mem_samples
@@ -831,6 +843,10 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         del runner.kv_cache_config
     # Dropping the manager releases the profiling graphs and throwaway pool.
     runner.cudagraph_manager = None
+    # Profiling managers are recreated during the real KV-cache initialization,
+    # so discard the speculator's profiling managers along with the main manager.
+    if runner.speculator is not None:
+        runner.speculator.clear_cudagraph_managers()
     # Release encoder graphs captured during profiling; the real
     # capture_model() re-captures them.
     if runner.model_state.supports_mm_inputs:
