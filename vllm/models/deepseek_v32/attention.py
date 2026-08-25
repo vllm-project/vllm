@@ -513,12 +513,11 @@ class DeepseekV32Attention(MLAAttention):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
             mqa_q_arg = get_tp_group().all_gather(mqa_q_arg, dim=1)
         elif not self.use_pcp and self.impl.dcp_world_size > 1:
-            # TODO: Use dcp_manager.query_gather after #52377 adds an
-            # oversized-input fallback for sparse mixed batches.
             assert self.dcp_manager is not None
             if isinstance(mqa_q_arg, tuple):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
-            mqa_q_arg = self.dcp_manager.group.all_gather(mqa_q_arg, dim=1)
+            assert self.dcp_manager.query_gather is not None
+            mqa_q_arg = self.dcp_manager.query_gather(mqa_q_arg)
         attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
