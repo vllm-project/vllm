@@ -77,6 +77,9 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
 
+    # Distinguishes push from pull in the NIXL compatibility hash.
+    _TRANSFER_MODE: str = "push"
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -156,6 +159,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
+        if self.pcp_rank > 0:
+            return
+
         # D-side: track reqs waiting for P to push.
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(

@@ -42,97 +42,97 @@ aws ecr-public get-login-password --region us-east-1 | \
 # ---- CUDA (default: 13.0) ----
 
 if target_enabled cuda-13-0; then
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64 vllm/vllm-openai:latest-x86_64
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" vllm/vllm-openai:latest-x86_64
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64"
   docker push vllm/vllm-openai:latest-x86_64
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64 vllm/vllm-openai:latest-aarch64
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" vllm/vllm-openai:latest-aarch64
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
   docker push vllm/vllm-openai:latest-aarch64
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
 
   docker manifest rm vllm/vllm-openai:latest || true
-  docker manifest rm vllm/vllm-openai:v${RELEASE_VERSION} || true
+  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}" || true
   docker manifest create vllm/vllm-openai:latest vllm/vllm-openai:latest-x86_64 vllm/vllm-openai:latest-aarch64
-  docker manifest create vllm/vllm-openai:v${RELEASE_VERSION} vllm/vllm-openai:v${RELEASE_VERSION}-x86_64 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
+  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
   docker manifest push vllm/vllm-openai:latest
-  docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}
+  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}"
 fi
 
 # ---- CUDA 12.9 ----
 
 if target_enabled cuda-12-9; then
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129 vllm/vllm-openai:latest-x86_64-cu129
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129" vllm/vllm-openai:latest-x86_64-cu129
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129"
   docker push vllm/vllm-openai:latest-x86_64-cu129
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129 vllm/vllm-openai:latest-aarch64-cu129
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129" vllm/vllm-openai:latest-aarch64-cu129
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129"
   docker push vllm/vllm-openai:latest-aarch64-cu129
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129"
 
   docker manifest rm vllm/vllm-openai:latest-cu129 || true
-  docker manifest rm vllm/vllm-openai:v${RELEASE_VERSION}-cu129 || true
+  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-cu129" || true
   docker manifest create vllm/vllm-openai:latest-cu129 vllm/vllm-openai:latest-x86_64-cu129 vllm/vllm-openai:latest-aarch64-cu129
-  docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129
+  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129"
   docker manifest push vllm/vllm-openai:latest-cu129
-  docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-cu129
+  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-cu129"
 fi
 
 # ---- Ubuntu 24.04 (CUDA 13.0) ----
 
 if target_enabled cuda-13-0-ubuntu-24-04; then
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404 vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" vllm/vllm-openai:latest-x86_64-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
   docker push vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404 vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" vllm/vllm-openai:latest-aarch64-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
   docker push vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
 
   docker manifest rm vllm/vllm-openai:latest-ubuntu2404 || true
-  docker manifest rm vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404 || true
+  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" || true
   docker manifest create vllm/vllm-openai:latest-ubuntu2404 vllm/vllm-openai:latest-x86_64-ubuntu2404 vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404
+  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
   docker manifest push vllm/vllm-openai:latest-ubuntu2404
-  docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404
+  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404"
 fi
 
 # ---- Ubuntu 24.04 (CUDA 12.9) ----
 
 if target_enabled cuda-12-9-ubuntu-24-04; then
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404 vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404" vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404"
   docker push vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404 vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404" vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404"
   docker push vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
-  docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404
+  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404"
 
   docker manifest rm vllm/vllm-openai:latest-cu129-ubuntu2404 || true
-  docker manifest rm vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404 || true
+  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404" || true
   docker manifest create vllm/vllm-openai:latest-cu129-ubuntu2404 vllm/vllm-openai:latest-x86_64-cu129-ubuntu2404 vllm/vllm-openai:latest-aarch64-cu129-ubuntu2404
-  docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404
+  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129-ubuntu2404"
   docker manifest push vllm/vllm-openai:latest-cu129-ubuntu2404
-  docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404
+  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-cu129-ubuntu2404"
 fi
 
 # ---- ROCm ----
@@ -141,36 +141,36 @@ if target_enabled rocm; then
   ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
   echo "ROCm base cache key: ${ROCM_BASE_CACHE_KEY}"
 
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm"
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm vllm/vllm-openai-rocm:latest
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm vllm/vllm-openai-rocm:v${RELEASE_VERSION}
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm" vllm/vllm-openai-rocm:latest
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm" "vllm/vllm-openai-rocm:v${RELEASE_VERSION}"
   docker push vllm/vllm-openai-rocm:latest
-  docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}
+  docker push "vllm/vllm-openai-rocm:v${RELEASE_VERSION}"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base vllm/vllm-openai-rocm:latest-base
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base" vllm/vllm-openai-rocm:latest-base
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base" "vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base"
   docker push vllm/vllm-openai-rocm:latest-base
-  docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
+  docker push "vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base"
 fi
 
 # ---- XPU ----
 
 if target_enabled xpu; then
-  docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu
+  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu"
 
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu vllm/vllm-openai-xpu:latest-x86_64
-  docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu" vllm/vllm-openai-xpu:latest-x86_64
+  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu" "vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64"
   docker push vllm/vllm-openai-xpu:latest-x86_64
-  docker push vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64
+  docker push "vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64"
 
   docker manifest rm vllm/vllm-openai-xpu:latest || true
-  docker manifest rm vllm/vllm-openai-xpu:v${RELEASE_VERSION} || true
+  docker manifest rm "vllm/vllm-openai-xpu:v${RELEASE_VERSION}" || true
   docker manifest create vllm/vllm-openai-xpu:latest vllm/vllm-openai-xpu:latest-x86_64 --amend
-  docker manifest create vllm/vllm-openai-xpu:v${RELEASE_VERSION} vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64 --amend
+  docker manifest create "vllm/vllm-openai-xpu:v${RELEASE_VERSION}" "vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64" --amend
   docker manifest push vllm/vllm-openai-xpu:latest
-  docker manifest push vllm/vllm-openai-xpu:v${RELEASE_VERSION}
+  docker manifest push "vllm/vllm-openai-xpu:v${RELEASE_VERSION}"
 fi
 
 # ---- CPU ----
@@ -192,22 +192,22 @@ if target_enabled cpu; then
   if [ "$CPU_X86_AVAILABLE" = "true" ] && [ "$CPU_ARM_AVAILABLE" = "true" ]; then
     docker pull "${CPU_X86_TAG}"
     docker tag "${CPU_X86_TAG}" vllm/vllm-openai-cpu:latest-x86_64
-    docker tag "${CPU_X86_TAG}" vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64
+    docker tag "${CPU_X86_TAG}" "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64"
     docker push vllm/vllm-openai-cpu:latest-x86_64
-    docker push vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64
+    docker push "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64"
 
     docker pull "${CPU_ARM_TAG}"
     docker tag "${CPU_ARM_TAG}" vllm/vllm-openai-cpu:latest-arm64
-    docker tag "${CPU_ARM_TAG}" vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
+    docker tag "${CPU_ARM_TAG}" "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64"
     docker push vllm/vllm-openai-cpu:latest-arm64
-    docker push vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
+    docker push "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64"
 
     docker manifest rm vllm/vllm-openai-cpu:latest || true
-    docker manifest rm vllm/vllm-openai-cpu:v${RELEASE_VERSION} || true
+    docker manifest rm "vllm/vllm-openai-cpu:v${RELEASE_VERSION}" || true
     docker manifest create vllm/vllm-openai-cpu:latest vllm/vllm-openai-cpu:latest-x86_64 vllm/vllm-openai-cpu:latest-arm64
-    docker manifest create vllm/vllm-openai-cpu:v${RELEASE_VERSION} vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64 vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
+    docker manifest create "vllm/vllm-openai-cpu:v${RELEASE_VERSION}" "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64" "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64"
     docker manifest push vllm/vllm-openai-cpu:latest
-    docker manifest push vllm/vllm-openai-cpu:v${RELEASE_VERSION}
+    docker manifest push "vllm/vllm-openai-cpu:v${RELEASE_VERSION}"
   elif [ "$CPU_X86_AVAILABLE" = "false" ] && [ "$CPU_ARM_AVAILABLE" = "false" ]; then
     echo "WARNING: Neither CPU image found in ECR, skipping CPU publish (ensure block-cpu-release-image-build and block-arm64-cpu-release-image-build were unblocked and the builds finished pushing)"
   else
