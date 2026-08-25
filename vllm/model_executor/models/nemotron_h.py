@@ -93,6 +93,26 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+from vllm.triton_utils import tl, triton
+
+
+@triton.jit
+def _nemotron_h_relu2_fp8_quant_kernel(
+    x_ptr,
+    scale_ptr,
+    output_ptr,
+    num_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_elements
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    relu = tl.where(x > 0.0, x, 0.0)
+    # Match the standalone ReLU2 kernel's BF16 output before quantization.
+    activated = (relu * relu).to(tl.bfloat16).to(tl.float32)
+    inv_scale = 1.0 / tl.load(scale_ptr)
+    quantized = tl.clamp(activated * inv_scale, -448.0, 448.0)
+    tl.store(output_ptr + offsets, quantized, mask=mask)
 
 
 @CustomOp.register("nemotron_h_relu2_fp8_quant")
@@ -100,16 +120,15 @@ class NemotronHReLU2Fp8Quant(CustomOp):
     """ReLU2 followed by static per-tensor FP8 quantization."""
 
     def __init__(self) -> None:
-        # Shared experts execute inside the opaque MoE custom op. Compiling this
-        # native function explicitly keeps activation and quantization in one
-        # pointwise kernel.
-        super().__init__(compile_native=True)
+        super().__init__(enforce_enable=True)
 
     def forward_native(
         self, x: torch.Tensor, scale: torch.Tensor
     ) -> torch.Tensor:
         fp8_min, fp8_max = get_fp8_min_max()
-        activated = torch.square(F.relu(x))
+        # The unfused path stores the ReLU2 result as BF16 before static FP8
+        # quantization. Preserve that rounding point in registers.
+        activated = torch.square(F.relu(x.to(torch.float32))).to(x.dtype)
         return (
             activated.to(torch.float32)
             .mul(scale.to(torch.float32).reciprocal())
@@ -118,7 +137,19 @@ class NemotronHReLU2Fp8Quant(CustomOp):
         )
 
     def forward_cuda(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        return self.forward_native(x, scale)
+        assert x.is_contiguous()
+        assert scale.numel() == 1
+        output = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+        block_size = 2048
+        grid = (triton.cdiv(x.numel(), block_size),)
+        _nemotron_h_relu2_fp8_quant_kernel[grid](
+            x,
+            scale,
+            output,
+            x.numel(),
+            BLOCK_SIZE=block_size,
+        )
+        return output
 
 
 class NemotronHMLP(nn.Module):
