@@ -263,7 +263,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
             quant_spec = shorthand.moe
             table = _ONLINE_MOE_METHODS
         else:
-            return None
+            raise ValueError(
+                f"Layer {prefix} was matched by quantization_config.targets "
+                f"({matches[0]}), but online quantization is not supported for "
+                f"{type(layer).__name__}."
+            )
         if quant_spec is None:
             raise ValueError(
                 f"targets pattern {matches[0]} = {quant_key_str} does "
@@ -280,17 +284,15 @@ class OnlineQuantizationConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         if self.args.targets is not None:
-            if not isinstance(layer, (LinearBase, RoutedExperts)):
-                return None
-
             method = self._dispatch_target(prefix, layer)
             if method is not None:
                 return method
 
             if isinstance(layer, LinearBase):
                 return UnquantizedLinearMethod()
-            else:
+            if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
+            return None
 
         if isinstance(layer, LinearBase):
             if should_ignore_layer(

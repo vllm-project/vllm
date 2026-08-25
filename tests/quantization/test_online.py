@@ -52,6 +52,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_tp_weight_quant,
     weight_amax,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -385,6 +388,28 @@ def test_online_quantization_targets_ignore_collision() -> None:
         config._dispatch_target(
             "model.layers.0.self_attn.o_proj", Mock(spec=LinearBase)
         )
+
+
+def test_online_quantization_targets_reject_unsupported_layer() -> None:
+    """A targets match on a non-linear, non-MoE layer is rejected."""
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"})
+    )
+    lm_head = VocabParallelEmbedding(
+        num_embeddings=1,
+        embedding_dim=1,
+        disable_tp=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Layer lm_head was matched by quantization_config.targets "
+            r"\(lm_head\), but online quantization is not supported for "
+            "VocabParallelEmbedding."
+        ),
+    ):
+        config.get_quant_method(lm_head, "lm_head")
 
 
 def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
