@@ -4,7 +4,7 @@ import gc
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import product
+from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import torch
@@ -194,9 +194,6 @@ class CudaGraphManager:
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
-        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -244,7 +241,6 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[decode_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
             elif separate_decode_routine and decode_mode and not self.varlen_decode:
@@ -270,9 +266,6 @@ class CudaGraphManager:
                     # avoid duplicate graphs
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
-                        ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -290,26 +283,26 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
-
-        if not descs_by_token_lora:
-            return
-
-        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
-        current_range_start = 0
-        for token_cg_size in all_token_counts:
-            for i in range(current_range_start, token_cg_size + 1):
-                for num_active_loras in self.lora_capture_cases:
-                    staging_key = (token_cg_size, num_active_loras)
-                    if staging_key in descs_by_token_lora:
-                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
-                            staging_key
-                        ]
-            current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
             self._capture_descs[mode] = descs
+
+        for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+            mode_descs = tuple(reversed(descs_by_mode.get(mode, [])))
+            for num_active_loras in self.lora_capture_cases:
+                lora_descs = [
+                    d for d in mode_descs if d.num_active_loras == num_active_loras
+                ]
+                current_range_start = 0
+                # Dynamic speculative decoding can produce multiple graphs with the same
+                # num_tokens. Group them so each graph covers the same candidate range.
+                for num_tokens, group in groupby(lora_descs, lambda d: d.num_tokens):
+                    matching = list(group)
+                    for i in range(current_range_start, num_tokens + 1):
+                        key = (i, num_active_loras)
+                        self._candidates.setdefault(key, []).extend(matching)
+                    current_range_start = num_tokens + 1
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
