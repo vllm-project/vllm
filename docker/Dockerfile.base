@@ -150,10 +150,12 @@ RUN uv pip install --system --no-cache-dir py-spy instanttensor==0.1.8
 
 # hpc-ops (Tencent): 独立源码编译 wheel 并安装，不并入 vLLM 的 CMake 构建。
 # 固定 commit 保证 vLLM 的 HPC API 与 kernel 实现匹配；--no-deps 防止其未钉版的
-# torch 依赖替换镜像中已经对齐的 torch 2.10.0。默认使用内部仓库中已验证的 BF16 commit。
-ARG HPC_OPS_GIT_REPO=https://gitlab-cn-beijing.siflow.cn/inference/hpc-ops.git
+# torch 依赖替换镜像中已经对齐的 torch 2.10.0。仓库地址由 CI/CD Variable 注入，
+# Dockerfile 不提供默认值，避免把内部仓库地址硬编码进源码。
+ARG HPC_OPS_GIT_REPO
 ARG HPC_OPS_GIT_REF=4e21449375d17d4a883dd1fb40a60e5f596c31b8
-RUN VLLM_DOCKER_BUILD_CONTEXT=1 bash vllm/tools/install_hpc_ops.sh \
+RUN : "${HPC_OPS_GIT_REPO:?HPC_OPS_GIT_REPO is required (set in GitLab CI/CD Variables)}" && \
+    VLLM_DOCKER_BUILD_CONTEXT=1 bash vllm/tools/install_hpc_ops.sh \
         --repo "${HPC_OPS_GIT_REPO}" \
         --ref "${HPC_OPS_GIT_REF}"
 
