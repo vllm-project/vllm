@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: ":nvidia: (H200) Rust Frontend OpenAI Coverage"
+  key: rust-frontend-openai-coverage
   timeout_in_minutes: 30
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -38,6 +39,7 @@ steps:
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
 - label: ":nvidia: (H200) Rust Frontend Serve/Admin Coverage"
+  key: rust-frontend-serve-admin-coverage
   timeout_in_minutes: 25
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
