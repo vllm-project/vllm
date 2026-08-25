@@ -177,7 +177,7 @@ def _compare_prefill(
             reference_gate = -a * torch.nn.functional.softplus(reference_gate)
     if beta_is_logit:
         reference_beta = reference_beta.sigmoid()
-    kernel_beta = beta.float().sigmoid() if beta_is_logit else beta
+    kernel_beta = beta
 
     reference_state = state.clone()
     reference_out = torch.empty_like(v)
@@ -256,6 +256,7 @@ def _compare_prefill(
         A_log=A_log,
         dt_bias=dt_bias,
         lower_bound=lower_bound,
+        beta_is_logit=beta_is_logit,
     )
 
     assert helion_out.data_ptr() == helion_v.data_ptr()
@@ -550,7 +551,7 @@ def test_fixed_partial_prefill_and_state_pool_contract() -> None:
 
 
 def test_prefill_vllm_raw_inputs_match_preactivated_inputs() -> None:
-    """The vLLM adapter must activate beta before calling the SGLang wrapper."""
+    """The Helion wrapper can activate vLLM's raw beta logits in-kernel."""
     torch.manual_seed(881)
     batch, tokens, heads, key_dim, value_dim = 1, 17, 2, 32, 32
     q = torch.randn(batch, tokens, heads, key_dim, device="cuda").bfloat16()
@@ -569,11 +570,12 @@ def test_prefill_vllm_raw_inputs_match_preactivated_inputs() -> None:
         k,
         v.clone(),
         raw_gate,
-        raw_beta.float().sigmoid(),
+        raw_beta,
         initial_state=raw_state,
         initial_state_indices=indices,
         A_log=a_log,
         dt_bias=dt_bias,
+        beta_is_logit=True,
     )
 
     a = torch.exp(a_log).view(1, 1, heads, 1)
@@ -998,6 +1000,63 @@ def test_prefill_state_zero_init_for_new_requests():
     assert torch.equal(recurrent_state[2], original_state[2])
 
 
+def test_prefill_uses_precomputed_chunk_metadata(monkeypatch) -> None:
+    """Caller-provided metadata avoids rebuilding it inside every layer."""
+    from vllm.kernels.helion.ops.kda import kda_prefill
+    from vllm.third_party.flash_linear_attention.ops.index import (
+        prepare_chunk_indices,
+        prepare_chunk_offsets,
+    )
+
+    torch.manual_seed(101)
+    lengths = [17, 48]
+    tokens, heads, dim = sum(lengths), 2, 32
+    q = torch.randn(1, tokens, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    gate = -torch.rand_like(q)
+    beta = torch.rand(1, tokens, heads, device="cuda")
+    cu_seqlens = torch.tensor([0, lengths[0], tokens], device="cuda", dtype=torch.int32)
+    indices = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+    state = torch.zeros(3, heads, dim, dim, device="cuda")
+    chunk_indices = prepare_chunk_indices(cu_seqlens, 64)
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, 64)
+
+    expected_state = state.clone()
+    expected = helion_chunk_kda(
+        q,
+        k,
+        v.clone(),
+        gate,
+        beta,
+        initial_state=expected_state,
+        initial_state_indices=indices,
+        cu_seqlens=cu_seqlens,
+    )
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("chunk metadata was rebuilt")
+
+    monkeypatch.setattr(kda_prefill, "prepare_chunk_indices", fail)
+    monkeypatch.setattr(kda_prefill, "prepare_chunk_offsets", fail)
+    actual_state = state.clone()
+    actual = helion_chunk_kda(
+        q,
+        k,
+        v.clone(),
+        gate,
+        beta,
+        initial_state=actual_state,
+        initial_state_indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_state, expected_state)
+
+
 def test_helion_decode_matches_reference_end_to_end():
     """Full decode adapter path: reshape → kernel → transpose."""
     torch.manual_seed(42)
@@ -1078,13 +1137,6 @@ def test_helion_prefill_matches_reference_end_to_end():
     has_initial_state = torch.tensor([False], device="cuda", dtype=torch.bool)
     helion_state = state.clone()
 
-    # Step 1: Zero-init (adapter logic)
-    new_request_mask = ~has_initial_state
-    new_indices = indices[new_request_mask]
-    if new_indices.numel() > 0:
-        helion_state[new_indices] = 0
-
-    # Step 2: Run Helion prefill
     helion_out = helion_chunk_kda(
         q=q,
         k=k,
@@ -1094,6 +1146,7 @@ def test_helion_prefill_matches_reference_end_to_end():
         scale=K**-0.5,
         initial_state=helion_state,
         initial_state_indices=indices,
+        has_initial_state=has_initial_state,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=cu_seqlens,
         A_log=A_log,

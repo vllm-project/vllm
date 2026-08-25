@@ -148,6 +148,7 @@ def _gate_cumsum_operands(
     has_bias: hl.constexpr,  # pyrefly: ignore[bad-function-definition]
     use_lower_bound: hl.constexpr,  # pyrefly: ignore[bad-function-definition]
     is_varlen: hl.constexpr,  # pyrefly: ignore[bad-function-definition]
+    activate_beta: hl.constexpr = False,  # pyrefly: ignore[bad-function-definition]
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -247,6 +248,8 @@ def _gate_cumsum_operands(
             extra_mask=valid[:, None],
         ).float()
         beta_value = hl.load(beta_rows, [row], extra_mask=valid).float()
+        if activate_beta:
+            beta_value = torch.sigmoid(beta_value)
         last_gate = torch.where(time[:, None] == 63, value, 0.0).sum(0)
         gate_value = torch.exp2(value)
         hl.store(
@@ -302,6 +305,7 @@ def gate_chunk_cumsum_operands(
     chunk_indices: torch.Tensor | None = None,
     lower_bound: float | None = None,
     gate_scale: float = RCP_LN2,
+    beta_is_logit: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -354,6 +358,7 @@ def gate_chunk_cumsum_operands(
         has_bias,
         use_lower_bound,
         is_varlen,
+        beta_is_logit,
     )
 
 
@@ -380,6 +385,7 @@ def _intra_matrices_wide(
     chunk_indices: torch.Tensor,
     scale: float,
     is_varlen: hl.constexpr,  # pyrefly: ignore[bad-function-definition]
+    activate_beta: hl.constexpr = False,  # pyrefly: ignore[bad-function-definition]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute a full 16x64 causal matrix row per CTA."""
     B = q.size(0)
@@ -547,6 +553,8 @@ def _intra_matrices_wide(
             [row],
             extra_mask=row_valid,
         ).float()
+        if activate_beta:
+            row_beta = torch.sigmoid(row_beta)
         hl.store(
             aqk_rows,
             [row[:, None], col_lane[None, :]],
@@ -695,6 +703,7 @@ def _intra_solve_recompute(
     cu_seqlens: torch.Tensor,
     chunk_indices: torch.Tensor,
     is_varlen: hl.constexpr,  # pyrefly: ignore[bad-function-definition]
+    activate_beta: hl.constexpr = False,  # pyrefly: ignore[bad-function-definition]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Solve the 64x64 system and emit W and U from pre-scaled operands."""
     B = wk.size(0)
@@ -811,6 +820,11 @@ def _intra_solve_recompute(
         beta1 = hl.load(beta_rows, [flat1], extra_mask=valid1).float()
         beta2 = hl.load(beta_rows, [flat2], extra_mask=valid2).float()
         beta3 = hl.load(beta_rows, [flat3], extra_mask=valid3).float()
+        if activate_beta:
+            beta0 = torch.sigmoid(beta0)
+            beta1 = torch.sigmoid(beta1)
+            beta2 = torch.sigmoid(beta2)
+            beta3 = torch.sigmoid(beta3)
         for tile_v in hl.tile(V, block_size=block_v):
             v0 = hl.load(
                 v_rows,
@@ -929,6 +943,7 @@ def chunk_kda_fwd_intra(
     scale: float,
     cu_seqlens: torch.Tensor | None,
     chunk_indices: torch.Tensor | None = None,
+    beta_is_logit: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Helion equivalent of SGLang's intra-chunk KDA preparation."""
     is_varlen = cu_seqlens is not None
@@ -949,6 +964,7 @@ def chunk_kda_fwd_intra(
         chunk_indices,
         scale,
         is_varlen,
+        beta_is_logit,
     )
     w, u = _intra_solve_recompute(
         akk,
@@ -958,6 +974,7 @@ def chunk_kda_fwd_intra(
         metadata,
         chunk_indices,
         is_varlen,
+        beta_is_logit,
     )
     return w, u, kg, aqk
 
@@ -985,6 +1002,7 @@ _STATE_VARLEN_CONFIG = helion.Config(
         "pointer",
         "pointer",
         "pointer",
+        "pointer",
         "tensor_descriptor",
         "pointer",
         "pointer",
@@ -996,6 +1014,7 @@ _STATE_VARLEN_CONFIG = helion.Config(
         "",
         "last",
         "last",
+        "",
         "first",
         "first",
         "first",
@@ -1015,9 +1034,20 @@ _STATE_VARLEN_CONFIG = helion.Config(
 _STATE_VARLEN_SMALL_HEAD_CONFIG = helion.Config(
     atomic_indexing=[],
     block_sizes=[32],
-    indexing=["pointer"] * 12,
+    indexing=["pointer"] * 13,
     l2_groupings=[1],
-    load_eviction_policies=["", "", "", "last", "first", "", "", "", "first"],
+    load_eviction_policies=[
+        "",
+        "",
+        "",
+        "last",
+        "first",
+        "",
+        "",
+        "",
+        "",
+        "first",
+    ],
     loop_orders=[[1, 2, 0]],
     num_stages=3,
     num_warps=8,
@@ -1041,6 +1071,7 @@ def _chunk_state(
     chunk_decay: torch.Tensor,
     initial_state: torch.Tensor,
     initial_state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor,
     chunk_indices: torch.Tensor,
     chunk_offsets: torch.Tensor,
@@ -1074,6 +1105,7 @@ def _chunk_state(
             initial_state.stride(2),
             initial_state.stride(3),
             initial_state_indices.stride(0),
+            has_initial_state.stride(0),
         )
     )
 
@@ -1111,6 +1143,11 @@ def _chunk_state(
             tile_v.index,
             :,
         ].float()
+        state = torch.where(
+            has_initial_state[tile_sequence.id],
+            state,
+            0.0,
+        )
 
         for token_tile in hl.tile(sequence_length, block_size=64):
             global_chunk = output_offset + token_tile.id
@@ -1312,11 +1349,15 @@ def chunk_kda(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     initial_state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     lower_bound: float | None = None,
+    beta_is_logit: bool = False,
     output_intermediate_states: bool = False,
     **kwargs: object,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -1325,6 +1366,13 @@ def chunk_kda(
         scale = k.shape[-1] ** -0.5
     if initial_state is None or initial_state_indices is None:
         raise ValueError("KDA prefill requires an indexed initial-state pool")
+    if has_initial_state is None:
+        has_initial_state = torch.ones_like(
+            initial_state_indices,
+            dtype=torch.bool,
+        )
+    elif has_initial_state.shape != initial_state_indices.shape:
+        raise ValueError("has_initial_state must match initial_state_indices shape")
 
     num_tokens = q.shape[1]
     if g.shape[1] < num_tokens or beta.shape[1] < num_tokens:
@@ -1338,6 +1386,10 @@ def chunk_kda(
         # Tracing constant-folds size-one dimensions, but the resulting kernel
         # can share a cache entry with longer inputs. Keep T=1 on Triton so a
         # short first request cannot specialize later Helion calls incorrectly.
+        new_indices = initial_state_indices[~has_initial_state]
+        if new_indices.numel() > 0:
+            initial_state[new_indices] = 0
+
         intermediate_states = None
         if output_intermediate_states:
             valid_state = initial_state_indices > 0
@@ -1364,12 +1416,13 @@ def chunk_kda(
             else:
                 recurrent_gate = -a * torch.nn.functional.softplus(recurrent_gate)
 
+        recurrent_beta = beta.float().sigmoid() if beta_is_logit else beta
         output, _ = triton_fused_recurrent_kda(
             q=q,
             k=k,
             v=v,
             g=recurrent_gate,
-            beta=beta,
+            beta=recurrent_beta,
             scale=scale,
             initial_state=initial_state,
             inplace_final_state=True,
@@ -1398,11 +1451,8 @@ def chunk_kda(
         q, k = _l2norm_qk(q, k)
     g = g.contiguous()
     beta = beta.contiguous()
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
-        if cu_seqlens is not None
-        else None
-    )
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
     g, qg, wk, kg, chunk_decay = gate_chunk_cumsum_operands(
         g,
         q,
@@ -1414,6 +1464,7 @@ def chunk_kda(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         lower_bound=lower_bound,
+        beta_is_logit=beta_is_logit,
     )
     w, u, kg, aqk = chunk_kda_fwd_intra(
         q,
@@ -1426,15 +1477,18 @@ def chunk_kda(
         scale,
         cu_seqlens,
         chunk_indices,
+        beta_is_logit,
     )
 
     is_varlen = cu_seqlens is not None
     if is_varlen:
-        chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE)
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE)
         metadata = cu_seqlens
     else:
         metadata = torch.empty(0, device=q.device, dtype=torch.int32)
         chunk_offsets = torch.empty(0, device=q.device, dtype=torch.long)
+    assert chunk_offsets is not None
     state_kernel = _select_state_kernel(is_varlen=is_varlen, num_heads=q.size(2))
     h, v_new = state_kernel(
         kg,
@@ -1443,6 +1497,7 @@ def chunk_kda(
         chunk_decay,
         initial_state,
         initial_state_indices,
+        has_initial_state,
         metadata,
         (
             chunk_indices

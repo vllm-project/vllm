@@ -634,27 +634,41 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 assert has_initial_state is not None
 
                 if self._helion_chunk_kda is not None:
-                    # Helion chunk_kda updates state IN PLACE via indices.
-                    # Zero out state for new requests to avoid stale data.
-                    new_request_mask = ~has_initial_state
-                    new_indices = non_spec_state_indices_tensor[new_request_mask]
-                    if new_indices.numel() > 0:
-                        recurrent_state[new_indices] = 0
+                    # A single packed sequence is already laid out as the
+                    # fixed-shape [1, T, H, D] input expected by Helion. Avoid
+                    # rebuilding equivalent varlen chunk metadata in every
+                    # layer for this common latency-sensitive path.
+                    helion_cu_seqlens = (
+                        None
+                        if non_spec_state_indices_tensor.numel() == 1
+                        else non_spec_query_start_loc
+                    )
+                    use_precomputed_chunks = (
+                        helion_cu_seqlens is not None and m.num_decodes == 0
+                    )
 
                     helion_out = self._helion_chunk_kda(
                         q=q_ns,
                         k=k_ns,
                         v=v_ns,
                         g=g1_ns,
-                        beta=beta_ns.float().sigmoid(),
+                        beta=beta_ns,
                         scale=self.head_dim**-0.5,
                         initial_state=recurrent_state,
                         initial_state_indices=(non_spec_state_indices_tensor),
+                        has_initial_state=has_initial_state,
                         use_qk_l2norm_in_kernel=True,
-                        cu_seqlens=non_spec_query_start_loc,
+                        cu_seqlens=helion_cu_seqlens,
+                        chunk_indices=(
+                            m.chunk_indices if use_precomputed_chunks else None
+                        ),
+                        chunk_offsets=(
+                            m.chunk_offsets if use_precomputed_chunks else None
+                        ),
                         A_log=self.A_log,
                         dt_bias=self.dt_bias,
                         lower_bound=self.gate_lower_bound,
+                        beta_is_logit=True,
                         output_intermediate_states=False,
                     )
                     core_attn_out_non_spec = helion_out
