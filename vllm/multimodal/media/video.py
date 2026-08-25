@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from functools import partial
+from io import BytesIO
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -12,10 +13,12 @@ from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO, MediaWithBytes
-from .image import ImageMediaIO
+from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
 
@@ -207,3 +210,45 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)
+
+
+class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    """Video embedding MediaIO implementation.
+
+    Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
+        buffer = BytesIO(data)
+        with check_sparse_tensor_invariants_threadsafe():
+            tensor = torch.load(buffer, weights_only=True)
+            return tensor.to_dense()
+
+    def _load_numpy(self, data: bytes) -> torch.Tensor:
+        with BytesIO(data) as buffer:
+            return torch.from_numpy(np.load(buffer))
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        if data[:6] == MAGIC_NUMPY_PREFIX:
+            return self._load_numpy(data)
+
+        return self._load_pickled_torch(data)
+
+    def load_base64(self, media_type: str, data: str) -> torch.Tensor:
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
+
+    def load_file(self, filepath: Path) -> torch.Tensor:
+        if filepath.suffix == ".npy":
+            return torch.from_numpy(np.load(filepath))
+
+        with check_sparse_tensor_invariants_threadsafe():
+            tensor = torch.load(filepath, weights_only=True)
+            return tensor.to_dense()
+
+    def encode_base64(self, media: torch.Tensor) -> str:
+        return tensor2base64(media)

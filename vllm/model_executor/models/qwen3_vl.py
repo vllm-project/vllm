@@ -1514,11 +1514,18 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             if is_list_of(sampled_fps, float):
                 sampled_fps = sampled_fps[item_idx]
 
-            timestamps = out_item["timestamps"].data
-            assert len(timestamps) == grid_thw[0], (
-                f"The timestamps length({len(timestamps)}) should be equal "
-                f"video length ({grid_thw[0]})."
-            )
+            timestamps_elem = out_item.get("timestamps")
+            if timestamps_elem is not None:
+                timestamps = timestamps_elem.data
+                assert len(timestamps) == grid_thw[0], (
+                    f"The timestamps length({len(timestamps)}) should be equal "
+                    f"video length ({grid_thw[0]})."
+                )
+            else:
+                # Embeds-only inputs (e.g. an EC consumer that receives just the
+                # grid metadata) carry no timestamps; synthesize one per
+                # temporal grid so the placeholder range can be sized.
+                timestamps = [float(i) for i in range(int(grid_thw[0]))]
 
             # Compute tokens per frame, with EVS / VidCom2 support
             num_frames = int(grid_thw[0])
