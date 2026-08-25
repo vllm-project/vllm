@@ -19,7 +19,6 @@
 """PyTorch Idefics2 model."""
 
 from collections.abc import Iterable
-from typing import ClassVar
 
 import torch
 from torch import nn
@@ -360,7 +359,7 @@ class Idefics2Encoder(nn.Module):
 
 
 class Idefics2VisionTransformer(nn.Module):
-    hf_to_vllm_mapper: ClassVar[WeightsMapper] = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
@@ -407,6 +406,13 @@ class Idefics2VisionTransformer(nn.Module):
             )
             if require_post_norm
             else nn.Identity()
+        )
+        # head is a pooling header absent from this model.
+        orig_to_new_prefix: dict[str, str | None] = {"head.": None}
+        if not require_post_norm:
+            orig_to_new_prefix["post_layernorm."] = None
+        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_prefix=orig_to_new_prefix
         )
 
     def get_input_embeddings(self):
@@ -469,11 +475,7 @@ class Idefics2VisionTransformer(nn.Module):
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # head is a pooling header absent from this model.
-        skip_prefixes = ["head."]
-        if not self.require_post_norm:
-            skip_prefixes.append("post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         layer_count = len(self.encoder.layers)
 
