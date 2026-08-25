@@ -17,6 +17,7 @@ import requests
 import torch
 from PIL import Image, ImageChops
 
+from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
@@ -30,8 +31,8 @@ TEST_IMAGE_ASSETS = [
 ]
 
 TEST_VIDEO_URLS = [
-    "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
-    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/slow_traffic_small.mp4",
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/vtest.avi",
 ]
 
 
@@ -76,8 +77,7 @@ async def test_fetch_image_base64(
     connector = MediaConnector(
         # Domain restriction should not apply to data URLs.
         allowed_media_domains=[
-            "www.bogotobogo.com",
-            "github.com",
+            VLLM_S3_BUCKET_URL.removeprefix("https://"),
         ]
     )
     url_image = url_images[raw_image_url]
@@ -226,6 +226,44 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_data_url_with_params():
+    """RFC 2397 allows parameters between the mediatype and the base64
+    marker; they must not be rejected or leak into the media type."""
+    connector = MediaConnector()
+
+    image = Image.new("RGB", (4, 4), color=(255, 0, 0))
+    with NamedTemporaryFile(suffix=".png") as f:
+        image.save(f.name)
+        base64_image = base64.b64encode(f.read()).decode("utf-8")
+
+    data_url = f"data:image/png;charset=utf-8;base64,{base64_image}"
+    image_sync = connector.fetch_image(data_url)
+    image_async = await connector.fetch_image_async(data_url)
+    assert _image_equals(image_sync, image_async)
+
+
+def test_fetch_image_data_url_malformed():
+    connector = MediaConnector()
+
+    with pytest.raises(ValueError, match="missing ','"):
+        connector.fetch_image("data:image/png;base64")
+
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:text/plain,hello")
+
+    # ";base64" requires the ";"; here "base64" is a (bogus) media type.
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:base64,aGVsbG8=")
+
+    # Strict RFC 2397 grammar: lowercase "base64", no whitespace.
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:image/png;BASE64,aGVsbG8=")
+
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:image/png; base64,aGVsbG8=")
+
+
+@pytest.mark.asyncio
 async def test_fetch_image_error_conversion():
     connector = MediaConnector()
     broken_img = "data:image/png;base64,aGVsbG9fdmxsbV9jb21tdW5pdHkK"
@@ -352,8 +390,7 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
             }
         },
         allowed_media_domains=[
-            "www.bogotobogo.com",
-            "github.com",
+            VLLM_S3_BUCKET_URL.removeprefix("https://"),
         ],
     )
 

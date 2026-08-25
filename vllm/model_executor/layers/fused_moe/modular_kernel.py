@@ -10,9 +10,9 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
 )
@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
@@ -99,8 +100,9 @@ class ExpertTokensMetadata:
     Metadata regarding expert-token routing.
     """
 
-    expert_num_tokens: torch.Tensor
+    expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
+    psum_recv_per_rank: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(
@@ -425,6 +427,9 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     described above for the monolithic case.
     """
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        return False
+
     @abstractmethod
     def prepare(
         self,
@@ -470,6 +475,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
+    # ROCm AITER kernels consume a 0/1 local-expert mask (with a trailing
+    # sentinel slot); every other backend consumes the canonical -1/local-slot
+    # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
+    # the active experts kernel.
+    consumes_expert_mask: bool = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -498,6 +509,9 @@ class FusedMoEExperts(ABC):
 
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            moe_config, quant_config
+        )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -886,21 +900,18 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         output: torch.Tensor,
         input: torch.Tensor,
         *,
-        clamp_limit: float | None = None,
-        alpha: float = 1.0,
-        beta: float = 0.0,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        valid_rows: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
             output,
             input,
-            clamp_limit=clamp_limit,
-            alpha=alpha,
-            beta=beta,
+            activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            valid_rows=valid_rows,
         )
 
     @abstractmethod
@@ -1019,8 +1030,15 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         if capture_fn is None:
             self._routing_replay_buffer = None
             return
+        # Allocate for per-rank batches gathered across the DP or EP group.
+        dispatch_group_size = (
+            self.moe_config.ep_size
+            if self.moe_config.use_ep
+            else self.moe_config.dp_size
+        )
+        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
         self._routing_replay_buffer = torch.empty(
-            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            (max_num_replay_tokens, self.moe_config.experts_per_token),
             dtype=torch.int16,
             device=self.moe_config.device,
         )
@@ -1067,7 +1085,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Same as apply(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
@@ -1194,21 +1212,6 @@ class FusedMoEKernelModularImpl:
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
-        # Skip cudagraph/DP padding tokens uniformly across all a2a backends:
-        # forcing padded rows' expert ids to -1 makes every prepare_finalize drop
-        # them (not dispatched / not computed by the experts). The V2 model runner
-        # marks them in forward_context.is_padding; it is None for runners that do
-        # not populate it, leaving topk_ids unchanged.
-        # Gated by VLLM_MOE_SKIP_PADDING (off by default) because this requires the
-        # experts kernel to treat topk_id == -1 as a skip sentinel, which not all
-        # MoE backends support yet.
-        is_padding = None
-        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-            is_padding = get_forward_context().is_padding
-        if is_padding is not None:
-            n = topk_ids.shape[0]
-            # TODO: Properly support DBO (padding lives at the batch tail).
-            topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
 
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
@@ -1323,6 +1326,14 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        use_output_alias = (
+            output_alias is not None
+            and output_alias.shape == fused_out.shape
+            and output_alias.dtype == fused_out.dtype
+            and output_alias.device == fused_out.device
+            and output_alias.is_contiguous()
+        )
+
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
@@ -1330,15 +1341,10 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if (
-                rocm_aiter_ops.is_fused_moe_enabled()
-                and output_alias is not None
-                and output_alias.shape == fused_out.shape
-                and output_alias.dtype == fused_out.dtype
-                and output_alias.device == fused_out.device
-                and output_alias.is_contiguous()
-            ):
+            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
                 fused_out = output_alias
+        elif use_output_alias:
+            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,
@@ -1549,7 +1555,7 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1580,9 +1586,14 @@ class FusedMoEKernelMonolithicImpl:
             topk_group=topk_group,
         )
 
-        output = self.prepare_finalize.finalize(fused_out)
-
-        return output
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
+            return fused_out
+        return self.prepare_finalize.finalize(fused_out)
 
 
 @final
@@ -1665,6 +1676,12 @@ class FusedMoEKernel:
         """
         return self.prepare_finalize.output_is_reduced()
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        return (
+            isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
+            and self.prepare_finalize.supports_deferred_moe_finalize()
+        )
+
     def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
@@ -1680,7 +1697,7 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
             hidden_states=hidden_states,
