@@ -478,10 +478,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
-    hf_to_vllm_mapper = (
-        Qwen3VLForConditionalGeneration.hf_to_vllm_mapper
-        | WeightsMapper(orig_to_new_prefix={"mtp.": None})
-    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__

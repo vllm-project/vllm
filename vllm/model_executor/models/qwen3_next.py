@@ -758,7 +758,6 @@ class Qwen3NextForCausalLM(
         "in_proj_qkvz": ["in_proj_qkvz"],
         "in_proj_ba": ["in_proj_ba"],
     }
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config

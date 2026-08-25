@@ -918,9 +918,6 @@ class GlmAsrForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"audio_tower.embed_positions": None}
-    )
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.embed_positions": None}

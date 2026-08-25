@@ -43,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
     is_pooling_model = True
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"lm_head.": None})
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"lm_head.": None})
 

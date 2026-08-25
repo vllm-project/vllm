@@ -461,7 +461,6 @@ class ModernBertPredictionHead(nn.Module):
 @default_pooling_type(tok_pooling_type="ALL")
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"drop": None})
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"drop": None})
 

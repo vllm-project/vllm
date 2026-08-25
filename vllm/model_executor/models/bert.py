@@ -422,7 +422,6 @@ class BertModel(nn.Module, SupportsQuant):
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
-    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
 
     # Unlike `BertModel`, this model has a pooler to load weights into.
     hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})

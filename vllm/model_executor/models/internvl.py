@@ -572,24 +572,6 @@ class InternVLChatModel(
         )
     )
 
-    # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "action_embed": None,
-            "temporal_embed": None,
-            "track_embed": None,
-            "track_embed_decoder": None,
-            "box_token": None,
-            "cg_criterion": None,
-            "cg_model": None,
-            "loc_encoder": None,
-            "loc_decoder": None,
-            "sam": None,
-            "temporal_token": None,
-            "track_token": None,
-        }
-    )
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):

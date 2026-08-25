@@ -715,6 +715,8 @@ class CLIPVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+
         # Drop layers beyond num_hidden_layers_override.
         def _filter(ws):
             for name, w in ws:
@@ -724,11 +726,7 @@ class CLIPVisionTransformer(nn.Module):
                     continue
                 yield name, w
 
-        mapper = self.hf_to_vllm_mapper
-        if self.post_layernorm is None:
-            mapper |= WeightsMapper(orig_to_new_prefix={"post_layernorm.": None})
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(_filter(weights), mapper=mapper)
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
 
 
 class CLIPVisionModel(nn.Module):
@@ -781,7 +779,6 @@ class CLIPVisionModel(nn.Module):
 )
 class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
 
