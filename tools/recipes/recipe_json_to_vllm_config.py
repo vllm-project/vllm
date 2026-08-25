@@ -57,7 +57,6 @@ try:
 except ImportError as exc:
     raise SystemExit("PyYAML is required. Install it with: pip install pyyaml") from exc
 
-
 DEFAULT_API_BASE = "https://recipes.vllm.ai"
 
 SHORT_ALIASES = {
@@ -116,6 +115,71 @@ def parse_args() -> argparse.Namespace:
         "--env-out",
         default="env.sh",
         help="Output shell environment file (default: env.sh)",
+    )
+
+    tuning = p.add_argument_group(
+        "optional runtime tuning",
+        (
+            "Refine the recipe baseline only when additional information is supplied. "
+            "Runtime tuning is enabled only for recipe hardware with a registered "
+            "policy (currently: xeon6)."
+        ),
+    )
+    tuning.add_argument(
+        "--detect-hardware",
+        action="store_true",
+        help=(
+            "Detect effective CPU/NUMA/memory resources and allow the selected "
+            "recipe-hardware policy to override recipe runtime arguments."
+        ),
+    )
+    tuning.add_argument(
+        "--input-tokens",
+        type=int,
+        help="Expected input-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--output-tokens",
+        type=int,
+        help="Expected output-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--concurrency",
+        type=int,
+        help="Expected maximum concurrent requests. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--ttft-sla-ms",
+        type=float,
+        help="Optional time-to-first-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--tpot-sla-ms",
+        type=float,
+        help="Optional time-per-output-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--target-qps",
+        type=float,
+        help="Optional capacity target for future DP/capacity tuning.",
+    )
+
+    sweep = p.add_argument_group(
+        "optional performance sweep",
+        ("Generate benchmark files after creating one initial runtime suggestion."),
+    )
+    sweep.add_argument(
+        "--generate-sweep",
+        action="store_true",
+        help=(
+            "Generate an optional vllm bench sweep package around the single "
+            "initial runtime suggestion."
+        ),
+    )
+    sweep.add_argument(
+        "--sweep-out-dir",
+        default="sweep",
+        help="Output directory for optional sweep files (default: sweep).",
     )
     return p.parse_args()
 
@@ -642,18 +706,115 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+
+        tuning_requested = (
+            args.detect_hardware
+            or args.generate_sweep
+            or any(
+                value is not None
+                for value in (
+                    args.input_tokens,
+                    args.output_tokens,
+                    args.concurrency,
+                    args.ttft_sla_ms,
+                    args.tpot_sla_ms,
+                    args.target_qps,
+                )
+            )
+        )
+
+        tuning = None
+        workload = None
+        sweep_writer = None
+        if tuning_requested:
+            # Keep plain Recipes conversion lightweight. vLLM-specific modules
+            # are imported only for optional runtime tuning or sweep generation.
+            from runtime_tuning import (
+                WorkloadHints,
+                finetune_runtime_config,
+                get_runtime_tuning_policies,
+            )
+
+            workload = WorkloadHints(
+                input_tokens=args.input_tokens,
+                output_tokens=args.output_tokens,
+                concurrency=args.concurrency,
+                ttft_sla_ms=args.ttft_sla_ms,
+                tpot_sla_ms=args.tpot_sla_ms,
+                target_qps=args.target_qps,
+            )
+
+            if args.generate_sweep:
+                from sweep_generation import (
+                    validate_sweep_workload,
+                    write_sweep_files,
+                )
+
+                validate_sweep_workload(workload)
+                sweep_writer = write_sweep_files
+
+            recipe_hardware = recipe.get("hardware")
+            policies = get_runtime_tuning_policies(recipe_hardware)
+
+            hardware = None
+            if args.detect_hardware:
+                from hardware_detection import detect_hardware
+
+                hardware = detect_hardware()
+
+            tuning = finetune_runtime_config(
+                config,
+                hardware=hardware,
+                workload=workload,
+                policies=policies,
+            )
+            config.update(tuning.overrides)
+
         write_config(args.config_out, source, recipe, config)
         write_env(args.env_out, source, recipe)
+
+        sweep_files: list[Path] = []
+        if args.generate_sweep:
+            assert workload is not None
+            assert sweep_writer is not None
+            sweep_files = sweep_writer(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+            )
+
+        if tuning is not None:
+            if tuning.overrides:
+                print("Initial runtime suggestion:")
+                for key, value in tuning.overrides.items():
+                    print(f"  {key}: {value}")
+            for note in tuning.notes:
+                print(f"  tuning: {note}")
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
+    if sweep_files:
+        print(f"Wrote optional sweep package under {args.sweep_out_dir}/")
     print()
     print("Run:")
     print(f"  source {shlex.quote(args.env_out)}")
     print(f"  vllm serve --config {shlex.quote(args.config_out)}")
+    if sweep_files:
+        sweep_dir = Path(args.sweep_out_dir)
+        run_sweep = sweep_dir / "run_sweep.sh"
+        recommend = sweep_dir / "recommend.py"
+        print()
+        print("Optional performance sweep:")
+        print(f"  {shlex.quote(str(run_sweep))} --dry-run")
+        print(f"  {shlex.quote(str(run_sweep))}")
+        print()
+        print("After the sweep:")
+        print(f"  {shlex.quote(str(recommend))}")
     return 0
 
 
