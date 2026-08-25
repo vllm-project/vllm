@@ -1622,60 +1622,84 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     )
 
 
-_DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
-    "FLASHMLA_SPARSE": {
-        1: (1536, 4096, None, None, None),
-        2: (512, 1024, 4096, None, None),
-        4: (512, 1024, 1536, 8192, None),
-        8: (512, 512, 1024, 2048, 16384),
-    },
-    "FLASHINFER_MLA_SPARSE": {
-        8: (512, 1024, 1024, 2048, 32768),
-    },
-}
-_DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
+_MaskedMHARanges = tuple[tuple[int, int], ...]
 
-_GLM5_MASKED_MHA_THRESHOLDS: dict[
-    str, dict[int, tuple[int, tuple[tuple[int, int], ...]]]
+_MASKED_MHA_THRESHOLDS: dict[
+    tuple[int, int],
+    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
 ] = {
-    "FLASHMLA_SPARSE": {
-        1: (8 * 1024, ()),
-        2: (
-            20 * 1024,
-            ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
-        ),
-        4: (
-            48 * 1024,
-            (
-                (8 * 1024, 4 * 1024),
-                (16 * 1024, 8 * 1024),
-                (24 * 1024, 16 * 1024),
-                (34 * 1024, 32 * 1024),
+    (192, 128): {
+        "FLASHMLA_SPARSE": {
+            1: (((2048, 1536), (4096, 4096)), None),
+            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
+            4: (
+                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
+                None,
             ),
-        ),
-        8: (
-            112 * 1024,
-            (
-                (8 * 1024, 4 * 1024),
-                (16 * 1024, 8 * 1024),
-                (32 * 1024, 16 * 1024),
-                (48 * 1024, 32 * 1024),
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 512),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 16384),
+                ),
+                None,
             ),
-        ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 1024),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 32768),
+                ),
+                None,
+            ),
+        },
     },
-    "FLASHINFER_MLA_SPARSE": {
-        8: (
-            64 * 1024,
-            (
-                (20 * 1024, 4 * 1024),
-                (24 * 1024, 8 * 1024),
-                (32 * 1024, 16 * 1024),
-                (48 * 1024, 32 * 1024),
-                (56 * 1024, 40 * 1024),
-                (64 * 1024, 48 * 1024),
-                (72 * 1024, 56 * 1024),
+    (256, 256): {
+        "FLASHMLA_SPARSE": {
+            1: (((8 * 1024, 0),), ()),
+            2: (
+                ((20 * 1024, 0),),
+                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
             ),
-        ),
+            4: (
+                ((48 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (34 * 1024, 32 * 1024),
+                ),
+            ),
+            8: (
+                ((112 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                ),
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            8: (
+                ((64 * 1024, 0),),
+                (
+                    (20 * 1024, 4 * 1024),
+                    (24 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                    (56 * 1024, 40 * 1024),
+                    (64 * 1024, 48 * 1024),
+                    (72 * 1024, 56 * 1024),
+                ),
+            ),
+        },
     },
 }
 
@@ -1690,33 +1714,20 @@ def _use_masked_mha(
     seq_len: int,
     has_context: bool,
 ) -> bool:
-    if (qk_head_dim, v_head_dim) == (256, 256):
-        backend_thresholds = _GLM5_MASKED_MHA_THRESHOLDS.get(backend_name)
-        if backend_thresholds is None:
-            return False
-        glm5_thresholds = backend_thresholds.get(tensor_parallel_size)
-        if glm5_thresholds is None:
-            return False
-        pure_prefill_max_query_len, context_thresholds = glm5_thresholds
-        if not has_context:
-            return query_len <= pure_prefill_max_query_len
-        for max_seq_len, context_min_query_len in context_thresholds:
-            if seq_len <= max_seq_len:
-                return query_len >= context_min_query_len
-        return False
-    elif (qk_head_dim, v_head_dim) == (192, 128):
-        thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
-            tensor_parallel_size
-        )
-    else:
-        return False
-
+    thresholds = (
+        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
+        .get(backend_name, {})
+        .get(tensor_parallel_size)
+    )
     if thresholds is None:
         return False
-    for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
-        if seq_len <= bucket_seq_len:
-            min_query_len = thresholds[bucket_idx]
-            return min_query_len is not None and query_len >= min_query_len
+    pure_prefill_ranges, context_ranges = thresholds
+    ranges = pure_prefill_ranges
+    if has_context and context_ranges is not None:
+        ranges = context_ranges
+    for max_seq_len, min_query_len in ranges:
+        if seq_len <= max_seq_len:
+            return query_len >= min_query_len
     return False
 
 
