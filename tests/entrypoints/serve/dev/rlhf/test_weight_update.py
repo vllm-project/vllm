@@ -27,6 +27,9 @@ from .conftest import (
 )
 
 
+_SERVER_PORT_BASE = 8870
+
+
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
 def use_v2(request):
     """Run the HTTP tests with both model-runner implementations."""
@@ -44,6 +47,7 @@ def server_url(use_v2):
     with (
         patch.dict(os.environ, env_vars),
         server(
+            port=8870 + int(use_v2),
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
@@ -312,4 +316,6 @@ class TestWeightUpdateProtocolErrors:
         )
         assert health(server_url) == 200
         assert ok(gen(server_url)), "engine must generate after invalid finish"
+
+
 
