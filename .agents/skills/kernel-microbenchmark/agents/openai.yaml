@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kernel Microbenchmark"
+  short_description: "Build and debug reliable GPU kernel microbenchmarks."
+  default_prompt: "Use the kernel microbenchmark workflow to build or debug a vLLM GPU kernel benchmark."

@@ -153,6 +153,26 @@ mod tests {
     }
 
     #[test]
+    fn test_midchain_dotted_integer_lookup() {
+        let template = CompiledChatTemplate::new(
+            "{{ values.0.name }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let mut kwargs = HashMap::new();
+        kwargs.insert("values".to_string(), serde_json::json!([{"name": "first"}]));
+
+        let result = template
+            .apply(TemplateContext {
+                template_kwargs: Some(&kwargs),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(result, "first");
+    }
+
+    #[test]
     fn test_chat_template_state_invalid_template() {
         let result = CompiledChatTemplate::new(
             "{% invalid".to_string(),

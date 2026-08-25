@@ -299,6 +299,143 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
         assert out.finished
 
 
+async def _consume(generator) -> None:
+    async for _ in generator:
+        pass
+
+
+async def _poll_flag(engine: AsyncLLM, want: bool, timeout: float) -> bool:
+    """Wait for the front-end's view of the DP engines to reach ``want``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if engine.engine_core.dp_engines_running() == want:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_late_request_does_not_block_drain():
+    """A request arriving after pause must not leave the coordinator believing
+    the engines are running.
+
+    Paused engines discard START_DP_WAVE, so nothing can report wave
+    completion afterwards; if forwarding the wake also marks the engines as
+    running, drain has no way back and can only end in a timeout.
+
+    MoE only: wave coordination is enabled iff the model is MoE, so a dense
+    model never reaches the coordinator state this exercises.
+    """
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        # Run a wave first, so the engines are quiesced by the pause rather
+        # than by never having started, and drain has something to observe.
+        long_request = asyncio.create_task(
+            _consume(
+                engine.generate(
+                    request_id="warmup",
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=SamplingParams(max_tokens=400, ignore_eos=True),
+                )
+            )
+        )
+
+        # A design that never reports the engines as running would satisfy
+        # every drain assertion below while destroying the signal, so pin it
+        # down first. The front-end sets its own copy optimistically when it
+        # forwards the wake, so sample only after several coordinator
+        # publishes (every 100ms while stats change) have overwritten it.
+        await asyncio.sleep(2)
+        assert not long_request.done(), "the warmup request was too short to sample"
+        assert engine.engine_core.dp_engines_running(), (
+            "the coordinator does not report the engines as running while they are"
+        )
+
+        await long_request
+        assert await _poll_flag(engine, False, timeout=30)
+
+        await engine.pause_generation(mode="abort")
+        await engine.wait_for_requests_to_drain(drain_timeout=30)
+
+        # Awaiting add_request guarantees the new-request notification has been
+        # sent to the coordinator - the message that used to latch the flag.
+        collector = await engine.add_request(
+            request_id="late",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=5),
+        )
+
+        # The front-end marks the engines running off the back of that
+        # notification. This is what makes the test non-vacuous: it is the
+        # path that used to leave the coordinator stuck.
+        assert await _poll_flag(engine, True, timeout=5), (
+            "the late request did not notify the coordinator"
+        )
+
+        # It must settle back by itself. Unfixed it never does, because the
+        # paused engines discard the wake and so never report wave completion.
+        assert await _poll_flag(engine, False, timeout=60)
+
+        # The late request was held rather than dropped: it completes on resume.
+        await engine.resume_generation()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60)
+            if out.finished:
+                break
+
+
+@pytest.mark.asyncio
+async def test_dp_sleep_late_request_does_not_block_drain():
+    """The same latch, reached through sleep rather than pause.
+
+    Sleep stops the engines stepping just as pause does, so a request arriving
+    while they are asleep can leave the coordinator believing they are running
+    with nothing able to say otherwise. This is worth pinning separately from
+    the pause case because it is the shape that reaches
+    `_drain_requests_for_elastic_ep`, which decides from the same signal
+    whether it is safe to scale.
+    """
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        async for _ in engine.generate(
+            request_id="warmup",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert await _poll_flag(engine, False, timeout=30)
+
+        await engine.sleep(level=1)
+        assert await engine.is_sleeping()
+
+        collector = await engine.add_request(
+            request_id="while-asleep",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=5),
+        )
+
+        assert await _poll_flag(engine, True, timeout=5), (
+            "the request did not notify the coordinator"
+        )
+
+        # Sleeping engines cannot report wave completion, so a coordinator that
+        # marked them running when it forwarded the wake never hears otherwise.
+        assert await _poll_flag(engine, False, timeout=60)
+
+        await engine.wake_up()
+        assert not await engine.is_sleeping()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60)
+            if out.finished:
+                break
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_abort(expert_parallel: bool):
