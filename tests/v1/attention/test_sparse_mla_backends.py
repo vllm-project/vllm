@@ -2393,6 +2393,161 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
 
 
 @requires_hisparse_ops
+def test_hisparse_round_trips_deepseek_v4_split_pages():
+    """C4 MLA value and scale planes retain their paged layout."""
+    device = torch.device(DEVICE_TYPE)
+    num_blocks, block_size, value_bytes, scale_bytes = 2, 64, 576, 8
+    row_width = value_bytes + scale_bytes
+    source = torch.zeros(
+        num_blocks, block_size, row_width, dtype=torch.uint8, device=device
+    )
+    host = torch.zeros(
+        num_blocks, block_size, row_width, dtype=torch.uint8
+    ).pin_memory()
+    src_slots = torch.tensor([1, block_size + 2], dtype=torch.int64, device=device)
+    host_slots = torch.tensor([3, block_size + 4], dtype=torch.int64, device=device)
+
+    def fill_split_row(cache, slot: int, seed: int) -> None:
+        block, offset = divmod(slot, block_size)
+        page = cache[block].view(-1)
+        page[offset * value_bytes : (offset + 1) * value_bytes] = seed
+        scale_start = block_size * value_bytes + offset * scale_bytes
+        page[scale_start : scale_start + scale_bytes] = seed + 1
+
+    def assert_split_row(cache, slot: int, seed: int) -> None:
+        block, offset = divmod(slot, block_size)
+        page = cache[block].view(-1)
+        torch.testing.assert_close(
+            page[offset * value_bytes : (offset + 1) * value_bytes].cpu(),
+            torch.full((value_bytes,), seed, dtype=torch.uint8),
+        )
+        scale_start = block_size * value_bytes + offset * scale_bytes
+        torch.testing.assert_close(
+            page[scale_start : scale_start + scale_bytes].cpu(),
+            torch.full((scale_bytes,), seed + 1, dtype=torch.uint8),
+        )
+
+    for slot, seed in zip(src_slots.tolist(), (11, 29)):
+        fill_split_row(source, slot, seed)
+    torch.ops._C_cache_ops.hisparse_backup(
+        source, src_slots, host, host_slots, value_bytes
+    )
+
+    staged = torch.zeros_like(source)
+    staged_slots = torch.tensor([[0, block_size + 5]], dtype=torch.int32, device=device)
+    torch.ops._C_cache_ops.hisparse_gather_plan(
+        host,
+        staged,
+        host_slots.to(torch.int32).unsqueeze(0),
+        staged_slots,
+        torch.ones_like(staged_slots),
+        None,
+        None,
+        0,
+        value_bytes,
+    )
+    torch.accelerator.synchronize()
+
+    for slot, seed in zip((0, block_size + 5), (11, 29)):
+        assert_split_row(staged, slot, seed)
+
+
+def test_hisparse_compresses_deepseek_v4_slot_mapping():
+    source = torch.tensor(
+        [0, 1, 2, 3, 255, 256, 259, 511], dtype=torch.int64, device=DEVICE_TYPE
+    )
+    positions = source.clone()
+
+    result = hisparse_runtime.compress_hisparse_slot_mapping(
+        source,
+        positions,
+        logical_block_size=256,
+        storage_block_size=64,
+        compress_ratio=4,
+    )
+
+    expected = torch.tensor(
+        [-1, -1, -1, 0, 63, -1, 64, 127],
+        dtype=torch.int64,
+        device=DEVICE_TYPE,
+    )
+    torch.testing.assert_close(result, expected)
+
+
+@requires_hisparse_ops
+def test_hisparse_backup_layers_from_packed_hma():
+    device = torch.device(DEVICE_TYPE)
+    num_layers, num_blocks, block_size, row_width = 3, 5, 4, 8
+    row_bytes = row_width * torch.float32.itemsize
+    page_bytes = block_size * row_bytes
+    block_stride = num_layers * page_bytes + 64
+    backing = torch.zeros(num_blocks * block_stride, dtype=torch.uint8, device=device)
+
+    hot_caches = [
+        torch.as_strided(
+            backing.view(torch.float32),
+            (num_blocks, block_size, row_width),
+            (block_stride // torch.float32.itemsize, row_width, 1),
+            storage_offset=layer * page_bytes // torch.float32.itemsize,
+        )
+        for layer in range(num_layers)
+    ]
+    source_indices = [
+        torch.tensor(
+            [layer + 1, block_size + layer, 2 * block_size + layer],
+            dtype=torch.int64,
+            device=device,
+        )
+        for layer in range(num_layers)
+    ]
+    host_caches = [
+        torch.full((num_blocks * block_size, row_width), -1.0).pin_memory()
+        for _ in range(num_layers)
+    ]
+    dst_slots = torch.tensor([2, 17, -1], dtype=torch.int64, device=device)
+
+    for layer, (hot_cache, indices) in enumerate(zip(hot_caches, source_indices)):
+        for item, src_slot in enumerate(indices.tolist()):
+            block, offset = divmod(src_slot, block_size)
+            hot_cache[block, offset].fill_(100 * layer + item + 1)
+
+    torch.ops._C_cache_ops.hisparse_backup_layers(
+        backing,
+        torch.tensor(
+            [cache.data_ptr() - backing.data_ptr() for cache in hot_caches],
+            dtype=torch.int64,
+            device=device,
+        ),
+        torch.tensor(
+            [indices.data_ptr() for indices in source_indices],
+            dtype=torch.uint64,
+            device=device,
+        ),
+        host_caches[0],
+        torch.tensor(
+            [cache.data_ptr() for cache in host_caches],
+            dtype=torch.uint64,
+            device=device,
+        ),
+        dst_slots,
+        dst_slots.numel(),
+        block_stride,
+        block_size,
+        num_blocks * block_size,
+    )
+    torch.accelerator.synchronize()
+
+    for layer, host_cache in enumerate(host_caches):
+        torch.testing.assert_close(
+            host_cache[2], torch.full((row_width,), 100 * layer + 1.0)
+        )
+        torch.testing.assert_close(
+            host_cache[17], torch.full((row_width,), 100 * layer + 2.0)
+        )
+        torch.testing.assert_close(host_cache[0], torch.full((row_width,), -1.0))
+
+
+@requires_hisparse_ops
 def test_hisparse_gather_zeroes_unaligned_destination():
     """Invalid host rows are safely zeroed even at a byte-unaligned address."""
     device = torch.device(DEVICE_TYPE)

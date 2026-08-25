@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import torch
@@ -383,8 +384,19 @@ class DeepseekCompressor(nn.Module):
         # - position used: (positions // compress_ratio) * compress_ratio
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
+        source_k_cache_metadata = k_cache_metadata
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
+        hisparse_cache = k_cache_layer.hisparse_cache
+        if hisparse_cache is not None:
+            assert hisparse_cache.view is not None
+            kv_cache = hisparse_cache.view.cache
+            num_kv_slots = source_k_cache_metadata.slot_mapping.numel()
+            k_cache_metadata = SimpleNamespace(
+                slot_mapping=hisparse_cache.get_compressed_slot_mapping(
+                    positions[:num_kv_slots], self.compress_ratio
+                )
+            )
 
         # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
         # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
@@ -452,3 +464,10 @@ class DeepseekCompressor(nn.Module):
             scale_dim=self._scale_dim,
             **extra_kwargs,
         )
+
+        if hisparse_cache is not None and not hisparse_cache.decode_batch:
+            hisparse_cache.runtime.backup_rows(
+                kv_cache,
+                k_cache_metadata.slot_mapping,
+                source_k_cache_metadata.slot_mapping,
+            )
