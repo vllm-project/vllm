@@ -270,6 +270,7 @@ class GraniteMoeHybridAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        self.rotary_emb: nn.Module | None
         if config.position_embedding_type == "rope":
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -454,7 +455,9 @@ class GraniteMoeHybridModel(nn.Module):
             # Skip layers on other devices.
             if not is_pp_missing_parameter(n, self):
                 param = params_dict[n]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", None)
+                if not callable(weight_loader):
+                    raise TypeError(f"{n} requires a shard-aware weight loader")
                 weight_loader(param, p, shard_id)
                 loaded_params.add(n)
 
@@ -462,7 +465,9 @@ class GraniteMoeHybridModel(nn.Module):
             if n not in params_dict:
                 return
             param = params_dict[n]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", None)
+            if not callable(weight_loader):
+                raise TypeError(f"{n} requires an expert-aware weight loader")
             weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
             loaded_params.add(n)
 

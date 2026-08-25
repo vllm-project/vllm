@@ -457,7 +457,7 @@ class DeepseekV2Attention(nn.Module):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: int,
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
@@ -495,7 +495,7 @@ class DeepseekV2Attention(nn.Module):
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank,
+                self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,

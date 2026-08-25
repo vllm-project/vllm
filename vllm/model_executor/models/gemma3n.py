@@ -77,7 +77,7 @@ class Gemma3nAltUp(nn.Module):
         altup_num_inputs: int,
         altup_coef_clip: float,
         altup_active_idx: int,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         prefix: str,
     ):
         super().__init__()
