@@ -406,33 +406,6 @@ void fused_gdn_decode_post_conv_mtp(
 
 #endif
 
-#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
-void fused_kda_prologue(
-    torch::stable::Tensor const& q, torch::stable::Tensor const& k,
-    torch::stable::Tensor const& v, torch::stable::Tensor const& raw_g,
-    torch::stable::Tensor const& raw_beta, torch::stable::Tensor const& a_log,
-    torch::stable::Tensor const& dt_bias, torch::stable::Tensor& qg,
-    torch::stable::Tensor& w, torch::stable::Tensor& u,
-    torch::stable::Tensor& kg_t, torch::stable::Tensor& aqk,
-    torch::stable::Tensor& decay, torch::stable::Tensor const& cu_seqlens,
-    torch::stable::Tensor const& chunk_indices,
-    std::optional<torch::stable::Tensor> conv_weight,
-    std::optional<torch::stable::Tensor> conv_state,
-    std::optional<torch::stable::Tensor> conv_state_indices,
-    std::optional<torch::stable::Tensor> conv_has_initial_state, double scale,
-    double lower_bound);
-
-void fused_kda_chunk(
-    torch::stable::Tensor const& qg, torch::stable::Tensor const& w,
-    torch::stable::Tensor const& u, torch::stable::Tensor const& kg_t,
-    torch::stable::Tensor const& aqk, torch::stable::Tensor const& decay,
-    std::optional<torch::stable::Tensor> initial_state,
-    std::optional<torch::stable::Tensor> final_state,
-    torch::stable::Tensor& out, torch::stable::Tensor const& cu_seqlens,
-    torch::stable::Tensor const& chunk_offsets, double scale,
-    std::optional<torch::stable::Tensor> group_state, int64_t groups);
-#endif
-
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
 void kimi_k3_attn_res(torch::stable::Tensor& prefix,
                       torch::stable::Tensor const& delta,
@@ -553,8 +526,16 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
-                  double beta = 1.0, double linear_beta = -1.0);
+void situ_and_mul(
+    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
+    double linear_beta = -1.0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor& scale,
+    torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
+    int64_t group_size = 0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,
