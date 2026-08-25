@@ -442,6 +442,21 @@ class MoRIIOConnectorScheduler:
         self.blocks_per_sw = self._compute_blocks_per_sw(
             kv_cache_config, self.block_size
         )
+        # Chunked-prefill last-chunk detection counts tokens as
+        # len(block_ids[g]) * block_size. Use an unclipped full-attention group
+        # (blocks_per_sw == 0) and its own block size: sliding-window groups are
+        # clipped and may be rescaled by the page-size unifier, so their block
+        # counts do not reflect the full sequence length. Falls back to group 0
+        # for a non-hybrid single-group model (unchanged behaviour).
+        self._token_count_group_idx = 0
+        self._token_count_block_size = self.block_size
+        for gi, group in enumerate(kv_cache_config.kv_cache_groups):
+            if self.blocks_per_sw[gi] == 0:
+                self._token_count_group_idx = gi
+                self._token_count_block_size = getattr(
+                    group.kv_cache_spec, "block_size", self.block_size
+                )
+                break
         self.host_ip = resolve_host_ip(
             self.kv_transfer_config.kv_connector_extra_config
         )
@@ -963,7 +978,10 @@ class MoRIIOConnectorScheduler:
                         for g in range(len(new_group_ids))
                     ]
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    saved_tokens = len(updated_blocks[0]) * self.block_size
+                    saved_tokens = (
+                        len(updated_blocks[self._token_count_group_idx])
+                        * self._token_count_block_size
+                    )
                     if saved_tokens >= req.num_prompt_tokens:
                         # Final chunk: live kv_transfer_params may be cleared,
                         # so prefer the snapshot from update_state_after_alloc.
@@ -989,7 +1007,11 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            if req.num_prompt_tokens > len(block_ids[0]) * self.block_size:
+            tokens_covered = (
+                len(block_ids[self._token_count_group_idx])
+                * self._token_count_block_size
+            )
+            if req.num_prompt_tokens > tokens_covered:
                 # not last chunk prefill
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
@@ -1891,9 +1913,12 @@ class MoRIIOConnectorWorker:
                 self.block_size,
             )
             self.block_size = first_geometry.block_size
-        # TODO(tms): self.block_len needs to be per-layer for sliding window,
-        # hybrid attn, etc
-        # block size in bytes
+        # Representative block length in bytes. Under the hybrid KV cache
+        # manager, sliding-window and full-attention groups can have different
+        # block_size (in tokens) but the page-size unifier keeps block_len (in
+        # bytes) and num_blocks uniform across groups, so a single advertised
+        # scalar is valid. Per-layer geometry (self.block_lens) drives the
+        # actual transfer offsets.
         self.block_len = first_geometry.block_len
         self.kv_cache_shape = first_kv_cache.shape
         self.block_shape = block_shape
@@ -1905,10 +1930,13 @@ class MoRIIOConnectorWorker:
 
         for layer_name in kv_caches:
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if geometry.block_size != self.block_size:
+            # block_size (tokens) may legitimately differ per group under the
+            # hybrid KV cache manager; block_len (bytes) must not, since it is
+            # advertised as a single scalar alongside a uniform num_blocks.
+            if geometry.block_len != self.block_len:
                 raise ValueError(
-                    "MoRIIO KV cache block size mismatch for layer "
-                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                    "MoRIIO KV cache block length mismatch for layer "
+                    f"{layer_name}: {geometry.block_len} != {self.block_len}"
                 )
             self.block_lens[layer_name] = geometry.block_len
             for cache, region_len in self._iter_layer_registration_regions(layer_name):
