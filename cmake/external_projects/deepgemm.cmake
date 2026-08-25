@@ -29,8 +29,13 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # Pinned to the tip of the nv_dev branch (SM120 support).
-  set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
+  # a6b593d is the last nv_dev commit with a correct SM12x pure-fp8 1d1d
+  # path. 8b1392b (the previous pin) dropped the sm100/sm120 fp8_gemm_1d1d
+  # kernels and aliased fp8_gemm_nt to the fp8xfp4 dispatcher, which silently
+  # corrupts fp8 linear output on SM12x (verified on 2x DGX Spark GB10:
+  # DeepSeek-V4-Flash France greedy degenerates, DSpark acceptance collapses).
+  # Same freeze eugr's spark-vllm-docker uses; vLLM v0.25.1 pinned a6b593d.
+  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
