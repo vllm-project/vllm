@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -107,12 +108,39 @@ def test_bridge_marks_supporting_and_skips_others():
     layer = torch.nn.Module()
     expose_input_quant_key(layer, supported)
     assert layer.input_quant_key == kNvfp4Dynamic
+    assert layer.input_quant_layout is None
 
     unsupported = _probe(FlashInferTrtllmNvFp4LinearKernel)
     assert unsupported.input_quant_key() is None
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
     assert not hasattr(layer, "input_quant_key")
+    assert not hasattr(layer, "input_quant_layout")
+
+
+def test_as_quantized_activation_validates_layout():
+    qa = QuantizedActivation(
+        data=torch.zeros(2, 4, dtype=torch.uint8),
+        scale=torch.zeros(2, 1, dtype=torch.uint8),
+        orig_dtype=torch.bfloat16,
+        orig_shape=torch.Size([2, 8]),
+        quant_key=kMxfp4Dynamic,
+        layout="shuffled",
+    )
+    with pytest.raises(AssertionError, match="layout"):
+        as_quantized_activation(qa, kMxfp4Dynamic, None)
+    assert as_quantized_activation(qa, kMxfp4Dynamic, "shuffled") is qa
+    plain = QuantizedActivation(
+        data=qa.data,
+        scale=qa.scale,
+        orig_dtype=qa.orig_dtype,
+        orig_shape=qa.orig_shape,
+        quant_key=kMxfp4Dynamic,
+        layout=None,
+    )
+    with pytest.raises(AssertionError, match="layout"):
+        as_quantized_activation(plain, kMxfp4Dynamic, "shuffled")
+    assert as_quantized_activation(plain, kMxfp4Dynamic) is plain
 
 
 def test_as_quantized_activation_validates_key():
