@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-This file contains the command line arguments for the vLLM's
-OpenAI-compatible server. It is kept in a separate file for documentation
-purposes.
+This file contains the command line arguments for the vLLM's online server.
+It is kept in a separate file for documentation purposes.
 """
 
 import argparse
@@ -20,13 +19,14 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.launchers.utils.constants import (
-    H11_MAX_HEADER_COUNT_DEFAULT,
-    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
-)
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+from .utils.constants import (
+    H11_MAX_HEADER_COUNT_DEFAULT,
+    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
+)
 
 
 class LoRAParserAction(argparse.Action):
@@ -449,7 +449,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         )
 
     if args.data_parallel_multi_port_external_lb:
-        from vllm.entrypoints.openai.dp_supervisor import (
+        from vllm.entrypoints.launchers.dp_supervisor import (
             validate_multi_port_external_lb_args,
         )
 

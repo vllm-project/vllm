@@ -23,8 +23,6 @@ import uvloop
 from fastapi import FastAPI, Response
 
 import vllm.envs as envs
-from vllm.entrypoints.launchers.launcher import NoSignalServer
-from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
@@ -32,6 +30,9 @@ from vllm.utils.system_utils import (
     set_process_title,
 )
 from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
+
+from .launcher import NoSignalServer
+from .utils.server_utils import get_uvicorn_log_config
 
 logger = init_logger(__name__)
 
