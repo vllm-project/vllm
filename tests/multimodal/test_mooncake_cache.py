@@ -380,3 +380,27 @@ def test_receiver_drops_an_unretrievable_pair():
     store.flush()
     loaded = store.get_kwargs("h")
     assert loaded is not None and torch.equal(loaded["a"].data, item["a"].data)
+
+
+def test_probe_tolerates_a_repeated_hash():
+    """The same image can appear twice in one prompt, so `is_cached` may be
+    handed the same hash twice. A repeated key inside a batch lookup comes back
+    correct for one occurrence and shifted for the other, so the keys must be
+    deduplicated before the batch call."""
+    backend, store = _make_store()
+    store.put("h", _item({"a": 8}), _updates([1, 2, 3]), item_size=8)
+    store.flush()
+
+    seen = []
+    inner = backend.get_batch
+
+    def recording_get_batch(keys):
+        seen.append(list(keys))
+        return inner(keys)
+
+    backend.get_batch = recording_get_batch
+    assert set(store.probe(["h", "h", "h"])) == {"h"}
+    assert seen == [[store._meta_key("h")]], seen
+
+    # And the sender reports every occurrence as cached.
+    assert _sender(store).is_cached(["h", "h"]) == [True, True]

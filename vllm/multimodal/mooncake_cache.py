@@ -314,6 +314,12 @@ class MooncakeProcessorStore:
         if not mm_hashes:
             return {}
 
+        # One request repeats an item whenever the same image appears twice in
+        # a prompt, so `mm_hashes` can hold duplicates. Batch lookups must see
+        # each key once: a repeated key in a `get_batch` comes back correct for
+        # one occurrence and shifted for the other.
+        mm_hashes = list(dict.fromkeys(mm_hashes))
+
         try:
             exists = self._store.batch_is_exist(
                 [self._kwargs_key(mm_hash) for mm_hash in mm_hashes]
