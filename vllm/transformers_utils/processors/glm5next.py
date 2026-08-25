@@ -60,13 +60,18 @@ from transformers.video_utils import (
 
 logger = logging.get_logger(__name__)
 
-# Serving cap on max VIDEO pixels. The checkpoint's video ``max_image_tokens``
-# (240000) implies a 376M px budget that would make vLLM's startup
-# encoder-profiling reserve huge activation memory and starve the KV cache
-# (300B weights already fill the GPU). ~1.25M px is a sane serving cap.
-# Images intentionally follow the checkpoint budget (8000 tokens) so that
-# preprocessing matches the HF reference pixel-for-pixel.
-_MM_MAX_PIXELS = 1_254_400
+# Serving cap on the per-video vision-token budget. The checkpoint ships
+# 240000 tokens for video, which vLLM would turn into a 240000-token encoder
+# compute/cache budget (``compute_mm_encoder_budget`` takes the max over
+# modalities) and profile against at startup -- huge activation memory that
+# starves the KV cache (300B weights already fill the GPU). 30000 is the cap
+# the reference GLM serving stack carries for this model family
+# (``MAX_PIXELS = 30000 * 28 * 28 * 2`` in sglang's GLM4V/GLM5Next
+# processor); it keeps native resolution for videos up to ~30s at the default
+# 2 fps sampling and only downscales longer ones. Images are not capped: their
+# checkpoint budget (8000 tokens) is already modest, and following it verbatim
+# keeps preprocessing pixel-for-pixel identical to the HF reference.
+_MAX_VIDEO_TOKENS = 30000
 
 # Frame-sampler fallbacks (mirror the checkpoint's fps_interval=2 /
 # max_frame_count_dynamic=2048); used when neither the request nor the
@@ -830,17 +835,13 @@ class Glm5NextProcessor(ProcessorMixin):
         tokenizer = AutoTokenizer.from_pretrained(model_path, **kwargs)
 
         def _cap_cfg(cfg: dict, *, is_video: bool) -> dict:
-            # Video keeps a serving pixel cap (the checkpoint's 240k-token
+            # Video keeps a serving token cap (the checkpoint's 240k-token
             # budget would starve the KV cache at startup profiling); images
             # follow the checkpoint budget verbatim so preprocessing matches
             # the HF reference exactly.
             if is_video and cfg.get("max_image_tokens") is not None:
-                ps = cfg.get("patch_size", 14)
-                ms = cfg.get("merge_size", 2)
-                tps = cfg.get("temporal_patch_size", 2)
                 cfg["max_image_tokens"] = min(
-                    cfg["max_image_tokens"],
-                    _MM_MAX_PIXELS // (tps * (ps * ms) ** 2),
+                    cfg["max_image_tokens"], _MAX_VIDEO_TOKENS
                 )
             return cfg
 
