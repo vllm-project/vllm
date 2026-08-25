@@ -88,7 +88,7 @@ def _make_connector_with_fake_worker(
 ):
     """Create a NixlConnector with FakeNixlConnectorWorker."""
     vllm_config = create_vllm_config(kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG)
-    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=32)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,

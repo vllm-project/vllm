@@ -147,31 +147,59 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
-        )
-        remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
-        read_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=[
-                    list(local_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-                remote_block_ids=[
-                    list(remote_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
+        local_region_groups = getattr(self, "region_group_ids", [])
+        remote_region_groups = getattr(self, "dst_region_group_ids", {}).get(
+            engine_id, local_region_groups
+        )
+        if local_region_groups != remote_region_groups:
+            if not self.use_mla or self._has_mamba:
+                raise NotImplementedError(
+                    "Different NIXL cache-group layouts are only supported for "
+                    "pure MLA models"
+                )
+            assert len(plan.all_source_ranks) == 1
+            remote_by_region = self._block_ids_by_region(
+                meta.remote.block_ids, remote_region_groups
             )
-            for rank in plan.all_source_ranks
-        ]
+            remote_by_region = self._split_block_ids_by_region(
+                remote_by_region, self.dst_region_split_ratios[engine_id]
+            )
+            read_specs = [
+                ReadSpec(
+                    remote_rank=plan.all_source_ranks[0],
+                    local_block_ids=self._block_ids_by_region(
+                        local_block_ids, local_region_groups
+                    ),
+                    remote_block_ids=remote_by_region,
+                    block_ids_by_region=True,
+                )
+            ]
+        else:
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
+            remote_block_ids = meta.remote.block_ids
+            num_groups = len(local_block_ids)
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=[
+                        list(local_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                    remote_block_ids=[
+                        list(remote_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                )
+                for rank in plan.all_source_ranks
+            ]
 
         # D may have to perform multiple reads from different remote ranks.
         # Pure MLA reads once because its cache is replicated. Hybrid
@@ -248,6 +276,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_info.remote_block_size
         )
         if block_size_ratio > 1:
+            if read_spec.block_ids_by_region:
+                raise NotImplementedError(
+                    "Region-mapped NIXL transfers require matching physical block sizes"
+                )
             local_block_ids, remote_block_ids = (
                 self._map_block_ids_for_block_size_ratio(
                     local_block_ids, remote_block_ids, block_size_ratio
@@ -287,17 +319,27 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self.xfer_stats.record_failed_notification()
             return
 
-        assert (
-            len(remote_block_ids)
-            == len(local_block_ids)
-            == len(self.kv_cache_config.transfer_groups)
-        )
-        local_block_ids, remote_block_ids = self._apply_prefix_caching(
-            decode_block_ids=local_block_ids,
-            prefill_block_ids=remote_block_ids,
-            decode_physical_per_logical=self._physical_blocks_per_logical_kv_block,
-            prefill_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
-        )
+        if read_spec.block_ids_by_region:
+            local_block_ids, remote_block_ids = self._apply_prefix_caching_by_region(
+                decode_block_ids=local_block_ids,
+                prefill_block_ids=remote_block_ids,
+            )
+        else:
+            assert (
+                len(remote_block_ids)
+                == len(local_block_ids)
+                == len(self.kv_cache_config.transfer_groups)
+            )
+            local_block_ids, remote_block_ids = self._apply_prefix_caching(
+                decode_block_ids=local_block_ids,
+                prefill_block_ids=remote_block_ids,
+                decode_physical_per_logical=(
+                    self._physical_blocks_per_logical_kv_block
+                ),
+                prefill_physical_per_logical=(
+                    remote_info.remote_physical_blocks_per_logical
+                ),
+            )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
@@ -309,12 +351,24 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
+            region_group_ids=(
+                list(range(self.num_regions))
+                if read_spec.block_ids_by_region
+                else self.dst_region_group_ids[dst_engine_id]
+            ),
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
+            region_group_ids=(
+                list(range(self.num_regions))
+                if read_spec.block_ids_by_region
+                else self.region_group_ids
+            ),
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
