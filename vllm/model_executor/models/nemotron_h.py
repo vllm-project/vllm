@@ -29,6 +29,7 @@ import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.logger import init_logger
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
@@ -94,6 +95,8 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.triton_utils import tl, triton
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -187,14 +190,34 @@ class NemotronHMLP(nn.Module):
         self.act_fn = ReLUSquaredActivation()
         self.relu2_fp8_quant = NemotronHReLU2Fp8Quant()
         down_quant_method = self.down_proj.quant_method
+        tp1 = self.down_proj.tp_size == 1
+        modelopt_fp8 = isinstance(down_quant_method, ModelOptFp8LinearMethod)
+        fp8_scaled_mm = modelopt_fp8 and isinstance(
+            down_quant_method.fp8_linear, FP8ScaledMMLinearKernel
+        )
+        quant_key = (
+            down_quant_method.fp8_linear.input_quant_key()
+            if fp8_scaled_mm
+            else None
+        )
+        static_fp8 = quant_key == kFp8StaticTensorSym
         self.use_fused_relu2_fp8_quant = (
             envs.VLLM_EXPERIMENTAL_NEMOTRON_SHARED_RELU2_FP8_QUANT
-            and self.down_proj.tp_size == 1
-            and isinstance(down_quant_method, ModelOptFp8LinearMethod)
-            and isinstance(down_quant_method.fp8_linear, FP8ScaledMMLinearKernel)
-            and down_quant_method.fp8_linear.input_quant_key()
-            == kFp8StaticTensorSym
+            and tp1
+            and modelopt_fp8
+            and fp8_scaled_mm
+            and static_fp8
         )
+        if envs.VLLM_EXPERIMENTAL_NEMOTRON_SHARED_RELU2_FP8_QUANT:
+            logger.info_once(
+                "Nemotron ReLU2+FP8 fusion guard: enabled=%s tp1=%s "
+                "quant_method=%s fp8_kernel=%s quant_key=%s",
+                self.use_fused_relu2_fp8_quant,
+                tp1,
+                type(down_quant_method).__name__,
+                type(getattr(down_quant_method, "fp8_linear", None)).__name__,
+                quant_key,
+            )
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
