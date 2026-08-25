@@ -574,3 +574,34 @@ def test_reasoning_end_streaming_scan_cache_resets_on_new_stream():
     fresh = tokenizer.encode("ab", add_special_tokens=False)
     parser._reasoning_ended_streaming = False
     assert parser.is_reasoning_end_streaming(fresh, fresh[-1:]) is False
+
+
+def test_reasoning_end_streaming_rejected_draft_marker_not_cached():
+    """The scheduler's bitmask path scans simulated sequences that include
+    scheduled speculative draft tokens. A draft proposing </mm:think> can be
+    rejected by the verifier while a later real sequence reaches the same
+    length with different tokens (accept-all-but-last + bonus). The scan
+    cache must not treat the rejected draft's marker as real - that engages
+    the grammar mid-reasoning and empties the response content."""
+    parser, tokenizer = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
+    end_id = tokenizer.convert_tokens_to_ids("</mm:think>")
+
+    history = tokenizer.encode("thinking a", add_special_tokens=False)
+    drafts = [
+        tokenizer.convert_tokens_to_ids("b"),
+        end_id,
+        tokenizer.convert_tokens_to_ids("c"),
+    ]
+    simulated = history + drafts
+    # Bitmask-path probe over the simulated (draft-containing) sequence.
+    assert parser.is_reasoning_end_streaming(simulated, drafts) is True
+
+    # Verifier rejected the marker draft; the real sequence reaches the SAME
+    # length with different tokens. Detection must NOT fire from the cache.
+    real = history + tokenizer.encode("bde", add_special_tokens=False)
+    assert len(real) == len(simulated)
+    assert parser.is_reasoning_end_streaming(real, real[-1:]) is False
+
+    # And the genuine marker must still be detected when it arrives.
+    real2 = real + [end_id]
+    assert parser.is_reasoning_end_streaming(real2, [end_id]) is True

@@ -208,12 +208,35 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         marker-length overlap for markers straddling the line). If the
         sequence shrank since the last call - a new stream reusing the
         parser - the cache resets and the scan restarts from zero.
+
+        Cached positions are re-verified against the current tokens before
+        being trusted: the scheduler's bitmask path scans *simulated*
+        sequences that include scheduled speculative draft tokens, and a
+        draft that proposes a marker can be rejected by the verifier while
+        the same sequence length is later reached by different tokens
+        (accept-all-but-last plus bonus). A stale cached marker would then
+        end reasoning that never ended - engaging the grammar mid-thought
+        and leaving the response with empty content. Verification is
+        O(marker length); a mismatch triggers a full rescan.
         """
         n = len(input_ids)
         if n < self._history_scan_pos:
             self._history_scan_pos = 0
             self._history_last_start_pos = -1
             self._history_last_end_pos = -1
+        else:
+            for pos, marker in (
+                (self._history_last_start_pos, self._start_token_ids),
+                (self._history_last_end_pos, self._end_token_ids),
+            ):
+                if pos >= 0 and (
+                    pos + len(marker) > n
+                    or tuple(input_ids[pos : pos + len(marker)]) != marker
+                ):
+                    self._history_scan_pos = 0
+                    self._history_last_start_pos = -1
+                    self._history_last_end_pos = -1
+                    break
         overlap = max(len(self._start_token_ids), len(self._end_token_ids)) - 1
         begin = max(0, self._history_scan_pos - overlap)
         window = input_ids[begin:n] if begin else input_ids
