@@ -44,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
+    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
@@ -1300,7 +1301,10 @@ def test_fused_marlin_moe_non_gated(
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
 
-def _make_humming_indexed_experts(activation: MoEActivation):
+def _make_humming_indexed_experts(
+    activation: MoEActivation,
+    input_dtype=None,
+):
     pytest.importorskip("humming")
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         HummingIndexedExperts,
@@ -1349,10 +1353,13 @@ def _make_humming_indexed_experts(activation: MoEActivation):
                 ),
             )
 
+    if input_dtype is None:
+        input_dtype = humming.dtypes.bfloat16
+
     humming_utils.convert_to_humming_moe_kernel_format(
         layer,
         weight_schema=weight_schema,
-        input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
+        input_schema=humming.HummingInputSchema(a_dtype=input_dtype),
     )
 
     layer.local_num_experts = layer.global_num_experts = num_experts
@@ -1451,6 +1458,185 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
         w2=torch.empty(num_experts, 1),
         topk_ids=torch.empty(1, top_k, dtype=torch.long),
     ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+
+def test_humming_fp8_workspace_elides_activation_output():
+    pytest.importorskip("humming")
+    if not current_platform.has_device_capability(89):
+        pytest.skip("FP8 activation quantization requires SM89+")
+    from vllm.utils import humming
+
+    experts, _ = _make_humming_indexed_experts(
+        MoEActivation.SILU,
+        input_dtype=humming.dtypes.float8e4m3,
+    )
+    assert experts._supports_fused_silu_fp8_quant(MoEActivation.SILU)
+
+    _, required_buffers = experts.get_buffer_metas(
+        M=1,
+        topk=experts.moe_config.experts_per_token,
+        activation=MoEActivation.SILU,
+    )
+    assert "activation_output" not in required_buffers
+    assert "quanted_down_input" in required_buffers
+
+
+@torch.inference_mode()
+def test_humming_fused_activation_quant_is_cudagraph_safe():
+    pytest.importorskip("humming")
+    if not current_platform.has_device_capability(89):
+        pytest.skip("FP8 activation quantization requires SM89+")
+    from humming import ops as humming_ops
+
+    from vllm.utils import humming
+
+    activation = MoEActivation.SILU
+    experts, _ = _make_humming_indexed_experts(
+        activation,
+        input_dtype=humming.dtypes.float8e4m3,
+    )
+    experts.activation_config = ApplyMoEActivationConfig(clamp_limit=10.0)
+
+    num_tokens = 6
+    intermediate_size = experts.moe_config.intermediate_size
+    gate_up_output = torch.randn(
+        (num_tokens, intermediate_size * 2),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    quanted_down_input = torch.empty(
+        (num_tokens, intermediate_size),
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+    buffers = {
+        "gate_up_output": gate_up_output,
+        "quanted_down_input": quanted_down_input,
+    }
+
+    # Warm up lazy library state before capture. The dynamic scale allocation
+    # itself intentionally remains inside the captured production path.
+    experts.activation_and_quantize(activation, buffers)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output, graph_scale = experts.activation_and_quantize(activation, buffers)
+
+    new_gate_up_output = torch.randn_like(gate_up_output)
+    gate_up_output.copy_(new_gate_up_output)
+    graph.replay()
+
+    activation_output = torch.empty_like(quanted_down_input, dtype=torch.bfloat16)
+    swiglu_limit_func(
+        activation_output,
+        new_gate_up_output,
+        experts.activation_config.clamp_limit,
+    )
+    ref_output = torch.empty_like(quanted_down_input)
+    ref_output, ref_scale = humming_ops.quant_input(
+        inputs=activation_output,
+        outputs=ref_output,
+        dtype="float8e4m3",
+        group_size=None,
+        scale_dtype="float32",
+    )
+
+    assert graph_output.data_ptr() == quanted_down_input.data_ptr()
+    torch.testing.assert_close(graph_scale, ref_scale, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        graph_output.float(), ref_output.float(), atol=0.0, rtol=0.0
+    )
+
+
+def test_humming_indexed_fused_activation_quant_matches_fallback():
+    from contextlib import nullcontext
+    from unittest.mock import patch
+
+    pytest.importorskip("humming")
+    if not current_platform.has_device_capability(89):
+        pytest.skip("FP8 activation quantization requires SM89+")
+    from vllm.forward_context import set_forward_context
+    from vllm.utils import humming
+
+    activation = MoEActivation.SILU
+    experts, layer = _make_humming_indexed_experts(
+        activation,
+        input_dtype=humming.dtypes.float8e4m3,
+    )
+    experts.activation_config = ApplyMoEActivationConfig(clamp_limit=10.0)
+    assert experts._supports_fused_silu_fp8_quant(activation)
+
+    moe_config = experts.moe_config
+    num_tokens = 3
+    top_k = moe_config.experts_per_token
+    hidden_size = moe_config.hidden_dim
+    num_experts = moe_config.num_experts
+    hidden_states = torch.randn(
+        (num_tokens, hidden_size), dtype=layer.params_dtype, device="cuda"
+    )
+    topk_weights = torch.full(
+        (num_tokens, top_k),
+        1 / top_k,
+        dtype=layer.params_dtype,
+        device="cuda",
+    )
+    topk_ids = (
+        torch.arange(num_tokens * top_k, dtype=torch.int32, device="cuda").view(
+            num_tokens, top_k
+        )
+        % num_experts
+    )
+
+    def run(force_fallback: bool) -> torch.Tensor:
+        context = (
+            patch.object(
+                experts,
+                "_supports_fused_silu_fp8_quant",
+                return_value=False,
+            )
+            if force_fallback
+            else nullcontext()
+        )
+        with context:
+            workspace13_shape, workspace2_shape, _ = experts.workspace_shapes(
+                M=num_tokens,
+                N=moe_config.intermediate_size,
+                K=hidden_size,
+                topk=top_k,
+                global_num_experts=num_experts,
+                local_num_experts=num_experts,
+                expert_tokens_meta=None,
+                activation=activation,
+            )
+            workspace13 = torch.empty(
+                workspace13_shape, dtype=layer.params_dtype, device="cuda"
+            )
+            workspace2 = torch.empty(
+                workspace2_shape, dtype=layer.params_dtype, device="cuda"
+            )
+            output = torch.empty_like(hidden_states)
+            with set_forward_context(None, vllm_config, num_tokens=num_tokens):
+                experts.apply(
+                    output=output,
+                    hidden_states=hidden_states,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    activation=activation,
+                    global_num_experts=num_experts,
+                    expert_map=None,
+                    a1q_scale=None,
+                    a2_scale=None,
+                    workspace13=workspace13,
+                    workspace2=workspace2,
+                    expert_tokens_meta=None,
+                    apply_router_weight_on_input=False,
+                )
+            return output
+
+    fused_output = run(force_fallback=False)
+    fallback_output = run(force_fallback=True)
+    torch.testing.assert_close(fused_output, fallback_output, atol=0.0, rtol=0.0)
 
 
 def test_humming_indexed_writes_supplied_output_buffer():
