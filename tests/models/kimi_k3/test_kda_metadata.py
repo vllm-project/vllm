@@ -130,14 +130,22 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     ).replace(is_prefilling=torch.tensor([True, True]))
-    actual = _make_builder(
+    builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=0,
         full_cuda_graph=False,
         mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
         device=device,
-    ).build(0, common_attn_metadata)
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        common_attn_metadata.block_table_tensor,
+        common_attn_metadata.seq_lens,
+        builder.kv_cache_spec,
+        "align",
+    )
+    actual = builder.build(0, common_attn_metadata)
 
     assert actual.checkpoint is not None
     torch.testing.assert_close(
@@ -159,14 +167,22 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     ).replace(is_prefilling=torch.tensor([True]))
-    actual = _make_builder(
+    builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=0,
         full_cuda_graph=False,
         mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
         device=device,
-    ).build(0, common_attn_metadata)
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        common_attn_metadata.block_table_tensor,
+        common_attn_metadata.seq_lens,
+        builder.kv_cache_spec,
+        "align",
+    )
+    actual = builder.build(0, common_attn_metadata)
 
     assert actual.checkpoint is None
 
