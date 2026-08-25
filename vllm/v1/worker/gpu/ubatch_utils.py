@@ -334,8 +334,14 @@ class UBatchRunner:
         """Whether this rank would like to microbatch this step.
 
         The answer still has to be agreed with the other DP ranks before it can
-        be acted on: microbatching is all-or-nothing across the group.
+        be acted on: microbatching is all-or-nothing across the group. It is
+        computed for the other ranks too, from the token counts the DP
+        all-reduce carries, so it must stay a pure function of its arguments.
         """
+        if num_tokens < self.num_ubatches:
+            # Below one token per microbatch the split is not well-formed, no
+            # matter what the thresholds say.
+            return False
         return check_ubatch_thresholds(
             self.parallel_config,
             num_tokens,
