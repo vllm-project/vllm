@@ -69,33 +69,38 @@ class XPUWorker(Worker):
                 f"({visible_device_count})."
             )
 
+        # Offset local_rank by VLLM_XPU_DEVICE_OFFSET so the worker binds a
+        # specific physical card while all cards stay visible. Keeping every
+        # card visible is required for oneCCL/XCCL collectives across separate
+        # processes (e.g. RL weight sync between a trainer and a standalone
+        # vLLM server); narrowing visibility with ZE_AFFINITY_MASK breaks those
+        # collectives. Offsetting local_rank itself (not just the device index)
+        # keeps every downstream consumer consistent: the device communicator
+        # in parallel_state, LOCAL_RANK, and the memory query below.
+        offset = envs.VLLM_XPU_DEVICE_OFFSET
+        if offset:
+            device_count = torch.accelerator.device_count()
+            offset_local_rank = self.local_rank + offset
+            if not 0 <= offset_local_rank < device_count:
+                raise ValueError(
+                    f"XPU local rank {offset_local_rank} (local rank "
+                    f"{self.local_rank} + VLLM_XPU_DEVICE_OFFSET {offset}) is "
+                    f"out of range for {device_count} visible device(s)."
+                )
+            self.local_rank = offset_local_rank
+
         device = self.device_config.device
         if (
             isinstance(device, torch.device)
             and device.type == "xpu"
             and current_platform.is_xpu()
         ):
-            # Offset the physical device index from the distributed local rank
-            # so a worker can be pinned to a specific card while all cards stay
-            # visible. Keeping every card visible is required for oneCCL/XCCL
-            # collectives across separate processes (e.g. RL weight sync between
-            # a trainer and a standalone vLLM server); narrowing visibility with
-            # ZE_AFFINITY_MASK breaks those collectives.
-            device_index = self.local_rank + envs.VLLM_XPU_DEVICE_OFFSET
-            device_count = torch.accelerator.device_count()
-            if not 0 <= device_index < device_count:
-                raise ValueError(
-                    f"XPU device index {device_index} (local rank "
-                    f"{self.local_rank} + VLLM_XPU_DEVICE_OFFSET "
-                    f"{envs.VLLM_XPU_DEVICE_OFFSET}) is out of range for "
-                    f"{device_count} visible device(s)."
-                )
-            self.device = torch.device(f"xpu:{device_index}")
+            self.device = torch.device(f"xpu:{self.local_rank}")
             torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
-                device_index
+                self.local_rank
             ).total_memory
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
