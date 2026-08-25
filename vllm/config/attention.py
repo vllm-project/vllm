@@ -42,10 +42,6 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
-    use_prefill_decode_attention: bool = False
-    """Use separate prefill and decode kernels for attention instead of
-    the unified triton kernel."""
-
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 
@@ -123,7 +119,7 @@ class AttentionConfig:
         if self.use_fp4_indexer_cache is not None:
             logger.warning(
                 "use_fp4_indexer_cache is deprecated and will be removed in "
-                "v0.19. Use indexer_kv_dtype instead (True -> 'mxfp4')."
+                "v0.29. Use indexer_kv_dtype instead (True -> 'mxfp4')."
             )
             if self.use_fp4_indexer_cache:
                 if self.indexer_kv_dtype not in ("auto", "mxfp4"):

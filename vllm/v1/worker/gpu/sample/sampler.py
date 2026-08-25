@@ -103,6 +103,22 @@ class Sampler:
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
 
+    def get_logprobs_dims(
+        self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
+    ) -> tuple[int, int] | None:
+        """(num_logprobs, max_per_req_token_ids) for the given requests, or
+        None when none of them want logprobs."""
+        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        max_token_ids = (
+            self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np)
+            if include_token_ids
+            else 0
+        )
+        if max_num_logprobs == NO_LOGPROBS and max_token_ids == 0:
+            return None
+        num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
+        return num_logprobs, max_token_ids
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -120,11 +136,7 @@ class Sampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
 
-        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
-            idx_mapping_np
-        )
-        return_logprobs = max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0
+        logprobs_dims = self.get_logprobs_dims(idx_mapping_np)
 
         sampled, processed_logits = self.sample(
             logits,
@@ -134,7 +146,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
-            return_logprobs=return_logprobs,
+            return_logprobs=logprobs_dims is not None,
         )
 
         if self.trace_replay_state is not None:
@@ -142,12 +154,12 @@ class Sampler:
             # computed logprobs reflect the real distribution of the forced token.
             self.trace_replay_state.apply_trace(sampled, idx_mapping)
 
-        if return_logprobs:
+        if logprobs_dims is not None:
+            num_logprobs, max_per_req_token_ids = logprobs_dims
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
-            num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
             logprobs_tensors = compute_topk_scores(
                 logits,
                 num_logprobs,

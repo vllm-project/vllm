@@ -815,6 +815,7 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    num_prefill_checkpoint_blocks: int = 0
     num_heads: int = 1
     tokens_per_state: int = -1
 
@@ -843,7 +844,9 @@ class MambaSpec(KVCacheSpec):
                 cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
             ) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
-            return self.page_size_bytes * (2 + self.num_speculative_blocks)
+            return self.page_size_bytes * (
+                2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
+            )
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
@@ -865,6 +868,7 @@ class MambaSpec(KVCacheSpec):
         return all(
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
+            and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             for spec in kv_cache_specs.values()
         )
 

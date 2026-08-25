@@ -99,12 +99,15 @@ class LogitsProcessor(PluggableLayer):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         if self.logits_as_input:
             logits = hidden_states
         else:
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            logits = self._get_logits(
+                hidden_states, lm_head, embedding_bias, skip_gather
+            )
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
@@ -173,9 +176,12 @@ class LogitsProcessor(PluggableLayer):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if skip_gather:
+            return logits
 
         # Gather logits for TP
         if lm_head.tp_size > 1:

@@ -48,7 +48,7 @@ The batch running tool is designed to be used from the command line.
 You can run the batch with the following command, which will write its results to a file called `results.jsonl`
 
 ```bash
-python -m vllm.entrypoints.openai.run_batch \
+python -m vllm.entrypoints.launchers.run_batch \
     -i features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
@@ -80,7 +80,7 @@ The batch runner supports remote input and output urls that are accessible via h
 For example, to run against our example input file located at `https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl`, you can run
 
 ```bash
-python -m vllm.entrypoints.openai.run_batch \
+python -m vllm.entrypoints.launchers.run_batch \
     -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
@@ -190,7 +190,7 @@ output_url='https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_OUTPUT_FILE.jsonl?AW
 You can now run the batch runner, using the urls generated in the previous section.
 
 ```bash
-python -m vllm.entrypoints.openai.run_batch \
+python -m vllm.entrypoints.launchers.run_batch \
     -i "https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_INPUT_FILE.jsonl?AWSAccessKeyId=ABCDEFGHIJKLMNOPQRST&Signature=abcdefghijklmnopqrstuvwxyz12345&Expires=1715800091" \
     -o "https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_OUTPUT_FILE.jsonl?AWSAccessKeyId=ABCDEFGHIJKLMNOPQRST&Signature=abcdefghijklmnopqrstuvwxyz12345&Expires=1715800091" \
     --model meta-llama/Meta-Llama-3-8B-Instruct

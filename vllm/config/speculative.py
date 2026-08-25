@@ -3,7 +3,7 @@
 
 import copy
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -79,6 +79,293 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+
+_QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
+    {
+        "Qwen3OmniMoeForConditionalGeneration",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
+    }
+)
+_QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
+
+
+def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
+    hf_config = model_config.hf_config
+    architectures = set(getattr(model_config, "architectures", ()) or ())
+    architectures.update(getattr(hf_config, "architectures", ()) or ())
+    return getattr(hf_config, "model_type", None) == "qwen3_omni_moe" or bool(
+        architectures & _QWEN3_OMNI_TARGET_ARCHITECTURES
+    )
+
+
+def _get_qwen3_omni_text_config(model_config: ModelConfig) -> Any:
+    thinker_config = getattr(model_config.hf_config, "thinker_config", None)
+    text_config = getattr(thinker_config, "text_config", None)
+    if text_config is None:
+        text_config = getattr(model_config, "hf_text_config", None)
+    return text_config
+
+
+def _get_attention_head_dim(config: Any) -> int | None:
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    hidden_size = getattr(config, "hidden_size", None)
+    num_attention_heads = getattr(config, "num_attention_heads", None)
+    if (
+        isinstance(hidden_size, int)
+        and isinstance(num_attention_heads, int)
+        and num_attention_heads > 0
+        and hidden_size % num_attention_heads == 0
+    ):
+        return hidden_size // num_attention_heads
+    return None
+
+
+def _get_nested_config_value(config: Any, section: str, name: str) -> Any:
+    nested_config = getattr(config, section, None)
+    if isinstance(nested_config, Mapping):
+        return nested_config.get(name)
+    return getattr(nested_config, name, None)
+
+
+def _get_qwen3_dspark_value(config: Any, name: str) -> Any:
+    # Match DFlashQwen3Model's precedence: dflash_config overrides
+    # eagle_config, and top-level values are the modern fallback.
+    value = _get_nested_config_value(config, "dflash_config", name)
+    if value is None:
+        value = _get_nested_config_value(config, "eagle_config", name)
+    if value is None:
+        value = getattr(config, name, None)
+    return value
+
+
+def _validate_qwen3_omni_dspark(
+    target_model_config: ModelConfig,
+    draft_model_config: ModelConfig,
+    num_speculative_tokens: int,
+) -> None:
+    """Validate the standalone Qwen3-Omni DSpark checkpoint contract."""
+    if not _is_qwen3_omni_target(target_model_config):
+        return
+
+    draft_hf_config = draft_model_config.hf_config
+    draft_architectures = set(getattr(draft_model_config, "architectures", ()) or ())
+    draft_architectures.update(getattr(draft_hf_config, "architectures", ()) or ())
+    if _QWEN3_OMNI_DSPARK_ARCHITECTURE not in draft_architectures:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a standalone draft checkpoint with "
+            f"architectures=['{_QWEN3_OMNI_DSPARK_ARCHITECTURE}']; generic "
+            "Qwen3DSparkModel checkpoints must be converted first."
+        )
+
+    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
+    if block_size is None:
+        block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a positive integer block_size in the "
+            "draft config."
+        )
+    if num_speculative_tokens != block_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires num_speculative_tokens to match the "
+            f"trained block_size ({block_size}); got {num_speculative_tokens}."
+        )
+
+    target_text_config = _get_qwen3_omni_text_config(target_model_config)
+    if target_text_config is None:
+        raise ValueError(
+            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
+        )
+    target_hidden_size = getattr(
+        target_text_config,
+        "hidden_size",
+        target_model_config.get_hidden_size(),
+    )
+    draft_target_hidden_size = getattr(draft_hf_config, "target_hidden_size", None)
+    if draft_target_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft target_hidden_size must match the target "
+            f"text hidden size ({target_hidden_size}); got {draft_target_hidden_size}."
+        )
+    draft_hidden_size = getattr(draft_hf_config, "hidden_size", None)
+    if draft_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft hidden_size must match the target thinker "
+            f"hidden size ({target_hidden_size}); got {draft_hidden_size}."
+        )
+
+    target_attention = {
+        "num_attention_heads": getattr(target_text_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(
+            target_text_config,
+            "num_key_value_heads",
+            getattr(target_text_config, "num_attention_heads", None),
+        ),
+        "head_dim": _get_attention_head_dim(target_text_config),
+    }
+    draft_attention = {
+        "num_attention_heads": getattr(draft_hf_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(
+            draft_hf_config,
+            "num_key_value_heads",
+            getattr(draft_hf_config, "num_attention_heads", None),
+        ),
+        "head_dim": _get_attention_head_dim(draft_hf_config),
+    }
+    for name, target_value in target_attention.items():
+        if (
+            not isinstance(target_value, int)
+            or isinstance(target_value, bool)
+            or target_value <= 0
+        ):
+            raise ValueError(
+                "Qwen3-Omni DSpark requires a positive integer "
+                f"{name} in the target thinker text_config; got {target_value}."
+            )
+        draft_value = draft_attention[name]
+        if draft_value != target_value:
+            raise ValueError(
+                f"Qwen3-Omni DSpark draft {name} must match the target thinker "
+                f"value ({target_value}); got {draft_value}."
+            )
+
+    target_layer_ids = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "target_layer_ids"
+    )
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
+    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a non-empty target_layer_ids list in "
+            "the draft config."
+        )
+    if any(
+        not isinstance(layer_id, int) or isinstance(layer_id, bool)
+        for layer_id in target_layer_ids
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must contain only integers."
+        )
+    if list(target_layer_ids) != sorted(set(target_layer_ids)):
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must be unique and strictly increasing."
+        )
+    target_num_layers = getattr(
+        target_text_config,
+        "num_hidden_layers",
+        target_model_config.get_total_num_hidden_layers(),
+    )
+    if target_layer_ids[0] < 0 or target_layer_ids[-1] >= target_num_layers:
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must be zero-based text-layer "
+            f"indices in [0, {target_num_layers - 1}]; got {target_layer_ids}."
+        )
+
+    if _get_qwen3_dspark_value(draft_hf_config, "use_aux_hidden_state") is not True:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires use_aux_hidden_state=true because Omni "
+            "conditioning is supplied through thinker hidden states."
+        )
+
+    markov_rank = getattr(draft_hf_config, "markov_rank", None)
+    if (
+        not isinstance(markov_rank, int)
+        or isinstance(markov_rank, bool)
+        or markov_rank <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a positive integer markov_rank in the "
+            "draft config."
+        )
+    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
+    if markov_head_type != "vanilla":
+        raise ValueError(
+            "Qwen3-Omni DSpark currently requires markov_head_type='vanilla'; "
+            f"got {markov_head_type!r}."
+        )
+
+    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
+    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
+    if sample_from_anchor is not True or bonus_anchor is not False:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires sample_from_anchor=true and "
+            "dspark_bonus_anchor=false."
+        )
+
+    target_vocab_size = getattr(
+        target_text_config,
+        "vocab_size",
+        target_model_config.get_vocab_size(),
+    )
+    draft_input_vocab_size = getattr(draft_hf_config, "vocab_size", None)
+    if (
+        not isinstance(draft_input_vocab_size, int)
+        or isinstance(draft_input_vocab_size, bool)
+        or draft_input_vocab_size <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark input vocab_size must be a positive integer; "
+            f"got {draft_input_vocab_size}."
+        )
+    draft_output_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None)
+    if draft_output_vocab_size is None:
+        draft_output_vocab_size = draft_input_vocab_size
+    if (
+        not isinstance(draft_output_vocab_size, int)
+        or isinstance(draft_output_vocab_size, bool)
+        or not 0 < draft_output_vocab_size <= target_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark draft_vocab_size must be a positive integer no "
+            f"larger than target vocab_size ({target_vocab_size}); got "
+            f"{draft_output_vocab_size}."
+        )
+
+    noise_token_id = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "mask_token_id"
+    )
+    for name in (
+        "mask_token_id",
+        "dspark_noise_token_id",
+        "pard_token",
+        "ptd_token_id",
+    ):
+        if noise_token_id is None:
+            noise_token_id = getattr(draft_hf_config, name, None)
+        if noise_token_id is not None:
+            break
+    if (
+        not isinstance(noise_token_id, int)
+        or isinstance(noise_token_id, bool)
+        or not 0 <= noise_token_id < draft_input_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a valid mask/noise token id within the "
+            f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
+        )
+
+    rope_configs = (
+        getattr(draft_hf_config, "rope_parameters", None),
+        getattr(draft_hf_config, "rope_scaling", None),
+    )
+    has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
+    has_mrope = has_mrope or any(
+        isinstance(rope_config, Mapping) and "mrope_section" in rope_config
+        for rope_config in rope_configs
+    )
+    if has_mrope:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft checkpoints must use logical 1-D RoPE and "
+            "must not define mrope_section."
+        )
 
 
 @config
@@ -964,6 +1251,8 @@ class SpeculativeConfig:
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                    or _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                    in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                     or (
                         "DSparkDraftModel" in self.draft_model_config.architectures
@@ -1037,6 +1326,8 @@ class SpeculativeConfig:
                     self.update_arch_()
                 elif self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
+                    and _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                    not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
@@ -1125,12 +1416,21 @@ class SpeculativeConfig:
                         if (
                             "Qwen3DSparkModel"
                             not in self.draft_model_config.architectures
+                            and _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                            not in self.draft_model_config.architectures
                         ):
                             raise ValueError(
                                 "dspark_draft_topk is only supported by "
-                                "Qwen3DSparkModel"
+                                "Qwen3DSparkModel and Qwen3OmniDSparkModel"
                             )
                         hf_config.dspark_draft_topk = dspark_draft_topk
+
+                    assert self.target_model_config is not None
+                    _validate_qwen3_omni_dspark(
+                        self.target_model_config,
+                        self.draft_model_config,
+                        self.num_speculative_tokens,
+                    )
 
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(

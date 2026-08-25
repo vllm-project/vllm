@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,
@@ -71,7 +72,12 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             headers=metrics_header(metrics_header_format),
         )
 
-    return StreamingResponse(content=generator, media_type="text/event-stream")
+    args = getattr(raw_request.app.state, "args", None)
+    keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
+    return StreamingResponse(
+        content=with_sse_keep_alive(generator, float(keep_alive_interval)),
+        media_type="text/event-stream",
+    )
 
 
 @router.post(

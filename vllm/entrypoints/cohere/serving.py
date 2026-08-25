@@ -304,13 +304,7 @@ class CohereServingChatV2(OpenAIServingChat):
                 "Received Cohere v2 chat request %s", request.model_dump_json()
             )
 
-        chat_req = self._convert_v2_to_chat_completion(request)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Converted Cohere v2 -> ChatCompletion: %s",
-                chat_req.model_dump_json(),
-            )
-
+        chat_req = self.to_chat_completion_request(request)
         generator = await self.create_chat_completion(chat_req, raw_request)
 
         match generator:
@@ -320,6 +314,26 @@ class CohereServingChatV2(OpenAIServingChat):
                 return self._chat_completion_to_v2(generator, request)
             case _:
                 return self._chat_completion_stream_to_v2(generator, request)
+
+    def to_chat_completion_request(
+        self, request: CohereChatV2Request
+    ) -> ChatCompletionRequest:
+        """Convert a Cohere v2 request into its ``ChatCompletionRequest``.
+
+        Exposed for callers that need the converted request without
+        running generation - notably the render endpoint
+        (``POST /cohere/v2/chat/render``), which hands the result to
+        :meth:`vllm.entrypoints.scale_out.render.serving.ServingRender.render_chat_request`
+        so that Cohere requests tokenize through exactly the same path
+        as ``/v1/chat/completions/render``.
+        """
+        chat_req = self._convert_v2_to_chat_completion(request)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Converted Cohere v2 -> ChatCompletion: %s",
+                chat_req.model_dump_json(),
+            )
+        return chat_req
 
     def _engine_chat_template_kwargs(
         self, chat_template_kwargs: dict[str, Any]

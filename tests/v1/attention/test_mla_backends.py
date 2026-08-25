@@ -62,6 +62,9 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.TOKENSPEED_MLA,
 ]
 
+if current_platform.is_rocm():
+    BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
+
 DEVICE_TYPE = current_platform.device_type
 
 
@@ -201,13 +204,18 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
-PREFILL_BACKENDS_TO_TEST = [
-    MLAPrefillBackendEnum.ROCM_AITER_FA,
-    MLAPrefillBackendEnum.FLASH_ATTN,
-    MLAPrefillBackendEnum.FLASHINFER,
-    MLAPrefillBackendEnum.TRTLLM_RAGGED,
-    MLAPrefillBackendEnum.TOKENSPEED_MLA,
-]
+PREFILL_BACKENDS_TO_TEST: list[MLAPrefillBackendEnum] = []
+if current_platform.is_cuda():
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [
+            MLAPrefillBackendEnum.FLASH_ATTN,
+            MLAPrefillBackendEnum.FLASHINFER,
+            MLAPrefillBackendEnum.TRTLLM_RAGGED,
+            MLAPrefillBackendEnum.TOKENSPEED_MLA,
+        ]
+    )
+elif current_platform.is_rocm():
+    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),
@@ -249,15 +257,6 @@ def _prefill_backend_dimension_params():
                             f"{invalid_reasons}"
                         )
                     )
-                )
-            elif (
-                current_platform.is_rocm()
-                and prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
-            ):
-                # Pre-existing on main: flash-attn MLA prefill returns wrong
-                # outputs and faults on ROCm, so it fails on the base commit too.
-                marks.append(
-                    pytest.mark.skip(reason="FLASH_ATTN MLA prefill broken on ROCm")
                 )
             params.append(
                 pytest.param(

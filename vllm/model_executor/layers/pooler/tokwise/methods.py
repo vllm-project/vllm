@@ -69,7 +69,7 @@ class AllPool(TokenPoolingMethod):
             return hidden_states_lst
 
         pooling_states = pooling_metadata.pooling_states
-        finished_mask = pooling_cursor.is_finished().tolist()
+        finished_mask = pooling_cursor.get_finished_mask()
 
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache

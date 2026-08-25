@@ -38,21 +38,31 @@ from vllm.multimodal.processing import (
 _I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
-class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _call_hf_processor(
+class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
+    def get_vision_encoder_info(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> PixtralHFEncoderInfo:
+        # LightOnOCR prompt updates use vision_config.image_size directly;
+        # preserve that behavior rather than inheriting Mistral3's processor
+        # longest_edge override.
+        return PixtralHFEncoderInfo(self.get_hf_config())
 
-        # NOTE: LightOnOCR does not use break/end tokens, so we remove them here.
-        input_ids = processed_outputs.get("input_ids")
+
+class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        input_ids = processed_data.get("input_ids")
         if input_ids is not None:
             processor = self.info.get_hf_processor()
             tokenizer = self.info.get_tokenizer()
@@ -67,22 +77,22 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
                 torch.tensor([break_id, end_id]),
             )
 
-            processed_outputs["input_ids"] = input_ids[keep_mask].unsqueeze(0)
-            if "attention_mask" in processed_outputs:
-                processed_outputs["attention_mask"] = processed_outputs[
-                    "attention_mask"
-                ][keep_mask].unsqueeze(0)
+            processed_data["input_ids"] = input_ids[keep_mask].unsqueeze(0)
+            if "attention_mask" in processed_data:
+                processed_data["attention_mask"] = processed_data["attention_mask"][
+                    keep_mask
+                ].unsqueeze(0)
 
         # un-pad pixel_values per-image so caches remain independent.
-        pixel_values = processed_outputs.get("pixel_values")
+        pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None:
-            image_sizes = processed_outputs["image_sizes"]
+            image_sizes = processed_data["image_sizes"]
             assert len(pixel_values) == len(image_sizes)
-            processed_outputs["pixel_values"] = [
+            processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -125,7 +135,7 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
 
 @MULTIMODAL_REGISTRY.register_processor(
     LightOnOCRMultiModalProcessor,
-    info=Mistral3ProcessingInfo,
+    info=LightOnOCRProcessingInfo,
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):

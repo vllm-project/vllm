@@ -43,7 +43,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
 
 class EncoderDecoderModelState(ModelState):
     """ModelState for cross-attention encoder-decoder models
-    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    (Whisper, CohereASR, NemotronParse, ...)
     """
 
     def __init__(
