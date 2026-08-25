@@ -388,11 +388,9 @@ class HarmonyParser(DelegatingParser):
 
 
 # Harmomy's stop tokens are <|return|>, <|call|>, <|endoftext|>
-# <|return|> is represented as "" since it's the default stop token, which xgrammar
-# disallows under constraints, leading to bad or infinite generation.
-# StreamableParser doesn't consider <|endoftext|> as a message end, so it's excluded
-# TODO: Remove <|call|> once #50595 lands.
-_END_TAG = ["<|end|>", "<|call|>", ""]
+# They are represented as "" since xgrammar disallows stop tokens while
+# under constraints, leading to bad or infinite generations.
+_END_TAG = ["<|end|>", ""]
 _FINAL_BEGIN = "<|channel|>final{constrain}<|message|>"
 _TOOL_CALL_CHANNELS = [
     "<|channel|>commentary",

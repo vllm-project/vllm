@@ -489,7 +489,7 @@ class Gemma4MTP(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if getattr(config, "tie_word_embeddings", True):
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
             text_config.vocab_size,

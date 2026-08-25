@@ -2777,6 +2777,43 @@ def fused_kda_decode(
     return out
 
 
+def fused_gdn_decode_post_conv_mtp(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    state: torch.Tensor,
+    output_gate: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out: torch.Tensor | None = None,
+    scale: float = 128**-0.5,
+    norm_eps: float = 1e-5,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty_like(output_gate)
+    torch.ops._C.fused_gdn_decode_post_conv_mtp(
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        state_indices,
+        cu_seqlens,
+        num_accepted_tokens,
+        state,
+        output_gate,
+        norm_weight,
+        out,
+        scale,
+        norm_eps,
+    )
+    return out
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,
@@ -3898,6 +3935,109 @@ def cpu_attention_with_kv_cache(
         v_scale,
         kv_cache_dtype,
     )
+
+
+def cpu_mla_decode(
+    query: torch.Tensor,
+    k_buffer: torch.Tensor,
+    v_buffer: torch.Tensor,
+    output: torch.Tensor,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
+    loc: torch.Tensor | None,
+    attn_logits: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    sm_scale: float,
+    logit_cap: float,
+    is_cross_attn: bool,
+    sliding_window_size: int,
+    encoder_lens: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+) -> None:
+    torch.ops._C.decode_attention_cpu(
+        query,
+        k_buffer,
+        v_buffer,
+        output,
+        key,
+        value,
+        loc,
+        attn_logits,
+        req_to_token,
+        req_pool_indices,
+        seq_lens,
+        sm_scale,
+        logit_cap,
+        is_cross_attn,
+        sliding_window_size,
+        encoder_lens,
+        sinks,
+    )
+
+
+def cpu_mla_extend(
+    q_extend: torch.Tensor,
+    k_extend: torch.Tensor | None,
+    v_extend: torch.Tensor | None,
+    o_extend: torch.Tensor,
+    k_buffer: torch.Tensor,
+    v_buffer: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    extend_seq_lens: torch.Tensor,
+    extend_start_loc: torch.Tensor,
+    max_len_extend: int,
+    sm_scale: float,
+    logit_cap: float,
+    is_cross_attn: bool,
+    sliding_window_size: int,
+    encoder_lens: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+    tree_mask: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.extend_attention_cpu(
+        q_extend,
+        k_extend,
+        v_extend,
+        o_extend,
+        k_buffer,
+        v_buffer,
+        req_to_token,
+        req_pool_indices,
+        seq_lens,
+        extend_seq_lens,
+        extend_start_loc,
+        max_len_extend,
+        sm_scale,
+        logit_cap,
+        is_cross_attn,
+        sliding_window_size,
+        encoder_lens,
+        sinks,
+        tree_mask,
+    )
+
+
+def bmm_cpu(
+    out: torch.Tensor,
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    is_vnni: bool,
+    scale: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.bmm_cpu(out, mat1, mat2, is_vnni, scale)
+
+
+def amx_mla_concat_and_cache(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    torch.ops._C.concat_and_cache_mla_cpu(kv_c_normed, k_pe, kv_cache, slot_mapping)
 
 
 def cpu_gemm_wna16(
