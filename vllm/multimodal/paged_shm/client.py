@@ -257,40 +257,14 @@ class _ReadContext:
 # ---------------------------------------------------------------------------
 
 
-class PagedShmClient(_BaseClient):
-    """
-    Client for the paged shared‑memory storage server.
-
-    Maintains a pool of ZMQ REQ sockets for thread‑safe concurrent access.
-    All public operations that require read/write locks are exposed through
-    high‑level methods that internally use context managers.
-
-    Parameters
-    ----------
-    address : str
-        IPC address of the server (e.g., ``"ipc:///tmp/xxx"``).
-    pin : bool
-        If True, the client‑side shared memory will be pinned for fast GPU transfers.
-    init_pool_size : int
-        Initial number of ZMQ sockets to pre‑allocate.
-    pool_workers : int
-        Number of threads in the internal thread pool for asynchronous writes.
-    max_pool_size : int
-        Maximum number of ZMQ sockets in the pool.
-    socket_timeout_ms : int
-        Send/receive timeout for ZMQ sockets in milliseconds.
-    """
-
+class PagedShmClientWithoutStorage(_BaseClient):
     def __init__(
         self,
         address: str,
-        pin: bool = False,
         init_pool_size: int = 4,
-        pool_workers: int = 1,
         max_pool_size: int = MAX_POOL_SIZE,
         socket_timeout_ms: int = 5000,
     ):
-        self._pin = pin
         self._address = address
         self._max_pool_size = max_pool_size
         self._socket_timeout_ms = socket_timeout_ms
@@ -306,6 +280,141 @@ class PagedShmClient(_BaseClient):
             sock = self._init_sock()
             self._pool.put(sock)
         self._resources.callback(_close_sock_pool, self._pool)
+
+    # ------------------------------------------------------------------
+    # Public API – each method maps 1:1 to a server command
+    # ------------------------------------------------------------------
+
+    def open_write(
+        self, items: list[ShmWriteRequest], timeout: float = 0.0
+    ) -> list[ShmAllocation]:
+        """Allocate blocks for a batch of items to be written."""
+        payload = json.dumps(
+            {
+                "items": [asdict(item) for item in items],
+                "timeout": timeout,
+            }
+        )
+        resp = self._request(OPEN_WRITE, payload)
+        resp_dict = json.loads(resp)
+        return [ShmAllocation(**a) for a in resp_dict["data"]]
+
+    def close_write(self, uuid: str) -> None:
+        """
+        Finalise a write operation for the given UUID.
+        The server will automatically reserve one read reference for each
+        generated read token associated with this UUID.
+        """
+        payload = json.dumps({"uuid": uuid})
+        self._request(CLOSE_WRITE, payload)
+
+    def open_read(self, uuid_or_token: str, timeout: float = 0.0) -> ShmAllocation:
+        """
+        Acquire a read reference to an item and return its block list.
+        Accepts UUID or read token. If a token is used, it is not consumed
+        until close_read is called, and may be used multiple times for open_read.
+        """
+        payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
+        resp = self._request(OPEN_READ, payload)
+        resp_dict = json.loads(resp)
+        return ShmAllocation(**resp_dict["data"])
+
+    def close_read(self, uuid_or_token: str) -> None:
+        """
+        Release a read reference. Accepts UUID or read token.
+
+        If a read token is provided, the token will be destroyed on the server
+        (i.e., removed from the token mapping).  The token must have been used
+        in a prior open_read call (or pre-incremented via the automatic
+        reservation on close_write).
+        """
+        self._request(CLOSE_READ, uuid_or_token)
+
+    def wait_for_readable(self, uuid_or_token: str, timeout: float = 0.0) -> None:
+        """Wait for an item to become readable. Does NOT acquire a read lock."""
+        payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
+        self._request(WAIT_FOR_READABLE, payload)
+
+    def delete(self, uuid: str) -> None:
+        """Delete an item and free its blocks immediately."""
+        self._request(DELETE, uuid)
+
+    def get_storage_info(self) -> dict[str, Any]:
+        """Return storage metadata (name, size, block_size, n_block)."""
+        resp = self._request(GET_STORAGE_INFO)
+        resp_dict = json.loads(resp)
+        return resp_dict["data"]
+
+    def get_manager_state(self) -> dict[str, Any]:
+        """Return manager statistics (allocations, cache state, etc.)."""
+        resp = self._request(GET_MANAGER_STATE)
+        return json.loads(resp)
+
+    def get_shm_name(self) -> str:
+        """Return the shared memory name (cached from initial handshake)."""
+        return self._shm_name
+
+    def get_info(self, uuid: str) -> dict[str, Any]:
+        """
+        Return object info for the given UUID.
+        Also accepts read tokens (they are resolved on the server).
+        """
+        resp = self._request(GET_INFO, uuid)
+        return json.loads(resp)
+
+    def debug_cleanup(self) -> None:
+        """
+        Send a DEBUG_CLEAN command to the server to forcibly clean up all
+        pending waiters and purge tokens. This is only effective if the server
+        was started with debug=True; otherwise it raises RuntimeError.
+        """
+        self._request(DEBUG_CLEAN)
+
+    def close(self) -> None:
+        self._resources.close()
+
+
+class PagedShmClient(PagedShmClientWithoutStorage):
+    """
+    Client for the paged shared‑memory storage server.
+
+    Maintains a pool of ZMQ REQ sockets for thread‑safe concurrent access.
+    All public operations that require read/write locks are exposed through
+    high‑level methods that internally use context managers.
+
+    Parameters
+    ----------
+    address : str
+        IPC address of the server (e.g., ``"ipc:///tmp/xxx"``).
+    init_pool_size : int
+        Initial number of ZMQ sockets to pre‑allocate.
+    max_pool_size : int
+        Maximum number of ZMQ sockets in the pool.
+    socket_timeout_ms : int
+        Send/receive timeout for ZMQ sockets in milliseconds.
+    pin : bool
+        If True, the client‑side shared memory will be pinned for fast GPU transfers.
+    pool_workers : int
+        Number of threads in the internal thread pool for asynchronous writes.
+    """
+
+    def __init__(
+        self,
+        address: str,
+        init_pool_size: int = 4,
+        max_pool_size: int = MAX_POOL_SIZE,
+        socket_timeout_ms: int = 5000,
+        pin: bool = False,
+        pool_workers: int = 1,
+    ):
+        super().__init__(
+            address=address,
+            init_pool_size=init_pool_size,
+            max_pool_size=max_pool_size,
+            socket_timeout_ms=socket_timeout_ms,
+        )
+
+        self._pin = pin
 
         # Thread pool for asynchronous writes
         self._executor: Executor = ThreadPoolExecutor(max_workers=pool_workers)
@@ -506,98 +615,6 @@ class PagedShmClient(_BaseClient):
         with self.read_context(uuid, timeout=timeout) as ctx:
             it = self._storage.get_iterator_tensor(ctx.size, ctx.blocks)()
             yield it
-
-    # ------------------------------------------------------------------
-    # Public API – each method maps 1:1 to a server command
-    # ------------------------------------------------------------------
-
-    def open_write(
-        self, items: list[ShmWriteRequest], timeout: float = 0.0
-    ) -> list[ShmAllocation]:
-        """Allocate blocks for a batch of items to be written."""
-        payload = json.dumps(
-            {
-                "items": [asdict(item) for item in items],
-                "timeout": timeout,
-            }
-        )
-        resp = self._request(OPEN_WRITE, payload)
-        resp_dict = json.loads(resp)
-        return [ShmAllocation(**a) for a in resp_dict["data"]]
-
-    def close_write(self, uuid: str) -> None:
-        """
-        Finalise a write operation for the given UUID.
-        The server will automatically reserve one read reference for each
-        generated read token associated with this UUID.
-        """
-        payload = json.dumps({"uuid": uuid})
-        self._request(CLOSE_WRITE, payload)
-
-    def open_read(self, uuid_or_token: str, timeout: float = 0.0) -> ShmAllocation:
-        """
-        Acquire a read reference to an item and return its block list.
-        Accepts UUID or read token. If a token is used, it is not consumed
-        until close_read is called, and may be used multiple times for open_read.
-        """
-        payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
-        resp = self._request(OPEN_READ, payload)
-        resp_dict = json.loads(resp)
-        return ShmAllocation(**resp_dict["data"])
-
-    def close_read(self, uuid_or_token: str) -> None:
-        """
-        Release a read reference. Accepts UUID or read token.
-
-        If a read token is provided, the token will be destroyed on the server
-        (i.e., removed from the token mapping).  The token must have been used
-        in a prior open_read call (or pre-incremented via the automatic
-        reservation on close_write).
-        """
-        self._request(CLOSE_READ, uuid_or_token)
-
-    def wait_for_readable(self, uuid_or_token: str, timeout: float = 0.0) -> None:
-        """Wait for an item to become readable. Does NOT acquire a read lock."""
-        payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
-        self._request(WAIT_FOR_READABLE, payload)
-
-    def delete(self, uuid: str) -> None:
-        """Delete an item and free its blocks immediately."""
-        self._request(DELETE, uuid)
-
-    def get_storage_info(self) -> dict[str, Any]:
-        """Return storage metadata (name, size, block_size, n_block)."""
-        resp = self._request(GET_STORAGE_INFO)
-        resp_dict = json.loads(resp)
-        return resp_dict["data"]
-
-    def get_manager_state(self) -> dict[str, Any]:
-        """Return manager statistics (allocations, cache state, etc.)."""
-        resp = self._request(GET_MANAGER_STATE)
-        return json.loads(resp)
-
-    def get_shm_name(self) -> str:
-        """Return the shared memory name (cached from initial handshake)."""
-        return self._shm_name
-
-    def get_info(self, uuid: str) -> dict[str, Any]:
-        """
-        Return object info for the given UUID.
-        Also accepts read tokens (they are resolved on the server).
-        """
-        resp = self._request(GET_INFO, uuid)
-        return json.loads(resp)
-
-    def debug_cleanup(self) -> None:
-        """
-        Send a DEBUG_CLEAN command to the server to forcibly clean up all
-        pending waiters and purge tokens. This is only effective if the server
-        was started with debug=True; otherwise it raises RuntimeError.
-        """
-        self._request(DEBUG_CLEAN)
-
-    def close(self) -> None:
-        self._resources.close()
 
 
 def _close_sock_pool(pool: queue.Queue):

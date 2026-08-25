@@ -12,6 +12,7 @@ from queue import PriorityQueue
 
 import zmq
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -977,7 +978,7 @@ def maybe_start_paged_shm_server(
         size=multimodal_config.paged_shm_size,
         block_size=multimodal_config.paged_shm_block_size,
         max_timeout=max_timeout,
-        debug=debug,
+        debug=debug or envs.VLLM_SERVER_DEV_MODE,
     )
     paged_shm_server.start()
 

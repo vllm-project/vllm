@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.logger import init_logger
+from vllm.multimodal.paged_shm.tensor_ipc import PagedShmTensorTracker
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
@@ -70,9 +71,9 @@ class EncoderCacheManager:
     def create_manager(
         cls, *, cache_size: int, vllm_config: "VllmConfig"
     ) -> "EncoderCacheManager":
-        return cls(cache_size=cache_size)
+        return cls(cache_size=cache_size, vllm_config=vllm_config)
 
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, vllm_config: "VllmConfig"):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.num_freeable_slots = cache_size
@@ -85,6 +86,7 @@ class EncoderCacheManager:
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+        self.pshm_tracker = PagedShmTensorTracker(vllm_config.model_config)
 
     def reset(self) -> None:
         """Reset the encoder cache to its initial state.
@@ -96,6 +98,7 @@ class EncoderCacheManager:
         self.request_cached_ids.clear()
         self.freeable.clear()
         self.freed.clear()
+        self.pshm_tracker.reset()
         self.num_free_slots = self.cache_size
         self.num_freeable_slots = self.cache_size
 
@@ -259,6 +262,7 @@ class EncoderCacheManager:
         """
         for input_id in list(self.get_cached_input_ids(request)):
             self.free_encoder_input(request, input_id)
+        self.pshm_tracker.free_request(request)
 
     def get_freed_mm_hashes(self) -> list[str]:
         """Get and clear the list of recently freed encoder cache entries.
@@ -334,7 +338,7 @@ def compute_mm_encoder_budget(
 # utilize the cache and this class will fold into EncoderCacheManager, as
 # differences with MM models shrink.
 class EncoderDecoderCacheManager(EncoderCacheManager):
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, vllm_config: "VllmConfig"):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.allocated: list[str] = []

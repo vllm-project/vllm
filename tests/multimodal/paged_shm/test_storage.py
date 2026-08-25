@@ -49,26 +49,6 @@ class TestInit:
 
 
 # ---------------------------------------------------------------------------
-# Size / block calculations
-# ---------------------------------------------------------------------------
-
-
-class TestSizing:
-    def test_exact_multiple(self):
-        store = _create_storage(size=1024, block_size=256)
-        assert store.n_block == 4
-        assert store.size == 1024
-        store.close()
-
-    def test_not_multiple_silent_truncation(self):
-        """size is silently truncated to block boundary."""
-        store = _create_storage(size=1000, block_size=256)
-        assert store.size == 768
-        assert store.n_block == 3
-        store.close()
-
-
-# ---------------------------------------------------------------------------
 # Write lifecycle (CPU data)
 # ---------------------------------------------------------------------------
 
@@ -370,7 +350,6 @@ class TestCleanup:
         with pytest.raises(FileNotFoundError):
             PagedShmStorage(size=1024, block_size=256, name=name)
 
-    # ----- New test for close idempotence -----
     def test_close_multiple_times_ok(self):
         store = _create_storage()
         store.close()

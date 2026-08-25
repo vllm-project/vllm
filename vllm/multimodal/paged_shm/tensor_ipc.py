@@ -27,7 +27,8 @@ and releases the read token.
 1. Extract `PagedShmTensor` from multimodal metadata.
 2. Wait for the async write to complete (`wait_write` with timeout).
 3. Read raw bytes from SHM to the target device and reconstruct the tensor.
-4. Destroy the read token (`close_read`) – the token cannot be reused.
+4. Defer the destruction of the read token (`close_read`) to `PagedShmTensorTracker`,
+   which is invoked when the request is freed. This avoids synchronizing the GPU stream.
 
 **Performance**: In the critical request‑processing path, ZMQ IPC can become
 a bottleneck for large tensors, with latencies often ranging from 1‑10 ms under
@@ -51,8 +52,10 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
 )
 from vllm.utils import random_uuid
+from vllm.v1.request import Request
+from vllm.v1.utils import record_function_or_nullcontext
 
-from .client import PagedShmClient
+from .client import PagedShmClient, PagedShmClientWithoutStorage
 from .types import PagedShmTensor, ShmWriteRequest
 
 logger = logging.getLogger(__name__)
@@ -111,6 +114,7 @@ class PagedShmTensorIPC:
         self.open_write_timeout = open_write_timeout
         self.read_timeout = read_timeout
         self.client: PagedShmClient | None = None
+        self.stream: torch.cuda.Stream | None = None
 
         if connect:
             self.connect()
@@ -144,69 +148,70 @@ class PagedShmTensorIPC:
         if not self.is_paged_shm_enabled or self.client is None:
             return
 
-        # 1. Collect all large tensors that should be sent via SHM.
-        elements: list[MultiModalFieldElem] = []
-        mm_kwargs = mm_inputs["mm_kwargs"]
-        for modality, mm_items in mm_kwargs.items():
-            for mm_item in mm_items:
-                if mm_item is None:
-                    continue
-                # Currently only handling 'pixel_values'; extend as needed.
-                if "pixel_values" in mm_item:
-                    elem: MultiModalFieldElem = mm_item["pixel_values"]
-                    if not isinstance(elem.data, torch.Tensor):
+        with record_function_or_nullcontext("PagedShmTensorIPC:write"):
+            # 1. Collect all large tensors that should be sent via SHM.
+            elements: list[MultiModalFieldElem] = []
+            mm_kwargs = mm_inputs["mm_kwargs"]
+            for modality, mm_items in mm_kwargs.items():
+                for mm_item in mm_items:
+                    if mm_item is None:
                         continue
-                    # Skip small tensors; they are more efficient via ZMQ.
-                    if elem.data.nbytes < self.block_size:
-                        continue
-                    elements.append(elem)
+                    # Currently only handling 'pixel_values'; extend as needed.
+                    if "pixel_values" in mm_item:
+                        elem: MultiModalFieldElem = mm_item["pixel_values"]
+                        if not isinstance(elem.data, torch.Tensor):
+                            continue
+                        # Skip small tensors; they are more efficient via ZMQ.
+                        if elem.data.nbytes < self.block_size:
+                            continue
+                        elements.append(elem)
 
-        if not elements:
-            return
+            if not elements:
+                return
 
-        # 2. Prepare allocation requests for all large tensors.
-        items: list[ShmWriteRequest] = []
-        for elem in elements:
-            assert isinstance(elem.data, torch.Tensor)
-            item = ShmWriteRequest(
-                uuid=random_uuid(),
-                size=elem.data.nbytes,
-                use_cache=True,  # Cacheable, can be evicted LRU.
-                generate_read_token=True,  # Create a one‑time read token.
-            )
-            items.append(item)
+            # 2. Prepare allocation requests for all large tensors.
+            items: list[ShmWriteRequest] = []
+            for elem in elements:
+                assert isinstance(elem.data, torch.Tensor)
+                item = ShmWriteRequest(
+                    uuid=random_uuid(),
+                    size=elem.data.nbytes,
+                    use_cache=True,  # Cacheable, can be evicted LRU.
+                    generate_read_token=True,  # Create a one‑time read token.
+                )
+                items.append(item)
 
-        # 3. Allocate shm for all these mm tensors at once
-        # Refer to the wiki:Dining philosophers problem.
-        try:
-            alloc = self.client.open_write(items, timeout=self.open_write_timeout)
-        except RuntimeError as e:
-            logger.error("PagedShm `open_write` failed: %s", e)
-            return None
+            # 3. Allocate shm for all these mm tensors at once
+            # Refer to the wiki:Dining philosophers problem.
+            try:
+                alloc = self.client.open_write(items, timeout=self.open_write_timeout)
+            except RuntimeError as e:
+                logger.error("PagedShm `open_write` failed: %s", e)
+                return None
 
-        # 4. Submit asynchronous writes for each tensor.
-        for elem, a in zip(elements, alloc):
-            assert isinstance(elem.data, torch.Tensor)
-            assert a.read_token is not None
+            # 4. Submit asynchronous writes for each tensor.
+            for elem, a in zip(elements, alloc):
+                assert isinstance(elem.data, torch.Tensor)
+                assert a.read_token is not None
 
-            # The background task will copy the tensor and then call close_write.
-            self.client.write(
-                uuid=a.uuid,
-                data=elem.data,
-                use_cache=a.use_cache,
-                blocks=a.blocks,
-                async_write=True,
-            )
+                # The background task will copy the tensor and then call close_write.
+                self.client.write(
+                    uuid=a.uuid,
+                    data=elem.data,
+                    use_cache=a.use_cache,
+                    blocks=a.blocks,
+                    async_write=True,
+                )
 
-            # Replace the original tensor data with metadata.
-            elem.pshm_tensor = PagedShmTensor(
-                uuid=a.read_token,
-                size=a.size,
-                blocks=a.blocks,
-                dtype=str(elem.data.dtype).removeprefix("torch."),
-                shape=tuple(elem.data.shape),
-            )
-            elem.data = None  # Free the original tensor reference.
+                # Replace the original tensor data with metadata.
+                elem.pshm_tensor = PagedShmTensor(
+                    uuid=a.read_token,
+                    size=a.size,
+                    blocks=a.blocks,
+                    dtype=str(elem.data.dtype).removeprefix("torch."),
+                    shape=tuple(elem.data.shape),
+                )
+                elem.data = None  # Free the original tensor reference.
 
     def read(
         self,
@@ -222,7 +227,9 @@ class PagedShmTensorIPC:
           - Waits for the asynchronous write to complete (with timeout).
           - Reads the raw bytes from SHM to the specified device.
           - Reconstructs the tensor and replaces the placeholder.
-          - Destroys the read token (making it invalid for future use).
+          - The read token is *not* destroyed here; it is deferred to
+            `PagedShmTensorTracker.free_request` when the request is freed,
+            to avoid synchronizing the GPU stream.
 
         Raises:
             RuntimeError: If waiting for the write times out, the token is
@@ -232,37 +239,107 @@ class PagedShmTensorIPC:
         if not self.is_paged_shm_enabled or self.client is None:
             return
 
-        for modality, items in mm_kwargs:
-            if "pixel_values" not in items:
-                continue
+        with record_function_or_nullcontext("PagedShmTensorIPC:read"):
+            if self.stream is None:
+                self.stream = torch.cuda.Stream()
 
-            pixel_values = items["pixel_values"]
-            pshm_tensor: PagedShmTensor | None = pixel_values.pshm_tensor
+            current_stream = torch.cuda.current_stream()
+            with self.stream:
+                for modality, items in mm_kwargs:
+                    if "pixel_values" not in items:
+                        continue
 
-            if pshm_tensor is not None:
-                torch_dtype = getattr(torch, pshm_tensor.dtype)
+                    pixel_values = items["pixel_values"]
+                    pshm_tensor: PagedShmTensor | None = pixel_values.pshm_tensor
 
-                # 1. Wait for the writer to complete and read the data.
-                # Here we sync the swap_blocks_batch stream, then call close_read,
-                # which releases the SHM read reference.
-                # We'd better not call close_read here, so that we can avoid syncing
-                # the swap_blocks_batch stream.
+                    if pshm_tensor is None:
+                        continue
 
-                self.client.wait_write()
+                    torch_dtype = getattr(torch, pshm_tensor.dtype)
 
-                tensor_gpu = self.client.read(
-                    pshm_tensor.uuid,
-                    device=device,
-                    timeout=self.read_timeout,
-                )
+                    # 1. Wait for the writer to complete and read the data.
+                    self.client.wait_for_readable(
+                        pshm_tensor.uuid, timeout=self.read_timeout
+                    )
 
-                # 2. Replace the metadata with the actual tensor.
-                tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
-                pixel_values.data = tensor_gpu
-                pixel_values.pshm_tensor = None
+                    # 2. Read raw bytes from SHM to the target device.
+                    # ops.swap_blocks_batch must not be run on the default stream.
+                    tensor_gpu = self.client._storage.read_to_tensor(
+                        pshm_tensor.size, pshm_tensor.blocks, device=device
+                    )
+                    tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
+
+                    # 3. Replace the metadata with the actual tensor.
+                    pixel_values.data = tensor_gpu
+
+        # The read token (`close_read`) is not called here; it will be
+        # released by PagedShmTensorTracker when the request is freed.
+        # This avoids synchronizing the GPU stream after the H2D transfer.
+        current_stream.wait_stream(self.stream)
 
     def shutdown(self) -> None:
         """Release all resources (client connection, background threads, etc.)."""
         if not self.is_paged_shm_enabled:
             return
         self._resources.close()
+
+
+class PagedShmTensorTracker:
+    def __init__(
+        self,
+        model_config: ModelConfig,
+    ):
+        self.is_paged_shm_enabled = False
+        self.model_config = model_config
+        self.multimodal_config = model_config.multimodal_config
+        if self.multimodal_config is None:
+            return
+
+        self.is_paged_shm_enabled = self.multimodal_config.is_paged_shm_enabled()
+        if not self.is_paged_shm_enabled:
+            return
+        self.client = PagedShmClientWithoutStorage(
+            address=self.multimodal_config.paged_shm_server_address
+        )
+
+    def free_request(self, request: Request):
+        """
+        Release all SHM read tokens associated with the given request.
+
+        This method should be called when the request is no longer needed
+        (e.g., after generation or on abort). It scans the request's multimodal
+        features and, for each that contains a `PagedShmTensor` in its
+        `pixel_values` field, invokes `close_read` on the client to destroy
+        the token and release the SHM blocks.
+
+        Args:
+            request: The vLLM Request object whose resources are to be freed.
+        """
+        if not self.is_paged_shm_enabled:
+            return
+
+        if request.mm_features is None:
+            return
+
+        uuids = []
+        for mm_feature in request.mm_features:
+            if mm_feature.data is None:
+                continue
+
+            if "pixel_values" not in mm_feature.data:
+                continue
+
+            pixel_values = mm_feature.data["pixel_values"]
+            pshm_tensor: PagedShmTensor | None = pixel_values.pshm_tensor
+
+            if pshm_tensor is None:
+                continue
+
+            uuids.append(pshm_tensor.uuid)
+
+        for uuid in uuids:
+            self.client.close_read(uuid)
+
+    def reset(self):
+        """Debug helper: forcibly clean up all SHM state on the server."""
+        self.client.debug_cleanup()
