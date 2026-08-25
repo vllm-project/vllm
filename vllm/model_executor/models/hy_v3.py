@@ -41,7 +41,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.hpc import HpcRopeNorm, QkNormPolicy
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -122,7 +122,6 @@ class HYV3MoEFused(nn.Module):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
         if self.tp_size > config.num_experts:
@@ -141,10 +140,6 @@ class HYV3MoEFused(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
@@ -160,7 +155,7 @@ class HYV3MoEFused(nn.Module):
                 intermediate_size=config.expert_hidden_dim * config.num_shared_experts,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                prefix=f"{prefix}",
+                prefix=f"{prefix}.shared_mlp",
                 reduce_results=False,
             )
         else:
@@ -172,7 +167,7 @@ class HYV3MoEFused(nn.Module):
         scoring_func = "sigmoid"
         e_score_correction_bias = self.expert_bias
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=top_k,
             hidden_size=config.hidden_size,
@@ -259,7 +254,7 @@ class HYV3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             quant_config=quant_config,
-            bias=None,
+            bias=False,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
@@ -579,7 +574,7 @@ class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

@@ -89,6 +89,8 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
 )
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    # Ignore registered buffers, see
+    # https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={"norm_mean": None, "norm_std": None}
     )

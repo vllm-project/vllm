@@ -53,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -439,7 +440,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            "image_grid_thw": MultiModalFieldConfig.batched("image"),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
 
     def _get_prompt_updates(
@@ -449,6 +450,10 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        image_pad_token_ids = cached_encode(
+            tokenizer, "<|image_pad|>", add_special_tokens=False
+        )
 
         pixel_shuffle_scale = getattr(image_processor, "pixel_shuffle_scale", 2)
         merge_length = pixel_shuffle_scale**2
@@ -459,13 +464,13 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             feature_size = int(grid_thw.prod()) // merge_length
-            repl_full = "<|image_pad|>" * feature_size
-            return PromptUpdateDetails.select_text(repl_full, "<|image_pad|>")
+            repl_full = image_pad_token_ids * feature_size
+            return PromptUpdateDetails.select_token_ids(repl_full, image_pad_token_ids)
 
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
+                target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
                 replacement=get_replacement_isaac,
             )
         ]
@@ -956,7 +961,9 @@ class IsaacForConditionalGeneration(
         device = next(self.language_model.parameters()).device
         dtype = self.vision_embedding.linear_fc1.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
-        spatial_grids = image_grid_thw[:, 1:3].to(device, dtype=torch.int32)
+        spatial_grids = image_grid_thw[:, 1:3].to(
+            device, dtype=torch.int32, non_blocking=True
+        )
 
         vision_embeddings = self.vision_embedding((pixel_values, spatial_grids))
         merge_size = self.config.vision_config.pixel_shuffle_scale_factor

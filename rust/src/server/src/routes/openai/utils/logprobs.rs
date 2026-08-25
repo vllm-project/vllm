@@ -100,20 +100,31 @@ pub fn decoded_prompt_logprobs_to_openai(
     })
 }
 
-/// Convert decoded prompt logprobs into the vLLM-style prompt-logprobs response
-/// shape.
-pub fn decoded_prompt_logprobs_to_maps(
-    prompt_logprobs: &DecodedPromptLogprobs,
+/// Map decoded prompt logprobs into vLLM-style per-position maps, treating a
+/// missing single-token payload as `[None]`.
+pub fn prompt_logprobs_to_maps(
+    prompt_logprobs: Option<&DecodedPromptLogprobs>,
+    prompt_token_ids: &[u32],
     return_tokens_as_token_ids: bool,
-) -> Vec<Option<HashMap<String, f32>>> {
-    std::iter::once(None)
-        .chain(prompt_logprobs.scored_positions.iter().map(|position| {
-            Some(position_top_logprobs_map(
-                position,
-                return_tokens_as_token_ids,
-            ))
-        }))
-        .collect()
+) -> Result<Vec<Option<HashMap<String, f32>>>, ApiError> {
+    if let Some(prompt_logprobs) = prompt_logprobs {
+        return Ok(std::iter::once(None)
+            .chain(prompt_logprobs.scored_positions.iter().map(|position| {
+                Some(position_top_logprobs_map(
+                    position,
+                    return_tokens_as_token_ids,
+                ))
+            }))
+            .collect());
+    }
+
+    if let [_token_id] = prompt_token_ids {
+        return Ok(vec![None]);
+    }
+
+    Err(server_error!(
+        "prompt_logprobs were requested but generation returned none"
+    ))
 }
 
 /// Convert decoded token-position logprobs into the OpenAI chat `logprobs`
@@ -275,7 +286,13 @@ pub fn clamp_logprob(logprob: f32) -> f32 {
 mod tests {
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::decoded_logprobs_to_openai_chat;
+    use super::{decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps};
+
+    #[test]
+    fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
+        prompt_logprobs_to_maps(None, &[9707, 11], false)
+            .expect_err("multi-token prompt without payload is an engine failure");
+    }
 
     fn sample_logprobs() -> DecodedLogprobs {
         DecodedLogprobs {

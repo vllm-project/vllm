@@ -27,13 +27,9 @@ class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS2PreviewForConditionalGeneration(Qwen3_5MoeForConditionalGeneration):
-    hf_to_vllm_mapper = (
-        Qwen3_5MoeForConditionalGeneration.hf_to_vllm_mapper
-        | WeightsMapper(
-            orig_to_new_prefix={
-                "mtp.": None,
-                "model.time_series.": None,
-                "time_series.": None,
-            }
+    # `mtp.` is already dropped by `Qwen3_5ForConditionalGeneration`.
+    hf_to_vllm_mapper = Qwen3_5MoeForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(
+            orig_to_new_prefix={"model.time_series.": None, "time_series.": None}
         )
     )

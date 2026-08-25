@@ -6,11 +6,13 @@ max_concurrency: 100
 server_args: >-
   --enforce-eager
   --max-model-len 4096
+  --max-num-batched-tokens 32768
   --safetensors-load-strategy prefetch
   --moe-backend flashinfer_cutlass
   --prefill-context-parallel-size 4
   --enable-expert-parallel
   --kv-cache-dtype fp8
 env:
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_LOGGING_LEVEL: "DEBUG"
   VLLM_USE_V2_MODEL_RUNNER: "1"

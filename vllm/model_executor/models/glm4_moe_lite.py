@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only GLM-4.7-Flash model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import TYPE_CHECKING
 
@@ -39,6 +39,9 @@ from vllm.distributed import (
     get_pp_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -62,7 +65,6 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -122,6 +124,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
 
+        attn_cls: Callable[..., Glm4MoeLiteMLAAttention | Glm4MoeLiteAttention]
         if model_config.use_mla:
             attn_cls = Glm4MoeLiteMLAAttention
         else:
@@ -135,7 +138,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+            q_lora_rank=getattr(config, "q_lora_rank", None),
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
@@ -246,13 +249,16 @@ class Glm4MoeLiteModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            Glm4MoeLite,
+            "mlp",
+        )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -324,6 +330,7 @@ class Glm4MoeLiteModel(nn.Module):
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
+            enabled=self.is_fused_shared_expert_enabled,
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=mapper)

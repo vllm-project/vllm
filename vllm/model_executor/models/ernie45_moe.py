@@ -41,7 +41,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -127,9 +127,8 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.layer_idx = layer_idx
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None)
+        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", 0)
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.moe_num_experts
         self.n_shared_experts: int = self.moe_num_shared_experts
@@ -143,10 +142,6 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
         self.has_shared_experts = getattr(config, "moe_num_shared_experts", 0) > 0
 
         if self.tp_size > config.moe_num_experts:
@@ -168,6 +163,7 @@ class Ernie4_5_MoeMoE(nn.Module):
             torch.empty(config.moe_num_experts, dtype=torch.float32)
         )
 
+        self.shared_experts: Ernie4_5_MoeMLP | None
         if self.has_shared_experts:
             intermediate_size = (
                 config.moe_intermediate_size * config.moe_num_shared_experts
@@ -183,7 +179,7 @@ class Ernie4_5_MoeMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_k,
@@ -399,7 +395,6 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
 @support_torch_compile
 class Ernie4_5_MoeModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={"mtp": None},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
@@ -410,6 +405,7 @@ class Ernie4_5_MoeModel(nn.Module):
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
         },
+        orig_to_new_substr={"mtp": None},
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -503,10 +499,7 @@ class Ernie4_5_MoeModel(nn.Module):
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            ignore_unexpected_suffixes=[".bias", "_bias"],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(
             self._preprocess(weights), mapper=self.hf_to_vllm_mapper
         )
@@ -548,7 +541,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
             self.lm_head = PPMissingLayer()
 
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

@@ -183,7 +183,7 @@ class GPT2Block(nn.Module):
 
 @support_torch_compile
 class GPT2Model(nn.Module):
-    # Skip attention mask buffers; NOTE: "c_attn.bias" must not be skipped.
+    # Drop attention mask buffers; NOTE: "c_attn.bias" must not be dropped.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".attn.bias": None, ".attn.masked_bias": None}
     )

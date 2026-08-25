@@ -7,6 +7,22 @@ use crate::datasets::SampleRequest;
 use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
 
+fn log_failed_requests(outputs: &[RequestFuncOutput]) {
+    let failed_outputs: Vec<_> = outputs.iter().filter(|output| !output.success).collect();
+    if failed_outputs.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        failed_requests = failed_outputs.len(),
+        displayed_errors = failed_outputs.len().min(10),
+        "benchmark requests failed"
+    );
+    for (index, output) in failed_outputs.into_iter().take(10).enumerate() {
+        tracing::warn!(index, error = %output.error, "benchmark request failed");
+    }
+}
+
 /// Calculate benchmark metrics from request outputs.
 ///
 /// Mirrors Python's `calculate_metrics()` from serve.py:392-599.
@@ -63,14 +79,7 @@ pub fn calculate_metrics(
 
     let failed = outputs.len() - completed;
 
-    // Print failed request errors (capped to 10)
-    let failed_outputs: Vec<&RequestFuncOutput> = outputs.iter().filter(|o| !o.success).collect();
-    if !failed_outputs.is_empty() {
-        eprintln!("Failed requests during benchmark run detected (capping to 10):");
-        for (i, err) in failed_outputs.iter().take(10).enumerate() {
-            eprintln!("Error {i}: {}", err.error);
-        }
-    }
+    log_failed_requests(outputs);
 
     // Calculate max output tokens per second and max concurrent requests
     let mut max_output_tokens_per_s = 0.0_f64;
@@ -175,8 +184,10 @@ pub fn calculate_metrics(
         completed,
         failed,
         total_input,
+        total_input_sequences: completed,
         total_output,
         request_throughput: completed as f64 / dur_s,
+        input_sequence_throughput: completed as f64 / dur_s,
         request_goodput,
         input_throughput: total_input as f64 / dur_s,
         output_throughput: total_output as f64 / dur_s,
@@ -282,6 +293,7 @@ pub fn calculate_embedding_metrics(
     selected_percentiles: &[f64],
 ) -> BenchmarkMetrics {
     let mut total_input: usize = 0;
+    let mut total_input_sequences: usize = 0;
     let mut completed: usize = 0;
     let mut e2els: Vec<f64> = Vec::new();
 
@@ -290,19 +302,13 @@ pub fn calculate_embedding_metrics(
             e2els.push(output.latency);
             completed += 1;
             total_input += output.prompt_len;
+            total_input_sequences += output.num_input_sequences;
         }
     }
 
     let failed = outputs.len() - completed;
 
-    // Print failed request errors (capped to 10)
-    let failed_outputs: Vec<&RequestFuncOutput> = outputs.iter().filter(|o| !o.success).collect();
-    if !failed_outputs.is_empty() {
-        eprintln!("Failed requests during benchmark run detected (capping to 10):");
-        for (i, err) in failed_outputs.iter().take(10).enumerate() {
-            eprintln!("Error {i}: {}", err.error);
-        }
-    }
+    log_failed_requests(outputs);
 
     // Compute peak concurrent requests from start_time + latency windows
     let successful_outputs: Vec<&RequestFuncOutput> =
@@ -342,8 +348,10 @@ pub fn calculate_embedding_metrics(
         completed,
         failed,
         total_input,
+        total_input_sequences,
         total_output: 0,
         request_throughput: completed as f64 / dur_s,
+        input_sequence_throughput: total_input_sequences as f64 / dur_s,
         request_goodput: 0.0,
         input_throughput: total_input as f64 / dur_s,
         output_throughput: 0.0,

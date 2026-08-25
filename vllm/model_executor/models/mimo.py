@@ -86,6 +86,7 @@ class MiMoModel(Qwen2Model):
 
 
 class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
+    # MTP layers are loaded by the draft model, not the main model.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp_layers.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -102,15 +103,14 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 

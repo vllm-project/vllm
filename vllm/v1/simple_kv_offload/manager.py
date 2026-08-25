@@ -4,7 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -75,9 +75,14 @@ class SimpleCPUOffloadScheduler:
         scheduler_block_size: int,
         hash_block_size: int,
         lazy_offload: bool = False,
+        disk_capacity_bytes: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        # When disk mode is active, the offload pool size is disk-based.
+        offload_capacity = (
+            disk_capacity_bytes if disk_capacity_bytes > 0 else cpu_capacity_bytes
+        )
         self.enable_kv_cache_events = (
             vllm_config.kv_events_config is not None
             and vllm_config.kv_events_config.enable_kv_cache_events
@@ -90,7 +95,7 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, cpu_capacity_bytes
+            kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         # Find the full attention kv group for prefix cache matching.
@@ -111,18 +116,21 @@ class SimpleCPUOffloadScheduler:
         assert self.block_size % self.fa_block_size == 0
 
         logger.info(
-            "SimpleCPUOffloadScheduler: Allocating %d CPU blocks (%.2f GB, mode=%s)",
+            "SimpleCPUOffloadScheduler: Allocating %d offload blocks "
+            "(%.2f GB, mode=%s, backend=%s)",
             self.num_cpu_blocks,
-            cpu_capacity_bytes / (1024**3),
+            offload_capacity / (1024**3),
             "lazy" if lazy_offload else "eager",
+            "disk" if disk_capacity_bytes > 0 else "cpu",
         )
 
-        # TODO (yifan): maybe need to enable kv_cache_events and metrics_collector here.
+        spec_config = vllm_config.speculative_config
+        use_eagle = spec_config is not None and spec_config.use_eagle()
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            use_eagle=False,
+            use_eagle=use_eagle,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -131,7 +139,6 @@ class SimpleCPUOffloadScheduler:
             hash_block_size=self.hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
-
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
 
@@ -183,35 +190,31 @@ class SimpleCPUOffloadScheduler:
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
         # Import here to avoid potential circular imports
-        from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        is_packed = any(t.block_stride for t in gpu_config.kv_cache_tensors)
-        assert not is_packed or all(t.block_stride for t in gpu_config.kv_cache_tensors)
-        gpu_total_bytes = (
-            gpu_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(t.size for t in gpu_config.kv_cache_tensors)
-        )
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total GPU KV cache size.
+        gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
                 size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
-                offset=t.offset,
+                layers=list(t.layers),
+                layer_stride=t.layer_stride,
                 block_stride=t.block_stride,
+                offset=t.offset,
             )
             for t in gpu_config.kv_cache_tensors
         ]
 
-        return KVCacheConfigCls(
+        return replace(
+            gpu_config,
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
-            kv_cache_groups=gpu_config.kv_cache_groups,
         )
 
     @staticmethod

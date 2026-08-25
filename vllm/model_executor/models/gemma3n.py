@@ -75,7 +75,7 @@ class Gemma3nAltUp(nn.Module):
         altup_num_inputs: int,
         altup_coef_clip: float,
         altup_active_idx: int,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         prefix: str,
     ):
         super().__init__()
@@ -1051,9 +1051,12 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
 class Gemma3nForCausalLM(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr=dict.fromkeys(
-            ["embed_audio.", "embed_vision.", "audio_tower.", "vision_tower."], None
-        )
+        orig_to_new_substr={
+            "embed_audio.": None,
+            "embed_vision.": None,
+            "audio_tower.": None,
+            "vision_tower.": None,
+        }
     )
     packed_modules_mapping = {
         "qkv_proj": [

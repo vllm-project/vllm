@@ -204,6 +204,9 @@ class FlashNgramModel(FlashModel):
 class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """LongCat-Flash-Lite for causal LM (MRV2-only, n-gram embedding)."""
 
+    # MTP weights are not part of this model.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -267,6 +270,9 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
 
 class LongcatNgramModelState(DefaultModelState):
+    # prepare_inputs builds its own inputs_embeds from n-gram token embeddings.
+    supports_prompt_embeds = False
+
     """Per-request n-gram token history for LongCat-Flash-Lite.
 
     Maintains a small CPU-side per-slot context (last ``n-1`` processed tokens)

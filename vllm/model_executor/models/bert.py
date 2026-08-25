@@ -100,6 +100,7 @@ class BertPooler(SequencePooler):
     def __init__(self, model_config: ModelConfig):
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
+        assert pooler_config.seq_pooling_type is not None
 
         config: BertConfig = model_config.hf_config
 
@@ -373,7 +374,6 @@ class BertModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"pooler.": None},
         # Original google-bert checkpoints use the legacy `gamma`/`beta`
         # LayerNorm names; rename to vLLM's `weight`/`bias`.
         orig_to_new_substr={
@@ -385,6 +385,7 @@ class BertModel(nn.Module, SupportsQuant):
             ".self.key": (".self.qkv_proj", "k"),
             ".self.value": (".self.qkv_proj", "v"),
         },
+        orig_to_new_prefix={"pooler.": None},
     )
 
     def __init__(
@@ -421,6 +422,9 @@ class BertModel(nn.Module, SupportsQuant):
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
+    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
+
+    # Unlike `BertModel`, this model has a pooler to load weights into.
     hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
 
     def __init__(

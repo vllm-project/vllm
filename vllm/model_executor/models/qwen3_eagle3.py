@@ -430,6 +430,6 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
             orig_to_new_substr["fc."] = None
         if not self.model.norm_before_fc:
             orig_to_new_substr["input_norm."] = None
-        drop = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
-        loader.load_weights(model_weights.items(), mapper=drop)
+        loader.load_weights(model_weights.items(), mapper=mapper)

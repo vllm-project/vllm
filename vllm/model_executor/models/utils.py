@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -27,7 +28,6 @@ from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
-    async_tensor_h2d,
     direct_register_custom_op,
 )
 
@@ -160,14 +160,40 @@ class WeightsMapper:
             if (out_name := self._map_name(name)) is not None
         }
 
-    def get_unstacked_mapper(self) -> "WeightsMapper":
-        """Mapper variant that drops stacked maps, keeping all genuine renames/prefixes.
+    def get_rename_mapper(self) -> "WeightsMapper":
+        """Mapper variant keeping only the renames.
 
-        Consumers that reference the checkpoint's *unstacked* module names (LoRA name
-        parsing and the quantization config's layer lists) need the constituent names
-        (e.g. `q_proj`) to survive rather than being rewritten to the stacked vLLM name
-        (`qkv_proj`)."""
-        return replace(self, orig_to_new_stacked={})
+        This is what consumers that *name* modules rather than load them need:
+        LoRA name parsing and the quantization config's layer lists.
+
+        Stacked maps are dropped so that constituent names (e.g. `q_proj`) survive
+        rather than being rewritten to the stacked vLLM name (`qkv_proj`). Mappings to
+        `None` are dropped because "do not load this weight" is meaningless to such a
+        consumer, and applying it would silently shrink a quantization config's ignore
+        list or make LoRA name parsing fail."""
+        remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
+        return replace(
+            self,
+            orig_to_new_regex=remove_none(self.orig_to_new_regex),
+            orig_to_new_substr=remove_none(self.orig_to_new_substr),
+            orig_to_new_stacked={},
+            orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
+            orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+        )
+
+
+def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
+    """Map each tied word embedding qualname to the first name it aliases."""
+    canonical = dict[int, str]()
+    aliased = dict[str, str]()
+    for prefix, submodule in module.named_modules(remove_duplicate=False):
+        if not isinstance(submodule, VocabParallelEmbedding):
+            continue
+        for name, param in submodule.named_parameters(remove_duplicate=False):
+            qualname = f"{prefix}.{name}" if prefix else name
+            if (first_name := canonical.setdefault(id(param), qualname)) != qualname:
+                aliased[qualname] = first_name
+    return aliased
 
 
 class AutoWeightsLoader:
@@ -187,7 +213,7 @@ class AutoWeightsLoader:
     """
 
     # Models trained using early version ColossalAI or quantized by
-    # GPTQModel may include these tensors in checkpoint. Skip them.
+    # GPTQModel may include these tensors in checkpoint. Drop them.
     REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER = WeightsMapper(
         orig_to_new_substr={
             "rotary_pos_emb.inv_freq": None,
@@ -196,7 +222,6 @@ class AutoWeightsLoader:
             "rotary_emb.sin_cached": None,
         }
     )
-    REMOVE_TIED_LM_HEAD_MAPPER = WeightsMapper(orig_to_new_prefix={"lm_head.": None})
 
     def __init__(
         self,
@@ -215,6 +240,14 @@ class AutoWeightsLoader:
         self.loads_spec_layers_only = any(
             hasattr(m, "mtp_start_layer_idx") for m in module.modules()
         )
+
+        # Weight tying makes two qualnames point at the same `nn.Parameter`
+        # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
+        # would write the same storage twice, so only the first name reached by
+        # module traversal is loaded and the rest are skipped.
+        self.aliased_params = _get_tied_embedding_params(module)
+        self._skipped_aliases = dict[str, str]()
+        self._loaded_params_are_complete = True
 
     def _groupby_prefix(
         self,
@@ -244,6 +277,9 @@ class AutoWeightsLoader:
 
         return ".".join((prefix, rest))
 
+    def _can_skip(self, qualname: str) -> bool:
+        return qualname in self.aliased_params
+
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
         ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
@@ -257,6 +293,11 @@ class AutoWeightsLoader:
     ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
+
+            if self._can_skip(weight_qualname):
+                logger.debug("Skipping weight %s", weight_qualname)
+
+                continue
 
             if weight_name != "":
                 if self._can_ignore_unexpected(weight_qualname):
@@ -325,6 +366,7 @@ class AutoWeightsLoader:
                     logger.warning(
                         "Unable to collect loaded parameters for module %s", module
                     )
+                    self._loaded_params_are_complete = False
                 else:
                     yield from map(
                         lambda x: self._get_qualname(base_prefix, x),
@@ -352,10 +394,20 @@ class AutoWeightsLoader:
                     prefix, child_modules[child_prefix], child_weights
                 )
             elif child_prefix in child_params:
+                if self._can_skip(prefix):
+                    logger.debug("Skipping param %s", prefix)
+
+                    continue
+
                 yield from self._load_param(
                     prefix, child_params[child_prefix], child_weights
                 )
             else:
+                if self._can_skip(prefix):
+                    logger.debug("Skipping missing %s", prefix)
+
+                    continue
+
                 can_ignore_module = self._can_ignore_unexpected(prefix + ".")
                 can_ignore_param = self._can_ignore_unexpected(prefix)
                 if can_ignore_module or can_ignore_param:
@@ -401,7 +453,6 @@ class AutoWeightsLoader:
         # Ignore unexpected biases (typically from GPTQ models)
         self.ignore_unexpected_suffixes.append(".bias")
 
-        # Ensure we have a mapper
         mapper = mapper or WeightsMapper()
         # Many models store quant_config in the base model instead of the causal model.
         # We look at the causal model's direct children for this reason.
@@ -412,17 +463,38 @@ class AutoWeightsLoader:
             mapper |= quant_config.get_cache_scale_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
-        # Always drop the known-unused rotary buffers some checkpoints ship.
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
-        # Drop lm_head weights when the model ties them to the input embeddings.
-        config = getattr(self.module, "config", None)
-        if config is not None and getattr(config, "tie_word_embeddings", False):
-            mapper |= self.REMOVE_TIED_LM_HEAD_MAPPER
 
         weights = mapper.apply(weights)
+        weights = self._filter_skipped(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
+        self._check_skipped_aliases(autoloaded_weights)
         return autoloaded_weights
+
+    def _filter_skipped(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            if (canonical := self.aliased_params.get(name)) is not None:
+                self._skipped_aliases[name] = canonical
+            if self._can_skip(name):
+                continue
+
+            yield name, weight
+
+    def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
+        """Guard against skipping an alias whose canonical name never loads."""
+        if not self._loaded_params_are_complete:
+            return
+        for alias, canonical in self._skipped_aliases.items():
+            if canonical not in autoloaded_weights:
+                raise ValueError(
+                    f"{alias!r} was skipped because it is tied to {canonical!r} "
+                    f"in {self.module._get_name()}, but {canonical!r} was not "
+                    "found in the checkpoint, so the tied weight is "
+                    "uninitialized."
+                )
 
 
 def maybe_fuse_shared_experts(
@@ -671,17 +743,6 @@ def _merge_multimodal_embeddings(
         raise ValueError("Error during index put operation") from e
 
     return inputs_embeds
-
-
-def isin_list(
-    elements: torch.Tensor,
-    test_elements_list: list[int],
-) -> torch.Tensor:
-    test_elements = async_tensor_h2d(
-        test_elements_list, dtype=torch.int64, device=elements.device
-    )
-
-    return torch.isin(elements, test_elements)
 
 
 class StageMissingLayer(nn.Module):
@@ -1074,3 +1135,25 @@ def scatter_output_slices(
         sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
         offset += n_tok
+
+
+def parse_diarized_timestamp(marker: str) -> float | None:
+    if (
+        not marker
+        or not marker.isascii()
+        or marker.count(".") > 1
+        or not marker.replace(".", "").isdigit()
+    ):
+        return None
+    return float(marker)
+
+
+def parse_diarized_speaker(speaker: str) -> str | None:
+    if (
+        len(speaker) < 2
+        or speaker[0] != "S"
+        or not speaker[1:].isascii()
+        or not speaker[1:].isdigit()
+    ):
+        return None
+    return speaker

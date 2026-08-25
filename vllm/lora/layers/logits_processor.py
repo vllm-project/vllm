@@ -118,6 +118,18 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         else:
             self.sharded_to_full_mapping_gpu = None
 
+    def reset_sharded_to_full_mapping(self) -> None:
+        """Restore the TP logits mapping after its GPU memory is reused."""
+        mapping_gpu = self.sharded_to_full_mapping_gpu
+        if mapping_gpu is not None:
+            mapping_gpu.copy_(
+                torch.tensor(
+                    self.sharded_to_full_mapping,
+                    device=mapping_gpu.device,
+                    dtype=mapping_gpu.dtype,
+                )
+            )
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -143,7 +155,14 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        # The LoRA delta is accumulated into the full gathered logits, so the
+        # TP gather cannot be skipped here.
+        if skip_gather:
+            raise NotImplementedError(
+                "Skipping the logits TP gather is not supported with an lm_head LoRA."
+            )
         # Get the logits for the next tokens.
         if hasattr(lm_head, "base_layer"):
             actual_lm_head = lm_head.base_layer

@@ -54,11 +54,11 @@ class Qwen3ASRForcedAlignerForTokenClassification(
     # Map thinker.lm_head -> classifier (not language_model.lm_head)
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "talker.": None,
-            "code2wav.": None,
             "thinker.lm_head.": "classifier.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 

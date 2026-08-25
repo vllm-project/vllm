@@ -90,6 +90,12 @@ class ChatParams:
     return_assistant_tokens_mask: bool = False
     """Request a per-token assistant mask from apply_chat_template."""
 
+    tool_choice: Any | None = None
+    """Request-level tool choice for renderers that need API metadata."""
+
+    response_format: Any | None = None
+    """Request-level response format for renderers that need API metadata."""
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -119,6 +125,8 @@ class ChatParams:
                 self.mm_processor_kwargs,
             ),
             return_assistant_tokens_mask=self.return_assistant_tokens_mask,
+            tool_choice=self.tool_choice,
+            response_format=self.response_format,
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:

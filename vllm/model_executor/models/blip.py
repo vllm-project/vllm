@@ -313,6 +313,9 @@ class BlipVisionModel(nn.Module, SupportsQuant):
             )
         else:
             self.post_layernorm = None
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"post_layernorm.": None}
+            )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embeddings(pixel_values)
@@ -324,6 +327,8 @@ class BlipVisionModel(nn.Module, SupportsQuant):
         return self.post_layernorm(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+
         # omit layers when num_hidden_layers_override is set
         def _filter(ws):
             for name, weight in ws:
@@ -333,8 +338,4 @@ class BlipVisionModel(nn.Module, SupportsQuant):
                     continue
                 yield name, weight
 
-        mapper = self.hf_to_vllm_mapper
-        if self.post_layernorm is None:
-            mapper |= WeightsMapper(orig_to_new_prefix={"post_layernorm.": None})
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(_filter(weights), mapper=mapper)
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)

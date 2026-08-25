@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -37,9 +38,10 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Linear(
-            in_features=config.num_channels * self.patch_size * self.patch_size,
-            out_features=self.embed_dim,
+        self.patch_embedding = ReplicatedLinear(
+            input_size=config.num_channels * self.patch_size * self.patch_size,
+            output_size=self.embed_dim,
+            return_bias=False,
         )
         self.num_patches = config.num_patches
         self.position_embedding_size = int(self.num_patches**0.5)
@@ -482,6 +484,10 @@ class Siglip2Model(torch.nn.Module):
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
+        if self.vision_model.post_layernorm is None:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"vision_model.post_layernorm.": None}
+            )
 
     def forward(
         self,
@@ -508,6 +514,8 @@ class Siglip2Model(torch.nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+
         # Drop layers omitted by num_hidden_layers_override.
         layer_count = len(self.vision_model.encoder.layers)
 
@@ -520,10 +528,4 @@ class Siglip2Model(torch.nn.Module):
                     continue
                 yield n, w
 
-        mapper = self.hf_to_vllm_mapper
-        if self.vision_model.post_layernorm is None:
-            mapper |= WeightsMapper(
-                orig_to_new_prefix={"vision_model.post_layernorm.": None}
-            )
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(_filter(weights), mapper=mapper)
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
