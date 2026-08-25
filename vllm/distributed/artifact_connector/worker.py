@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
@@ -116,7 +117,12 @@ class ArtifactWorkerConnector:
         query_start_loc = query_start_loc[: len(request_ids) + 1]
         # Freeze the packed batch before splitting it into request ranges.
         num_rows = int(query_start_loc[-1])
-        routed_experts = self._capturer.snapshot_routing_data(num_rows).cpu().numpy()
+        with gpu_sync_allowed():
+            routed_experts = (
+                self._capturer.snapshot_routing_data(num_rows).cpu().numpy()
+            )
+            num_sampled_np = num_sampled.cpu().numpy()
+            num_rejected_np = num_rejected.cpu().numpy()
         block_size = buffer.block_size
 
         # Publish the whole batch before materializing any consumer output.
@@ -130,8 +136,8 @@ class ArtifactWorkerConnector:
             token_starts,
             query_start_loc[:-1],
             query_start_loc[1:],
-            num_sampled.cpu().numpy(),
-            num_rejected.cpu().numpy(),
+            num_sampled_np,
+            num_rejected_np,
             strict=True,
         ):
             request_num_tokens = end - start
