@@ -346,16 +346,42 @@ class MooncakeProcessorStore:
 
                 prompt_updates = _decode_prompt_updates(encoded_updates)
             except Exception:
+                # Log enough to diagnose the object without the store, then
+                # drop it: the next publish upserts a fresh pair, whereas
+                # leaving it would fail every probe for as long as it lives.
                 logger.warning(
-                    "Discarding unreadable Mooncake metadata for mm_hash %s.",
+                    "Discarding unreadable Mooncake metadata for mm_hash %s "
+                    "(%d bytes, starts with %s).",
                     mm_hash,
+                    len(blob),
+                    bytes(blob[:32]).hex(),
                     exc_info=True,
                 )
+                self._drop_meta(mm_hash)
                 continue
 
             found[mm_hash] = (item_size, prompt_updates)
 
         return found
+
+    def _drop_meta(self, mm_hash: str) -> None:
+        """Remove a metadata object that could not be decoded.
+
+        Runs on the writer thread so a corrupt entry never puts a store write
+        on the caller's path.
+        """
+
+        def remove() -> None:
+            try:
+                self._store.remove(self._meta_key(mm_hash))
+            except Exception:
+                logger.debug(
+                    "Failed to drop the metadata of mm_hash %s.",
+                    mm_hash,
+                    exc_info=True,
+                )
+
+        self._writer.submit(remove)
 
     def put(
         self,
@@ -406,16 +432,25 @@ class MooncakeProcessorStore:
             bufs = self._encoder.encode(item)
             lengths = msgpack.encode([len(buf) for buf in bufs])
             header = _PARTS_HEADER.pack(len(lengths)) + lengths
+            # `upsert`, not `put`: `put` silently declines to overwrite an
+            # existing key and still reports success, which would make any
+            # damaged object permanent -- every later publish would no-op.
             # kwargs first: a reader that sees the metadata can then assume the
             # kwargs object was written too.
-            ret = self._store.put_parts(self._kwargs_key(mm_hash), header, *bufs)
+            ret = self._store.upsert_parts(self._kwargs_key(mm_hash), header, *bufs)
             if ret != 0:
                 logger.debug(
-                    "Mooncake put_parts returned %d for mm_hash %s.", ret, mm_hash
+                    "Mooncake upsert_parts returned %d for mm_hash %s.", ret, mm_hash
                 )
                 return
 
-            self._store.put(self._meta_key(mm_hash), meta)
+            ret = self._store.upsert(self._meta_key(mm_hash), meta)
+            if ret != 0:
+                logger.debug(
+                    "Mooncake upsert returned %d for the metadata of mm_hash %s.",
+                    ret,
+                    mm_hash,
+                )
         except Exception:
             logger.debug(
                 "Failed to publish mm_hash %s to Mooncake.",

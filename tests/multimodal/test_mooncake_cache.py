@@ -50,12 +50,25 @@ class FakeMooncakeStore:
         return self.data.get(key, b"")
 
     def put(self, key: str, value) -> int:
-        self.data[key] = bytes(value)
+        # Mooncake's `put` declines to overwrite an existing key and still
+        # reports success. Modelled so tests catch a regression to `put`.
+        self.data.setdefault(key, bytes(value))
         return 0
 
     def put_parts(self, key: str, *parts) -> int:
+        self.data.setdefault(key, b"".join(bytes(part) for part in parts))
+        return 0
+
+    def upsert(self, key: str, value) -> int:
+        self.data[key] = bytes(value)
+        return 0
+
+    def upsert_parts(self, key: str, *parts) -> int:
         self.data[key] = b"".join(bytes(part) for part in parts)
         return 0
+
+    def remove(self, key: str, force: bool = False) -> int:
+        return 0 if self.data.pop(key, None) is not None else -1
 
     def close(self) -> None:
         pass
@@ -317,3 +330,44 @@ def test_store_errors_degrade_to_a_miss():
 
     backend.batch_is_exist = boom
     assert sender.is_cached(["h"]) == [False]
+
+
+def test_a_damaged_metadata_object_does_not_become_permanent():
+    """Regression: `put` silently declines to overwrite, so a damaged object
+    used to fail every probe for as long as it lived. Publishing must repair
+    it, and a failed decode must drop it."""
+    backend, store = _make_store()
+    item, updates = _item({"a": 8}), _updates([1, 2, 3])
+
+    store.put("h", item, updates, item_size=8)
+    store.flush()
+    good = backend.data[store._meta_key("h")]
+
+    # Truncate the metadata the way the observed failure looked.
+    backend.data[store._meta_key("h")] = good[:2]
+
+    sender = _sender(store)
+    assert sender.is_cached(["h"]) == [False]  # reported as a miss, no raise
+    store.flush()
+    assert store._meta_key("h") not in backend.data  # and dropped, not left to rot
+
+    # Republishing repairs it rather than no-op'ing.
+    store.put("h", item, updates, item_size=8)
+    store.flush()
+    assert backend.data[store._meta_key("h")] == good
+    assert _sender(store).is_cached(["h"]) == [True]
+
+
+def test_republishing_refreshes_both_objects():
+    """Both writes must use upsert, or a re-publish silently keeps stale bytes."""
+    backend, store = _make_store()
+    store.put("h", _item({"a": 8}), _updates([1]), item_size=8)
+    store.flush()
+    first = backend.data[store._kwargs_key("h")]
+
+    store.put("h", _item({"a": 64}), _updates([1, 2]), item_size=64)
+    store.flush()
+    assert backend.data[store._kwargs_key("h")] != first
+
+    loaded = store.get_kwargs("h")
+    assert loaded is not None and loaded["a"].data.numel() == 64
