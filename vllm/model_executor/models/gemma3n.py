@@ -1056,6 +1056,14 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
 
 class Gemma3nForCausalLM(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "embed_audio.": None,
+            "embed_vision.": None,
+            "audio_tower.": None,
+            "vision_tower.": None,
+        }
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1112,10 +1120,5 @@ class Gemma3nForCausalLM(nn.Module):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=(
-                ["embed_audio.", "embed_vision.", "audio_tower.", "vision_tower."]
-            ),
-        )
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

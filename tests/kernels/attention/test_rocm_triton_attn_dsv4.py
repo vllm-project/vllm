@@ -730,9 +730,19 @@ def test_sparse_attn_decode_split_k_kernel(
 @torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
     device = torch.device("cuda")
-    part_m = torch.full((1, 8, 1), torch.finfo(torch.float32).min, device=device)
+    part_m = torch.full(
+        (1, 8, 1),
+        torch.finfo(torch.float32).min,
+        dtype=torch.float32,
+        device=device,
+    )
     part_l = torch.zeros_like(part_m)
-    part_acc = torch.full((1, 8, 1, HEAD_DIM), float("nan"), device=device)
+    part_acc = torch.full(
+        (1, 8, 1, HEAD_DIM),
+        float("nan"),
+        dtype=torch.float32,
+        device=device,
+    )
     part_m[:, :2] = 0
     part_l[:, :2] = 1
     part_acc[:, 0] = 1
