@@ -21,7 +21,6 @@ def _selector_walk_kernel(
     temperature_ptr,
     seeds_ptr,
     tokens_ptr,
-    chosen_column_ptr,
     realized_scores_ptr,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
@@ -73,9 +72,6 @@ def _selector_walk_kernel(
         )
         token = tl.load(candidate_ptr + candidate_base + index, mask=valid, other=0)
         tl.store(tokens_ptr + flat, token, mask=valid)
-        # The acceptance estimator scores the candidate distribution, so it needs
-        # the column rather than the token id. The walk already has it.
-        tl.store(chosen_column_ptr + flat, index, mask=valid)
         previous = index
 
 
@@ -133,12 +129,6 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
-        # Which of the top_k candidates the walk sampled, per (request, step).
-        self._chosen_column = torch.zeros(
-            self.max_num_reqs * self.num_speculative_steps,
-            dtype=torch.int32,
-            device=device,
-        )
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -161,7 +151,6 @@ class DFlash2Speculator(DFlashSpeculator):
             self.temperature,
             self.seeds,
             self.draft_tokens,
-            self._chosen_column,
             self._selector_scores,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
@@ -229,7 +218,6 @@ class DFlash2Speculator(DFlashSpeculator):
                 self._selector_scores[:num_reqs].flatten(0, 1),
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
-                self._chosen_column[:num_sample],
             )
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)

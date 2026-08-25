@@ -130,9 +130,7 @@ class DSparkSpeculator(DFlashSpeculator):
         if self.draft_logits is None:
             draft_ids = logits.argmax(dim=-1)
             if not self.use_confidence_head:
-                self._maybe_predict_acceptance(
-                    logits, idx_map, self._step_cols[step], draft_ids
-                )
+                self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
             return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
@@ -158,9 +156,7 @@ class DSparkSpeculator(DFlashSpeculator):
             use_fp64=self.use_fp64_gumbel,
         )
         if not self.use_confidence_head:
-            self._maybe_predict_acceptance(
-                logits, idx_map, self._step_cols[step], draft_ids
-            )
+            self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         return draft_ids
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:

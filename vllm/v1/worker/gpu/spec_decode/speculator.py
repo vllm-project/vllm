@@ -396,7 +396,7 @@ class DraftModelSpeculator(BaseSpeculator):
             return self.model.get_top_tokens(hidden_states)
         logits = self.model.compute_logits(hidden_states)
         draft_tokens = logits.argmax(dim=-1)
-        self._maybe_predict_acceptance(logits, idx_mapping, draft_step, draft_tokens)
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return draft_tokens
 
     def sample_draft(
@@ -423,9 +423,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-            self._maybe_predict_acceptance(
-                logits, idx_mapping, draft_step, draft_tokens
-            )
+            self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
             return draft_tokens
         return self._greedy_sample(hidden_states, idx_mapping, draft_step)
 
@@ -434,7 +432,6 @@ class DraftModelSpeculator(BaseSpeculator):
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
-        draft_tokens: torch.Tensor,
     ) -> None:
         if self.acceptance_estimator is not None:
             self.acceptance_estimator.predict(
@@ -442,7 +439,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 idx_mapping,
                 draft_step,
                 self.draft_token_confidence_probs,
-                draft_tokens,
                 self.temperature,
             )
 

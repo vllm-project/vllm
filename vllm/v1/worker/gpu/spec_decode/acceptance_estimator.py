@@ -18,7 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 logger = init_logger(__name__)
 
 # The feature is a log-odds, log(q / (1 - q)), which a row carrying all of its
-# mass on the drawn token sends to infinity. Clamp it symmetrically.
+# mass on one token sends to infinity. Clamp it symmetrically.
 _MAX_LOG_ODDS = 40.0
 
 
@@ -242,19 +242,14 @@ def _predict_kernel(
     local_max_stride,
     local_sumexp_ptr,
     local_sumexp_stride,
-    logits_ptr,
-    logits_stride,
     idx_mapping_ptr,
     idx_mapping_stride,
     step_ptr,
-    tokens_ptr,
-    temperature_ptr,
     num_tokens,
     vocab_num_blocks,
     per_token_step: tl.constexpr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     MAX_LOG_ODDS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
@@ -281,13 +276,6 @@ def _predict_kernel(
         step = tl.load(step_ptr).to(tl.int64)
         batch_idx = token_idx
 
-    token = tl.load(tokens_ptr + token_idx).to(tl.int64)
-    temp = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
-    temp = tl.where(temp > 0.0, temp, 1.0)
-    sampled_logit = (
-        tl.load(logits_ptr + token_idx * logits_stride + token).to(tl.float32) / temp
-    )
-
     blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
     blocks_mask = blocks < vocab_num_blocks
     maxes = tl.load(
@@ -301,27 +289,28 @@ def _predict_kernel(
         other=0.0,
     )
 
-    # The feature, logit(q(s)), can be derived as:
-    #   q(s) = e^s / Σ_z e^z
-    #   logit(q(s)) = log(q(s) / (1 - q(s)))
-    #               = log(e^s) - log(Σ_z e^z - e^s)
-    #               = s - log(Σ_{z≠s} e^z),
-    # which is the sampled logit minus the complement log-sum-exponential
-    # (excluding the sampled token's contribution).
-
-    # Compute the complement log-sum-exponential.
-    sampled_token_block = (token // BLOCK_SIZE).to(tl.int32)
-    sumexps = tl.where(
-        blocks == sampled_token_block, sumexps - tl.exp(sampled_logit - maxes), sumexps
-    )
+    # The feature, logit(q(m)) for the row's most likely token m, is:
+    #   q(m) = e^m / Σ_z e^z
+    #   logit(q(m)) = log(q(m) / (1 - q(m)))
+    #               = m - log(Σ_{z≠m} e^z).
+    # It scores the draft *distribution*, not the token drawn from it, so it is
+    # a function of the prefix alone. Trimming a draft therefore never
+    # conditions on the token being trimmed, and rejection sampling stays
+    # lossless. Scoring the drawn token instead would select on the proposal
+    # and bias the emitted distribution toward the drafter's confident modes.
     global_max = tl.max(maxes, axis=0)
-    complement_sumexp = tl.sum(
+
+    # Rescale each block's partial to the global max and sum. The most likely
+    # token contributes exactly e^(m - m) = 1, so removing it leaves the sum
+    # over every other token.
+    total_sumexp = tl.sum(
         tl.where(blocks_mask, sumexps * tl.exp(maxes - global_max), 0.0), axis=0
     )
-    complement_sumexp = tl.maximum(complement_sumexp, 0.0)
+    complement_sumexp = tl.maximum(total_sumexp - 1.0, 0.0)
 
-    # Compute the feature, clamped to the min/max log-odds.
-    feature = sampled_logit - global_max - tl.log(complement_sumexp)
+    # Shifted by m, the numerator is e^0 = 1, so the feature is just the
+    # negated complement log-sum-exponential. Clamp to the min/max log-odds.
+    feature = -tl.log(complement_sumexp)
     feature = tl.minimum(tl.maximum(feature, -MAX_LOG_ODDS), MAX_LOG_ODDS)
     tl.store(features_ptr + req_state_idx * features_stride + step, feature)
 
@@ -498,7 +487,6 @@ class OnlineAcceptanceEstimator:
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
         confidence_probs: torch.Tensor,
-        draft_tokens: torch.Tensor,
         temperature: torch.Tensor,
     ) -> None:
         num_tokens, vocab_size = logits.shape
@@ -535,18 +523,13 @@ class OnlineAcceptanceEstimator:
             local_max.stride(0),
             local_sumexp,
             local_sumexp.stride(0),
-            logits,
-            logits.stride(0),
             idx_mapping,
             idx_mapping.stride(0),
             draft_step,
-            draft_tokens,
-            temperature,
             num_tokens,
             num_blocks,
             per_token_step=draft_step.dim() > 0,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             MAX_LOG_ODDS=_MAX_LOG_ODDS,
-            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
             PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         )
