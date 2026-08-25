@@ -291,7 +291,7 @@ def test_static_model_tensors_survive_level2_restore(
         "attention_backend": "TRITON_ATTN",
         "max_model_len": 128,
         "max_num_seqs": 1,
-        "gpu_memory_utilization": 0.8,
+        "gpu_memory_utilization": 0.5,
         "seed": 0,
         "enable_prefix_caching": False,
         "disable_log_stats": True,
