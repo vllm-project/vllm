@@ -131,6 +131,32 @@ def test_glm5_masked_mha_context_routing(
     )
 
 
+@pytest.mark.parametrize(
+    ("query_len", "seq_len", "has_context", "expected"),
+    [
+        (64 * 1024, 64 * 1024, False, True),
+        (68 * 1024, 68 * 1024, False, False),
+        (4 * 1024, 20 * 1024, True, True),
+        (48 * 1024, 64 * 1024, True, True),
+        (56 * 1024, 72 * 1024, True, True),
+        (63 * 1024, 79 * 1024, True, False),
+    ],
+)
+def test_glm5_flashinfer_masked_mha_routing(query_len, seq_len, has_context, expected):
+    assert (
+        _use_masked_mha(
+            backend_name="FLASHINFER_MLA_SPARSE",
+            tensor_parallel_size=8,
+            qk_head_dim=256,
+            v_head_dim=256,
+            query_len=query_len,
+            seq_len=seq_len,
+            has_context=has_context,
+        )
+        is expected
+    )
+
+
 def test_masked_mha_routing_is_dimension_specific():
     assert _use_masked_mha(
         backend_name="FLASHMLA_SPARSE",

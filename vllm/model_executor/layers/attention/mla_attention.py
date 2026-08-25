@@ -1635,7 +1635,9 @@ _DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
 }
 _DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
 
-_GLM5_MASKED_MHA_THRESHOLDS = {
+_GLM5_MASKED_MHA_THRESHOLDS: dict[
+    str, dict[int, tuple[int, tuple[tuple[int, int], ...]]]
+] = {
     "FLASHMLA_SPARSE": {
         1: (8 * 1024, ()),
         2: (
@@ -1660,7 +1662,21 @@ _GLM5_MASKED_MHA_THRESHOLDS = {
                 (48 * 1024, 32 * 1024),
             ),
         ),
-    }
+    },
+    "FLASHINFER_MLA_SPARSE": {
+        8: (
+            64 * 1024,
+            (
+                (20 * 1024, 4 * 1024),
+                (24 * 1024, 8 * 1024),
+                (32 * 1024, 16 * 1024),
+                (48 * 1024, 32 * 1024),
+                (56 * 1024, 40 * 1024),
+                (64 * 1024, 48 * 1024),
+                (72 * 1024, 56 * 1024),
+            ),
+        ),
+    },
 }
 
 
