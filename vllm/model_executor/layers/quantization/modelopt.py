@@ -19,6 +19,7 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -45,6 +46,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
+    prepare_nvfp4_megamoe_inputs,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     expose_input_quant_key,
@@ -95,6 +99,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1020,6 +1025,11 @@ def _make_modelopt_nvfp4_moe_method(
     if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
         if quant_config.quant_method != "NVFP4":
             raise ValueError("deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16.")
+        if layer.apply_router_weight_on_input:
+            raise NotImplementedError(
+                "NVFP4 deep_gemm_mega_moe does not support "
+                "apply_router_weight_on_input=True."
+            )
         return ModelOptNvFp4MegaMoE(
             quant_config=quant_config,
             moe_config=layer.moe_config,
@@ -1747,7 +1757,6 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         self._num_shared_experts = 0
         self._routed_scaling_factor = 1.0
         self._deep_gemm: Any = None
-        self._scaled_fp4_quant: Any = None
         self._symm_buffer: Any = None
 
         parallel = moe_config.moe_parallel_config
@@ -1764,6 +1773,19 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             )
         if moe_config.activation.value != "silu":
             raise ValueError("NVFP4 deep_gemm_mega_moe currently requires SiLU.")
+        if moe_config.in_dtype != torch.bfloat16:
+            raise ValueError("NVFP4 deep_gemm_mega_moe requires BF16 activations.")
+        if moe_config.has_bias:
+            raise NotImplementedError(
+                "NVFP4 deep_gemm_mega_moe does not support expert bias."
+            )
+        if moe_config.is_lora_enabled:
+            raise NotImplementedError("NVFP4 deep_gemm_mega_moe does not support LoRA.")
+        if moe_config.hidden_dim % 256 or moe_config.intermediate_size % 256:
+            raise ValueError(
+                "NVFP4 deep_gemm_mega_moe requires hidden and intermediate "
+                "dimensions to be multiples of 256."
+            )
         if moe_config.num_experts % parallel.ep_size != 0:
             raise ValueError(
                 f"num_experts={moe_config.num_experts} must be divisible by "
@@ -1810,13 +1832,55 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         *,
         routed_output_transform: torch.nn.Module | None = None,
     ) -> None:
-        # The generic runner applies this transform to routed output before
-        # adding shared output. Folding shared output into MegaMoE earlier
-        # would incorrectly transform both branches, so retain the regular
-        # shared-expert path for this model shape.
-        self._shared_experts_layer = (
-            shared_experts if routed_output_transform is None else None
+        self._shared_experts_layer = None
+        if shared_experts is None or routed_output_transform is not None:
+            return
+
+        gate_up = getattr(shared_experts, "gate_up_proj", None)
+        down = getattr(shared_experts, "down_proj", None)
+        act_fn = getattr(shared_experts, "act_fn", None)
+        compatible = (
+            not getattr(shared_experts, "shard_sequence_parallel", False)
+            and getattr(shared_experts, "expert_gate", None) is None
+            and gate_up is not None
+            and down is not None
+            and getattr(gate_up, "bias", None) is None
+            and getattr(down, "bias", None) is None
+            and isinstance(
+                getattr(gate_up, "quant_method", None), UnquantizedLinearMethod
+            )
+            and isinstance(getattr(down, "quant_method", None), UnquantizedLinearMethod)
+            and isinstance(act_fn, SiluAndMul)
         )
+        if not compatible:
+            logger.info_once(
+                "Shared expert is not compatible with DeepGEMM fusion; "
+                "using the regular shared-expert path.",
+                scope="local",
+            )
+            return
+
+        gate_up_weight = getattr(gate_up, "weight", None)
+        down_weight = getattr(down, "weight", None)
+        hidden = self.moe.hidden_dim
+        if (
+            gate_up_weight is None
+            or down_weight is None
+            or gate_up_weight.dtype != torch.bfloat16
+            or down_weight.dtype != torch.bfloat16
+            or gate_up_weight.ndim != 2
+            or down_weight.ndim != 2
+            or gate_up_weight.shape[0] % 2
+        ):
+            return
+        shared_intermediate = gate_up_weight.shape[0] // 2
+        if (
+            tuple(gate_up_weight.shape) != (2 * shared_intermediate, hidden)
+            or tuple(down_weight.shape) != (hidden, shared_intermediate)
+            or shared_intermediate % self.moe.intermediate_size
+        ):
+            return
+        self._shared_experts_layer = shared_experts
 
     def bind_routed_scaling_factor(self, routed_scaling_factor: float) -> None:
         self._routed_scaling_factor = routed_scaling_factor
@@ -1899,6 +1963,23 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
+        required_apis = (
+            "transform_weights_for_mega_moe",
+            "get_symm_buffer_for_mega_moe",
+            "fp4_fp4_mega_moe",
+        )
+        if not envs.VLLM_USE_DEEP_GEMM:
+            raise RuntimeError(
+                "deep_gemm_mega_moe was selected while VLLM_USE_DEEP_GEMM=0."
+            )
+        if not current_platform.is_device_capability_family(100):
+            raise RuntimeError("NVFP4 deep_gemm_mega_moe requires SM100-family GPUs.")
+        if deep_gemm is None or any(
+            not hasattr(deep_gemm, api) for api in required_apis
+        ):
+            raise RuntimeError(
+                "Installed DeepGEMM does not provide the NVFP4 MegaMoE APIs."
+            )
         if not hasattr(layer, "_deep_gemm_mega_l1_weights"):
             w13_scale = self._pack_e4m3_scales(layer.w13_weight_scale.data)
             w2_scale = self._pack_e4m3_scales(layer.w2_weight_scale.data)
@@ -1910,7 +1991,12 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             layer._deep_gemm_mega_l2_weights = l2_weights
 
             a1_scale = layer.w13_input_scale.data.max().float().reshape(())
+            if not bool(torch.isfinite(a1_scale).item()) or a1_scale.item() <= 0:
+                raise ValueError(
+                    "NVFP4 MegaMoE activation scale must be positive and finite."
+                )
             layer._deep_gemm_mega_a1_scale = a1_scale
+            layer._deep_gemm_mega_a1_gscale = a1_scale.reciprocal()
             layer._deep_gemm_mega_l1_alphas = (
                 layer.w13_weight_scale_2.data.float().reshape(-1, 2).contiguous()
                 * a1_scale
@@ -1936,6 +2022,11 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             layer.w2_weight_scale_2 = None
             layer.w2_input_scale = None
 
+        if not hasattr(layer, "_deep_gemm_mega_a1_gscale"):
+            layer._deep_gemm_mega_a1_gscale = (
+                layer._deep_gemm_mega_a1_scale.reciprocal()
+            )
+
         self._transform_shared_weights(deep_gemm)
         self._initialize_runtime(deep_gemm)
 
@@ -1951,7 +2042,6 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         return None
 
     def _initialize_runtime(self, deep_gemm) -> None:
-        import vllm._custom_ops as ops
         from vllm.distributed import get_ep_group
 
         ep_group = get_ep_group()
@@ -1983,7 +2073,6 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             )
             cache[key] = symm_buffer
         self._deep_gemm = deep_gemm
-        self._scaled_fp4_quant = ops.scaled_fp4_quant
         self._symm_buffer = symm_buffer
 
     def apply(
@@ -2006,28 +2095,24 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             raise RuntimeError(
                 "NVFP4 MegaMoE runtime was not initialized after weight loading."
             )
-        assert self._scaled_fp4_quant is not None
         symm_buffer = self._symm_buffer
-
-        x_fp4, x_scale = self._scaled_fp4_quant(
-            x,
-            1.0 / layer._deep_gemm_mega_a1_scale,
-            is_sf_swizzled_layout=False,
-        )
-        staged_topk_ids = topk_ids
+        is_padding = None
         if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
             is_padding = get_forward_context().is_padding
             if is_padding is not None:
-                staged_topk_ids = torch.where(
-                    is_padding[:num_tokens].unsqueeze(1), -1, topk_ids
-                )
+                is_padding = is_padding[:num_tokens]
 
-        symm_buffer.x[:num_tokens].copy_(x_fp4)
-        symm_buffer.x_sf[:num_tokens].copy_(
-            x_scale.contiguous().view(torch.uint8).view(torch.int32)
+        prepare_nvfp4_megamoe_inputs(
+            x,
+            layer._deep_gemm_mega_a1_gscale,
+            topk_weights,
+            topk_ids,
+            symm_buffer.x[:num_tokens],
+            symm_buffer.x_sf[:num_tokens],
+            symm_buffer.topk_idx[:num_tokens],
+            symm_buffer.topk_weights[:num_tokens],
+            is_padding=is_padding,
         )
-        symm_buffer.topk_idx[:num_tokens].copy_(staged_topk_ids)
-        symm_buffer.topk_weights[:num_tokens].copy_(topk_weights)
 
         y = torch.empty_like(x)
         shared_kwargs = {}
