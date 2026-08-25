@@ -17,6 +17,12 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -75,6 +81,24 @@ def _make_router(eplb_state: EplbLayerState | None = None) -> DummyRouter:
 def _make_modular_routed_experts():
     return types.SimpleNamespace(
         quant_method=types.SimpleNamespace(is_monolithic=False),
+    )
+
+
+def _full_attention_kv_group(
+    spec_type: type[FullAttentionSpec] = FullAttentionSpec,
+) -> KVCacheGroupSpec:
+    full_attention = spec_type(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    return KVCacheGroupSpec(
+        ["layer"],
+        UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={"layer": full_attention},
+        ),
     )
 
 
@@ -381,7 +405,7 @@ def test_artifact_worker_connector_binds_capture_on_non_output_rank(monkeypatch)
     connector = artifact_worker.ArtifactWorkerConnector(
         vllm_config=config,
         model=model,
-        kv_cache_config=SimpleNamespace(),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()]),
         max_num_batched_tokens=32,
     )
 
@@ -397,11 +421,12 @@ def test_artifact_worker_connector_binds_capture_on_non_output_rank(monkeypatch)
     capturer.snapshot_routing_data.assert_not_called()
 
 
-def test_artifact_worker_connector_shm_capacity(monkeypatch):
+def test_artifact_worker_connector_default_capacity(monkeypatch):
     import vllm.distributed.artifact_connector.worker as artifact_worker
 
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
     store_constructor = Mock()
+    background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(artifact_worker, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
@@ -414,7 +439,9 @@ def test_artifact_worker_connector_shm_capacity(monkeypatch):
         lambda *_: (32, 16),
     )
     monkeypatch.setattr(artifact_worker, "InProcessArtifactStore", store_constructor)
-    monkeypatch.setattr(artifact_worker, "BackgroundArtifactStore", Mock())
+    monkeypatch.setattr(
+        artifact_worker, "BackgroundArtifactStore", background_store_constructor
+    )
     monkeypatch.setattr(artifact_worker, "RoutedExpertsArtifactBuffer", Mock())
 
     config = SimpleNamespace(
@@ -427,13 +454,17 @@ def test_artifact_worker_connector_shm_capacity(monkeypatch):
     kwargs = dict(
         vllm_config=config,
         model=Mock(),
-        kv_cache_config=SimpleNamespace(num_blocks=10, kv_cache_groups=[object()]),
+        kv_cache_config=SimpleNamespace(
+            num_blocks=10,
+            kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
+        ),
         max_num_batched_tokens=32,
     )
 
     artifact_worker.ArtifactWorkerConnector(**kwargs)
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
+    assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):

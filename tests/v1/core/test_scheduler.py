@@ -1382,8 +1382,13 @@ def test_scheduler_reset_prefix_cache():
     with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
         scheduler.reset_prefix_cache(reset_running_requests=True)
 
-    # Running requests may only be reset after pause(mode="keep").
+    # pause(mode="keep") also waits for scheduled model outputs to drain.
     scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    with pytest.raises(RuntimeError, match="model output is in flight"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    for request in requests:
+        request.num_in_flight_tokens = 0
+
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
     scheduler.artifact_connector.reset.assert_called_once_with()
 
@@ -1395,12 +1400,14 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
-def test_artifact_reset_prefix_cache_when_idle():
+@pytest.mark.parametrize("reset_successful", [False, True])
+def test_artifact_reset_follows_kv_reset_result(reset_successful: bool):
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.artifact_connector = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=reset_successful)
 
-    assert scheduler.reset_prefix_cache(reset_running_requests=True)
-    scheduler.artifact_connector.reset.assert_called_once_with()
+    assert scheduler.reset_prefix_cache() is reset_successful
+    assert scheduler.artifact_connector.reset.call_count == int(reset_successful)
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():

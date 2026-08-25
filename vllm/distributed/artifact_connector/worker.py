@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -207,6 +208,8 @@ class ArtifactWorkerConnector:
     def _publish_blocks(
         self,
         batches: list[tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]],
+        retain_keys: Sequence[str] = (),
+        release_keys: Sequence[str] = (),
     ) -> None:
         store = self._store
         buffer = self._buffer
@@ -223,11 +226,14 @@ class ArtifactWorkerConnector:
             ]
             if ready:
                 ready_batches.append((state.artifact_keys, ready))
-        publish_routed_experts(
-            store,
-            batches=ready_batches,
-            block_size=buffer.block_size,
-        )
+        if ready_batches or retain_keys or release_keys:
+            publish_routed_experts(
+                store,
+                batches=ready_batches,
+                block_size=buffer.block_size,
+                retain_keys=retain_keys,
+                release_keys=release_keys,
+            )
         for _, blocks in ready_batches:
             for _, rows in blocks:
                 buffer.release_block(rows)
@@ -240,7 +246,13 @@ class ArtifactWorkerConnector:
             raise RuntimeError("artifact request cannot run and finish in one step")
         if metadata.generation < self._generation:
             raise RuntimeError("artifact metadata generation moved backwards")
+        release_keys: list[str] = []
         if metadata.generation > self._generation:
+            release_keys.extend(
+                key
+                for state in self._requests.values()
+                for key in reversed(state.artifact_keys)
+            )
             self._buffer.reset()
             self._requests.clear()
             self._generation = metadata.generation
@@ -253,15 +265,22 @@ class ArtifactWorkerConnector:
         block_batches: list[
             tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
         ] = []
+        retained_keys: list[str] = []
         for request_id, block_hashes in metadata.block_hashes.items():
             state = self._requests[request_id]
-            state.artifact_keys.extend(
-                routed_experts_keys(block_hashes, str(self._generation))
-            )
+            keys = routed_experts_keys(block_hashes, str(self._generation))
+            state.artifact_keys.extend(keys)
+            retained_keys.extend(keys)
             block_batches.append((state, []))
-        self._publish_blocks(block_batches)
+        release_keys.extend(
+            key
+            for request_id in metadata.finished_requests
+            for key in reversed(self._requests[request_id].artifact_keys)
+        )
+        self._publish_blocks(block_batches, retained_keys, release_keys)
         for request_id in metadata.finished_requests:
-            for _, rows in self._requests.pop(request_id).pending_blocks:
+            state = self._requests.pop(request_id)
+            for _, rows in state.pending_blocks:
                 self._buffer.release_block(rows)
             self._buffer.discard(request_id)
 

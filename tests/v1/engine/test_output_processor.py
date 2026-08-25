@@ -1336,7 +1336,7 @@ async def test_request_output_collector():
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
 
 
-def test_routed_experts_are_accumulated_and_prompt_prefix_is_trimmed():
+def test_routed_experts_are_accumulated_until_finish():
     state = RequestState(
         request_id="request-int",
         external_req_id="request",
@@ -1358,7 +1358,6 @@ def test_routed_experts_are_accumulated_and_prompt_prefix_is_trimmed():
         queue=None,
         log_stats=False,
         stream_interval=1,
-        routed_experts_prompt_start=2,
     )
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
@@ -1373,7 +1372,7 @@ def test_routed_experts_are_accumulated_and_prompt_prefix_is_trimmed():
     assert finished is not None
     np.testing.assert_array_equal(
         finished.outputs[0].routed_experts,
-        np.concatenate((prompt_chunk[2:], decode_chunk)),
+        np.concatenate((prompt_chunk, decode_chunk)),
     )
 
 

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,8 +31,8 @@ class PackedBlockHashes:
 class ArtifactConnectorMetadata:
     generation: int
     requests: dict[str, int]
-    block_hashes: dict[str, Iterable[bytes]]
-    finished_requests: set[str]
+    block_hashes: dict[str, PackedBlockHashes]
+    finished_requests: tuple[str, ...]
 
 
 @dataclass
@@ -57,7 +57,7 @@ class ArtifactSchedulerConnector:
         requests: dict[str, Request],
     ) -> ArtifactConnectorMetadata:
         scheduled_requests: dict[str, int] = {}
-        block_hashes_by_request: dict[str, Iterable[bytes]] = {}
+        block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id in scheduler_output.num_scheduled_tokens:
             num_sent = self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
@@ -65,8 +65,10 @@ class ArtifactSchedulerConnector:
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
             self._sent_hash_counts[request_id] = len(request.block_hashes)
-            scheduled_requests[request_id] = (
-                0 if request.num_output_tokens == 0 else request.num_tokens - 1
+            assert request.sampling_params is not None
+            scheduled_requests[request_id] = max(
+                request.sampling_params.routed_experts_prompt_start,
+                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
             )
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
@@ -81,7 +83,7 @@ class ArtifactSchedulerConnector:
                 block_hashes_by_request[request_id] = packed
                 self._sent_hash_counts[request_id] = len(request.block_hashes)
         # Sending transfers ownership of these one-shot events.
-        finished_requests = set(self._finished_requests)
+        finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
             (request_id, block_hashes)
             for request_id, block_hashes in self._finished_requests.items()
