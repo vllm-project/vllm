@@ -582,3 +582,57 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     assert isinstance(result["error"], RuntimeError)
     assert "Microbatch 0" in str(result["error"])
     assert isinstance(result["error"].__cause__, ValueError)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_capturable_run_replays_as_a_cudagraph():
+    """The split forward survives `torch.cuda.graph`, and a replay recomputes.
+
+    This is the half of the DBO capture path that end-to-end runs cannot reach
+    without a DeepEP-capable box: threads start (and reach their contexts)
+    outside the graph, only the handoff-and-join is captured, and the replay
+    has to pick up whatever the persistent input buffers hold.
+    """
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, all2all_backend="deepep_low_latency"
+        ),
+    )
+    device = torch.device("cuda:0")
+    runner = _make_execution_runner(vllm_config)
+
+    num_tokens = 16
+    input_ids = torch.arange(num_tokens, device=device)
+    positions = torch.arange(num_tokens, device=device)
+    model_inputs = {
+        "input_ids": input_ids,
+        "positions": positions,
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+    }
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 4), slice(0, 8)),
+            UBatchSlice(slice(4, 8), slice(8, 16)),
+        ],
+    )
+
+    model = _YieldingModel([])
+    graph = torch.cuda.CUDAGraph()
+    finish = runner.begin_capturable_run(
+        model, model_inputs, ubatch_state, for_capture=True
+    )
+    with torch.cuda.graph(graph, stream=runner.capture_stream):
+        captured = finish()
+
+    input_ids.fill_(3)
+    positions.fill_(5)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    expected = torch.full(
+        (num_tokens, 1), 3 * 2 + 5, dtype=torch.float32, device=device
+    )
+    torch.testing.assert_close(captured, expected)
