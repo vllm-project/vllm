@@ -358,16 +358,25 @@ def test_a_damaged_metadata_object_does_not_become_permanent():
     assert _sender(store).is_cached(["h"]) == [True]
 
 
-def test_republishing_refreshes_both_objects():
-    """Both writes must use upsert, or a re-publish silently keeps stale bytes."""
+def test_receiver_drops_an_unretrievable_pair():
+    """A key can exist while its data cannot be read. Publishing uses `put`,
+    which declines to overwrite, so the receiver must remove the pair or every
+    later request for that item fails the same way."""
     backend, store = _make_store()
-    store.put("h", _item({"a": 8}), _updates([1]), item_size=8)
-    store.flush()
-    first = backend.data[store._kwargs_key("h")]
+    receiver = _receiver(store)
 
-    store.put("h", _item({"a": 64}), _updates([1, 2]), item_size=64)
-    store.flush()
-    assert backend.data[store._kwargs_key("h")] != first
+    # Key present, payload unreadable -- the state a failed write leaves behind.
+    backend.data[store._kwargs_key("h")] = b"\x00\x01"
 
+    with pytest.raises(MultiModalCacheMissError):
+        receiver.get_and_update_item(None, "h")
+    store.flush()
+    assert store._kwargs_key("h") not in backend.data
+    assert store._meta_key("h") not in backend.data
+
+    # With the keys gone, a fresh publish repopulates it.
+    item = _item({"a": 8})
+    store.put("h", item, _updates([1]), item_size=8)
+    store.flush()
     loaded = store.get_kwargs("h")
-    assert loaded is not None and loaded["a"].data.numel() == 64
+    assert loaded is not None and torch.equal(loaded["a"].data, item["a"].data)

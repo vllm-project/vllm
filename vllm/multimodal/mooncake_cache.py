@@ -357,31 +357,40 @@ class MooncakeProcessorStore:
                     bytes(blob[:32]).hex(),
                     exc_info=True,
                 )
-                self._drop_meta(mm_hash)
+                self.drop_meta(mm_hash)
                 continue
 
             found[mm_hash] = (item_size, prompt_updates)
 
         return found
 
-    def _drop_meta(self, mm_hash: str) -> None:
-        """Remove a metadata object that could not be decoded.
+    def _drop(self, mm_hash: str, *, meta_only: bool) -> None:
+        """Remove objects that could not be read back.
 
-        Runs on the writer thread so a corrupt entry never puts a store write
-        on the caller's path.
+        Publishing uses `put`, which declines to overwrite, so an unreadable
+        object has to be removed before it can be replaced. Runs on the writer
+        thread to keep store writes off the caller's path.
         """
+        keys = [self._meta_key(mm_hash)]
+        if not meta_only:
+            keys.append(self._kwargs_key(mm_hash))
 
         def remove() -> None:
-            try:
-                self._store.remove(self._meta_key(mm_hash))
-            except Exception:
-                logger.debug(
-                    "Failed to drop the metadata of mm_hash %s.",
-                    mm_hash,
-                    exc_info=True,
-                )
+            for key in keys:
+                try:
+                    self._store.remove(key)
+                except Exception:
+                    logger.debug("Failed to drop %s.", key, exc_info=True)
 
         self._writer.submit(remove)
+
+    def drop_meta(self, mm_hash: str) -> None:
+        """Remove an undecodable metadata object."""
+        self._drop(mm_hash, meta_only=True)
+
+    def drop(self, mm_hash: str) -> None:
+        """Remove both objects of an item that could not be retrieved."""
+        self._drop(mm_hash, meta_only=False)
 
     def put(
         self,
@@ -432,22 +441,27 @@ class MooncakeProcessorStore:
             bufs = self._encoder.encode(item)
             lengths = msgpack.encode([len(buf) for buf in bufs])
             header = _PARTS_HEADER.pack(len(lengths)) + lengths
-            # `upsert`, not `put`: `put` silently declines to overwrite an
-            # existing key and still reports success, which would make any
-            # damaged object permanent -- every later publish would no-op.
+            # `put`, not `upsert`. Neither primitive is safe on its own:
+            # `put` declines to overwrite an existing key (so a damaged object
+            # would be permanent), while a losing `upsert` has already
+            # repointed the key in its start phase before it reports the
+            # conflict -- leaving a key that exists but cannot be read, which
+            # the readers below would then promise to the engine. `put` never
+            # damages a key, and repair comes from removing the bad object
+            # first (see `drop_meta` and the receiver cache).
             # kwargs first: a reader that sees the metadata can then assume the
             # kwargs object was written too.
-            ret = self._store.upsert_parts(self._kwargs_key(mm_hash), header, *bufs)
+            ret = self._store.put_parts(self._kwargs_key(mm_hash), header, *bufs)
             if ret != 0:
                 logger.debug(
-                    "Mooncake upsert_parts returned %d for mm_hash %s.", ret, mm_hash
+                    "Mooncake put_parts returned %d for mm_hash %s.", ret, mm_hash
                 )
                 return
 
-            ret = self._store.upsert(self._meta_key(mm_hash), meta)
+            ret = self._store.put(self._meta_key(mm_hash), meta)
             if ret != 0:
                 logger.debug(
-                    "Mooncake upsert returned %d for the metadata of mm_hash %s.",
+                    "Mooncake put returned %d for the metadata of mm_hash %s.",
                     ret,
                     mm_hash,
                 )
@@ -688,9 +702,14 @@ class MooncakeProcessorReceiverCache(BaseMultiModalReceiverCache):
             mm_item = self._store.get_kwargs(mm_hash)
 
         if mm_item is None:
-            # P0 sent data=None trusting its shadow, but the item is no longer
-            # in the store. Raise a retryable error so P0 drops the stale
-            # entry and the client resends the data.
+            # P0 sent data=None trusting its shadow, but the item is not
+            # retrievable. Drop the pair: the key may exist while its data does
+            # not, in which case `put` would decline to republish it and every
+            # later request for this item would fail the same way.
+            self._store.drop(mm_hash)
+
+            # Raise a retryable error so P0 drops the stale entry and the
+            # client resends the data.
             raise MultiModalCacheMissError([mm_hash])
 
         self.cache_if_fits(self._cache, mm_hash, mm_item)
