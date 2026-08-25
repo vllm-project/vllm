@@ -87,7 +87,7 @@ class UBatchWrapper:
                 runnable, vllm_config, runtime_mode=runtime_mode
             )
 
-        self.sm_control = create_sm_control_context(vllm_config)
+        self.sm_control = create_sm_control_context(vllm_config.parallel_config)
         self.device = device
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         self._runnable_str = str(runnable) if self.is_debugging_mode else None

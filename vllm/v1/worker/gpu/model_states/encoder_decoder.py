@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, get_backend_names
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.interface import (
@@ -118,7 +118,10 @@ class EncoderDecoderModelState(ModelState):
         for_capture: bool = False,
         ubatch_idx: int = 0,
     ) -> dict[str, Any]:
-        assert ubatch_idx == 0, "ubatch_idx should be 0."
+        assert ubatch_idx == 0, (
+            f"DBO is not supported when running with {type(self).__name__} "
+            f"(Attention backends: {get_backend_names(attn_groups)})."
+        )
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding

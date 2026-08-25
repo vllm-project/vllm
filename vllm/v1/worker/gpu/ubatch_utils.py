@@ -29,7 +29,6 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
-    check_ubatch_thresholds,
     create_sm_control_context,
     maybe_create_ubatch_slices,
 )
@@ -302,7 +301,6 @@ class UBatchRunner:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         max_num_reqs: int,
-        decode_query_len: int,
     ):
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
@@ -324,29 +322,10 @@ class UBatchRunner:
             torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
             for _ in range(self.num_ubatches)
         ]
-        self.decode_query_len = decode_query_len
         self.comm_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
-        self.sm_control = create_sm_control_context(vllm_config)
-
-    def wants_ubatch(self, num_tokens: int, uniform_token_count: int | None) -> bool:
-        """Whether this rank would like to microbatch this step.
-
-        The answer still has to be agreed with the other DP ranks before it can
-        be acted on: microbatching is all-or-nothing across the group. It is
-        computed for the other ranks too, from the token counts the DP
-        all-reduce carries, so it must stay a pure function of its arguments.
-        """
-        if num_tokens < self.num_ubatches:
-            # Below one token per microbatch the split is not well-formed, no
-            # matter what the thresholds say.
-            return False
-        return check_ubatch_thresholds(
-            self.parallel_config,
-            num_tokens,
-            uniform_decode=uniform_token_count == self.decode_query_len,
-        )
+        self.sm_control = create_sm_control_context(self.parallel_config)
 
     def prepare(
         self,
@@ -523,7 +502,6 @@ def maybe_build_ubatch_runner(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     max_num_reqs: int,
-    decode_query_len: int,
 ) -> UBatchRunner | None:
     """Build the microbatch runner, or None when DBO is not in use.
 
@@ -545,5 +523,4 @@ def maybe_build_ubatch_runner(
         attn_groups,
         kv_cache_config,
         max_num_reqs,
-        decode_query_len,
     )

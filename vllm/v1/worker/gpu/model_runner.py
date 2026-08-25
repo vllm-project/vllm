@@ -648,7 +648,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups,
             self.kv_cache_config,
             self.max_num_reqs,
-            self.decode_query_len,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config,
@@ -1612,7 +1611,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            ubatch_runner=None if skip_attn_for_dummy_run else self.ubatch_runner,
+            parallel_config=self.parallel_config,
+            allow_ubatching=(
+                self.ubatch_runner is not None and not skip_attn_for_dummy_run
+            ),
+            uniform_decode=uniform_tok_count == self.decode_query_len,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1785,6 +1788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run model.
         if ubatch_state is not None:
             assert self.ubatch_runner is not None
+            assert batch_desc.cg_mode == CUDAGraphMode.NONE
             with self.ubatch_runner.forward_context(
                 ubatch_state,
                 dp_sync.num_tokens_across_dp if dp_sync is not None else None,
@@ -2178,7 +2182,6 @@ class BatchReqState(NamedTuple):
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
     has_prefill: bool
-
 
 
 def sort_batch_req_ids(

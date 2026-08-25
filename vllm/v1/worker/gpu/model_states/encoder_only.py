@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import get_backend_names
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -169,7 +170,11 @@ class EncoderOnlyModelState(DefaultModelState):
         for_capture: bool = False,
         ubatch_idx: int = 0,
     ) -> dict[str, Any]:
-        assert ubatch_idx == 0, "ubatch_idx should be 0."
+        backends = get_backend_names(attn_groups + [self.encoder_attn_groups])
+        assert ubatch_idx == 0, (
+            f"DBO is not supported when running with {type(self).__name__} "
+            f"(Attention backends: {backends})."
+        )
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
