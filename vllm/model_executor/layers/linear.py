@@ -232,6 +232,22 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
 
+def maybe_restore_unquantized_weight_layout(model: torch.nn.Module) -> None:
+    """Re-apply the platform-preferred layout of unquantized linear weights.
+
+    Model loaders that bypass `process_weights_after_loading` must call this,
+    since some serialization formats (e.g. tensorizer) do not preserve tensor
+    strides. Leaving the layout loader-dependent makes `torch.compile` reuse a
+    graph specialized for a different stride and fail its input stride check.
+    """
+    if not current_platform.is_xpu():
+        return
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, UnquantizedLinearMethod):
+            quant_method.process_weights_after_loading(module)
+
+
 class LinearBase(PluggableLayer):
     """Base linear layer.
 

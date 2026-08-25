@@ -10,6 +10,9 @@ from torch import nn
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (
+    maybe_restore_unquantized_weight_layout,
+)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -135,8 +138,15 @@ class TensorizerLoader(BaseModelLoader):
                         tensorizer_config=tensorizer_config, vllm_config=vllm_config
                     )
             self.load_weights(model, model_config)
-            return model
-        return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
+        else:
+            model = self._load_model_serialized_cpu(
+                vllm_config=vllm_config, prefix=prefix
+            )
+
+        # Weights were already processed before serialization, but tensorizer
+        # does not round-trip tensor strides, so restore the expected layout.
+        maybe_restore_unquantized_weight_layout(model)
+        return model
 
     @staticmethod
     def save_model(
