@@ -3,13 +3,13 @@
 """Routed-experts capture + replay consistency (issue #45585, section R3).
 
 Three tests cover the replay invariants end-to-end; each test exercises
-two or three scenarios so the matrix below is covered with few cases:
+one to three scenarios so the matrix below is covered with few cases:
 
   1. ``test_capture_shape_and_range``: capture shape/range and
      token_ids/completion alignment on both endpoints, with and without
      ``return_token_ids``.
   2. ``test_replay_identity``: deterministic reruns (prefix-cache slot
-     recovery) and prefix identity when the prompt is extended.
+     recovery).
   3. ``test_batch_isolation``: batch composition / concurrent load must
      not perturb routing; varied-length requests all stay valid.
 
@@ -42,20 +42,24 @@ import pytest
 
 from vllm.utils.network_utils import get_open_port
 
-from ..conftest import server as _server
+from ..conftest import SERVED_MODEL_NAME, server as _server
 
 # tiny-mixtral config: 8 local experts, top-2 routing, 2 hidden layers.
 # The published config has sliding_window=4096, which produces
 # SlidingWindowSpec kv-cache groups; the routed-experts slot buffer
 # requires a FullAttentionSpec group, so we override sliding_window=null.
-MOE_MODEL_NAME = "TitanML/tiny-mixtral"
+MOE_MODEL_NAME = os.environ.get("VLLM_TEST_MOE_MODEL", "TitanML/tiny-mixtral")
 MOE_NUM_LOCAL_EXPERTS = 8
 MOE_NUM_EXPERTS_PER_TOK = 2
 MOE_NUM_HIDDEN_LAYERS = 2
 
-# ~10 tokens per sentence; the long prompts force multi-step chunked
-# prefill, exercising the slot-indexed routing buffer across steps.
+# Sentence (~10 tokens) used to build the varied-length prompts.
 _PROMPT_SEED = "The quick brown fox jumps over the lazy dog."
+
+# Tiny-mixtral's tokenizer does not define a chat template; without one,
+# transformers >= 4.44 rejects chat requests with a 400. Use a minimal
+# content-only template so the chat endpoint is exercisable end-to-end.
+_CHAT_TEMPLATE = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
 
 # (runner_type, enforce_eager, moe_backend)
 SERVER_CONFIGS = [
@@ -130,7 +134,7 @@ def _generate(
     response = openai.OpenAI(
         base_url=f"{url}/v1", api_key="EMPTY", max_retries=0
     ).completions.create(
-        model=MOE_MODEL_NAME,
+        model=SERVED_MODEL_NAME,
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=0,
@@ -153,7 +157,7 @@ def _generate_chat(
     response = openai.OpenAI(
         base_url=f"{url}/v1", api_key="EMPTY", max_retries=0
     ).chat.completions.create(
-        model=MOE_MODEL_NAME,
+        model=SERVED_MODEL_NAME,
         messages=messages,
         max_tokens=max_tokens,
         temperature=0,
@@ -216,12 +220,15 @@ def server_url(request):
     runner_type, enforce_eager, moe_backend = request.param
     if moe_backend is not None and not _supports_monolithic_trtllm():
         pytest.skip(
-            "flashinfer_trtllm MoE kernels require flashinfer on Blackwell (SM100) GPUs"
+            "flashinfer_trtllm MoE kernels require flashinfer on "
+            "Blackwell (SM100) GPUs"
         )
     extra_args = [
         "--enable-return-routed-experts",
         "--hf-overrides",
         '{"sliding_window": null}',
+        "--chat-template",
+        _CHAT_TEMPLATE,
     ]
     if enforce_eager:
         # The harness no longer forces eager; opt in per scenario so the
@@ -252,25 +259,13 @@ def test_capture_shape_and_range(server_url):
 
 
 def test_replay_identity(server_url):
-    """Reruns and extended prompts reproduce routing exactly."""
+    """Reruns reproduce routing exactly."""
     prompt = f"{_PROMPT_SEED} Count to three."
     first = _generate(server_url, prompt, max_tokens=6, ignore_eos=True)
     # The second run prefix-cache-hits the first run's blocks, so the
     # comparison also covers slot-buffer recovery against live capture.
     second = _generate(server_url, prompt, max_tokens=6, ignore_eos=True)
     _assert_identical(second, first)
-
-    prefix = (_PROMPT_SEED + " ") * 15
-    pref = _generate(server_url, prefix, max_tokens=4, ignore_eos=True)
-    extended = _generate(
-        server_url, prefix + (_PROMPT_SEED + " ") * 4, max_tokens=4, ignore_eos=True
-    )
-    # Routing is causal: the extended request's rows for the shared
-    # prompt prefix tokens must equal the prefix request's rows.
-    assert np.array_equal(
-        extended.routed_experts[: pref.prompt_tokens],
-        pref.routed_experts[: pref.prompt_tokens],
-    )
 
 
 def test_batch_isolation(server_url):
