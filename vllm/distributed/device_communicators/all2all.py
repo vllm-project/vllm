@@ -817,7 +817,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
         # Release cached allocator blocks before FlashInfer reserves the
         # symmetric MNNVL fabric workspace.
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,
