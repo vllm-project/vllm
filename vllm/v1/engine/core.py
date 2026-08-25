@@ -2132,7 +2132,11 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
 
-        if has_global_unfinished:
+        # Once rank 0's DP coordinator is lost, resume into always-running
+        # (dummy batches when idle) — no coordinator wake-up is available.
+        if has_global_unfinished or (
+            self.enable_fault_tolerance and self.ft_sentinel.coordinator_lost
+        ):
             self.engines_running = True
 
     def barrier(self):
@@ -2287,6 +2291,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_lost:
+            # Coordinator lost: never idle-pause; engines keep stepping batches.
+            return True
 
         return has_unfinished
 
