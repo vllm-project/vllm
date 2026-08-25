@@ -183,6 +183,19 @@ class SchedulerIterationDetails:
 
 
 @dataclass
+class HiSparseStats:
+    cache_hits: int = 0
+    cache_misses: int = 0
+    host_to_device_bytes: int = 0
+
+    def aggregate(self, other: "HiSparseStats") -> "HiSparseStats":
+        self.cache_hits += other.cache_hits
+        self.cache_misses += other.cache_misses
+        self.host_to_device_bytes += other.host_to_device_bytes
+        return self
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -205,6 +218,7 @@ class SchedulerStats:
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
+    hisparse_stats: HiSparseStats | None = None
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
+    from vllm.v1.metrics.stats import HiSparseStats
     from vllm.v1.request import Request
 
 
@@ -112,6 +113,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def finish_forward(self) -> None:
         assert self._worker is not None
         self._worker.finish_forward()
+
+    def finish_step(self) -> HiSparseStats | None:
+        assert self._worker is not None
+        return self._worker.finish_step()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         return
