@@ -89,14 +89,6 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        extra_config = self._kv_transfer_config.kv_connector_extra_config
-        return (
-            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
-            == "true"
-        )
-
     @staticmethod
     def _validate_kv_cache_config(
         vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
@@ -141,12 +133,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None, "kv_cache_config is required"
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        save_decode_cache = extra_config.get("save_decode_cache", False)
         # Capacity-only: contributes its segment to the store pool but transfers
         # no KV, so the KV-cache-shape invariants below cannot be reached.
-        self._capacity_only = self.kv_role == "kv_consumer" and not (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "enable_lookup", True
-            )
+        self._capacity_only = (
+            self.kv_role == "kv_consumer"
+            and not extra_config.get("enable_lookup", True)
+            and not save_decode_cache
         )
         if not self._capacity_only:
             self._validate_kv_cache_config(vllm_config, kv_cache_config)
@@ -287,16 +281,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type
-    ):
-        assert self.connector_worker is not None
-        assert (
-            self._kv_cache_config is not None
-            and len(self._kv_cache_config.kv_cache_groups) == 1
-        ), "Cross-layer KV cache does not supported with hybrid models"
-        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         # No-op: loads are issued in get_finished() for compute overlap.
