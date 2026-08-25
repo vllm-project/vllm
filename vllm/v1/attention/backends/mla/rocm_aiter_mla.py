@@ -222,6 +222,10 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     fp8_prefill_max_q_len: int | None = None
     fp8_prefill_num_partial_tiles: int | None = None
 
+    # Per-token flat KV indices for each chunked-context chunk, indexed by
+    # ContextChunk.index. Built once per step so every MLA layer reuses them.
+    context_chunk_kv_indices: list[torch.Tensor] | None = None
+
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
@@ -778,6 +782,42 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return attn_metadata
 
+    def _build_context_chunk_kv_indices(
+        self, attn_metadata: AiterMLAMetadata
+    ) -> list[torch.Tensor] | None:
+        """Flatten each context chunk's block table into per-token KV indices.
+
+        ``gather_kv_b_proj`` addresses its KV buffer one token per entry, so it
+        needs flat indices rather than block ids. Built here so the expansion
+        runs once per step instead of once per MLA layer.
+        """
+        prefill = attn_metadata.prefill
+        if prefill is None or prefill.chunked_context is None:
+            return None
+
+        indices = []
+        for chunk in prefill.chunked_context.chunks:
+            block_table = prefill.block_table[chunk.request_slice]
+            cu_seq_lens = chunk.cu_seq_lens
+            kv_indices = torch.empty(
+                chunk.num_context_tokens,
+                dtype=torch.int32,
+                device=block_table.device,
+            )
+            _expand_page_indices_kernel[(cu_seq_lens.shape[0] - 1,)](
+                kv_indices,
+                block_table,
+                block_table.stride(0),
+                cu_seq_lens,
+                cu_seq_lens[1:] - cu_seq_lens[:-1],
+                chunk.starts,
+                KERNEL_BLOCK_SIZE=self.kernel_block_size,
+                BLOCK_SIZE=1024,
+                HAS_START_OFFSETS=True,
+            )
+            indices.append(kv_indices)
+        return indices
+
     def build(
         self,
         common_prefix_len: int,
@@ -786,6 +826,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     ) -> AiterMLAMetadata:
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
+        )
+        attn_metadata.context_chunk_kv_indices = self._build_context_chunk_kv_indices(
+            attn_metadata
         )
         if (
             attn_metadata.decode is not None
@@ -868,39 +911,6 @@ def _expand_page_indices_kernel(
             flat_indices,
             mask=mask,
         )
-
-
-def _chunk_kv_indices(chunk, block_table: torch.Tensor, block_size: int):
-    """Per-token flat KV indices for one context chunk, via the same kernel the
-    decode path uses to flatten its block table.
-
-    ``gather_kv_b_proj`` maps a request-local row to ``indices[indptr[r] + row]``
-    when addressed one token at a time, so the chunk's token-space cumsum doubles
-    as its entry-space indptr. Memoized on the chunk, which lives for one step,
-    so only the first MLA layer pays for it.
-    """
-    cached = getattr(chunk, "_aiter_kv_indices", None)
-    if cached is not None:
-        return cached
-
-    cu_seq_lens = chunk.cu_seq_lens
-    num_reqs = cu_seq_lens.shape[0] - 1
-    kv_indices = torch.empty(
-        chunk.num_context_tokens, dtype=torch.int32, device=block_table.device
-    )
-    _expand_page_indices_kernel[(num_reqs,)](
-        kv_indices,
-        block_table,
-        block_table.stride(0),
-        cu_seq_lens,
-        cu_seq_lens[1:] - cu_seq_lens[:-1],
-        chunk.starts,
-        KERNEL_BLOCK_SIZE=block_size,
-        BLOCK_SIZE=1024,
-        HAS_START_OFFSETS=True,
-    )
-    chunk._aiter_kv_indices = kv_indices
-    return kv_indices
 
 
 class AiterMLAHelper:
@@ -1089,7 +1099,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         self,
         chunk,
         kv_c_and_k_pe_cache: torch.Tensor,
-        block_table: torch.Tensor,
+        kv_indices: torch.Tensor,
         k_scale: torch.Tensor,
         out_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1120,7 +1130,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_c_and_k_pe_cache.view(num_blocks * block_size, 1, cache_width),
             k_scale,
             chunk.cu_seq_lens,
-            _chunk_kv_indices(chunk, block_table, block_size),
+            kv_indices,
             chunk.cu_seq_lens,
             self.kv_b_proj.weight,
             None,
@@ -1144,6 +1154,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return super()._compute_prefill_context(
                 q, kv_c_and_k_pe_cache, attn_metadata, k_scale
             )
+        kv_indices = attn_metadata.context_chunk_kv_indices
+        if kv_indices is None:
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+
         assert prefill_metadata.prefill_backend is not None
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
@@ -1154,7 +1170,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             k, v = self._gather_context_chunk(
                 chunk,
                 kv_c_and_k_pe_cache,
-                prefill_metadata.block_table[chunk.request_slice],
+                kv_indices[chunk.index],
                 k_scale,
                 q.dtype,
             )
