@@ -186,6 +186,47 @@ def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
     assert chunk_plan == [(0, 5, 36, 103)]
 
 
+@pytest.mark.parametrize(
+    "compress_ratio,expected",
+    [
+        (1, [(0, 1, 0, 80), (1, 2, 0, 96), (2, 3, 0, 112)]),
+        (4, [(0, 1, 20, 100), (1, 2, 24, 120), (2, 3, 28, 140)]),
+    ],
+)
+def test_deepseek_v4_batch_invariant_prefill_chunks_are_request_local(
+    compress_ratio, expected
+):
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
+        _batch_invariant_prefill_chunk_plan,
+    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=3,
+        prefill_seq_lens_cpu=torch.tensor([80, 96, 112], dtype=torch.int32),
+        prefill_query_lens_cpu=torch.tensor([80, 96, 112], dtype=torch.int32),
+        prefill_window_size=128,
+    )
+
+    assert (
+        _batch_invariant_prefill_chunk_plan(metadata, compress_ratio, 128) == expected
+    )
+
+
+def test_deepseek_v4_batch_invariant_decode_is_request_local():
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
+        _batch_invariant_decode_request_ranges,
+    )
+
+    assert _batch_invariant_decode_request_ranges(
+        torch.tensor([0, 1, 3, 6], dtype=torch.int32),
+        num_decodes=3,
+    ) == [(0, 0, 1), (1, 1, 3), (2, 3, 6)]
+
+
 def test_flashinfer_sparse_indices_cache(monkeypatch):
     from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as flashinfer_mod
     from vllm.models.deepseek_v4.sparse_mla import DeepseekV4FlashMLAMetadata

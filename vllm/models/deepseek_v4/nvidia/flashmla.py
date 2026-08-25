@@ -32,6 +32,53 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
+def _batch_invariant_prefill_chunk_plan(
+    metadata: "DeepseekSparseSWAMetadata",
+    compress_ratio: int,
+    window_size: int,
+) -> list[tuple[int, int, int, int]]:
+    if metadata.num_prefills == 0:
+        return []
+    assert metadata.prefill_seq_lens_cpu is not None
+    assert metadata.prefill_query_lens_cpu is not None
+    prefix_lens = metadata.prefill_seq_lens_cpu - metadata.prefill_query_lens_cpu
+    gather_lens = metadata.prefill_query_lens_cpu + torch.clamp(
+        prefix_lens, min=0, max=window_size - 1
+    )
+    compressed_lens = (
+        torch.zeros_like(metadata.prefill_seq_lens_cpu)
+        if compress_ratio <= 1
+        else torch.div(
+            metadata.prefill_seq_lens_cpu,
+            compress_ratio,
+            rounding_mode="floor",
+        )
+    )
+    return [
+        (
+            index,
+            index + 1,
+            int(compressed_lens[index].item()),
+            int((compressed_lens[index] + gather_lens[index]).item()),
+        )
+        for index in range(metadata.num_prefills)
+    ]
+
+
+def _batch_invariant_decode_request_ranges(
+    query_start_loc_cpu: torch.Tensor,
+    num_decodes: int,
+) -> list[tuple[int, int, int]]:
+    return [
+        (
+            request_index,
+            int(query_start_loc_cpu[request_index].item()),
+            int(query_start_loc_cpu[request_index + 1].item()),
+        )
+        for request_index in range(num_decodes)
+    ]
+
+
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
@@ -276,10 +323,16 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
+        *,
+        request_start: int = 0,
+        token_start: int = 0,
+        request_count: int | None = None,
     ) -> None:
         """Run real decode requests through the prefill sparse FlashMLA kernel."""
-        num_decodes = swa_metadata.num_decodes
-        num_decode_tokens = swa_metadata.num_decode_tokens
+        num_decodes = (
+            swa_metadata.num_decodes if request_count is None else request_count
+        )
+        num_decode_tokens = q.shape[0]
         if num_decodes <= 0 or num_decode_tokens <= 0:
             raise RuntimeError("decode-sparse requires at least one decode request")
         if swa_metadata.decode_swa_indices is None:
@@ -298,10 +351,40 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         ):
             raise RuntimeError("decode-sparse requires finalized scheduler metadata")
 
-        seq_lens = swa_metadata.seq_lens[:num_decodes]
-        seq_lens_cpu = swa_metadata.seq_lens_cpu[:num_decodes]
-        query_start_loc = swa_metadata.query_start_loc[: num_decodes + 1]
-        query_start_loc_cpu = swa_metadata.query_start_loc_cpu[: num_decodes + 1]
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and request_count is None
+            and num_decodes > 1
+        ):
+            for request_index, begin, end in _batch_invariant_decode_request_ranges(
+                swa_metadata.query_start_loc_cpu, num_decodes
+            ):
+                self._forward_decode_sparse(
+                    q[begin:end],
+                    compressed_k_cache,
+                    swa_k_cache,
+                    swa_metadata,
+                    attn_metadata,
+                    swa_only,
+                    output[begin:end],
+                    request_start=request_index,
+                    token_start=begin,
+                    request_count=1,
+                )
+            return
+
+        request_end = request_start + num_decodes
+        token_end = token_start + num_decode_tokens
+        seq_lens = swa_metadata.seq_lens[request_start:request_end]
+        seq_lens_cpu = swa_metadata.seq_lens_cpu[request_start:request_end]
+        query_start_loc = (
+            swa_metadata.query_start_loc[request_start : request_end + 1]
+            - token_start
+        )
+        query_start_loc_cpu = (
+            swa_metadata.query_start_loc_cpu[request_start : request_end + 1]
+            - token_start
+        )
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         prefix_lens_cpu = seq_lens_cpu - query_lens_cpu
         gather_lens_cpu = query_lens_cpu + torch.clamp(
@@ -320,7 +403,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         if swa_only:
             assert self.topk_indices_buffer is not None
-            local_topk = self.topk_indices_buffer[:num_decode_tokens]
+            local_topk = self.topk_indices_buffer[token_start:token_end]
             top_k = 0
             max_compressed = 0
         else:
@@ -330,7 +413,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 )
             if self.compress_ratio == 4:
                 assert self.topk_indices_buffer is not None
-                local_topk = self.topk_indices_buffer[:num_decode_tokens]
+                local_topk = self.topk_indices_buffer[token_start:token_end]
                 top_k = local_topk.shape[-1]
             elif self.compress_ratio == 128:
                 if attn_metadata.c128a_global_decode_topk_indices is None:
@@ -377,7 +460,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     seq_lens, self.compress_ratio, rounding_mode="floor"
                 ),
                 gather_lens=None,
-                block_table=attn_metadata.block_table[:num_decodes],
+                block_table=attn_metadata.block_table[request_start:request_end],
                 block_size=attn_metadata.block_size // self.compress_ratio,
                 offset=0,
             )
@@ -386,7 +469,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             swa_k_cache,
             seq_lens=seq_lens,
             gather_lens=gather_lens,
-            block_table=swa_metadata.block_table[:num_decodes],
+            block_table=swa_metadata.block_table[request_start:request_end],
             block_size=swa_metadata.block_size,
             offset=max_compressed,
         )
@@ -410,7 +493,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             assert attn_metadata.c128a_decode_topk_lens is not None
             local_topk.masked_fill_(
                 local_topk
-                >= attn_metadata.c128a_decode_topk_lens[:num_decode_tokens, None],
+                >= attn_metadata.c128a_decode_topk_lens[token_start:token_end, None],
                 -1,
             )
         assert local_topk is not None
@@ -427,7 +510,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             out=(combined_indices_out, combined_lens_out),
         )
         combined_lens.masked_fill_(
-            ~swa_metadata.is_valid_token[:num_decode_tokens], 0
+            ~swa_metadata.is_valid_token[token_start:token_end], 0
         )
         flash_mla_sparse_fwd(
             q=q,
@@ -483,10 +566,23 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             assert self.topk_indices_buffer is not None
             topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
-        chunk_plan = swa_metadata.get_prefill_chunk_plan(
-            compress_ratio=self.compress_ratio,
-            prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            # The grouped prefill path chooses shared workspace dimensions and
+            # offsets from all requests in a chunk. Its end-to-end attention
+            # output is therefore not bitwise invariant even though the sparse
+            # FlashMLA kernel itself is invariant for identical q/kv/indices.
+            # Keep each request in its own chunk in BI mode so N, M, gathers,
+            # indices and kernel launch geometry depend only on that request.
+            chunk_plan = _batch_invariant_prefill_chunk_plan(
+                swa_metadata,
+                self.compress_ratio,
+                self.window_size,
+            )
+        else:
+            chunk_plan = swa_metadata.get_prefill_chunk_plan(
+                compress_ratio=self.compress_ratio,
+                prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
+            )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
         combined_topk = round_up(top_k + self.window_size, 128)
