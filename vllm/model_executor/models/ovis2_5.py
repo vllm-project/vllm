@@ -425,6 +425,8 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):

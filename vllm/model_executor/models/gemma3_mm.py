@@ -526,6 +526,7 @@ class Gemma3ForConditionalGeneration(
         }
     )
 
+    supports_encoder_tp_data = True
     supports_tower_connector_lora = True
 
     @classmethod

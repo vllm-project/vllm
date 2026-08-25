@@ -515,6 +515,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         ],
     }
 
+    supports_encoder_tp_data = True
     supports_tower_connector_lora = True
 
     @classmethod
