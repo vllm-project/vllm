@@ -39,10 +39,12 @@ from vllm.utils.network_utils import (
     make_zmq_path,
 )
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    SlidingWindowSpec,
     compute_layer_kv_cache_shape_bytes,
 )
 
@@ -699,3 +701,146 @@ def test_resolve_host_ip_prefers_extra_config():
     fallback = get_ip()
     assert resolve_host_ip({}) == fallback
     assert resolve_host_ip({"host_ip": ""}) == fallback
+
+
+def _make_hybrid_kv_cache_config() -> KVCacheConfig:
+    """One full-attention group + one sliding-window group (Gemma-like)."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+        ],
+    )
+
+
+def _read_scheduler(kv_cache_config: KVCacheConfig) -> MoRIIOConnectorScheduler:
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=True)
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+    assert connector.connector_scheduler is not None
+    return connector.connector_scheduler
+
+
+def test_hma_blocks_per_sw_two_groups():
+    """A Full + SlidingWindow config engages HMA and computes a per-group
+    sliding-window block budget (0 for the full group)."""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    assert scheduler._is_hma_required is True
+    # cdiv(32, 16) + 1 == 3 for the sliding-window group; 0 for full attention.
+    assert scheduler.blocks_per_sw == [0, 3]
+
+
+def test_non_sliding_window_hybrid_is_rejected():
+    """A hybrid group that is not sliding-window (e.g. chunked-local
+    attention) must fail closed rather than be silently mistransferred."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    local_spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        attention_chunk_size=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "local0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["local0"], kv_cache_spec=local_spec),
+        ],
+    )
+    with pytest.raises(NotImplementedError, match="sliding-window hybrid"):
+        _read_scheduler(config)
+
+
+def test_get_sw_clipped_blocks_clips_only_sw_group():
+    """get_sw_clipped_blocks keeps the full group intact and clips the
+    sliding-window group to its in-window tail."""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    full = [10, 11, 12, 13, 14]
+    sw = [20, 21, 22, 23, 24]
+    clipped = scheduler.get_sw_clipped_blocks([full, sw])
+    assert clipped[0] == full
+    assert clipped[1] == [22, 23, 24]
+
+
+def test_match_local_to_remote_tails_per_group():
+    """Per group: an equal-length local keeps its own ids; a shorter local
+    pulls the matching remote tail."""
+    matched = MoRIIOConnectorScheduler._match_local_to_remote_tails(
+        [[1, 2], [7]],
+        [[1, 2], [5, 6, 7]],
+    )
+    assert matched == [[1, 2], [7]]
+
+
+def test_single_group_path_unchanged():
+    """A non-hybrid single-group config does not engage HMA and never clips."""
+    scheduler = _read_scheduler(_make_test_kv_cache_config())
+    assert scheduler._is_hma_required is False
+    assert scheduler.blocks_per_sw == [0]
+    blocks = [[1, 2, 3, 4, 5]]
+    assert scheduler.get_sw_clipped_blocks(blocks) == blocks
+
+
+def test_hybrid_write_mode_rejected():
+    """Hybrid KV cache groups are unsupported in WRITE mode and fail closed."""
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=False)
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError),
+    ):
+        MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_hybrid_kv_cache_config(),
+        )
+
+
+def test_worker_layer_to_group_routing(mock_parallel_groups):
+    """The worker maps every layer to its KV cache group so the READ path can
+    select that group's (per-group) block-id list."""
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    with set_current_vllm_config(vllm_config):
+        worker = FakeMoRIIOConnectorWorker(
+            vllm_config,
+            "engine0",
+            hand_shake_latency=0,
+            kv_cache_config=_make_hybrid_kv_cache_config(),
+        )
+    assert worker.layer_to_group == {"full0": 0, "sw0": 1}
+    assert worker.num_kv_cache_groups == 2

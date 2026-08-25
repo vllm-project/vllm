@@ -440,11 +440,17 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
 
 @dataclass
 class ReqMeta:
-    """Metadata for a single request."""
+    """Metadata for a single request.
+
+    ``local_block_ids`` / ``remote_block_ids`` are per KV cache group: one
+    block-id list per group (length 1 for non-hybrid models). For hybrid
+    sliding-window models the sliding-window groups carry only their clipped
+    in-window tail.
+    """
 
     transfer_id: TransferId
-    local_block_ids: list[int]
-    remote_block_ids: list[int]
+    local_block_ids: list[list[int]]
+    remote_block_ids: list[list[int]]
     remote_host: str
     remote_port: int
     remote_handshake_port: int
@@ -480,7 +486,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def add_new_req(
         self,
         request_id: ReqId,
-        local_block_ids: list[int],
+        local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
@@ -555,10 +561,13 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             )
         )
 
+        # Per-group block ids (list[list[int]]); [] on the WRITE producer leg.
+        remote_block_ids = kv_transfer_params["remote_block_ids"] or []
+
         _req = ReqMeta(
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
+            remote_block_ids=remote_block_ids,
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=remote_host,
             remote_port=int(remote_handshake_port),
