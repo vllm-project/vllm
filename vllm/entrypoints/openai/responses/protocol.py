@@ -622,7 +622,10 @@ class ResponsesRequest(OpenAIBaseModel):
                 if isinstance(tool, dict):
                     if tool.get("type") == "namespace":
                         namespace = tool.get("name")
-                        for namespaced_tool in tool.get("tools", []):
+                        namespaced_tools = tool.get("tools")
+                        if not isinstance(namespaced_tools, list):
+                            return data
+                        for namespaced_tool in namespaced_tools:
                             namespaced_name = (
                                 namespaced_tool.get("name")
                                 if isinstance(namespaced_tool, dict)
