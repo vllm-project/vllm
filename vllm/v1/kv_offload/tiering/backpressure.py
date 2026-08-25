@@ -49,6 +49,61 @@ class DropStorePolicy(BackpressurePolicy):
         self._blocks_dropped = 0
 
 
+class ThrottledDropPolicy(BackpressurePolicy):
+    """Drop stores proportionally to pressure severity.
+
+    Instead of dropping all stores when pressure is detected, the drop
+    rate scales with how far the EMA exceeds the high watermark::
+
+        overshoot = (ema - high_water) / high_water
+        drop_rate = min(1.0, overshoot / ramp_factor)
+
+    With the default ``ramp_factor=2.0``, stores ramp from 0% drop at
+    the high watermark to 100% drop at 3x the high watermark.  This
+    keeps secondary tiers populated under moderate pressure, reducing
+    cache misses (and therefore recomputation / ITL regression) while
+    still protecting TTFT under severe congestion.
+    """
+
+    def __init__(self, ramp_factor: float = 2.0):
+        self._stores_dropped: int = 0
+        self._blocks_dropped: int = 0
+        self._call_count: int = 0
+        self._ramp_factor = ramp_factor
+
+    def should_store(self, detector: BackpressureDetector) -> bool:
+        if not detector.is_under_pressure():
+            return True
+        ema = getattr(detector, "store_latency_ema", None)
+        high = getattr(detector, "_high", None)
+        if ema is None or high is None or high <= 0:
+            return False
+        overshoot = max(0.0, ema - high) / high
+        drop_rate = min(1.0, overshoot / self._ramp_factor)
+        if drop_rate <= 0:
+            return True
+        if drop_rate >= 1.0:
+            return False
+        self._call_count += 1
+        period = max(2, round(1.0 / drop_rate))
+        return (self._call_count % period) != 0
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        self._stores_dropped += 1
+        self._blocks_dropped += num_blocks
+
+    def pop_stores_dropped(self) -> tuple[int, int]:
+        stores, blocks = self._stores_dropped, self._blocks_dropped
+        self._stores_dropped = 0
+        self._blocks_dropped = 0
+        return stores, blocks
+
+    def reset(self) -> None:
+        self._stores_dropped = 0
+        self._blocks_dropped = 0
+        self._call_count = 0
+
+
 class BackpressureDetector(ABC):
     """Observes store completion signals and determines pressure state."""
 
@@ -56,7 +111,7 @@ class BackpressureDetector(ABC):
         self,
         policy: BackpressurePolicy | None = None,
     ):
-        self._policy = policy or DropStorePolicy()
+        self._policy = policy or ThrottledDropPolicy()
 
     @property
     def policy(self) -> BackpressurePolicy:
@@ -152,6 +207,14 @@ class EMABackpressureDetector(BackpressureDetector):
     # at 0.010 reaches low_water=0.001 in ~6.6 s.
     DEFAULT_DECAY_HALF_LIFE_S = 2.0
 
+    # After pressure clears, stores are throttled to 50% for this many
+    # seconds to prevent a burst of stores from re-overwhelming the tier.
+    DEFAULT_COOLDOWN_S = 1.0
+
+    # Number of consecutive sub-low-watermark completions before the
+    # detector enters a "healthy" fast-path that bypasses policy checks.
+    _HEALTHY_THRESHOLD = 10
+
     LOCAL_HIGH_WATER_S = 0.005
     LOCAL_LOW_WATER_S = 0.001
 
@@ -182,6 +245,7 @@ class EMABackpressureDetector(BackpressureDetector):
         alpha: float = DEFAULT_ALPHA,
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
         decay_half_life_s: float = DEFAULT_DECAY_HALF_LIFE_S,
+        cooldown_s: float = DEFAULT_COOLDOWN_S,
         policy: BackpressurePolicy | None = None,
     ):
         super().__init__(policy=policy)
@@ -197,6 +261,7 @@ class EMABackpressureDetector(BackpressureDetector):
         self._low = low_water_s
         self._warmup_completions = warmup_completions
         self._decay_half_life_s = decay_half_life_s
+        self._cooldown_s = cooldown_s
         # Exponential moving average of store latency in seconds.
         self._ema: float = 0.0
         # Whether the tier is currently considered under pressure.
@@ -207,6 +272,11 @@ class EMABackpressureDetector(BackpressureDetector):
         self._warmup_samples: list[float] = []
         # Monotonic timestamp of the last EMA update; used for idle decay.
         self._last_update: float = 0.0
+        # Consecutive completions with EMA below low watermark.
+        self._healthy_streak: int = 0
+        # Monotonic timestamp when pressure was last cleared (for cooldown).
+        self._pressure_cleared_at: float = 0.0
+        self._cooldown_count: int = 0
 
     def _apply_idle_decay(self) -> None:
         """Decay the EMA toward zero based on elapsed idle time.
@@ -239,15 +309,51 @@ class EMABackpressureDetector(BackpressureDetector):
         self._last_update = now
         if self._ema > self._high:
             self._under_pressure = True
+            self._pressure_cleared_at = 0.0
+            self._healthy_streak = 0
         elif self._ema < self._low:
+            if self._under_pressure:
+                self._pressure_cleared_at = now
+                self._cooldown_count = 0
             self._under_pressure = False
+            self._healthy_streak += 1
+        else:
+            self._healthy_streak = 0
 
     def is_under_pressure(self) -> bool:
         if self._under_pressure and self._completions >= self._warmup_completions:
             self._apply_idle_decay()
             if self._ema < self._low:
                 self._under_pressure = False
+                self._pressure_cleared_at = time.monotonic()
+                self._cooldown_count = 0
         return self._under_pressure
+
+    def is_healthy(self) -> bool:
+        """True when the tier has been consistently fast.
+
+        After ``_HEALTHY_THRESHOLD`` consecutive store completions with
+        EMA below the low watermark (and no active pressure), the
+        detector enters a healthy fast-path: ``should_store()`` returns
+        ``True`` immediately, skipping the policy check entirely.
+        """
+        return (
+            not self._under_pressure and self._healthy_streak >= self._HEALTHY_THRESHOLD
+        )
+
+    def should_store(self, num_blocks: int) -> bool:
+        if self.is_healthy():
+            return True
+        if (
+            not self._under_pressure
+            and self._pressure_cleared_at > 0
+            and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
+        ):
+            self._cooldown_count += 1
+            if self._cooldown_count % 2 == 0:
+                self._policy.on_store_skipped(num_blocks)
+                return False
+        return super().should_store(num_blocks)
 
     def reset(self) -> None:
         self._ema = 0.0
@@ -255,6 +361,9 @@ class EMABackpressureDetector(BackpressureDetector):
         self._completions = 0
         self._warmup_samples.clear()
         self._last_update = 0.0
+        self._healthy_streak = 0
+        self._pressure_cleared_at = 0.0
+        self._cooldown_count = 0
         self._policy.reset()
 
     @property
