@@ -140,6 +140,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """TurboQuant packs K+V into one slot per head."""
+        spec = super().customize_spec(spec)
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_turboquant:
             return spec
         from vllm.model_executor.layers.quantization.turboquant.config import (
