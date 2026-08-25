@@ -11,6 +11,9 @@ Covers:
 * The router wiring: response shapes (JSON + SSE), error translation,
   and the ``cohere_serving_chat_v2 is None`` fallback (501 Not
   Implemented).
+* The render route (``POST /cohere/v2/chat/render``): that the v2 body
+  reaches :class:`ServingRender` as a converted ``ChatCompletionRequest``
+  and that the resulting ``GenerateRequest`` is returned verbatim.
 """
 
 import json
@@ -29,13 +32,20 @@ from vllm.entrypoints.cohere.protocol import (
     AssistantMessageResponse,
     CohereChatV2Response,
 )
+from vllm.entrypoints.cohere.serving import CohereServingChatV2
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.exception_handling.handlers.http import (
     http_exception_handler,
 )
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
+from vllm.entrypoints.serve.exception_handling.handlers.vllm_error import (
+    vllm_error_handler,
+)
+from vllm.exceptions import VLLMError
+from vllm.sampling_params import SamplingParams
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +84,49 @@ class _Handler:
         return self.result
 
 
+class _RenderChatHandler:
+    """Stand-in for :class:`CohereServingChatV2` on the render route.
+
+    Only ``to_chat_completion_request`` is reachable from
+    ``/cohere/v2/chat/render``, and it delegates to the real conversion
+    classmethod (which needs no engine or tokenizer) so the tests
+    exercise the actual v2 -> ``ChatCompletionRequest`` translation
+    rather than a stub of it.
+    """
+
+    def to_chat_completion_request(self, request):
+        return CohereServingChatV2._convert_v2_to_chat_completion(request)
+
+
+class _RenderHandler:
+    """Minimal stand-in for :class:`ServingRender`.
+
+    Records the ``ChatCompletionRequest`` it was handed so tests can
+    assert on the conversion, and returns ``self.result`` - either a
+    :class:`GenerateRequest`, an :class:`ErrorResponse`, or an exception
+    to raise.
+    """
+
+    def __init__(self, result):
+        self.result = result
+        self.seen_request = None
+
+    async def render_chat_request(self, request):
+        self.seen_request = request
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _generate_request() -> GenerateRequest:
+    return GenerateRequest(
+        request_id="chatcmpl-abc",
+        token_ids=[5, 6, 7],
+        sampling_params=SamplingParams(temperature=0.25),
+        model="m",
+    )
+
+
 def _build_app(handler: _Handler | None) -> FastAPI:
     app = FastAPI()
     attach_router(app)
@@ -81,9 +134,17 @@ def _build_app(handler: _Handler | None) -> FastAPI:
     return app
 
 
+def _build_render_app(chat_handler, render_handler) -> FastAPI:
+    app = FastAPI()
+    attach_router(app)
+    app.state.cohere_serving_chat_v2 = chat_handler
+    app.state.serving_render = render_handler
+    return app
+
+
 def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
     """Build a FastAPI app that mirrors the real vLLM setup by installing
-    ``validation_exception_handler`` and ``http_exception_handler``. The
+    validation, HTTP, and vLLM exception handlers. The
     :class:`CohereErrorEnvelopeMiddleware` registered by ``attach_router``
     is expected to translate any resulting vLLM ``ErrorResponse`` body
     into the ``CohereError`` wire shape.
@@ -96,6 +157,7 @@ def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
     app.state.args = Namespace(log_error_stack=False)
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(HTTPException)(http_exception_handler)
+    app.exception_handler(VLLMError)(vllm_error_handler)
     return app
 
 
@@ -317,6 +379,144 @@ class TestEndpoint:
 
 
 # ----------------------------------------------------------------------
+# Render endpoint
+# ----------------------------------------------------------------------
+
+
+class TestRenderEndpoint:
+    """``POST /cohere/v2/chat/render`` is the Cohere counterpart to
+    ``POST /v1/chat/completions/render``: it converts the v2 body to a
+    ``ChatCompletionRequest`` and hands it to the shared
+    ``ServingRender``, returning the resulting ``GenerateRequest``
+    instead of running generation.
+
+    The route therefore spans *two* app-state handlers, and these tests
+    pin both halves: that the conversion preserves the Cohere-specific
+    request surface, and that the render handler's output (or error)
+    reaches the client unchanged.
+    """
+
+    def test_route_registered(self):
+        app = _build_render_app(_RenderChatHandler(), _RenderHandler(None))
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/cohere/v2/chat/render" in paths
+
+    def test_route_not_registered_when_flag_unset(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ENABLE_COHERE_API", raising=False)
+        app = FastAPI()
+        attach_router(app)
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/cohere/v2/chat/render" not in paths
+
+    def test_returns_generate_request_json(self):
+        render_handler = _RenderHandler(_generate_request())
+        app = _build_render_app(_RenderChatHandler(), render_handler)
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.OK
+        assert r.headers["content-type"].startswith("application/json")
+        body = r.json()
+        assert body["request_id"] == "chatcmpl-abc"
+        assert body["token_ids"] == [5, 6, 7]
+        assert body["sampling_params"]["temperature"] == 0.25
+        # The body must be a wire-valid GenerateRequest so callers can
+        # feed it straight back to /v1/generate.
+        assert GenerateRequest.model_validate(body).token_ids == [5, 6, 7]
+
+    def test_cohere_request_surface_survives_conversion(self):
+        """The point of routing through ``CohereServingChatV2`` rather
+        than asking callers to pre-convert: Cohere-only fields
+        (``documents``, ``safety_mode``, ``citation_options``) must land
+        in ``chat_template_kwargs`` so the rendered prompt matches what
+        ``/cohere/v2/chat`` would have produced.
+        """
+        render_handler = _RenderHandler(_generate_request())
+        app = _build_render_app(_RenderChatHandler(), render_handler)
+        body = {
+            **_minimal_request_body(),
+            "documents": [{"id": "doc-1", "data": {"text": "Paris is in France."}}],
+            "safety_mode": "STRICT",
+            "max_tokens": 32,
+        }
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=body)
+        assert r.status_code == HTTPStatus.OK
+
+        seen = render_handler.seen_request
+        assert seen is not None
+        assert seen.model == "m"
+        assert seen.messages[0]["content"] == "hi"
+        # ``max_tokens`` matters because ServingRender feeds it to
+        # ``get_max_tokens`` when building sampling params.
+        assert seen.max_completion_tokens == 32
+        kwargs = seen.chat_template_kwargs or {}
+        assert kwargs["documents"][0]["id"] == "doc-1"
+        # The conversion lower-cases safety_mode for the renderer.
+        assert kwargs["safety_mode"] == "strict"
+
+    def test_501_when_chat_handler_missing(self):
+        app = _build_render_app(None, _RenderHandler(_generate_request()))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.NOT_IMPLEMENTED
+        assert "does not support" in r.json()["message"]
+
+    def test_501_when_render_handler_missing(self):
+        # A server without ``serving_render`` in app state (e.g. a
+        # non-generate task set) can't render, even though the Cohere
+        # chat handler exists.
+        app = _build_render_app(_RenderChatHandler(), None)
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.NOT_IMPLEMENTED
+        assert "does not support" in r.json()["message"]
+
+    def test_error_response_translated_to_cohere_envelope(self):
+        err = ErrorResponse(
+            error=ErrorInfo(message="unknown model", type="NotFound", code=404)
+        )
+        app = _build_render_app(_RenderChatHandler(), _RenderHandler(err))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.NOT_FOUND
+        assert r.json() == {"message": "unknown model"}
+
+    def test_render_exception_returns_500_envelope(self):
+        app = _build_render_app(
+            _RenderChatHandler(), _RenderHandler(RuntimeError("tokenizer exploded"))
+        )
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert r.json() == {"message": "tokenizer exploded"}
+
+    def test_conversion_exception_returns_500_envelope(self):
+        """Conversion runs inside the same ``try`` as the render call, so
+        a bad v2 body that slips past Pydantic still yields the Cohere
+        error envelope rather than an unhandled 500 with vLLM's shape.
+        """
+
+        class _Boom:
+            def to_chat_completion_request(self, request):
+                raise ValueError("unconvertible message")
+
+        app = _build_render_app(_Boom(), _RenderHandler(_generate_request()))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert r.json() == {"message": "unconvertible message"}
+
+    def test_invalid_body_returns_422(self):
+        app = _build_render_app(_RenderChatHandler(), _RenderHandler(None))
+        with TestClient(app) as client:
+            r = client.post(
+                "/cohere/v2/chat/render",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+        assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+# ----------------------------------------------------------------------
 # CohereErrorEnvelopeMiddleware
 # ----------------------------------------------------------------------
 
@@ -333,8 +533,8 @@ class TestCohereErrorEnvelope:
 
     def test_validation_error_body_is_cohere_shaped(self):
         # ``model=""`` and ``messages=[]`` trip our custom field
-        # validators, which raise pydantic ValueErrors and are routed
-        # through ``validation_exception_handler`` in the real vLLM
+        # validators, which raise VLLMValidationError and are routed
+        # through ``vllm_error_handler`` in the real vLLM
         # server (producing the ``{"error": {...}}`` shape).
         app = _build_app_with_vllm_handlers(handler=None)
         with TestClient(app) as client:
