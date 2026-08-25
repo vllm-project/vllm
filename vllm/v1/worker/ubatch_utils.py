@@ -131,6 +131,11 @@ def is_last_ubatch_empty(
     return (padded_num_tokens // num_ubatches) * (num_ubatches - 1) >= orig_num_tokens
 
 
+def get_num_ubatches(parallel_config: ParallelConfig) -> int:
+    """How many microbatches a step is split into; 1 when microbatching is off."""
+    return parallel_config.num_ubatches if parallel_config.use_ubatching else 1
+
+
 def check_ubatch_thresholds(
     config: ParallelConfig, num_tokens: int, uniform_decode: bool
 ) -> bool:

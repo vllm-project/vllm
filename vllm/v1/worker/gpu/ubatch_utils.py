@@ -3,8 +3,10 @@
 """Microbatching (DBO) helpers for the V2 GPU model runner."""
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -15,20 +17,34 @@ from vllm.forward_context import (
     ForwardContext,
     create_forward_context,
     override_forward_context,
+    set_forward_context,
 )
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
     check_ubatch_thresholds,
     create_sm_control_context,
+    maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.ubatching import make_ubatch_contexts
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+class UBatchState(NamedTuple):
+    """Per-microbatch inputs for one dual-batch-overlap step."""
+
+    slices: UBatchSlices
+    forward_contexts: list[ForwardContext]
+    num_tokens_after_padding: int
 
 
 def slice_input_batch(
@@ -242,31 +258,121 @@ class UBatchRunner:
     microbatch's expert all-to-all overlaps the other's compute.
     """
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        model_state: ModelState,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        input_buffers: InputBuffers,
+        decode_query_len: int,
+    ):
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
         self.num_ubatches = self.parallel_config.num_ubatches
         self.device = device
+        self.model_state = model_state
+        self.attn_groups = attn_groups
+        self.kv_cache_config = kv_cache_config
+        self.input_buffers = input_buffers
+        self.decode_query_len = decode_query_len
         self.comm_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         self.sm_control = create_sm_control_context(vllm_config)
 
-    def wants_ubatch(self, num_tokens: int, uniform_decode: bool) -> bool:
+    def wants_ubatch(self, num_tokens: int, uniform_token_count: int | None) -> bool:
         """Whether this rank would like to microbatch this step.
 
         The answer still has to be agreed with the other DP ranks before it can
         be acted on: microbatching is all-or-nothing across the group.
         """
         return check_ubatch_thresholds(
-            self.parallel_config, num_tokens, uniform_decode=uniform_decode
+            self.parallel_config,
+            num_tokens,
+            uniform_decode=uniform_token_count == self.decode_query_len,
         )
 
-    def make_forward_contexts(
+    def prepare(
         self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+    ) -> UBatchState:
+        """Split the batch into the microbatches the step will run on.
+
+        The split point is the midpoint of the (DP-padded) token count, which
+        all ranks agree on because they run the same number of tokens whenever
+        microbatching is active.
+        """
+        _, ubatch_slices = maybe_create_ubatch_slices(
+            True,
+            input_batch.num_scheduled_tokens,
+            input_batch.num_tokens_after_padding,
+            input_batch.num_reqs_after_padding,
+            self.num_ubatches,
+        )
+        assert ubatch_slices is not None
+
+        attn_metadata = []
+        slot_mappings_by_layer = []
+        is_padding = []
+        for i, ubatch_slice in enumerate(ubatch_slices):
+            ubatch = slice_input_batch(input_batch, ubatch_slice, i, self.input_buffers)
+            ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
+            ubatch_block_tables = tuple(
+                block_table[ubatch_slice.request_slice] for block_table in block_tables
+            )
+            attn_metadata.append(
+                self.model_state.prepare_attn(
+                    ubatch,
+                    CUDAGraphMode.NONE,
+                    ubatch_block_tables,
+                    ubatch_slot_mappings,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    ubatch_idx=i,
+                )
+            )
+            slot_mappings_by_layer.append(
+                build_slot_mappings_by_layer(ubatch_slot_mappings, self.kv_cache_config)
+            )
+            is_padding.append(ubatch.is_padding)
+
+        return UBatchState(
+            slices=ubatch_slices,
+            forward_contexts=self._make_forward_contexts(
+                ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
+            ),
+            num_tokens_after_padding=input_batch.num_tokens_after_padding,
+        )
+
+    @contextmanager
+    def forward_context(
+        self, ubatch_state: UBatchState, num_tokens_across_dp: torch.Tensor | None
+    ) -> Iterator[None]:
+        """Forward context wrapping a microbatched step.
+
+        The microbatch threads install their own contexts inside `run`; this
+        outer one covers the KV connector and anything else that reads the
+        context around the forward.
+        """
+        with set_forward_context(
+            None,
+            self.vllm_config,
+            num_tokens=ubatch_state.num_tokens_after_padding,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            num_tokens_across_dp=num_tokens_across_dp,
+            ubatch_slices=ubatch_state.slices,
+        ):
+            yield
+
+    def _make_forward_contexts(
+        self,
+        ubatch_slices: UBatchSlices,
         attn_metadata: list[dict[str, Any]],
         slot_mappings_by_layer: list[dict[str, torch.Tensor]],
-        ubatch_slices: UBatchSlices,
         is_padding: list[torch.Tensor | None],
     ) -> list[ForwardContext]:
         """Build one forward context per microbatch.
@@ -302,16 +408,17 @@ class UBatchRunner:
         self,
         model: Any,
         model_inputs: dict[str, Any],
-        forward_contexts: list[ForwardContext],
-        ubatch_slices: UBatchSlices,
+        ubatch_state: UBatchState,
     ) -> Any:
-        assert len(forward_contexts) == len(ubatch_slices) == self.num_ubatches
+        ubatch_slices = ubatch_state.slices
+        assert len(ubatch_slices) == len(ubatch_state.forward_contexts)
+        assert len(ubatch_slices) == self.num_ubatches
 
         ubatch_contexts = make_ubatch_contexts(
             num_micro_batches=self.num_ubatches,
             comm_stream=self.comm_stream,
             compute_stream=current_stream(),
-            forward_contexts=forward_contexts,
+            forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
         )
 
@@ -360,3 +467,36 @@ class UBatchRunner:
                 f"Microbatch {failed} of {self.num_ubatches} failed"
             ) from errors[failed]
         return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
+
+
+def maybe_build_ubatch_runner(
+    vllm_config: VllmConfig,
+    device: torch.device,
+    model_state: ModelState,
+    attn_groups: list[list[AttentionGroup]],
+    kv_cache_config: KVCacheConfig,
+    input_buffers: InputBuffers,
+    decode_query_len: int,
+) -> UBatchRunner | None:
+    """Build the microbatch runner, or None when DBO is not in use.
+
+    Microbatching needs the DP handshake to agree on it, so it is only
+    available with more than one DP rank (as in the V1 runner).
+    """
+    parallel_config = vllm_config.parallel_config
+    if not parallel_config.use_ubatching or parallel_config.data_parallel_size <= 1:
+        return None
+
+    logger.info_once(
+        "Dual batch overlap is enabled. Microbatched steps run without "
+        "CUDA graphs on the V2 model runner."
+    )
+    return UBatchRunner(
+        vllm_config,
+        device,
+        model_state,
+        attn_groups,
+        kv_cache_config,
+        input_buffers,
+        decode_query_len,
+    )
