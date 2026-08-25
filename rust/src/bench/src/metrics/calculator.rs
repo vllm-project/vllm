@@ -184,8 +184,10 @@ pub fn calculate_metrics(
         completed,
         failed,
         total_input,
+        total_input_sequences: completed,
         total_output,
         request_throughput: completed as f64 / dur_s,
+        input_sequence_throughput: completed as f64 / dur_s,
         request_goodput,
         input_throughput: total_input as f64 / dur_s,
         output_throughput: total_output as f64 / dur_s,
@@ -291,6 +293,7 @@ pub fn calculate_embedding_metrics(
     selected_percentiles: &[f64],
 ) -> BenchmarkMetrics {
     let mut total_input: usize = 0;
+    let mut total_input_sequences: usize = 0;
     let mut completed: usize = 0;
     let mut e2els: Vec<f64> = Vec::new();
 
@@ -299,6 +302,7 @@ pub fn calculate_embedding_metrics(
             e2els.push(output.latency);
             completed += 1;
             total_input += output.prompt_len;
+            total_input_sequences += output.num_input_sequences;
         }
     }
 
@@ -344,8 +348,10 @@ pub fn calculate_embedding_metrics(
         completed,
         failed,
         total_input,
+        total_input_sequences,
         total_output: 0,
         request_throughput: completed as f64 / dur_s,
+        input_sequence_throughput: total_input_sequences as f64 / dur_s,
         request_goodput: 0.0,
         input_throughput: total_input as f64 / dur_s,
         output_throughput: 0.0,

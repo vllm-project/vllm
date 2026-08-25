@@ -645,6 +645,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]: the indexer kernels and
+        # kv_cache_as_quant_view index a 3-D block-major cache.
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
@@ -1041,8 +1046,14 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
-        qrep_enabled = (
+        # The env var predates the config field and still wins if set explicitly.
+        qrep_requested = (
             envs.VLLM_DCP_Q_REPLICATE
+            if envs.is_set("VLLM_DCP_Q_REPLICATE")
+            else bool(vllm_config.parallel_config.dcp_q_replicate)
+        )
+        qrep_enabled = (
+            qrep_requested
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.prefill_context_parallel_size <= 1
         )
