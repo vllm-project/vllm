@@ -73,9 +73,11 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
+    KVConnectorOutput,
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
@@ -1964,9 +1966,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
             # Post-step KV connector related operations.
-            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
             # The first PP rank holds the encoder cache, so pass its EC output on.
-            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            output = ModelRunnerOutput.with_worker_output_only(
+                kv_connector_output, hisparse_stats
+            )
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
@@ -2088,8 +2092,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
+        model_runner_output.hisparse_stats = hisparse_stats
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
@@ -2111,11 +2116,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state = None
 
         # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            output = ModelRunnerOutput.with_worker_output_only(
+                kv_connector_output, hisparse_stats
+            )
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         assert self.pooling_runner is not None
@@ -2128,6 +2135,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
+            hisparse_stats=hisparse_stats,
             ec_connector_output=ec_connector_output,
         )
         async_output = AsyncPoolingOutput(
@@ -2140,6 +2148,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.postprocess_num_computed_tokens(input_batch)
         return async_output
+
+    def _finish_step(
+        self, finished_req_ids: set[str]
+    ) -> tuple[KVConnectorOutput | None, HiSparseStats | None]:
+        return (
+            self.kv_connector.post_forward(finished_req_ids),
+            self.kv_connector.finish_step(),
+        )
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.

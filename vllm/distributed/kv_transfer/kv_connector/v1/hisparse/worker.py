@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     KVCacheConfig,
 )
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
@@ -69,6 +70,9 @@ def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
         dst.numpy(),
         sizes.numpy(),
     )
+
+
+_METRICS_INTERVAL = 2000
 
 
 def _get_hisparse_cache(
@@ -311,6 +315,8 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
             deque()
         )
+        self._metrics_calls = 0
+        self._metrics_last = HiSparseStats()
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
@@ -500,6 +506,31 @@ class HiSparseConnectorWorker:
     def reset_hot_state(self) -> None:
         for runtime in self.leader_runtimes:
             runtime.reset_hot_state()
+
+    def finish_step(self) -> HiSparseStats | None:
+        self._metrics_calls += 1
+        if self._metrics_calls % _METRICS_INTERVAL != 0:
+            return None
+
+        current = HiSparseStats()
+        for runtime in self.leader_runtimes:
+            group = runtime.index_group
+            hits, misses = group.swap_stats.cpu().tolist()
+            current.cache_hits += hits
+            current.cache_misses += misses
+            current.host_to_device_bytes += misses * group.stats_row_bytes
+
+        delta = HiSparseStats(
+            cache_hits=current.cache_hits - self._metrics_last.cache_hits,
+            cache_misses=current.cache_misses - self._metrics_last.cache_misses,
+            host_to_device_bytes=(
+                current.host_to_device_bytes - self._metrics_last.host_to_device_bytes
+            ),
+        )
+        self._metrics_last = current
+        if delta.cache_hits == 0 and delta.cache_misses == 0:
+            return None
+        return delta
 
     def _release_completed_dma_descriptors(self) -> None:
         pending = self._pending_dma_descriptors
