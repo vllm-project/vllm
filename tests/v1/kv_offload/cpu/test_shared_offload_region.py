@@ -46,7 +46,6 @@ def _make_region(
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
-    expected_openers: int | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -55,7 +54,6 @@ def _make_region(
         rank=rank,
         kv_bytes_per_block=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
-        expected_openers=expected_openers,
     )
 
 
@@ -167,7 +165,7 @@ def _mp_race_construct_and_write(
     fill_value: int,
     done_queue,
     cleanup_queue,
-    expected_openers: int | None = None,
+    mmap_barrier=None,
 ) -> None:
     """Race to construct a SharedOffloadRegion, write fill_value, then wait
     for the parent's cleanup signal before tearing down.  The wait gives the
@@ -179,8 +177,10 @@ def _mp_race_construct_and_write(
             rank=rank,
             kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
-            expected_openers=expected_openers,
         )
+        if mmap_barrier is not None:
+            mmap_barrier.wait()
+            region.unlink()
         t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
         done_queue.put(
@@ -576,20 +576,19 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Unlink-after-all-open protocol
+# Unlink after barrier
 # ---------------------------------------------------------------------------
 
 
-def test_file_unlinked_after_all_expected_openers_map_it(iid):
-    """The backing file must survive until the last expected opener maps it,
-    and be gone right after, so no exit path can leak it."""
-    r0 = _make_region(iid, num_workers=2, rank=0, expected_openers=2)
+def test_unlink_preserves_existing_mappings(iid):
+    """Mappings remain shared after the creator unlinks the backing file."""
+    r0 = _make_region(iid, num_workers=2, rank=0)
     try:
         assert os.path.exists(r0.mmap_path)
-        r1 = _make_region(iid, num_workers=2, rank=1, expected_openers=2)
+        r1 = _make_region(iid, num_workers=2, rank=1)
         try:
+            r0.unlink()
             assert not os.path.exists(r0.mmap_path)
-            assert not os.path.exists(f"{r0.mmap_path}.openers")
             r0.mmap_obj[0:1] = b"\xab"
             assert memoryview(r1.mmap_obj)[0:1] == b"\xab"
         finally:
@@ -597,28 +596,6 @@ def test_file_unlinked_after_all_expected_openers_map_it(iid):
     finally:
         r0.cleanup()
         _cleanup_file(r0.mmap_path)
-
-
-def test_stale_opener_count_does_not_unlink_early(iid):
-    """An opener count left behind by a crashed run must not push a later run
-    over the threshold early, which would split workers onto two inodes."""
-    openers_path = f"{_mmap_path(iid)}.openers"
-    with open(openers_path, "w") as f:
-        f.write("1")  # one opener short of the threshold below
-
-    r0 = _make_region(iid, num_workers=2, rank=0, expected_openers=2)
-    try:
-        assert os.path.exists(r0.mmap_path), "creator must reset the stale count"
-        r1 = _make_region(iid, num_workers=2, rank=1, expected_openers=2)
-        try:
-            assert os.fstat(r0.fd).st_ino == os.fstat(r1.fd).st_ino
-            assert not os.path.exists(r0.mmap_path)
-        finally:
-            r1.cleanup()
-    finally:
-        r0.cleanup()
-        _cleanup_file(r0.mmap_path)
-        _cleanup_file(openers_path)
 
 
 def test_sigkilled_workers_leave_nothing_behind(iid):
@@ -631,6 +608,7 @@ def test_sigkilled_workers_leave_nothing_behind(iid):
     ctx = get_mp_context()
     done_queue = ctx.Queue()
     cleanup_queue = ctx.Queue()
+    mmap_barrier = ctx.Barrier(num_workers)
     procs = [
         ctx.Process(
             target=_mp_race_construct_and_write,
@@ -643,7 +621,7 @@ def test_sigkilled_workers_leave_nothing_behind(iid):
                 rank + 1,
                 done_queue,
                 cleanup_queue,
-                num_workers,
+                mmap_barrier,
             ),
         )
         for rank in range(num_workers)
@@ -663,7 +641,6 @@ def test_sigkilled_workers_leave_nothing_behind(iid):
             p.join(timeout=10)
 
     assert not os.path.exists(path)
-    assert not os.path.exists(f"{path}.openers")
     with _region(iid) as restarted:
         assert restarted._creator is True
 
