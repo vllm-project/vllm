@@ -437,7 +437,6 @@ def _make_ubatch_state(
         forward_contexts=[
             create_forward_context(None, vllm_config) for _ in ubatch_slices
         ],
-        num_tokens_after_padding=sum(s.num_tokens for s in ubatch_slices),
     )
 
 
