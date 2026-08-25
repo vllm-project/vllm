@@ -4,7 +4,6 @@ import dataclasses
 import functools
 import json
 from concurrent.futures import Future
-from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -49,11 +48,10 @@ class StructuredOutputRequest:
 
     def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
-            try:
-                # We will check whether the future is ready within 100 us
-                self._grammar = self._grammar.result(timeout=0.0001)
-            except TimeoutError:
+            if not self._grammar.done():
                 return False
+            try:
+                self._grammar = self._grammar.result()
             except Exception as e:
                 self._grammar = e
         return True
