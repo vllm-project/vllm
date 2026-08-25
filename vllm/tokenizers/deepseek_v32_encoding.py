@@ -118,6 +118,22 @@ def find_last_user_index(messages: list[dict[str, Any]]) -> int:
     return last_user_index
 
 
+def _folded_system_content(messages: list[dict[str, Any]], index: int) -> str:
+    nxt = index + 1
+    if nxt < len(messages) and _folds_into_previous_user_turn(messages, nxt):
+        return messages[nxt].get("content") or ""
+    return ""
+
+
+def _folds_into_previous_user_turn(messages: list[dict[str, Any]], index: int) -> bool:
+    """The user turn already emitted ``<|Assistant|>``, so this text goes before it."""
+    if index <= 0 or messages[index].get("role") != "system":
+        return False
+    if messages[index - 1].get("role") not in ("user", "developer"):
+        return False
+    return index == len(messages) - 1 or messages[index + 1].get("role") == "assistant"
+
+
 def render_message(
     index: int,
     messages: list[dict[str, Any]],
@@ -151,6 +167,8 @@ def render_message(
         tool_calls = tool_calls_from_openai_format(tool_calls)
 
     if role == "system":
+        if _folds_into_previous_user_turn(messages, index):
+            return ""
         prompt += system_msg_template.format(content=content or "")
         if tools:
             prompt += "\n\n" + render_tools(tools)
@@ -174,14 +192,18 @@ def render_message(
 
         content_developer += "\n\n# The user's message is: {}".format(content)
 
-        prompt += user_msg_template.format(content=content_developer)
+        prompt += user_msg_template.format(
+            content=content_developer + _folded_system_content(messages, index)
+        )
         if index == last_user_idx and thinking_mode == "thinking":
             prompt += thinking_start_token
         else:
             prompt += thinking_end_token
 
     elif role == "user":
-        prompt += user_msg_template.format(content=content)
+        prompt += user_msg_template.format(
+            content=f"{content}{_folded_system_content(messages, index)}"
+        )
 
         if index == last_user_idx and thinking_mode == "thinking":
             prompt += thinking_start_token
