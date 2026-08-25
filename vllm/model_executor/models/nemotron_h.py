@@ -38,6 +38,10 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
+    Bf16ReLUSquaredStaticFp8Quant,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -54,6 +58,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -79,6 +86,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
@@ -115,10 +123,29 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
+        self.relu2_fp8_quant = (
+            Bf16ReLUSquaredStaticFp8Quant()
+            if current_platform.is_cuda()
+            and self.down_proj.tp_size == 1
+            and getattr(self.down_proj, "input_quant_key", None) == kFp8StaticTensorSym
+            and hasattr(self.down_proj, "input_scale")
+            else None
+        )
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
-        x = self.act_fn(x)
+        if self.relu2_fp8_quant is not None and x.dtype == torch.bfloat16:
+            input_scale = self.down_proj.input_scale
+            x_q = self.relu2_fp8_quant(x, input_scale)
+            x = QuantizedActivation(
+                data=x_q,
+                scale=input_scale,
+                orig_dtype=x.dtype,
+                orig_shape=x.shape,
+                quant_key=kFp8StaticTensorSym,
+            )
+        else:
+            x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
 
