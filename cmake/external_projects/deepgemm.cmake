@@ -29,8 +29,11 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # Pinned to the tip of the nv_dev branch (SM120 support).
-  set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
+  # a6b593d is the last nv_dev commit with an SM12x pure-fp8 1d1d path.
+  # 8b1392b dropped the sm100 fp8_gemm_1d1d kernel and aliased fp8_gemm_nt to
+  # the fp8xfp4 dispatcher, so pure-fp8 weights reach the wrong kernel on
+  # SM12x. Interim until DeepGEMM#419; vLLM v0.25.1 also pinned a6b593d.
+  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
