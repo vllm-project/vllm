@@ -32,7 +32,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
       - Worst-case tensor allocation; padding rows zeroed via
         handle.psum_num_recv_tokens_per_scaleup_rank
       - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta=None)
+      - Expert kernel sorts internally (expert_tokens_meta carries no counts)
 
     **Prefill mode (use_cudagraph=False):**
       - do_expand=True, do_cpu_sync=True
@@ -265,6 +265,18 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
+
+        if self.use_cudagraph:
+            # Carry the per-rank prefix sum so SiTU can skip padding rows.
+            # expert_num_tokens stays None: count-based consumers (DeepGEMM,
+            # Triton) must treat a None field as "no counts" and derive their
+            # own, exactly as in the meta-absent decode case.
+            if expert_tokens_meta is None:
+                expert_tokens_meta = mk.ExpertTokensMetadata(
+                    expert_num_tokens=None,
+                    expert_num_tokens_cpu=None,
+                )
+            expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
