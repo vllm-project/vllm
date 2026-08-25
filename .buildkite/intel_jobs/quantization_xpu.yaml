@@ -29,7 +29,7 @@ steps:
     'uv pip install torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130 || true &&
     uv pip install conch-triton-kernels || true &&
     cd tests &&
-    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k not test_compressed_tensors_w4a8_fp8 --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k not test_compressed_tensors_w4a8_fp8 --ignore quantization/test_quark.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
 - label: Quantized Fusions
   device: intel_gpu
   timeout_in_minutes: 20

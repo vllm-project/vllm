@@ -16,6 +16,7 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  # need split test_config.py as it need VLLM_XPU_ENABLE_XPU_GRAPH=1
   source_file_dependencies:
   - vllm/compilation/
   - vllm/config/
@@ -39,7 +40,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py || true'
+    VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py || true'
 - label: Engine (1 GPU)
   device: intel_gpu
   timeout_in_minutes: 45
