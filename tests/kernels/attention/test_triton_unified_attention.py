@@ -11,6 +11,8 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import KVQuantMode
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 DEVICE_TYPE = current_platform.device_type
 
 NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
