@@ -148,6 +148,7 @@ class NemotronHReLU2Fp8Quant(CustomOp):
             output,
             x.numel(),
             BLOCK_SIZE=block_size,
+            num_warps=4,
         )
         return output
 
