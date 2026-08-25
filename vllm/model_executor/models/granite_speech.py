@@ -60,7 +60,9 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (
@@ -178,13 +180,14 @@ class GraniteSpeechMultiModalProcessor(
             )
         ]
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
@@ -192,22 +195,23 @@ class GraniteSpeechMultiModalProcessor(
             # GraniteSpeechFeatureExtractor accepts "audio"
             mm_data["audio"] = audios
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if "audio" in mm_data:
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
             audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = (
-                processed_outputs["input_ids"] == audio_token_index
+            processed_data["audio_embed_sizes"] = (
+                processed_data["input_ids"] == audio_token_index
             ).sum(-1)
 
-        return processed_outputs
+        return processed_data
 
 
 class GraniteSpeechDummyInputsBuilder(
@@ -732,7 +736,8 @@ class GraniteSpeechForConditionalGeneration(
         target_device = self.encoder.input_linear.weight.device
         if target_device == input_features_mask.device:
             return input_features_mask
-        return input_features_mask.pin_memory().to(target_device, non_blocking=True)
+        masked = input_features_mask.pin_memory() if PIN_MEMORY else input_features_mask
+        return masked.to(target_device, non_blocking=True)
 
     def _pad_and_stack_input_features(
         self,
@@ -786,8 +791,9 @@ class GraniteSpeechForConditionalGeneration(
         encoder_embeds = self.encoder(audio_input["input_features"])
         # [bsz, <max feature size>, 4096]
         projected_embeds = self.projector(encoder_embeds)
-        # Apply mask on variable length audio features
-        masked_embeds = projected_embeds[audio_input["input_features_mask"]]
+        # Apply mask on variable length audio features.
+        with gpu_sync_allowed():
+            masked_embeds = projected_embeds[audio_input["input_features_mask"]]
         # Split variable length features into a tuple
         return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
 

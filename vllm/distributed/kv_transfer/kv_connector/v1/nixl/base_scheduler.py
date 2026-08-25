@@ -51,6 +51,11 @@ logger = init_logger(__name__)
 class NixlBaseConnectorScheduler:
     """Base implementation of Scheduler side methods shared by pull and push."""
 
+    # Emitted in kv_transfer_params so an external router can distinguish a
+    # pull (READ) producer from a push (WRITE) one. Overridden by the push
+    # scheduler.
+    _TRANSFER_MODE: str = "pull"
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -189,6 +194,9 @@ class NixlBaseConnectorScheduler:
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self._has_mamba:
+            self._truncate_mamba_request_for_prefill(request)
+
         # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
         # effectively disabled for Bidirectional KV transfer.
         if params is None or not params.get("do_remote_prefill"):
