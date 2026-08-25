@@ -18,6 +18,8 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -101,9 +103,10 @@ def benchmark_graphs(
     warmup_replays: int,
     samples: int,
     device_group: dist.ProcessGroup,
+    device_barrier: Callable[[], None],
 ) -> float:
     for index in range(warmup_replays):
-        dist.barrier(group=device_group)
+        device_barrier()
         graphs[index % len(graphs)].replay()
     torch.accelerator.synchronize()
 
@@ -111,7 +114,7 @@ def benchmark_graphs(
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     for index in range(samples):
-        dist.barrier(group=device_group)
+        device_barrier()
         start.record()
         graphs[index % len(graphs)].replay()
         end.record()
@@ -139,6 +142,7 @@ def benchmark_shape(
     world_size: int,
     device_group: dist.ProcessGroup,
     cpu_group: dist.ProcessGroup,
+    device_barrier: Callable[[], None],
 ) -> dict[str, float | int]:
     padded_m = (m + world_size - 1) // world_size * world_size
     local_m = padded_m // world_size
@@ -180,6 +184,7 @@ def benchmark_shape(
         warmup_replays,
         samples,
         device_group,
+        device_barrier,
     )
     global_tflops = 2 * m * n * k * world_size / (latency_us * 1e6)
     return {
@@ -208,6 +213,16 @@ def main() -> None:
     rank = dist.get_rank(device_group)
     world_size = dist.get_world_size(device_group)
     device = torch.device("cuda", local_rank)
+    pynccl_comm = PyNcclCommunicator(group=cpu_group, device=device)
+    assert not pynccl_comm.disabled
+    sync_input = torch.zeros(1, device=device)
+    sync_output = torch.empty_like(sync_input)
+
+    def device_barrier() -> None:
+        # Order the timed launch after a device-side rank rendezvous without
+        # including the rendezvous itself in the measured event interval.
+        pynccl_comm.all_reduce(sync_input, sync_output)
+
     results = [
         benchmark_shape(
             m,
@@ -221,6 +236,7 @@ def main() -> None:
             world_size,
             device_group,
             cpu_group,
+            device_barrier,
         )
         for k in args.k
         for m in args.m
@@ -241,6 +257,7 @@ def main() -> None:
         print(df.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
 
     dist.barrier(group=cpu_group)
+    pynccl_comm.destroy()
     dist.destroy_process_group(cpu_group)
     dist.destroy_process_group()
 
