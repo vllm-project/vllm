@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import ClassVar, Final
 
 import torch
-from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    MLACommonPrefillMetadata,
     QueryLenSupport,
     accumulate_mla_context_chunk,
     init_mla_context_partial,
@@ -145,6 +145,21 @@ def _aiter_mla_native_h24_supported() -> bool:
         _aiter_mla_native_h24_reducer_supported()
         and _aiter_mla_native_h24_metadata_supported()
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_gather_kv_b_proj():
+    """Load the fused chunked-context gather entry point.
+
+    Requires an AITER build that exports ``gather_kv_b_proj``.  When it is
+    missing we return ``None`` and ``_can_fuse_context_gather`` falls back to
+    the generic ``_compute_prefill_context``.
+    """
+    try:
+        from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+    except ImportError:
+        return None
+    return gather_kv_b_proj
 
 
 @functools.lru_cache(maxsize=1)
@@ -1544,12 +1559,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             self._mla_reduce_v1 = mla_reduce_v1
 
     def _can_fuse_context_gather(
-        self, q: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor
+        self,
+        q: torch.Tensor,
+        prefill_metadata: MLACommonPrefillMetadata,
+        kv_c_and_k_pe_cache: torch.Tensor,
     ) -> bool:
+        from vllm.platforms import current_platform
+
         weight = getattr(self.kv_b_proj, "weight", None)
         return (
             self.kv_cache_dtype != "fp8_ds_mla"
+            and prefill_metadata.q_data_type != current_platform.fp8_dtype()
             and q.dtype in (torch.bfloat16, torch.float16)
+            and _aiter_gather_kv_b_proj() is not None
             and kv_c_and_k_pe_cache.is_contiguous()
             and weight is not None
             and weight.dtype in (torch.bfloat16, torch.float16)
@@ -1587,7 +1609,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if num_rows == 0:
             return k, v
 
-        gather_kv_b_proj(
+        _aiter_gather_kv_b_proj()(
             kv_c_and_k_pe_cache.view(num_blocks * block_size, 1, cache_width),
             k_scale,
             chunk.cu_seq_lens,
@@ -1608,13 +1630,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         k_scale: torch.Tensor,
     ):
         """Attend the cached prefix, gathering and expanding it in one kernel"""
-        if not self._can_fuse_context_gather(q, kv_c_and_k_pe_cache):
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
+
+        if not self._can_fuse_context_gather(q, prefill_metadata, kv_c_and_k_pe_cache):
             return super()._compute_prefill_context(
                 q, kv_c_and_k_pe_cache, attn_metadata, k_scale
             )
-
-        assert attn_metadata.prefill is not None
-        prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
