@@ -146,16 +146,15 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
-            # Per-group properties, so the first microbatch's builder answers
-            # for all of them. The workspace is deliberately not shared with the
-            # others: microbatches run concurrently, and a workspace the
-            # attention kernels write to cannot be shared between them.
-            builder = group.get_metadata_builder(0)
-            if attn_backend_workspace is None:
-                if hasattr(builder, "_get_workspace_buffer"):
-                    attn_backend_workspace = builder._get_workspace_buffer()
-            else:
-                if hasattr(builder, "set_workspace_buffer"):
+            # The microbatches' builders share the workspace too: they all
+            # issue their attention on the one compute stream the microbatch
+            # threads hand off (see `vllm.v1.worker.ubatching`), so the buffer
+            # is written serially, as it already is across steps.
+            for builder in group.metadata_builders:
+                if attn_backend_workspace is None:
+                    if hasattr(builder, "_get_workspace_buffer"):
+                        attn_backend_workspace = builder._get_workspace_buffer()
+                elif hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
     attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
     return attn_groups, attn_cg_support_info, kernel_block_sizes
