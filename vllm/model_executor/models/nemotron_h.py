@@ -48,8 +48,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    FP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -191,9 +191,7 @@ class NemotronHMLP(nn.Module):
             envs.VLLM_EXPERIMENTAL_NEMOTRON_SHARED_RELU2_FP8_QUANT
             and self.down_proj.tp_size == 1
             and isinstance(down_quant_method, ModelOptFp8LinearMethod)
-            and isinstance(
-                down_quant_method.fp8_linear, CutlassFP8ScaledMMLinearKernel
-            )
+            and isinstance(down_quant_method.fp8_linear, FP8ScaledMMLinearKernel)
             and down_quant_method.fp8_linear.input_quant_key()
             == kFp8StaticTensorSym
         )
