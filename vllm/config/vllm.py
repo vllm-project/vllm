@@ -563,22 +563,13 @@ class VllmConfig:
         return hash_str
 
     @property
-    def is_ec_producer_only(self) -> bool:
-        ec_config = self.ec_transfer_config
-        return (
-            ec_config is not None
-            and ec_config.is_ec_producer
-            and not ec_config.is_ec_consumer
-        )
-
-    @property
     def is_mm_encoder_only(self) -> bool:
         mm_config = (
             self.model_config.multimodal_config
             if self.model_config is not None
             else None
         )
-        return self.is_ec_producer_only or bool(mm_config and mm_config.mm_encoder_only)
+        return bool(mm_config and mm_config.mm_encoder_only)
 
     @property
     def max_concurrent_batches(self) -> int:
@@ -1120,6 +1111,8 @@ class VllmConfig:
 
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
+
+        self._resolve_mm_encoder_only()
 
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
@@ -2379,6 +2372,20 @@ class VllmConfig:
                 "EC/KV consumer: pre-computed-embedding inputs may "
                 "omit the embedding tensor."
             )
+
+    def _resolve_mm_encoder_only(self) -> None:
+        """Enable encoder-only mode for a dedicated EC producer."""
+        ec_config = self.ec_transfer_config
+        if ec_config is None or not ec_config.is_encode_only:
+            return
+
+        model_config = self.model_config
+        mm_config = model_config.multimodal_config if model_config is not None else None
+        if mm_config is None:
+            raise ValueError(
+                "An EC producer-only instance requires a multimodal model."
+            )
+        mm_config.mm_encoder_only = True
 
     def _resolve_mm_processor_device(self) -> None:
         """Settle `--mm-processor-device=auto` now that the EC role is known.
