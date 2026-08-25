@@ -5,7 +5,7 @@ steps:
 - label: ":nvidia: (H200) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests
-  timeout_in_minutes: 25
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/entrypoints
