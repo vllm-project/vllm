@@ -171,9 +171,7 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             "layers with metadata: %s",
             len(self.draft_attn_groups),
             sorted(
-                name
-                for group in self.draft_attn_groups
-                for name in group.layer_names
+                name for group in self.draft_attn_groups for name in group.layer_names
             ),
         )
 
@@ -183,7 +181,9 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         target's real, already-populated paged KV cache."""
         if not (hasattr(self.model, "model") and hasattr(self.model.model, "layers")):
             return
-        if not (hasattr(target_model, "model") and hasattr(target_model.model, "layers")):
+        if not (
+            hasattr(target_model, "model") and hasattr(target_model.model, "layers")
+        ):
             return
 
         target_prefix = None
@@ -304,7 +304,10 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         # --- input_ids: [batch_size, block_len] -> flattened, row-major
         # (one request's full block before the next request's). ---
         block_ids = torch.full(
-            (batch_size, block_len), mask_token_id, dtype=torch.int32, device=self.device
+            (batch_size, block_len),
+            mask_token_id,
+            dtype=torch.int32,
+            device=self.device,
         )
         block_ids[:, 0] = next_token_ids[:batch_size]
         self.input_ids[:num_tokens] = block_ids.reshape(-1)
@@ -335,8 +338,10 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         clamped_positions = torch.clamp(block_positions, max=max_model_len - 1)
         block_idx = clamped_positions // block_size  # [batch_size, block_len]
         block_offset = clamped_positions % block_size
-        req_idx = torch.arange(batch_size, device=self.device).unsqueeze(1).expand(
-            -1, block_len
+        req_idx = (
+            torch.arange(batch_size, device=self.device)
+            .unsqueeze(1)
+            .expand(-1, block_len)
         )
         physical_block_ids = cad.block_table_tensor[req_idx, block_idx]
         slot_mapping = (physical_block_ids * block_size + block_offset).reshape(-1)

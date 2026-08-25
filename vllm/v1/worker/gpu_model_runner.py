@@ -200,7 +200,6 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
-from vllm.v1.spec_decode.orthrus import OrthrusProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
@@ -209,6 +208,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
+from vllm.v1.spec_decode.orthrus import OrthrusProposer
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -683,12 +683,9 @@ class GPUModelRunner(
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "orthrus":
-                # EXPERIMENTAL / unvalidated: see
-                # vllm/v1/spec_decode/orthrus.py for status. load_model's
-                # KV-sharing wiring is implemented; propose() is an explicit
-                # stub pending the one-shot block-proposal attention
-                # metadata construction (not safe to guess blind -- see
-                # that module's docstring).
+                # WIP: diffusion-mode drafting is implemented but not yet
+                # validated end-to-end on GPU. See
+                # vllm/v1/spec_decode/orthrus.py for current status.
                 self.drafter = OrthrusProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)

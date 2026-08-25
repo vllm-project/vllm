@@ -13,6 +13,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -34,7 +35,6 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
-
 
 _BUILDING_DIFFUSION_DRAFT: ContextVar[bool] = ContextVar(
     "orthrus_building_diffusion_draft", default=False
@@ -64,6 +64,38 @@ def building_diffusion_draft():
         yield
     finally:
         _BUILDING_DIFFUSION_DRAFT.reset(token)
+
+
+# Orthrus adds a parallel set of "*_diff" attention projections next to the
+# Qwen3 ones. Order matters only for readability here: matching is anchored on
+# the full module segment (see resolve_stacked_weight_name), so "q_proj" does
+# not also capture "q_proj_diff".
+STACKED_PARAMS_MAPPING: list[tuple[str, str, str | int]] = [
+    ("qkv_proj", "q_proj", "q"),
+    ("qkv_proj", "k_proj", "k"),
+    ("qkv_proj", "v_proj", "v"),
+    ("qkv_proj_diff", "q_proj_diff", "q"),
+    ("qkv_proj_diff", "k_proj_diff", "k"),
+    ("qkv_proj_diff", "v_proj_diff", "v"),
+    ("gate_up_proj", "gate_proj", 0),
+    ("gate_up_proj", "up_proj", 1),
+]
+
+
+def resolve_stacked_weight_name(name: str) -> tuple[str, str | int] | None:
+    """Maps a checkpoint weight name onto its fused vLLM parameter.
+
+    Args:
+        name: Checkpoint weight name, e.g. ``...self_attn.q_proj_diff.weight``.
+
+    Returns:
+        ``(vllm_param_name, shard_id)``, or ``None`` if ``name`` is not part
+        of a fused parameter and should be loaded directly.
+    """
+    for param_name, weight_name, shard_id in STACKED_PARAMS_MAPPING:
+        if f"{weight_name}." in name:
+            return name.replace(weight_name, param_name), shard_id
+    return None
 
 
 class OrthrusAttention(Qwen3Attention):
@@ -115,12 +147,12 @@ class OrthrusAttention(Qwen3Attention):
         self.o_proj_diff = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=qkv_bias,
+            bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj_diff",
         )
-        self.q_norm_diff = type(self.q_norm)(self.head_dim, eps=rms_norm_eps)
-        self.k_norm_diff = type(self.k_norm)(self.head_dim, eps=rms_norm_eps)
+        self.q_norm_diff = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm_diff = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
         # EXPERIMENTAL (milestone 3, unvalidated against vLLM's real
         # scheduler/CI): a second paged Attention layer for the diffusion
@@ -355,10 +387,8 @@ class OrthrusDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = type(self.self_attn.q_norm)(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = type(self.self_attn.q_norm)(
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -520,7 +550,11 @@ class OrthrusModel(Qwen2Model):
         ``OrthrusProposer.load_model``), instead of the offline tensors
         ``forward_diffusion`` takes for milestone-1/2 validation.
         """
-        hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+        hidden_states = (
+            inputs_embeds
+            if inputs_embeds is not None
+            else self.embed_input_ids(input_ids)
+        )
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer.forward_diffusion_paged(
@@ -573,25 +607,14 @@ class OrthrusModel(Qwen2Model):
         return hidden_states, new_cache
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("qkv_proj_diff", "q_proj_diff", "q"),
-            ("qkv_proj_diff", "k_proj_diff", "k"),
-            ("qkv_proj_diff", "v_proj_diff", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
+            resolved = resolve_stacked_weight_name(name)
+            if resolved is not None:
+                name, shard_id = resolved
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
@@ -600,13 +623,14 @@ class OrthrusModel(Qwen2Model):
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue
+                if name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if weight_loader == default_weight_loader:
                     weight_loader(param, loaded_weight)
                 else:
                     weight_loader(param, loaded_weight, shard_id)
-                break
             else:
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -671,15 +695,14 @@ class OrthrusForCausalLM(
         self.is_orthrus_diffusion_draft = _BUILDING_DIFFUSION_DRAFT.get()
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -699,7 +722,9 @@ class OrthrusForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if self.is_orthrus_diffusion_draft:
-            return self.model.forward_diffusion_paged(input_ids, positions, inputs_embeds)
+            return self.model.forward_diffusion_paged(
+                input_ids, positions, inputs_embeds
+            )
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(
@@ -754,11 +779,15 @@ class OrthrusForCausalLM(
         Returns:
             ``[1, prompt_len + generated_len]`` full token sequence.
         """
-        assert input_ids.shape[0] == 1, "generate_with_diffusion only supports batch size 1"
+        assert input_ids.shape[0] == 1, (
+            "generate_with_diffusion only supports batch size 1"
+        )
         device = input_ids.device
         block_size = self.config.block_size
         mask_token_id = self.config.mask_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        eos_token_id = (
+            eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        )
 
         prompt_ids = input_ids[0]
         num_input_tokens = prompt_ids.shape[0]
@@ -785,9 +814,13 @@ class OrthrusForCausalLM(
 
         while start_idx < max_length - 1:
             diff_len = min(block_size, max_length - start_idx)
-            diff_block_ids = torch.full((diff_len,), mask_token_id, dtype=torch.long, device=device)
+            diff_block_ids = torch.full(
+                (diff_len,), mask_token_id, dtype=torch.long, device=device
+            )
             diff_block_ids[0] = output_ids[start_idx]
-            diff_positions = torch.arange(start_idx, start_idx + diff_len, device=device)
+            diff_positions = torch.arange(
+                start_idx, start_idx + diff_len, device=device
+            )
 
             # --- Propose: one diffusion forward predicts the whole block. ---
             if diff_len > 1:
@@ -798,7 +831,9 @@ class OrthrusForCausalLM(
             else:
                 diff_tokens = torch.empty((0,), dtype=torch.long, device=device)
 
-            proposed_block = torch.cat([output_ids[start_idx : start_idx + 1], diff_tokens])
+            proposed_block = torch.cat(
+                [output_ids[start_idx : start_idx + 1], diff_tokens]
+            )
 
             # --- Verify: a normal AR forward over the proposed block must
             # agree, position by position, for the block to be accepted
@@ -811,7 +846,9 @@ class OrthrusForCausalLM(
             ar_tokens = ar_logits.argmax(dim=-1)
 
             matches = diff_tokens == ar_tokens[:-1]
-            acceptance_len = int(matches.cumprod(dim=0).sum().item()) if diff_tokens.numel() else 0
+            acceptance_len = (
+                int(matches.cumprod(dim=0).sum().item()) if diff_tokens.numel() else 0
+            )
             next_token = ar_tokens[acceptance_len]
 
             end_idx = start_idx + acceptance_len + 1
@@ -820,7 +857,9 @@ class OrthrusForCausalLM(
             eos_positions = (accepted_block == eos_token_id).nonzero()
             if len(eos_positions) > 0:
                 eos_offset = int(eos_positions[0, 0].item())
-                output_ids[start_idx : start_idx + eos_offset + 1] = accepted_block[: eos_offset + 1]
+                output_ids[start_idx : start_idx + eos_offset + 1] = accepted_block[
+                    : eos_offset + 1
+                ]
                 return output_ids[: start_idx + eos_offset + 1].unsqueeze(0)
 
             output_ids[start_idx:end_idx] = accepted_block
@@ -829,7 +868,10 @@ class OrthrusForCausalLM(
             # accepted prefix of the newly computed cache.
             keep_len = accepted_block.shape[0]  # == acceptance_len + 1
             kv_cache = [
-                (k[: k.shape[0] - diff_len + keep_len], v[: v.shape[0] - diff_len + keep_len])
+                (
+                    k[: k.shape[0] - diff_len + keep_len],
+                    v[: v.shape[0] - diff_len + keep_len],
+                )
                 for k, v in verify_cache
             ]
             start_idx = end_idx
