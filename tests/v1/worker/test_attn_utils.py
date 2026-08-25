@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -21,10 +22,100 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layout_strides,
 )
+from vllm.v1.worker.gpu.attn_utils import (
+    get_attn_cg_support,
+    get_query_lens_mismatch_unsupported_backend,
+)
 from vllm.v1.worker.utils import (
+    AttentionGroup,
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
 )
+
+
+class _FakeMetadataBuilder:
+    def __init__(self, support: AttentionCGSupport):
+        self.support = support
+
+    def get_cudagraph_support(self, *_args):
+        return self.support
+
+
+class _TargetBackend:
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
+
+class _DraftBackend:
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return False
+
+
+def test_attention_checks_preserve_global_and_target_scoped_support():
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    target_group = AttentionGroup(
+        _TargetBackend,
+        ["target"],
+        spec,
+        0,  # type: ignore[arg-type]
+    )
+    target_group.metadata_builders = [
+        _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
+    ]
+    draft_group = AttentionGroup(
+        _DraftBackend,
+        ["draft"],
+        spec,
+        0,  # type: ignore[arg-type]
+    )
+    draft_group.metadata_builders = [
+        _FakeMetadataBuilder(AttentionCGSupport.UNIFORM_BATCH)  # type: ignore[list-item]
+    ]
+    groups = [[target_group, draft_group]]
+
+    # The runner-wide execution mode must still honor the drafter's limit.
+    unfiltered = get_attn_cg_support(groups, None)  # type: ignore[arg-type]
+    assert unfiltered.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert unfiltered.min_cg_attn_backend == "_DraftBackend"
+
+    # Adaptive verification validates only the target's varlen graphs.
+    target_only = get_attn_cg_support(
+        groups,
+        None,  # type: ignore[arg-type]
+        checked_layer_names={"target"},
+    )
+    assert target_only.min_cg_support == AttentionCGSupport.ALWAYS
+    assert target_only.min_cg_attn_backend is None
+    assert (
+        get_query_lens_mismatch_unsupported_backend(
+            groups,
+            checked_layer_names={"target"},
+        )
+        is None
+    )
+
+    # Shared target/draft groups still participate in target-scoped checks.
+    draft_group.layer_names.append("target")
+    target_with_shared_group = get_attn_cg_support(
+        groups,
+        None,  # type: ignore[arg-type]
+        checked_layer_names={"target"},
+    )
+    assert target_with_shared_group.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert (
+        get_query_lens_mismatch_unsupported_backend(
+            groups,
+            checked_layer_names={"target"},
+        )
+        == "_DraftBackend"
+    )
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():

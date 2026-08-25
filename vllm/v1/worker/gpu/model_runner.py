@@ -559,12 +559,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
             max_num_blocks_per_group.append(max_num_blocks)
 
+        target_attn_layer_names = None
+        if isinstance(self.speculator, DraftModelSpeculator):
+            # Adaptive verification validates target attention separately.
+            target_attn_layer_names = {
+                layer_name
+                for group in self.kv_cache_config.kv_cache_groups
+                for layer_name in group.layer_names
+            } - self.speculator.draft_attn_layer_names
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
+            self.kv_cache_config,
+            self.vllm_config,
+            self.device,
         )
-        attn_cg_support = attn_cg_support.narrow(
-            *self.model_state.get_additional_cg_support()
-        )
+        additional_attn_cg_support = self.model_state.get_additional_cg_support()
+        attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
@@ -577,6 +586,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc=self.input_buffers.query_start_loc,
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             max_total_logits=get_max_chunk_logits(self.vocab_size),
+            vllm_config=self.vllm_config,
+            target_layer_names=target_attn_layer_names,
+            additional_attn_cg_support=additional_attn_cg_support,
         )
 
         self.block_tables = BlockTables(
