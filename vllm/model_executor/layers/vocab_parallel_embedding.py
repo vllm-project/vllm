@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -322,6 +323,14 @@ class VocabParallelEmbedding(PluggableLayer):
             - self.shard_indices.added_vocab_start_index
         )
 
+        # The fused kernel masks, shifts and gathers in one pass; it assumes a
+        # plain row-major shard, so it only applies to unquantized weights.
+        self.use_fused_embedding = (
+            self.tp_size > 1
+            and current_platform.is_cuda()
+            and isinstance(quant_method, UnquantizedEmbeddingMethod)
+        )
+
         self.quant_method.create_weights(
             self,
             self.embedding_dim,
@@ -485,8 +494,24 @@ class VocabParallelEmbedding(PluggableLayer):
         param[loaded_weight.shape[0] :].data.fill_(0)
 
     def forward(self, input_):
-        if self.tp_size > 1:
-            # Build the mask.
+        if self.tp_size == 1:
+            return self.quant_method.embedding(self, input_.long())
+
+        if self.use_fused_embedding:
+            output_parallel = ops.vocab_parallel_embedding(
+                input_ if input_.ndim == 1 else input_.reshape(-1),
+                self.weight,
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+                self.shard_indices.num_org_vocab_padding,
+                self.shard_indices.added_vocab_start_index,
+                self.shard_indices.added_vocab_end_index,
+            )
+            if input_.ndim != 1:
+                output_parallel = output_parallel.view(
+                    *input_.shape, self.embedding_dim
+                )
+        else:
             masked_input, input_mask = get_masked_input_and_mask(
                 input_,
                 self.shard_indices.org_vocab_start_index,
@@ -495,16 +520,10 @@ class VocabParallelEmbedding(PluggableLayer):
                 self.shard_indices.added_vocab_start_index,
                 self.shard_indices.added_vocab_end_index,
             )
-        else:
-            masked_input = input_
-        # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
-        # Mask the output embedding.
-        if self.tp_size > 1:
+            output_parallel = self.quant_method.embedding(self, masked_input.long())
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-            # Reduce across all the model parallel GPUs.
-            return tensor_model_parallel_all_reduce(output_parallel)
-        return output_parallel
+        # Reduce across all the model parallel GPUs.
+        return tensor_model_parallel_all_reduce(output_parallel)
 
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings}"
