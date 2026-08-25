@@ -83,8 +83,15 @@ conclusions.
 - Stabilize GPU clocks or run enough untimed work to reach steady state.
   Alternate candidate order so clock, thermal, and rank-skew effects are shared.
 
-## Included Example
+## Included Examples
 
-Use [benchmarks/cupti_microbenchmark.py](benchmarks/cupti_microbenchmark.py) as
-a minimal FlashInfer CUPTI timing pattern. Adapt its operation, cases, work
-formula, and correctness tolerances rather than copying it unchanged.
+- Use [benchmarks/cupti_microbenchmark.py](benchmarks/cupti_microbenchmark.py)
+  as a minimal single-GPU FlashInfer CUPTI timing pattern.
+- Use
+  [benchmarks/multi_gpu_gemm_rs.py](benchmarks/multi_gpu_gemm_rs.py) as a
+  minimal distributed CUDA-graph timing pattern. It is derived from vLLM's
+  `benchmarks/kernels/benchmark_kimi_k3_gemm_rs_ar.py` without its model,
+  custom-kernel, or symmetric-memory dependencies.
+
+Adapt the operation, cases, work formula, and correctness tolerances rather
+than copying either example unchanged.
