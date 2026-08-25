@@ -11,6 +11,7 @@ from compressed_tensors.quantization import (
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
@@ -53,6 +54,7 @@ class WNA16MoEBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     HUMMING = "HUMMING"
     CPU = "CPU"
+    ZEN_CPU = "ZEN_CPU"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     TRITON = "TRITON"
     XPU = "XPU"
@@ -95,6 +97,12 @@ def backend_to_kernel_cls(
         )
 
         return [CPUExpertsInt4]
+    elif backend == WNA16MoEBackend.ZEN_CPU:
+        from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+            ZentorchExpertsInt4,
+        )
+
+        return [ZentorchExpertsInt4]
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
             Int4EmulationTritonExperts,
@@ -110,7 +118,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     Get available backends in priority order based on platform and config.
     """
     if current_platform.is_cpu():
-        return [WNA16MoEBackend.CPU]
+        return [WNA16MoEBackend.ZEN_CPU, WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
@@ -134,6 +142,18 @@ def _backend_incompatibility_reason(
 ) -> str | None:
     if backend == WNA16MoEBackend.FLASHINFER_TRTLLM and (may_have_zp or may_have_bias):
         return "zero points and bias are not supported"
+
+    if backend == WNA16MoEBackend.ZEN_CPU:
+        if not envs.VLLM_CPU_INT4_W4A8:
+            return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
+        if may_have_zp or may_have_bias:
+            return "zero points and expert bias are not supported"
+        group_size = getattr(quant_config, "group_size", None)
+        if group_size is None or group_size <= 0:
+            return "DA8W4 requires group-quantized weights"
+        # AOCL sym_quant requires the group size to be a multiple of 4.
+        if group_size % 4 != 0:
+            return f"group size {group_size} is not a multiple of 4"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -377,10 +397,14 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
+    from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+        ZentorchExpertsInt4,
+    )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
-    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, the Humming
-    # grouped/indexed experts, and Int4EmulationTritonExperts
+    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
+    # ZentorchExpertsInt4, the Humming grouped/indexed experts, and
+    # Int4EmulationTritonExperts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
@@ -388,6 +412,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
+        ZentorchExpertsInt4,
         Int4EmulationTritonExperts,
     )
     if backend == WNA16MoEBackend.HUMMING:
@@ -1018,6 +1043,71 @@ def _process_weights_cpu(
     )
 
 
+def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
+    """Repack CT int4 ``[E, K//8, N]`` into zentorch s4 ``[E, N, K//8]``."""
+    from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
+        _import_unpack_from_int32,
+    )
+
+    num_experts, _, out_features = packed.shape
+    unpacked = _import_unpack_from_int32()(
+        packed,
+        4,
+        torch.Size([num_experts, in_features, out_features]),
+        packed_dim=0,
+    )
+    # CT stores [K, N] per expert; the repack consumes [N, K].
+    unpacked = unpacked.transpose(1, 2).contiguous()
+    repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
+    return torch.stack([repack_op(w) for w in unpacked])
+
+
+def _process_weights_zen_cpu(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_g_idx
+    torch.Tensor | None,  # w2_g_idx
+    torch.Tensor | None,  # w13_g_idx_sort_indices
+    torch.Tensor | None,  # w2_g_idx_sort_indices
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """Zen CPU INT4 DA8W4 (W4A8) weight post-processing."""
+    hidden_size = w2_scale.shape[2]
+    intermediate_size = w13_scale.shape[2] // 2
+
+    # Per-group scales already arrive as [E, G, N], the layout the kernel wants.
+    return (
+        _zen_repack_s4(w13.data, hidden_size),
+        _zen_repack_s4(w2.data, intermediate_size),
+        w13_scale.data.to(torch.bfloat16).contiguous(),
+        w2_scale.data.to(torch.bfloat16).contiguous(),
+        None,  # w13_g_idx
+        None,  # w2_g_idx
+        None,  # w13_g_idx_sort_indices
+        None,  # w2_g_idx_sort_indices
+        None,  # w13_qzeros (symmetric)
+        None,  # w2_qzeros (symmetric)
+        None,  # w13_input_global_scale
+        None,  # w2_input_global_scale
+        w13_bias,
+        w2_bias,
+    )
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -1569,6 +1659,15 @@ def convert_to_wna16_moe_kernel_format(
             w2_g_idx,
             w13_qzeros,
             w2_qzeros,
+            w13_bias,
+            w2_bias,
+        )
+    elif backend == WNA16MoEBackend.ZEN_CPU:
+        return _process_weights_zen_cpu(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
             w13_bias,
             w2_bias,
         )
