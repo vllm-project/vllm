@@ -11,7 +11,8 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
-from unittest.mock import patch
+from collections import defaultdict
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -27,13 +28,14 @@ class _RecordingNixl:
     def __init__(self, *args, **kwargs):
         self.dlists: dict[int, np.ndarray] = {}
         self.xfers: list[tuple] = []
+        self.registered: list[tuple[list[tuple], object]] = []
         self._next_handle = 1
 
     def get_reg_descs(self, caches_data, mem_type):
         return caches_data
 
     def register_memory(self, descs, backends=None):
-        pass
+        self.registered.append((descs, backends))
 
     def deregister_memory(self, descs):
         pass
@@ -96,6 +98,146 @@ class _RecordingNixl:
 
     def remove_remote_agent(self, agent):
         pass
+
+
+@pytest.mark.cpu_test
+def test_local_descriptors_follow_each_region_pool_capacity():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.device_id = 0
+    worker.block_len_per_layer = [16, 16]
+    worker.region_strides = [16, 16]
+    worker.region_num_blocks = [2, 3]
+
+    descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
+
+    assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
+
+
+@pytest.mark.cpu_test
+def test_overlaid_transfer_groups_share_region_geometry():
+    """Groups overlaid on one allocation share its transfer region."""
+    import msgspec
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 4
+    spec = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+    )
+    page_size = spec.page_size_bytes
+    block_stride = 2 * page_size
+    backing = torch.zeros(num_blocks, block_stride, dtype=torch.uint8)
+    caches = {
+        "layer.0": backing[:, :page_size],
+        "layer.1": backing[:, :page_size],
+    }
+    groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.tp_rank = 0
+    worker.world_size = 1
+    worker.block_size = 4
+    worker.engine_id = "local-engine"
+    worker.use_mla = True
+    worker.model_config = MagicMock()
+    worker.model_config.get_total_num_kv_heads.return_value = 1
+    worker.attn_backends = []
+    worker._has_mamba = False
+    worker.vllm_config = MagicMock()
+    worker.backend_name = "FLASHMLA"
+    worker.num_blocks = num_blocks
+    worker.nixl_memory_type = "VRAM"
+    worker.nixl_backends = None
+    worker.nixl_wrapper = _RecordingNixl()
+    worker._registered_descs = []
+    worker.dst_num_blocks = {}
+    worker.dst_region_num_blocks = {}
+    worker.dst_region_group_ids = {}
+    worker.dst_region_block_sizes = {}
+    worker.dst_region_split_ratios = {}
+    worker.src_xfer_handles_by_block_size = {}
+    worker.kv_caches_base_addr = defaultdict(dict)
+    worker._mamba_ssm_size = (0, 0)
+    worker.kv_cache_layout = "NHD"
+    worker.host_buffer_kv_cache_layout = "NHD"
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._logical_num_blocks = num_blocks
+    worker.region_strides = []
+    worker.region_group_ids = []
+    worker.region_block_sizes = []
+    worker.region_names = []
+    worker.region_num_blocks = []
+    worker._region_is_mla = []
+    worker.block_len_per_layer = []
+    worker.block_stride_per_layer = []
+    worker.device_id = 0
+    worker.use_host_buffer = False
+    worker.host_xfer_buffers = {}
+    worker.device_kv_caches = {}
+    worker.pp_size = 1
+    worker.dcp_size = 1
+    worker.pcp_size = 1
+    worker.kv_buffer_device = "cuda"
+    worker._layer_specs = {name: spec for name in caches}
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=backing.nbytes,
+                layers=[name],
+                layer_stride=page_size,
+                block_stride=block_stride,
+            )
+            for name in caches
+        ],
+        kv_cache_groups=groups,
+    )
+
+    transfer_topology = MagicMock()
+
+    with (
+        patch.object(bw, "TransferTopology", return_value=transfer_topology),
+        patch.object(bw, "compute_nixl_compatibility_hash", return_value="hash"),
+    ):
+        worker.register_kv_caches(caches)
+
+    assert worker.region_group_ids == [-1]
+    assert worker.region_strides == [block_stride]
+    assert worker.nixl_wrapper.registered[0][0] == [
+        (backing.data_ptr(), backing.nbytes, 0, "")
+    ]
+    expected_addrs = [
+        backing.data_ptr() + block * block_stride for block in range(num_blocks)
+    ]
+    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    assert metadata.region_group_ids == [-1]
+    assert metadata.region_num_blocks == [num_blocks]
+    assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
 
 
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
