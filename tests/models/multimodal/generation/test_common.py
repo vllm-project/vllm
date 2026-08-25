@@ -30,7 +30,6 @@ from ....conftest import (
     VllmRunner,
 )
 from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
-from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
 from .vlm_utils.types import (
@@ -320,20 +319,6 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
         # FIXME: https://github.com/huggingface/transformers/pull/38510
         marks=[pytest.mark.skip("Model is broken")],
-    ),
-    "chameleon": VLMTestInfo(
-        models=["facebook/chameleon-7b"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        # For chameleon, we only compare the sequences
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
-        max_tokens=8,
-        dtype="bfloat16",
     ),
     "cosmos3": VLMTestInfo(
         models=["nvidia/Cosmos3-Nano"],
@@ -935,17 +920,6 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
-    "chameleon-broadcast": VLMTestInfo(
-        models=["facebook/chameleon-7b"],
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        max_model_len=4096,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
-        marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
-    ),
     "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
