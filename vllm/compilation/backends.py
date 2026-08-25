@@ -489,6 +489,11 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
     size_nodes = list(graph.graph.find_nodes(op="call_method", target="size"))
 
     for node in size_nodes:
+        # Only x.size() (no dim) returns a torch.Size tuple that can't cross
+        # split boundaries. x.size(dim) already returns a scalar SymInt/int,
+        # which crosses fine, so leave it untouched.
+        if len(node.args) > 1 or "dim" in node.kwargs:
+            continue
         tensor_node = node.args[0]
         ev = tensor_node.meta.get("example_value")
         assert ev is not None, (
@@ -1256,11 +1261,12 @@ class VllmBackend:
             # code adapted from
             # https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30
             # use `print_readable` because it can include submodules
-            src = (
-                "from __future__ import annotations\nimport torch\n"
-                + self.split_gm.print_readable(print_output=False)
-            )
-            src = src.replace("<lambda>", "GraphModule")
+            with dynamo_timed("vllm_print_readable"):
+                src = (
+                    "from __future__ import annotations\nimport torch\n"
+                    + self.split_gm.print_readable(print_output=False)
+                )
+                src = src.replace("<lambda>", "GraphModule")
             with open(graph_path, "w") as f:
                 f.write(src)
 
