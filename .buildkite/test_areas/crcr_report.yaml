@@ -9,4 +9,4 @@ steps:
     allow_dependency_failure: true
     timeout_in_minutes: 15
     commands:
-      - bash .buildkite/scripts/crcr-report.sh
+      - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
