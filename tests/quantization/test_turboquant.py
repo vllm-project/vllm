@@ -309,6 +309,46 @@ class TestTurboQuantKVCacheSpec:
         expected_slot = TurboQuantConfig.from_cache_dtype(preset, 128).slot_size_aligned
         assert spec.state_content_bytes == expected_slot
 
+    @pytest.mark.parametrize("skip_dtype", ["auto", "fp8"])
+    def test_customize_spec_passes_through_non_turboquant_layers(self, skip_dtype):
+        """Layers excluded from TQ must not have their dtype fed to the presets.
+
+        On a hybrid model the layers TurboQuant skips (GDN linear attention,
+        or anything under kv_cache_dtype_skip_layers) resolve their own
+        kv_cache_dtype independently of the global setting, so "auto" reaches
+        customize_spec while the run as a whole is TurboQuant. Passing that
+        string to TurboQuantConfig.from_cache_dtype aborted startup with
+        "Unknown TurboQuant cache dtype: 'auto'" (issue #50709).
+        """
+        from vllm.model_executor.layers.attention.attention import Attention
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+        from vllm.v1.kv_cache_interface import KVQuantMode
+
+        layer = SimpleNamespace(
+            attn_type="decoder",
+            kv_cache_dtype=skip_dtype,
+            kv_cache_torch_dtype=torch.bfloat16,
+            head_size=128,
+            head_size_v=128,
+            num_kv_heads=4,
+            sliding_window=None,
+            get_attn_backend=lambda: TurboQuantAttentionBackend,
+        )
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
+
+        spec = Attention.get_kv_cache_spec(layer, vllm_config)
+        assert not spec.kv_quant_mode.is_turboquant
+
+        # Must be an unpacked pass-through, not a ValueError from the presets.
+        customized = TurboQuantAttentionBackend.customize_spec(spec)
+        assert customized == spec
+        assert customized.state_content_bytes is None
+
+        if skip_dtype == "auto":
+            assert spec.kv_quant_mode == KVQuantMode.NONE
+
 
 class TestTurboQuantWorkspaceReservation:
     @staticmethod
