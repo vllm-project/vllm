@@ -65,7 +65,12 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from .whisper import ISO639_1_SUPPORTED_LANGS, _create_fake_bias_for_k_proj
 
 
@@ -395,6 +400,14 @@ class GlmAsrEncoder(nn.Module):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config,
@@ -496,44 +509,9 @@ class GlmAsrEncoder(nn.Module):
         return _GlmAsrEncoderOutput(last_hidden_state=hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Custom weight loading to handle q_proj/k_proj/v_proj -> qkv_proj mapping."""
-        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
         weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
-
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Default weight loading for non-stacked params
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class GlmAsrFeatureInputs(TensorSchema):
@@ -647,13 +625,13 @@ def _glmasr_field_config(
             feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
                 "audio", chunk_counts, dim=0
             ),
-            chunk_counts=MultiModalFieldConfig.batched("audio"),
+            chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
     return dict(
         audio_embeds=MultiModalFieldConfig.batched("audio"),
         input_features=MultiModalFieldConfig.batched("audio"),
         feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        chunk_counts=MultiModalFieldConfig.batched("audio"),
+        chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
     )
 
 
@@ -772,48 +750,40 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
-        mm_data: dict[str, object],
-        mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Normalize input: handle deprecated key and list conversion.
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
 
-        audio = mm_data.get("audio", [])
-        audio_list = [audio] if audio and not isinstance(audio, list) else audio
-
-        # Early return for text-only.
-        if not audio_list:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        # Handle sampling_rate
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        # Call parent method
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
-        # Postprocess: rename mask and add chunk counts
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         # Handle different key names from different transformers versions
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-        elif "input_features_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in processed_data:
+            processed_data["feature_attention_mask"] = processed_data.pop(
+                "input_features_mask"
+            )
+        elif "input_features" in processed_data:
             # If no mask is provided, create one from input_features
-            input_features = outputs["input_features"]
+            input_features = processed_data["input_features"]
             if isinstance(input_features, torch.Tensor):
                 # Create a mask of all ones matching the sequence length
                 mask = torch.ones(
@@ -821,18 +791,22 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                     input_features.shape[-1],
                     dtype=torch.long,
                 )
-                outputs["feature_attention_mask"] = mask
+                processed_data["feature_attention_mask"] = mask
 
-        # Get processor for chunk counts calculation
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        audio = mm_data.get("audio", [])
+        audio_list = [audio] if audio and not isinstance(audio, list) else audio
+        if audio_list:
+            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        # Override chunk counts calculation with GLM-ASR specific logic
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, processor.feature_extractor, processor
-        )
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+            # Override chunk counts calculation with GLM-ASR specific logic
+            chunk_counts = self._calculate_chunk_counts(
+                audio_list, processor.feature_extractor, processor
+            )
+            processed_data["chunk_counts"] = torch.tensor(
+                chunk_counts, dtype=torch.long
+            )
 
-        return outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -922,7 +896,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_glmasr,
             )
         ]
@@ -937,6 +911,10 @@ class GlmAsrForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"audio_tower.embed_positions": None}
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1105,9 +1083,8 @@ class GlmAsrForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["audio_tower.embed_positions"]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def _get_audio_token(cls, model_config: ModelConfig) -> str:

@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror::Error;
 use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
+pub use crate::lower::sampling::SamplingParamsError;
 pub use crate::lower::token_ids::TokenIdsError;
 
 #[derive(Debug, Error)]
@@ -11,6 +15,8 @@ pub enum Error {
     Tokenizer(String),
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
+    #[error("text request `{request_id}` stop strings cannot be empty")]
+    EmptyStopString { request_id: String },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
@@ -20,6 +26,8 @@ pub enum Error {
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
     TokenIds(#[from] TokenIdsError),
+    #[error(transparent)]
+    SamplingParams(#[from] SamplingParamsError),
     #[error(
         "`min_tokens` must be less than or equal to `max_tokens`, \
          got min_tokens={min_tokens}, max_tokens={max_tokens}"
@@ -45,14 +53,19 @@ impl Error {
         match self {
             Self::PromptTooLong { .. }
             | Self::EmptyPromptTokenIds { .. }
+            | Self::EmptyStopString { .. }
             | Self::Logprobs(_)
             | Self::TokenIds(_)
+            | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
-            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::EngineCoreClient(
+                EngineCoreError::InvalidDataParallelRank { .. },
+            )) => true,
             _ => false,
         }
     }

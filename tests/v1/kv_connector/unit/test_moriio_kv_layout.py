@@ -12,7 +12,10 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MLAAttentionSpec,
+)
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -241,7 +244,7 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
             id="interleaved-kernel-axis-from-spec",
         ),
         pytest.param(
-            (8, 4, 3),
+            (8, 1, 4, 3),
             _mla_spec(),
             16,
             {
@@ -297,7 +300,7 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     kv_caches = {
         "separated": torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16),
         "interleaved": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
     }
     worker = _worker(
         kv_caches,
@@ -342,7 +345,7 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     kv_caches = {
         "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
         "dense1": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
     }
     calls: list[str] = []
 
@@ -670,20 +673,29 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_block_id_length_mismatch_raises_value_error():
+def test_local_block_ids_longer_than_remote_raises_value_error():
     cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
-    with pytest.raises(ValueError, match="must have the same length"):
+    with pytest.raises(ValueError, match="longer than remote_block_ids"):
         moriio_layout.compute_block_transfer_offsets(
             "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
         )
 
 
+def test_empty_local_block_ids_is_free_only_noop():
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [], [4, 5], _remote_meta().num_blocks
+    ) == ([], [], [])
+
+
 def test_registration_regions_do_not_split_interleaved_or_mla_cache():
     separated = torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16)
     interleaved = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
-    indexer = torch.empty((8, 4, 3), dtype=torch.bfloat16)
+    indexer = torch.empty((8, 1, 4, 3), dtype=torch.bfloat16)
     worker = _worker(
         {
             "separated": separated,
@@ -736,7 +748,9 @@ def test_registration_regions_use_layer_num_blocks():
 
 
 def test_unsupported_shape_raises_value_error():
-    cache = torch.empty((8, 4, 2, 3), dtype=torch.bfloat16)
+    # A 4-D view whose head/state/content dims all disagree with the spec (a
+    # standardized [B, H, N, C] view for _full_spec would be (8, 2, 4, 6)).
+    cache = torch.empty((8, 3, 5, 7), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Tracking of the external→internal request-id mapping for in-flight requests.
 //!
 //! When request-id randomization is enabled (the default), [`crate::Llm`]

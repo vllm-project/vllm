@@ -47,6 +47,8 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
 | `OpenAIPrivacyFilterForTokenClassification` | gpt-oss-based encoder | `openai/privacy-filter` | | |
 | `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
+| `RobertaForTokenClassification` | RoBERTa-based | `Jean-Baptiste/roberta-large-ner-english` | | |
+| `XLMRobertaForTokenClassification` | XLM-RoBERTa-based | `Davlan/xlm-roberta-base-ner-hrl` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
 <sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))
