@@ -85,8 +85,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             mapping, lora_index_to_id, max_loras, vocab_size
         )
 
-        self.token_mapping_meta.prepare_tensors_cpu(token_lora_indices_cpu)
-        self.prompt_mapping_meta.prepare_tensors_cpu(sampler_indices_cpu)
+        token_metadata = self.token_mapping_meta.prepare_tensors_cpu(
+            token_lora_indices_cpu
+        )
+        if token_lora_indices_cpu is sampler_indices_cpu:
+            self.prompt_mapping_meta.copy_tensors_cpu(token_metadata)
+        else:
+            self.prompt_mapping_meta.prepare_tensors_cpu(sampler_indices_cpu)
 
     def add_shrink(
         self,

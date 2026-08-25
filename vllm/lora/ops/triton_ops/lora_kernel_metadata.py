@@ -12,6 +12,18 @@ import torch
 from vllm.utils.torch_utils import PIN_MEMORY
 
 
+@dataclass(frozen=True)
+class LoRAKernelMetaCPU:
+    token_lora_mapping: torch.Tensor | None = None
+    token_indices_sorted_by_lora_ids: torch.Tensor | None = None
+    active_lora_ids: torch.Tensor | None = None
+    num_tokens_per_lora: torch.Tensor | None = None
+    lora_token_start_loc: torch.Tensor | None = None
+    num_tokens: int = 0
+    num_active_loras: int = 0
+    no_lora: bool = False
+
+
 @dataclass
 class LoRAKernelMeta:
     token_lora_mapping: torch.Tensor
@@ -108,13 +120,13 @@ class LoRAKernelMeta:
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras_cpu.fill_(0)
 
-    def prepare_tensors_cpu(self, token_lora_mapping: list[int]) -> None:
+    def prepare_tensors_cpu(self, token_lora_mapping: list[int]) -> LoRAKernelMetaCPU:
         """Prepare metadata on the CPU and asynchronously copy it to device."""
-        self._reset()
         no_lora = all(lora_id == -1 for lora_id in token_lora_mapping)
-        self.no_lora_flag_cpu[0] = no_lora
         if no_lora:
-            return
+            metadata = LoRAKernelMetaCPU(no_lora=True)
+            self.copy_tensors_cpu(metadata)
+            return metadata
 
         indices_by_lora_id = [[] for _ in range(self.active_lora_ids.numel())]
         for token_index, lora_id in enumerate(token_lora_mapping):
@@ -163,16 +175,48 @@ class LoRAKernelMeta:
         num_tokens = len(token_lora_mapping)
         num_active_loras = len(lora_ids)
 
-        self.token_lora_mapping[:num_tokens].copy_(mapping_cpu, non_blocking=True)
-        self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
-            sorted_indices_cpu, non_blocking=True
+        metadata = LoRAKernelMetaCPU(
+            token_lora_mapping=mapping_cpu,
+            token_indices_sorted_by_lora_ids=sorted_indices_cpu,
+            active_lora_ids=lora_ids_cpu,
+            num_tokens_per_lora=counts_cpu,
+            lora_token_start_loc=start_locs_cpu,
+            num_tokens=num_tokens,
+            num_active_loras=num_active_loras,
         )
-        self.active_lora_ids[:num_active_loras].copy_(lora_ids_cpu, non_blocking=True)
-        self.num_tokens_per_lora[:num_active_loras].copy_(counts_cpu, non_blocking=True)
-        self.lora_token_start_loc[1 : num_active_loras + 1].copy_(
-            start_locs_cpu, non_blocking=True
+        self.copy_tensors_cpu(metadata)
+        return metadata
+
+    def copy_tensors_cpu(self, metadata: LoRAKernelMetaCPU) -> None:
+        """Asynchronously copy prepared CPU metadata to this device buffer."""
+        self._reset()
+        self.no_lora_flag_cpu[0] = metadata.no_lora
+        if metadata.no_lora:
+            return
+
+        assert metadata.token_lora_mapping is not None
+        assert metadata.token_indices_sorted_by_lora_ids is not None
+        assert metadata.active_lora_ids is not None
+        assert metadata.num_tokens_per_lora is not None
+        assert metadata.lora_token_start_loc is not None
+
+        self.token_lora_mapping[: metadata.num_tokens].copy_(
+            metadata.token_lora_mapping, non_blocking=True
+        )
+        self.token_indices_sorted_by_lora_ids[: metadata.num_tokens].copy_(
+            metadata.token_indices_sorted_by_lora_ids, non_blocking=True
+        )
+        self.active_lora_ids[: metadata.num_active_loras].copy_(
+            metadata.active_lora_ids, non_blocking=True
+        )
+        self.num_tokens_per_lora[: metadata.num_active_loras].copy_(
+            metadata.num_tokens_per_lora, non_blocking=True
+        )
+        self.lora_token_start_loc[1 : metadata.num_active_loras + 1].copy_(
+            metadata.lora_token_start_loc, non_blocking=True
         )
 
+        num_active_loras = metadata.num_active_loras
         if self.captured_lora_counts:
             idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
             if idx < len(self.captured_lora_counts):

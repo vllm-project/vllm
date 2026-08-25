@@ -6,8 +6,10 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops as triton_ops
+from vllm.lora.layers import LoRAMapping
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.lora.punica_wrapper.utils import convert_mapping
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -77,6 +79,41 @@ def test_prepare_lora_metadata_on_cpu_no_lora():
     meta.prepare_tensors_cpu([-1, -1, -1])
 
     assert meta.no_lora_flag_cpu.item()
+
+
+def test_copy_prepared_lora_metadata():
+    mapping = [2, -1, 0, 2, 0]
+    source = LoRAKernelMeta.make(4, len(mapping), DEVICE_TYPE)
+    destination = LoRAKernelMeta.make(4, len(mapping), DEVICE_TYPE)
+
+    metadata = source.prepare_tensors_cpu(mapping)
+    destination.copy_tensors_cpu(metadata)
+
+    torch.testing.assert_close(
+        destination.token_lora_mapping, source.token_lora_mapping
+    )
+    torch.testing.assert_close(
+        destination.token_indices_sorted_by_lora_ids,
+        source.token_indices_sorted_by_lora_ids,
+    )
+    torch.testing.assert_close(destination.active_lora_ids, source.active_lora_ids)
+    torch.testing.assert_close(
+        destination.num_tokens_per_lora, source.num_tokens_per_lora
+    )
+    torch.testing.assert_close(
+        destination.lora_token_start_loc, source.lora_token_start_loc
+    )
+
+
+@pytest.mark.parametrize("reuse_mapping", [True, False])
+def test_convert_mapping_reuses_equal_cpu_mappings(reuse_mapping):
+    index_mapping = (1, 2)
+    prompt_mapping = index_mapping if reuse_mapping else (2, 1)
+    mapping = LoRAMapping(index_mapping, prompt_mapping)
+
+    result = convert_mapping(mapping, [1, 2], 2, 32000, 0, DEVICE_TYPE)
+
+    assert (result[-2] is result[-1]) is reuse_mapping
 
 
 @pytest.fixture(autouse=True)

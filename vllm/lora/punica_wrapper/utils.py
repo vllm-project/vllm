@@ -111,9 +111,6 @@ def convert_mapping(
         if lora_id is not None
     }
 
-    prompt_mapping: list[int] = [
-        lora_id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
-    ]
     lora_idx = None
     for i in range(len(index_mapping_indices)):
         lora_idx = (
@@ -123,6 +120,13 @@ def convert_mapping(
         )
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
+
+    if mapping.index_mapping != mapping.prompt_mapping:
+        prompt_mapping = [
+            lora_id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
+        ]
+    else:
+        prompt_mapping = lora_indices
 
     indices_list: list[list[int] | torch.Tensor] = [
         index_mapping_indices,
