@@ -84,6 +84,23 @@ class CorrectionRouter(nn.Module):
         return logits, scores, index
 
 
+class NestedRouter(nn.Module):
+    """LongCat-style router with its projection under `classifier`."""
+
+    def __init__(self, num_experts=8, hidden=16, top_k=2):
+        super().__init__()
+        self.top_k = top_k
+        self.classifier = nn.Linear(hidden, num_experts, bias=False)
+        self.register_buffer("e_score_correction_bias", torch.zeros(num_experts))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states.float(), self.classifier.weight.float())
+        scores = F.softmax(logits, dim=-1)
+        _, index = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1)
+        weights = scores.gather(1, index)
+        return weights.to(hidden_states.dtype), index
+
+
 class BiasedRouter(TopKRouter):
     """A valid top-k router but not `weight`-only (extra `bias` param) -> declined."""
 
@@ -293,6 +310,17 @@ def test_moe_fuser_matches_correction_router():
     fuser = MoEBlockFuser.match(block, "experts")
     assert isinstance(fuser, MoEBlockFuser)
     assert fuser.scoring_func == "sigmoid"
+
+
+def test_moe_fuser_matches_nested_router_projection():
+    with torch.device("meta"):
+        block = MoEBlock(NestedRouter)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.gate_name == "gate"
+    assert fuser.gate_linear_name == "classifier"
+    assert fuser.scoring_func == "softmax"
+    assert fuser.router_dtype == torch.float32
 
 
 def test_moe_fuser_reads_router_dtype_from_the_gate():

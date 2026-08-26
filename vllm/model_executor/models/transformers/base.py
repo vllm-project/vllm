@@ -403,14 +403,13 @@ class Base(
             attrsetter(name)(module, PPMissingLayer())
 
         # Module list
+        layers_name = names[module_list_idx]
+        layers = attrgetter(layers_name)(module)
         start_layer, end_layer = get_pp_indices(
-            self.text_config.num_hidden_layers,
+            len(layers),
             self.pp_group.rank_in_group,
             self.pp_group.world_size,
         )
-        layers_name = names[module_list_idx]
-        # attrgetter in case the module is nested (e.g. "text_model.layers")
-        layers = attrgetter(layers_name)(module)
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
@@ -470,9 +469,15 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
+                num_decoder_layers = (
+                    self.text_config.num_layers
+                    if self.text_config.model_type
+                    in ("longcat_flash", "longcat_flash_ngram")
+                    else self.text_config.num_hidden_layers
+                )
                 if (
                     isinstance(module, nn.ModuleList)
-                    and len(module) == self.text_config.num_hidden_layers
+                    and len(module) == num_decoder_layers
                 ):
                     # Populate Eagle3 attrs
                     self._target_class = type(child_module)
@@ -530,8 +535,13 @@ class Base(
 
         # kv_lora_rank indicates that this is an MLA model
         if getattr(text_config, "kv_lora_rank", None) is not None:
+            num_attn_module = (
+                2
+                if text_config.model_type in ("longcat_flash", "longcat_flash_ngram")
+                else 1
+            )
             mla_fusers = {
-                extract_layer_index(prefix): (prefix, fuser)
+                extract_layer_index(prefix, num_attn_module): (prefix, fuser)
                 for prefix, fuser in self.fusers.items()
                 if isinstance(fuser, MLAFuser)
             }

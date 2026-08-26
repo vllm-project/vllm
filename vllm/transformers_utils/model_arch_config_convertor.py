@@ -553,6 +553,11 @@ class DbrxModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
+class LongCatModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return self.hf_text_config.num_layers
+
+
 class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_total_num_kv_heads(self) -> int:
         for block in self.hf_text_config.block_configs:
@@ -666,11 +671,6 @@ class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
-class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_num_hidden_layers(self) -> int:
-        return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
-
-
 class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_hidden_size(self) -> int:
         # The speculator buffer must match the backbone (target) model's
@@ -775,7 +775,8 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
-    "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "longcat_flash": LongCatModelArchConfigConvertor,
+    "longcat_flash_ngram": LongCatModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "medusa": MedusaModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,

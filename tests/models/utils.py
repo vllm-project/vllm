@@ -545,7 +545,6 @@ def dummy_hf_overrides(
     # from num_layers for its dual-attention layers).
     if model_arch not in (
         "LongcatFlashForCausalLM",
-        "LongCatFlashMTPModel",
         "LongcatFlashNgramForCausalLM",
     ):
         update_dict["num_hidden_layers"] = num_hidden_layers
