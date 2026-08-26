@@ -15,6 +15,8 @@ ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCPROFILER_SDK_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
+ARG ROCM_RUNTIME_REPO="https://github.com/mawong-amd/rocm-systems.git"
+ARG ROCM_RUNTIME_COMMIT="c7e40e16bca10311af72aee09cfa0cd1726f70a7"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -24,11 +26,86 @@ ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
+
+###
+### ROCr + CLR build
+###
+# Pull in updates to ROCr + clr from ROCm 7.2.4 and beyond. Happens before base so they
+# are present in each downstream stage
+FROM ${BASE_IMAGE} AS build_rocm_runtime
+ARG ROCM_RUNTIME_REPO
+ARG ROCM_RUNTIME_COMMIT
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git cmake ninja-build g++ pkg-config \
+       python3-pip libelf-dev libdrm-dev libnuma-dev libdw-dev xxd \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir CppHeaderParser
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCM_RUNTIME_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocr-runtime projects/clr projects/hip shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCM_RUNTIME_COMMIT} \
+    && git checkout -q FETCH_HEAD
+# ROCr's trap_handler and blit_shaders call find_package(Clang/LLVM REQUIRED) only to get
+# IMPORTED executables. The ROCm dev image ships the binaries but no CMake package config, so
+# supply one pointing at them.
+RUN mkdir -p /opt/rocm-cmake-shim \
+    && printf 'if(NOT TARGET clang)\n  add_executable(clang IMPORTED GLOBAL)\n  set_target_properties(clang PROPERTIES IMPORTED_LOCATION "/opt/rocm/llvm/bin/clang")\nendif()\nset(Clang_PACKAGE_VERSION "rocm-image-shim")\n' > /opt/rocm-cmake-shim/ClangConfig.cmake \
+    && printf 'if(NOT TARGET llvm-objcopy)\n  add_executable(llvm-objcopy IMPORTED GLOBAL)\n  set_target_properties(llvm-objcopy PROPERTIES IMPORTED_LOCATION "/opt/rocm/llvm/bin/llvm-objcopy")\nendif()\nset(LLVM_FOUND TRUE)\nset(LLVM_PACKAGE_VERSION "rocm-image-shim")\n' > /opt/rocm-cmake-shim/LLVMConfig.cmake
+# ROCr first, and installed into /opt/rocm, because the clr build below needs its headers
+RUN cd /src/projects/rocr-runtime \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/rocm \
+        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
+        -DClang_DIR=/opt/rocm-cmake-shim \
+        -DLLVM_DIR=/opt/rocm-cmake-shim \
+    && cmake --build build --parallel 16 \
+    && cmake --install build \
+    && cmake --install build --prefix /rocr-install --strip
+RUN cd /src/projects/clr \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DHIP_COMMON_DIR=/src/projects/hip \
+        -DROCM_PATH=/opt/rocm \
+        -DCMAKE_PREFIX_PATH=/opt/rocm \
+        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
+        -DLLVM_DIR=/opt/rocm-cmake-shim \
+        -DHIP_LLVM_ROOT=/opt/rocm/llvm \
+    && cmake --build build --parallel 16 \
+    && cmake --install build --prefix /clr-install --strip
+RUN mkdir -p /staging/lib \
+    && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
+    && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
+    && ls -l /staging/lib
+
+
 FROM ${BASE_IMAGE} AS base
 
 ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
+
+COPY --from=build_rocm_runtime /staging/ /opt/rocm/
+# Hard link the patched library onto every stock file name so that both the
+# SONAME lookup and the hard coded paths resolve to it.
+RUN set -eux; \
+    cd /opt/rocm/lib; \
+    ours_hsa="$(readlink -f libhsa-runtime64.so.1)"; \
+    ours_hip="$(readlink -f libamdhip64.so.7)"; \
+    for f in libhsa-runtime64.so.1.*; do \
+        [ "$f" = "${ours_hsa##*/}" ] || ln -f "$ours_hsa" "$f"; \
+    done; \
+    for f in libamdhip64.so.7.*; do \
+        [ "$f" = "${ours_hip##*/}" ] || ln -f "$ours_hip" "$f"; \
+    done; \
+    ldconfig
+
 ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=gfx942;gfx950
@@ -371,9 +448,13 @@ ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCPROFILER_SDK_REPO
 ARG ROCPROFILER_SDK_COMMIT
+ARG ROCM_RUNTIME_REPO
+ARG ROCM_RUNTIME_COMMIT
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "ROCPROFILER_SDK_REPO: ${ROCPROFILER_SDK_REPO}" >> /app/versions.txt \
     && echo "ROCPROFILER_SDK_COMMIT: ${ROCPROFILER_SDK_COMMIT}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_REPO: ${ROCM_RUNTIME_REPO}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \
