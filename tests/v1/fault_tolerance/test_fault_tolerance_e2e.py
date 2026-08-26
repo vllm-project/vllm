@@ -171,7 +171,7 @@ def _in_parallel(fn, servers) -> list:
 
 
 def _get_ft_status(server) -> dict:
-    resp = requests.get(server.url_for("fault_tolerance/status"), timeout=10)
+    resp = requests.get(server.url_for("v1/fault_tolerance/status"), timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -188,7 +188,7 @@ def _assert_serving_and_healthy(servers) -> None:
 def _apply_ft(server, instruction: str, params: dict | None = None) -> dict:
     """POST an FT instruction; assert it is accepted (202) and return the body."""
     resp = requests.post(
-        server.url_for("fault_tolerance/apply"),
+        server.url_for("v1/fault_tolerance/apply"),
         json={"instruction": instruction, "params": params or {}},
         timeout=10,
     )
@@ -213,7 +213,7 @@ def _wait_for_engines(
     match_values: set[str],
     deadline_s: int = FAULT_DETECTION_DEADLINE_S,
 ) -> list[dict[str, Any] | None]:
-    """Poll ``/fault_tolerance/status`` until each server's engine status matches.
+    """Poll ``/v1/fault_tolerance/status`` until each server's engine status matches.
 
     A server matches when its engine-status dict has ``match_key`` equal to
     one of ``match_values``. Returns one engine-status dict per server. Servers still
@@ -263,7 +263,7 @@ def _driving(*servers):
 
 
 def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str | None:
-    """Wait until ``/fault_tolerance/status`` records the FT apply outcome."""
+    """Wait until ``/v1/fault_tolerance/status`` records the FT apply outcome."""
     engine_status = _wait_for_engines(
         [server],
         match_key="last_ft_request_id",
@@ -387,7 +387,7 @@ def test_scale_down_removes_dead_rank_and_recovers():
             victim, request_id, FAULT_DETECTION_DEADLINE_S
         )
         assert ft_error is not None, (
-            "rejection was never recorded in /fault_tolerance/status"
+            "rejection was never recorded in /v1/fault_tolerance/status"
         )
         assert "status is DEAD" in ft_error, ft_error
 
