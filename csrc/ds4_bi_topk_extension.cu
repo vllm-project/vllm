@@ -15,7 +15,6 @@ constexpr int kThreads = 512;
 constexpr int kMaxColumns = 4096;
 constexpr int kItemsPerThread = kMaxColumns / kThreads;
 constexpr int kMaxTopK = 2048;
-constexpr int kTopKItemsPerThread = kMaxTopK / kThreads;
 
 __device__ __forceinline__ uint32_t ordered_float_bits(float value) {
   const uint32_t bits = __float_as_uint(value);
@@ -27,12 +26,7 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
     int* output, int64_t stride0, int64_t stride1, int top_k) {
   using ScoreSort =
       cub::BlockRadixSort<uint64_t, kThreads, kItemsPerThread>;
-  using IndexSort =
-      cub::BlockRadixSort<uint32_t, kThreads, kTopKItemsPerThread>;
-  __shared__ union {
-    typename ScoreSort::TempStorage scores;
-    typename IndexSort::TempStorage indices;
-  } temp;
+  __shared__ typename ScoreSort::TempStorage temp;
 
   const int row = blockIdx.x;
   const int row_start = row_starts[row];
@@ -47,42 +41,27 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
       const float score =
           logits[static_cast<int64_t>(row) * stride0 +
                  static_cast<int64_t>(absolute_index) * stride1];
-      // Descending score, then ascending source index. The key is unique, so
+      // Descending score, then descending source index, matching vLLM's
+      // insertion-sort tie semantics. The key is unique, so
       // neither candidate selection nor output depends on warp scheduling.
       score_keys[item] =
           (static_cast<uint64_t>(ordered_float_bits(score)) << 32) |
-          static_cast<uint32_t>(0xffffffffU -
-                                static_cast<uint32_t>(absolute_index));
+          static_cast<uint32_t>(absolute_index);
     } else {
       score_keys[item] = 0;
     }
   }
-  ScoreSort(temp.scores).SortDescendingBlockedToStriped(score_keys);
+  ScoreSort(temp).SortDescendingBlockedToStriped(score_keys);
   __syncthreads();
 
-  uint32_t selected_indices[kTopKItemsPerThread];
 #pragma unroll
-  for (int item = 0; item < kTopKItemsPerThread; ++item) {
-    const int sorted_position = item * kThreads + threadIdx.x;
-    selected_indices[item] =
-        sorted_position < top_k
-            ? 0xffffffffU - static_cast<uint32_t>(score_keys[item])
-            : 0xffffffffU;
-  }
-  __syncthreads();
-
-  // Sparse attention does not require score order. Canonical source-index
-  // order also fixes downstream reduction order across batch compositions.
-  IndexSort(temp.indices).SortBlockedToStriped(selected_indices);
-  __syncthreads();
-#pragma unroll
-  for (int item = 0; item < kTopKItemsPerThread; ++item) {
+  for (int item = 0; item < kItemsPerThread; ++item) {
     const int output_column = item * kThreads + threadIdx.x;
     if (output_column < top_k) {
       output[static_cast<int64_t>(row) * top_k + output_column] =
-          selected_indices[item] == 0xffffffffU
+          score_keys[item] == 0
               ? -1
-              : static_cast<int>(selected_indices[item]);
+              : static_cast<int>(static_cast<uint32_t>(score_keys[item]));
     }
   }
 }
