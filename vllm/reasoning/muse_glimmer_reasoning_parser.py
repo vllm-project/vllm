@@ -1,302 +1,79 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reasoning-content parser for MuseGlimmer.
-
-Implements the ``reasoning_content`` rule of the MuseGlimmer response schema.
-MuseGlimmer emits chain-of-thought in ``to=self`` channels delimited by
-``<|message|>`` ... ``<|eom|>``:
-    to=self<|message|>...reasoning...<|eom|>
-A turn may contain several ``to=self`` blocks interleaved with tool calls, and a
-tool call or final answer follows in its own channel.
-Because MuseGlimmer's framing markers (``<|message|>``, ``<|eom|>``) are not guaranteed
-to be single vocab tokens across every checkpoint's tokenizer, this parser works
-on the decoded text with regexes rather than the single start/end-token base class.
-Usage: ``--reasoning-parser muse_glimmer``
-"""
+"""Reasoning-content parser for MuseGlimmer channel-scoped output."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-import regex as re
-
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-
-_EOM = "<|eom|>"
-_EOT = "<|eot|>"
-_FUNCTION_CALLS_OPEN = "<atem:function_calls>"
-_REASONING_OPEN = "to=self<|message|>"
-_ASSISTANT_TURN_OPEN = "<|start|>assistant"
-# A channel header: ``to=<recipient><|message|>`` where recipient is ``self``
-# (reasoning), ``user`` (final answer) or ``<tool>[.<fn>]`` (tool call).
-_CHANNEL_HEADER_RE = re.compile(
-    r"(?:<\|start\|>assistant\s*)?to=(?P<recipient>[^\s<]+)<\|message\|>"
+from vllm.reasoning.muse_glimmer_utils import (
+    advance_emitted,
+    current_assistant_turn,
+    open_recipient,
+    safe_open_body,
+    visible_channels,
 )
-_FRAMED_TOOL_HEADER_PAT = (
-    r"<\|start\|>assistant\s+to=(?!(?:self|user)<\|message\|>)"
-    r"[^\s<]+<\|message\|>"
-)
-_FRAMED_TOOL_HEADER_RE = re.compile(_FRAMED_TOOL_HEADER_PAT)
-# Collapse the gap between reasoning blocks so multiple to=self spans join.
-_COLLAPSE_RE = re.compile(
-    r"<\|eom\|>(?:(?!to=self<\|message\|>).)*?to=self<\|message\|>", re.DOTALL
-)
-_REASONING_RE = re.compile(r"to=self<\|message\|>(.*?)<\|eom\|>", re.DOTALL)
-_CONTENT_RE = re.compile(
-    r"to=user<\|message\|>(.*?)(?=<\|eot\|>|<\|eom\|>|$)", re.DOTALL
-)
-# Strip a CLOSED reasoning span (header .. <|eom|>).
-_STRIP_REASONING_RE = re.compile(
-    r"(?:<\|start\|>assistant\s*)?to=self<\|message\|>.*?<\|eom\|>", re.DOTALL
-)
-# An UNTERMINATED trailing reasoning span. A bare ``to=<tool><|message|>`` is
-# ambiguous with quoted reasoning text, so only a fully framed assistant tool
-# message may end the span. Malformed bare tool switches are intentionally
-# dropped rather than promoted into calls the model may not have intended.
-_STRIP_OPEN_REASONING_RE = re.compile(
-    r"(?:<\|start\|>assistant\s*)?to=self<\|message\|>"
-    r"(?:(?!<\|eom\|>)(?!" + _FRAMED_TOOL_HEADER_PAT + r").)*"
-    r"(?=" + _FRAMED_TOOL_HEADER_PAT + r"|$)",
-    re.DOTALL,
-)
-_OPEN_REASONING_RE = re.compile(
-    r"to=self<\|message\|>"
-    r"((?:(?!<\|eom\|>)(?!" + _FRAMED_TOOL_HEADER_PAT + r").)*)"
-    r"(?=" + _FRAMED_TOOL_HEADER_PAT + r"|$)",
-    re.DOTALL,
-)
-# Markers whose PREFIX could appear at the tail of an OPEN (still-streaming) body.
-_HOLDBACK_MARKERS = (_EOM, _EOT, "<|start|>", "<|message|>")
-# A trailing fragment that could still grow into a channel header (" t", " to",
-# " to=", " to=skill"). Without this the recipient name leaks into reasoning and
-# then has to be un-emitted once ``<|message|>`` arrives.
-_OPEN_TAIL_HEADER_RE = re.compile(r"[\s](?:t|to|to=[^\s<]*)$")
-
-
-def _current_assistant_turn(text: str) -> str:
-    """Return only the text generated in the current assistant turn.
-    ``is_reasoning_end`` is evaluated on the PROMPT token-ids at stream start,
-    and an MuseGlimmer prompt legitimately contains ATEM markers (``render_tool_defs``
-    writes a literal ``<atem:function_calls>`` example into the system message,
-    and prior assistant turns may carry real tool calls). Anchoring on the last
-    channel-open keeps prompt text from deciding the phase.
-    """
-    idx = text.rfind(_ASSISTANT_TURN_OPEN)
-    return text[idx + len(_ASSISTANT_TURN_OPEN) :] if idx != -1 else text
-
-
-def _trim_open_body(body: str) -> str:
-    """Hold back any tail of a still-growing body that could still be framing.
-    Iterated to a fixpoint because the two cases compose: `" to=skill<"` needs
-    the partial-marker trim (``<``) before the partial-header trim can see
-    `" to=skill"`. Trimming only once leaks the recipient name as reasoning.
-    """
-    while True:
-        trimmed = body
-        for marker in _HOLDBACK_MARKERS:
-            for k in range(min(len(marker) - 1, len(trimmed)), 0, -1):
-                if trimmed.endswith(marker[:k]):
-                    trimmed = trimmed[:-k]
-                    break
-            else:
-                continue
-            break
-        header_tail = _OPEN_TAIL_HEADER_RE.search(trimmed)
-        if header_tail is not None:
-            trimmed = trimmed[: header_tail.start()]
-        if trimmed == body:
-            return body
-        body = trimmed
 
 
 class MuseGlimmerReasoningParser(ReasoningParser):
     def __init__(self, tokenizer, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
-        # Cursors over what was ACTUALLY emitted. Diffing a freshly reclassified
-        # `previous_text` is unsafe: a classified body legitimately shrinks when
-        # a partial header becomes recognisable, and diffing against the shrunken
-        # value re-emits text that already went out.
-        self._emitted_reasoning: str = ""
-        self._emitted_content: str = ""
-        self._tool_handoff_done: bool = False
-        self._tool_handoff_deferred: bool = False
+        self._emitted_reasoning = ""
+        self._emitted_content = ""
         self._initial_recipient: str | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """Preserve MuseGlimmer's ATEM framing tokens in the decoded output.
-
-        vLLM's serving default is ``skip_special_tokens=True``, which strips
-        ``<|start|>`` / ``<|message|>`` / ``<|eom|>`` / ``<|eot|>`` before the
-        parsers run, collapsing reasoning into content and breaking channel
-        scoping. When tools are active, caller-provided output constraints are
-        cleared because the engine would otherwise apply the answer schema to
-        MuseGlimmer's ATEM tool channel.
-        """
+        """Preserve MuseGlimmer framing so channel parsing remains possible."""
         request.skip_special_tokens = False
-        if request.tools and request.tool_choice != "none":
-            request.structured_outputs = None
-            if isinstance(request, ResponsesRequest):
-                if request.text is not None and request.text.format is not None:
-                    request.text = None
-            else:
-                request.response_format = None
         return request
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        """Return True once the turn has left the ``to=self`` reasoning phase.
-
-        Reasoning ends as soon as the model opens any other channel: the
-        ``to=user`` final answer or a ``to=<tool>`` call. Reporting the
-        ``to=user`` boundary is what lets the structured-outputs backend engage,
-        since it only applies the grammar after reasoning ends -- an unreported
-        answer channel leaves ``response_format`` requests unconstrained and the
-        model free-generates prose.
-
-        Reasoning spans are stripped first (see ``_scoped_turn``), so channel
-        markup quoted inside the chain-of-thought never ends the phase.
-        """
+        """Report an open answer or tool channel to engine-side callers."""
         try:
             text = self.model_tokenizer.decode(input_ids)
         except Exception:
             return False
-        return self._response_recipient(text) is not None
+        recipient = open_recipient(current_assistant_turn(text))
+        return recipient not in (None, "self")
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        return self.is_reasoning_end(list(input_ids))
+        return self.is_reasoning_end(input_ids)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """Continue classifying text in the prompt's open ATEM channel."""
+        """Continue classifying generation in the prompt's open channel."""
         try:
             text = self.model_tokenizer.decode(prompt_token_ids)
         except Exception:
             return
-        recipients = _CHANNEL_HEADER_RE.findall(_current_assistant_turn(text))
-        if recipients:
-            self._initial_recipient = recipients[-1]
+        self._initial_recipient = open_recipient(current_assistant_turn(text))
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        # Content-id slicing is unreliable for multi-token markers; the serving
-        # path uses extract_reasoning() for the final split.
+        # Content-id slicing is unreliable for multi-token markers.
         return []
 
-    @classmethod
-    def _scoped_turn(cls, text: str) -> str:
-        """Current assistant turn with reasoning spans removed."""
-        scoped = _current_assistant_turn(text)
-        scoped = _STRIP_REASONING_RE.sub("", scoped)
-        return _STRIP_OPEN_REASONING_RE.sub("", scoped)
-
-    @classmethod
-    def _response_recipient(cls, text: str) -> str | None:
-        """Recipient of the channel currently being written, or None.
-
-        ``"user"`` for the final answer, a tool name for a tool call, None while
-        the turn is still purely reasoning. The chat template renders a turn as a
-        flat sequence of ``<|start|>assistant to=X<|message|>`` blocks, so the
-        recipient that matters is the one belonging to the LAST header, not the
-        first: a turn may answer the user and then open a tool channel. Reading
-        the first header would pin the turn to ``user`` for good and strand the
-        tool call.
-
-        Headers quoted inside a still-open reasoning span count as reasoning
-        text. Only a fully framed assistant tool message can switch away from
-        unterminated reasoning.
-        """
-        current_turn = _current_assistant_turn(text)
-        without_closed_reasoning = _STRIP_REASONING_RE.sub("", current_turn)
-        has_open_reasoning = _REASONING_OPEN in without_closed_reasoning
-        scoped = _STRIP_OPEN_REASONING_RE.sub("", without_closed_reasoning)
-
-        for recipient in reversed(_CHANNEL_HEADER_RE.findall(scoped)):
-            if recipient == "self":
-                continue
-            if recipient == "user" and has_open_reasoning:
-                continue
-            return recipient
-        return None
-
-    @classmethod
-    def _tool_channel_remainder(cls, text: str) -> str:
-        """Text from the first tool-channel header onward, framing INCLUDED.
-        ``DelegatingParser.parse_delta`` rebuilds ``current_text`` from whatever
-        this parser returns as ``.content`` on the transition delta and commits
-        it; anything not returned is destroyed. It must start AT the
-        ``to=<name><|message|>`` header -- handing over the text after the header
-        loses the recipient, and the tool parser then sees a bare ``<|message|>``,
-        classifies it as the content channel, and leaks the ATEM markup.
-        """
-        scoped = cls._scoped_turn(text)
-        for match in _CHANNEL_HEADER_RE.finditer(scoped):
-            if match.group("recipient") not in ("self", "user"):
-                return scoped[match.start() :]
-        return ""
-
-    def _classify_bodies(self, text: str) -> tuple[str, str]:
-        """Split ``text`` into (reasoning_body, content_body), channel-aware.
-        Framing markers and tool channels contribute nothing -- the tool parser
-        owns those. A body ends at ``<|eom|>`` / ``<|eot|>``, at a valid channel
-        boundary, or at end-of-text (an OPEN body, which is held back).
-        """
-        if self._initial_recipient is not None:
-            text = f"to={self._initial_recipient}<|message|>{text}"
-        reasoning_parts: list[str] = []
-        content_parts: list[str] = []
-        pos = 0
-        n = len(text)
-        while pos < n:
-            match = _CHANNEL_HEADER_RE.search(text, pos)
-            if not match:
-                break
-            recipient = match.group("recipient")
-            body_start = match.end()
-            eom = text.find(_EOM, body_start)
-            eot = text.find(_EOT, body_start)
-            terminators = [p for p in (eom, eot) if p != -1]
-            next_header = (
-                _FRAMED_TOOL_HEADER_RE.search(text, body_start)
-                if recipient == "self"
-                else _CHANNEL_HEADER_RE.search(text, body_start)
-            )
-            if next_header is not None:
-                terminators.append(next_header.start())
-            body_end = min(terminators) if terminators else n
-            body = text[body_start:body_end]
-            if not terminators:
-                body = _trim_open_body(body)
-            if recipient == "self":
-                reasoning_parts.append(body)
-            elif (
-                # Never surface tool XML echoed into a user channel.
-                recipient == "user"
-                and _FUNCTION_CALLS_OPEN not in body
-                and "<atem:invoke" not in body
-            ):
-                content_parts.append(body)
-            if terminators and body_end in (eom, eot):
-                pos = body_end + len(_EOM if body_end == eom else _EOT)
-            else:
-                pos = body_end
-        return "".join(reasoning_parts), "".join(content_parts)
+    def _seeded_text(self, text: str) -> str:
+        if self._initial_recipient is None:
+            return text
+        return f"to={self._initial_recipient}<|message|>{text}"
 
     def get_streaming_fallback_content(
         self,
         previous_text: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> str | None:
-        """Promote un-surfaced content when the stream ends mid-reasoning.
-        ``DelegatingParser.finalize_generation`` calls this when
-        ``reasoning_ended`` is still False. Returns only the channel-classified
-        ``to=user`` body, and only the portion not already streamed.
-        """
-        _, content_body = self._classify_bodies(previous_text)
-        remainder = content_body[len(self._emitted_content) :]
+        """Promote any unstreamed answer body when generation is truncated."""
+        content, _reasoning, _content_open, _reasoning_open = visible_channels(
+            self._seeded_text(previous_text)
+        )
+        remainder = content[len(self._emitted_content) :]
         return remainder or None
 
     def extract_reasoning(
@@ -304,33 +81,11 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        collapsed = _COLLAPSE_RE.sub("\n", model_output)
-        matches = _REASONING_RE.findall(collapsed)
-        reasoning = "\n".join(matches) if matches else None
-        # Truncation fallback: generation stopped inside a to=self block, so
-        # there is no closing <|eom|>. A fully framed tool call still bounds the
-        # partial reasoning so it can be forwarded to the tool parser.
-        open_match = _OPEN_REASONING_RE.search(model_output)
-        if open_match and open_match.group(1):
-            partial = open_match.group(1)
-            reasoning = f"{reasoning}\n{partial}" if reasoning else partial
-        # Content is everything that is not a reasoning block. In a
-        # reasoning+tool-call turn there is no to=user answer, but the tool
-        # channels MUST be forwarded -- the unified parser runs the tool parser
-        # on this returned `content`, not on the original model_output.
-        remainder = _STRIP_REASONING_RE.sub("", model_output)
-        remainder = _STRIP_OPEN_REASONING_RE.sub("", remainder)
-        if "<atem:invoke" in remainder or _FUNCTION_CALLS_OPEN in remainder:
-            return reasoning, (remainder or None)
-        content_match = _CONTENT_RE.search(model_output)
-        if content_match:
-            content = content_match.group(1) or None
-        elif _REASONING_OPEN in model_output:
-            content = None
-        else:
-            content = model_output or None
-            reasoning = None
-        return reasoning, content
+        """Extract reasoning while preserving framed text for channel consumers."""
+        _content, reasoning, _content_open, _reasoning_open = visible_channels(
+            model_output
+        )
+        return reasoning or None, model_output or None
 
     def extract_reasoning_streaming(
         self,
@@ -341,49 +96,25 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """Channel-aware streaming split of reasoning vs content.
-        Classifies the full ``current_text`` and emits only what has not been
-        emitted yet, so no framing token is ever surfaced and a delta straddling
-        a channel boundary only contributes the portion inside a real body.
-        """
-        curr_reason, curr_content = self._classify_bodies(current_text)
-        reasoning_delta = ""
-        if curr_reason.startswith(self._emitted_reasoning) and len(curr_reason) > len(
-            self._emitted_reasoning
-        ):
-            reasoning_delta = curr_reason[len(self._emitted_reasoning) :]
-            self._emitted_reasoning = curr_reason
-        content_delta = ""
-        if curr_content.startswith(self._emitted_content) and len(curr_content) > len(
-            self._emitted_content
-        ):
-            content_delta = curr_content[len(self._emitted_content) :]
-            self._emitted_content = curr_content
-        # On the delta that opens a tool channel, hand the remainder (from the
-        # ``to=<tool><|message|>`` header onward) to the tool parser, exactly
-        # once. This fires on the delta ``is_reasoning_end`` flips, so the header
-        # becomes the tool parser's opening context instead of visible content.
-        # If that delta also completes visible answer text, emit the answer first
-        # and defer the handoff one delta. ``to=user`` answers yield no remainder.
-        handoff = ""
-        if not self._tool_handoff_done:
-            remainder = self._tool_channel_remainder(current_text)
-            if remainder:
-                if self._tool_handoff_deferred:
-                    handoff = remainder
-                    self._tool_handoff_done = True
-                    self._tool_handoff_deferred = False
-                elif content_delta:
-                    self._tool_handoff_deferred = True
-                else:
-                    handoff = remainder
-                    self._tool_handoff_done = True
-        if handoff:
-            return DeltaMessage(reasoning=reasoning_delta or None, content=handoff)
-        if reasoning_delta and content_delta:
-            return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
-        if reasoning_delta:
-            return DeltaMessage(reasoning=reasoning_delta)
-        if content_delta:
-            return DeltaMessage(content=content_delta)
-        return None
+        """Stream clean reasoning and answer bodies from the shared segmenter."""
+        content, reasoning, content_open, reasoning_open = visible_channels(
+            self._seeded_text(current_text)
+        )
+        if content_open:
+            content = safe_open_body(content)
+        if reasoning_open:
+            reasoning = safe_open_body(reasoning)
+
+        reasoning_delta, self._emitted_reasoning = advance_emitted(
+            self._emitted_reasoning, reasoning
+        )
+        content_delta, self._emitted_content = advance_emitted(
+            self._emitted_content, content
+        )
+        if not reasoning_delta and not content_delta:
+            return None
+
+        return DeltaMessage(
+            reasoning=reasoning_delta or None,
+            content=content_delta or None,
+        )
