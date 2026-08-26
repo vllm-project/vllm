@@ -108,9 +108,6 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
-            # Sliding-window cache specs select the smallest advertised size.
-            # Report the kernel's exact page-size contract instead of the
-            # generic FlashAttention multiple-of-16 capability.
             return [block_size]
         return [MultipleOf(16)]
 
