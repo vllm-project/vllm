@@ -2612,28 +2612,24 @@ class FlashInferImpl(AttentionImpl):
                         else 0
                     )
                     # A packed NVFP4 cache is handed over as the fp4 data
-                    # views plus the per-block scale factors the variant
-                    # declares; other dtypes pass the cache as-is. The
-                    # additional tensors are positional, in declaration
-                    # order, ahead of the scalars.
+                    # views; FlashInfer routes ``kv_cache_sf`` into the
+                    # ``maybe_k_cache_sf`` / ``maybe_v_cache_sf`` tensors the
+                    # variant declares, so the scales must not be passed
+                    # positionally.
                     if self.is_kvcache_nvfp4:
                         assert nvfp4_kv_data is not None
                         assert nvfp4_kv_block_scales is not None
                         mm_kv_cache: (
                             torch.Tensor | tuple[torch.Tensor, torch.Tensor]
                         ) = nvfp4_kv_data
-                        mm_extra_tensors: tuple[torch.Tensor, ...] = (
-                            nvfp4_kv_block_scales[0],
-                            nvfp4_kv_block_scales[1],
-                        )
+                        mm_kv_cache_sf = nvfp4_kv_block_scales
                     else:
                         mm_kv_cache = kv_cache_tuple
-                        mm_extra_tensors = ()
+                        mm_kv_cache_sf = None
                     mm_wrapper.run(
                         prefill_query,
                         mm_kv_cache,
                         mm_prefill_ranges,
-                        *mm_extra_tensors,
                         float(sw_n),
                         float(clamp_sw),
                         # The wrapper folds q/k scales into sm_scale only on
@@ -2641,6 +2637,7 @@ class FlashInferImpl(AttentionImpl):
                         float(self.scale * layer._q_scale_float * layer._k_scale_float),
                         v_scale=layer._v_scale_float,
                         out=output[num_decode_tokens:],
+                        kv_cache_sf=mm_kv_cache_sf,
                     )
                 elif use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
