@@ -130,9 +130,14 @@ class CUDAGraphEntry:
     cudagraph: torch.cuda.CUDAGraph | None = None
     output: Any | None = None
 
-    # for cudagraph debugging, track the input addresses
-    # during capture, and check if they are the same during replay
+    # track the input addresses during capture, and check they are the same
+    # during replay (see the check in CUDAGraphWrapper.__call__)
     input_addresses: list[int] | None = None
+
+    # whether the input-address stability check has run for this entry yet;
+    # the check runs on the first replay always, and on every replay in
+    # debug mode
+    replay_checked: bool = False
 
 
 @dataclasses.dataclass
@@ -343,16 +348,39 @@ class CUDAGraphWrapper:
             # manage the memory during cuda graph capture
             return output
 
-        if self.is_debugging_mode:
-            # check if the input addresses are the same
+        # Verify input-address stability before replay. A captured piece is
+        # replayed reading its inputs from the addresses recorded at capture
+        # time; the wrapper does not copy inputs (see the class docstring), so
+        # an input whose address changed means the graph reads stale memory and
+        # silently corrupts output. This is a footgun when a custom op is added
+        # to ``splitting_ops``: only ops that write into persistent buffers
+        # (e.g. the attention ops) are safe as piecewise splitting boundaries;
+        # an op that returns freshly-allocated outputs lands them at new
+        # addresses every step. Check on the first replay of every entry always
+        # (cheap, once per captured shape) so this fails loudly instead of
+        # silently corrupting, and on every replay in debug mode.
+        if self.is_debugging_mode or not entry.replay_checked:
+            entry.replay_checked = True
             new_input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
-            assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for cudagraphs are different "
-                f"during replay. Expected {entry.input_addresses}, "
-                f"got {new_input_addresses}"
-            )
+            if new_input_addresses != entry.input_addresses:
+                raise RuntimeError(
+                    "CUDA graph replay received different input addresses than "
+                    "were recorded at capture time for "
+                    f"{self.runtime_mode.name} graph {entry.batch_descriptor}. "
+                    "Captured pieces are replayed reading their inputs from "
+                    "the capture-time addresses (inputs are not copied), so a "
+                    "changed address makes replay read stale memory and "
+                    "silently corrupt output. This typically means an op "
+                    "feeding this piece returns freshly-allocated outputs "
+                    "instead of writing into persistent buffers -- e.g. a "
+                    "custom op added to `splitting_ops`; only ops that write "
+                    "persistent outputs (like the attention ops) are safe as "
+                    "piecewise splitting boundaries. "
+                    f"Expected {entry.input_addresses}, got "
+                    f"{new_input_addresses}."
+                )
 
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
