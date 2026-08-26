@@ -7,6 +7,73 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 
 
 @triton.jit
+def _reduced_greedy_verify_kernel(
+    target_argmax_ptr,
+    draft_sampled_ptr,
+    cu_num_logits_ptr,
+    sampled_ptr,
+    sampled_stride,
+    num_sampled_ptr,
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1).to(tl.int64)
+    num_draft_tokens = end_idx - start_idx - 1
+
+    accepted_length = tl.zeros((), tl.int64)
+    verifying = True
+    for i in range(num_draft_tokens):
+        if verifying:
+            logit_idx = start_idx + i
+            target_token = tl.load(target_argmax_ptr + logit_idx)
+            draft_token = tl.load(draft_sampled_ptr + logit_idx + 1)
+            accepted = (draft_token >= 0) & (draft_token == target_token)
+            tl.store(
+                sampled_ptr + req_idx * sampled_stride + i,
+                tl.where(accepted, draft_token, target_token),
+            )
+            accepted_length += accepted
+            verifying = accepted
+
+    if verifying:
+        bonus_token = tl.load(target_argmax_ptr + end_idx - 1)
+        tl.store(
+            sampled_ptr + req_idx * sampled_stride + accepted_length,
+            bonus_token,
+        )
+
+    tl.store(num_sampled_ptr + req_idx, accepted_length + 1)
+
+
+def reduced_greedy_verify(
+    target_argmax: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_speculative_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Verify greedy drafts using one global target argmax per position."""
+    assert target_argmax.ndim == 1
+    assert draft_sampled.ndim == 1
+    assert cu_num_logits.ndim == 1
+
+    num_reqs = cu_num_logits.shape[0] - 1
+    sampled = draft_sampled.new_empty(
+        (num_reqs, num_speculative_steps + 1), dtype=torch.int64
+    )
+    num_sampled = draft_sampled.new_empty(num_reqs, dtype=torch.int32)
+    _reduced_greedy_verify_kernel[(num_reqs,)](
+        target_argmax,
+        draft_sampled,
+        cu_num_logits,
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        num_warps=1,
+    )
+    return sampled, num_sampled
+
+
+@triton.jit
 def _compute_max_and_sumexp(logits):
     max = tl.max(logits, axis=0)
     sumexp = tl.where(

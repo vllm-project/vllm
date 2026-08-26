@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    reduced_greedy_verify,
     rejection_sample,
 )
 
@@ -81,6 +82,7 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
+        self.draft_sample_method = spec_config.draft_sample_method
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
@@ -96,6 +98,64 @@ class RejectionSampler:
             )
         elif rejection_sample_method == "block":
             self.use_block_verification = True
+
+    def can_use_reduced_sampling(self, idx_mapping_np: np.ndarray) -> bool:
+        """Return whether greedy verification needs only target argmaxes."""
+        temperatures = self.sampler.sampling_states.temperature.np[idx_mapping_np]
+        return (
+            self.draft_sample_method == "greedy"
+            and self.synthetic_conditional_rates is None
+            and not np.any(temperatures != 0.0)
+        )
+
+    def _reduced_greedy_verify(
+        self,
+        local_logits: torch.Tensor,
+        input_batch: InputBatch,
+        vocab_start_index: int,
+    ) -> SamplerOutput:
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        pos = input_batch.positions[input_batch.logits_indices]
+        processed_logits = self.sampler.apply_sampling_params(
+            local_logits,
+            input_batch.expanded_idx_mapping,
+            input_batch.idx_mapping,
+            input_batch.idx_mapping_np,
+            pos,
+            draft_sampled,
+            input_batch.expanded_local_pos,
+        )
+        target_argmax = self.sampler._sample_reduced(
+            processed_logits,
+            top_k=None,
+            top_p=None,
+            expanded_idx_mapping=input_batch.expanded_idx_mapping,
+            idx_mapping_np=input_batch.idx_mapping_np,
+            temperature=self.sampler.sampling_states.temperature.gpu,
+            seeds=self.sampler.sampling_states.seeds.gpu,
+            pos=pos,
+            vocab_start_index=vocab_start_index,
+        )
+        sampled, num_sampled = reduced_greedy_verify(
+            target_argmax,
+            draft_sampled,
+            input_batch.cu_num_logits,
+            self.num_speculative_steps,
+        )
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
 
     def _get_logprobs_tensors(
         self,
@@ -262,7 +322,18 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        *,
+        use_reduced_sampling: bool = False,
+        vocab_start_index: int | None = None,
     ) -> SamplerOutput:
+        if use_reduced_sampling:
+            assert vocab_start_index is not None
+            assert self.can_use_reduced_sampling(input_batch.idx_mapping_np)
+            assert self.sampler.can_use_reduced_sampling(
+                input_batch.idx_mapping_np, logits
+            )
+            return self._reduced_greedy_verify(logits, input_batch, vocab_start_index)
+
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None

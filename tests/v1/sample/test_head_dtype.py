@@ -7,12 +7,16 @@ fp32, which is required for RL training-inference consistency.
 """
 
 import math
+import types
 
 import pytest
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.logits_processor import (
+    LogitsProcessor,
+    compute_local_logits,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
@@ -25,11 +29,12 @@ class _FakeLmHead:
         weight: torch.Tensor,
         quantized: bool = False,
         shard_indices: object | None = None,
+        tp_size: int = 1,
     ):
         self.weight = weight
         self.quant_method = object() if quantized else UnquantizedEmbeddingMethod()
         self.shard_indices = shard_indices
-        self.tp_size = 1
+        self.tp_size = tp_size
 
 
 def _build_processor(vocab_size: int) -> LogitsProcessor:
@@ -186,11 +191,147 @@ def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
     assert torch.equal(top, expected.argmax(dim=-1))
 
 
+def test_compute_local_logits_uses_vocab_shard_metadata(default_vllm_config):
+    vocab_size, hidden_size = 127, 8
+    lp = LogitsProcessor(vocab_size)
+    hidden_states = torch.randn(2, hidden_size)
+    lm_head = _FakeLmHead(
+        torch.randn(64, hidden_size),
+        shard_indices=types.SimpleNamespace(
+            org_vocab_start_index=64,
+            org_vocab_end_index=127,
+            num_elements_padded=64,
+            num_org_vocab_padding=1,
+            num_added_elements_padded=0,
+        ),
+        tp_size=2,
+    )
+
+    def fail_gather(logits: torch.Tensor) -> None:
+        raise AssertionError("The TP logits gather must be skipped")
+
+    lp._gather_logits = fail_gather
+    logits, metadata = compute_local_logits(
+        lambda hidden: lp(lm_head, hidden), hidden_states
+    )
+
+    assert logits is not None and logits.shape == (2, 64)
+    assert metadata is not None
+    assert metadata.vocab_size == vocab_size
+    assert metadata.vocab_start_index == 64
+    assert metadata.local_vocab_size == 64
+    assert torch.isfinite(logits[..., :-1]).all()
+    assert torch.isneginf(logits[..., -1]).all()
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "shard_indices"),
+    [
+        pytest.param(1, None, id="replicated-head"),
+        pytest.param(2, object(), id="missing-shard-metadata"),
+        pytest.param(
+            2,
+            types.SimpleNamespace(
+                org_vocab_start_index=0,
+                num_elements_padded=16,
+                num_org_vocab_padding=0,
+                num_added_elements_padded=1,
+            ),
+            id="added-vocabulary",
+        ),
+    ],
+)
+def test_compute_local_logits_falls_back_for_unsupported_head(
+    default_vllm_config, tp_size: int, shard_indices: object | None
+):
+    vocab_size, hidden_size = 16, 8
+    lp = LogitsProcessor(vocab_size)
+    lp._gather_logits = lambda logits: logits
+    hidden_states = torch.randn(2, hidden_size)
+    lm_head = _FakeLmHead(
+        torch.randn(vocab_size, hidden_size),
+        tp_size=tp_size,
+        shard_indices=shard_indices,
+    )
+
+    logits, metadata = compute_local_logits(
+        lambda hidden: lp(lm_head, hidden), hidden_states
+    )
+
+    assert logits is not None and logits.shape == (2, vocab_size)
+    assert metadata is None
+
+
+def test_compute_local_logits_recomputes_multiple_projections(
+    default_vllm_config,
+):
+    vocab_size, hidden_size = 128, 8
+    lp = LogitsProcessor(vocab_size)
+    hidden_states = torch.randn(2, hidden_size)
+    lm_head = _FakeLmHead(
+        torch.randn(64, hidden_size),
+        shard_indices=types.SimpleNamespace(
+            org_vocab_start_index=0,
+            org_vocab_end_index=64,
+            num_elements_padded=64,
+            num_org_vocab_padding=0,
+            num_added_elements_padded=0,
+        ),
+        tp_size=2,
+    )
+    lp._gather_logits = lambda logits: torch.cat((logits, logits), dim=-1)
+    num_calls = 0
+
+    def compute_logits(hidden: torch.Tensor) -> torch.Tensor:
+        nonlocal num_calls
+        num_calls += 1
+        first = lp(lm_head, hidden)
+        second = lp(lm_head, hidden)
+        assert first is not None and second is not None
+        return first + second
+
+    logits, metadata = compute_local_logits(compute_logits, hidden_states)
+
+    assert logits is not None and logits.shape == (2, vocab_size)
+    assert metadata is None
+    assert num_calls == 2
+
+
+def test_compute_local_logits_recomputes_model_postprocessing(default_vllm_config):
+    vocab_size, hidden_size = 128, 8
+    lp = LogitsProcessor(vocab_size)
+    hidden_states = torch.randn(2, hidden_size)
+    lm_head = _FakeLmHead(
+        torch.randn(64, hidden_size),
+        shard_indices=types.SimpleNamespace(
+            org_vocab_start_index=0,
+            org_vocab_end_index=64,
+            num_elements_padded=64,
+            num_org_vocab_padding=0,
+            num_added_elements_padded=0,
+        ),
+        tp_size=2,
+    )
+    lp._gather_logits = lambda logits: torch.cat((logits, logits), dim=-1)
+    num_calls = 0
+
+    def compute_logits(hidden: torch.Tensor) -> torch.Tensor:
+        nonlocal num_calls
+        num_calls += 1
+        logits = lp(lm_head, hidden)
+        assert logits is not None
+        return logits + 1
+
+    logits, metadata = compute_local_logits(compute_logits, hidden_states)
+
+    assert logits is not None and logits.shape == (2, vocab_size)
+    assert metadata is None
+    assert num_calls == 2
+
+
 def test_get_top_tokens_honors_head_dtype(default_vllm_config):
     # The spec-decode local-argmax path (get_top_tokens) must run the lm_head
     # in head_dtype too, not just _get_logits.
-    import types
-
     vocab_size, hidden_size = 64, 16
     lp = _build_processor(vocab_size)
     lp.head_dtype = torch.float32
