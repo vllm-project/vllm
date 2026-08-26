@@ -18,8 +18,8 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        GIT_REPOSITORY https://github.com/MatthewBonanni/FlashMLA
-        GIT_TAG fix/skip-unused-splitkv-workspace
+        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
+        GIT_TAG 0397728d511c4e3d94ea3a01d8dda8654525a611
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
