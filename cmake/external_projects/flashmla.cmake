@@ -162,8 +162,11 @@ if(FLASH_MLA_ARCHS)
         $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)
 
     # _flashmla_C is now ABI-stable torch 2.11+
+    # _USE_MATH_DEFINES: MSVC only exposes M_LOG2E (used throughout FlashMLA's
+    # csrc) when this is defined; no-op for GCC/Clang. Matches FlashMLA's setup.py.
     target_compile_definitions(_flashmla_C PRIVATE
-        TORCH_TARGET_VERSION=0x020B000000000000ULL)
+        TORCH_TARGET_VERSION=0x020B000000000000ULL
+        _USE_MATH_DEFINES)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_C PRIVATE USE_CUDA)
     endif()
@@ -181,7 +184,8 @@ if(FLASH_MLA_ARCHS)
 
     # _flashmla_extension_C is now ABI-stable w/ torch 2.11+
     target_compile_definitions(_flashmla_extension_C PRIVATE
-        TORCH_TARGET_VERSION=0x020B000000000000ULL)
+        TORCH_TARGET_VERSION=0x020B000000000000ULL
+        _USE_MATH_DEFINES)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_extension_C PRIVATE USE_CUDA)
     endif()
