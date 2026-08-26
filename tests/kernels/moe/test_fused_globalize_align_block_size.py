@@ -74,14 +74,16 @@ def _group_by_expert(sorted_ids, expert_ids, block_size, valid_len, total):
 
 
 @pytest.mark.parametrize("n", [1, 7, 64, 257])
-# topk=6 / block_size=16, 128 are outside the old template dispatch table:
-# they guard against a regression to fixed (topk, block_size) specialization.
-@pytest.mark.parametrize("topk", [1, 6, 8])
+# topk=16 with local_num_experts=28 is the Kimi K3 decode config. topk=6 and
+# block_size=16, 128 are outside the old template dispatch table: they guard
+# against a regression to fixed (topk, block_size) specialization.
+@pytest.mark.parametrize("topk", [1, 6, 8, 16])
 @pytest.mark.parametrize("block_size", [16, 32, 64, 128])
+@pytest.mark.parametrize("local_e", [28, 32])
 @pytest.mark.parametrize("rank", ["first", "mid", "last"])
 @pytest.mark.parametrize("fill", ["rand", "all_local", "all_nonlocal", "single"])
-def test_fused_matches_reference(n, topk, block_size, rank, fill):
-    ep_size, local_e = 4, 32
+def test_fused_matches_reference(n, topk, block_size, local_e, rank, fill):
+    ep_size = 4
     local_idx, psum, reo, gne = _make_case(
         n, topk, ep_size, local_e, block_size, seed=n * 131 + topk,
         frac_recv=0.75, rank=rank, fill=fill,
