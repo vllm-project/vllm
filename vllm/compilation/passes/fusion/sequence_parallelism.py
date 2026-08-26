@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
 )
+from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
@@ -676,7 +677,9 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
 
-            if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
+            if current_platform.is_xpu() and hasattr(
+                torch.ops._C, "per_token_group_fp8_quant"
+            ):
                 FirstAllReduceRMSNormBlockFP8Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)

@@ -29,7 +29,7 @@ logger = init_logger("test_sequence_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
 NVFP4_MODEL_INFO = _HfExamplesInfo(NVFP4_MODEL_ID)
-BLOCK_FP8_MODEL_ID = "RedHatAI/Qwen3-32B-FP8-block"
+BLOCK_FP8_MODEL_ID = "Qwen/Qwen3-32B-FP8"
 BLOCK_FP8_MODEL_INFO = _HfExamplesInfo(BLOCK_FP8_MODEL_ID)
 
 
@@ -257,6 +257,7 @@ def _compare_sp_settings(
     settings: list[tuple[list[str], list[str]]],
     *,
     method: Literal["generate", "encode"],
+    max_wait_seconds: float | None = None,
 ) -> None:
     if not settings:
         pytest.skip("No supported sequence-parallel configurations")
@@ -273,6 +274,7 @@ def _compare_sp_settings(
             [None] * len(all_args),
             method=method,
             force_v1_runner=True,
+            max_wait_seconds=max_wait_seconds,
         )
 
 
@@ -439,9 +441,9 @@ def test_tp_sp_xpu_block_fp8_generation(num_gpus_available: int):
         enable_prompt_embeds=False,
         is_multimodal=False,
     )
-    print(f"comparison {comparison}")
     _compare_sp_settings(
         BLOCK_FP8_MODEL_ID,
         [] if comparison is None else [comparison],
         method="generate",
+        max_wait_seconds=960,
     )
