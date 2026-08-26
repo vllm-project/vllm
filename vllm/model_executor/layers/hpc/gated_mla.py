@@ -7,7 +7,7 @@ sigmoid and the elementwise product -- into a single kernel launch, replacing
 the eager ``attn_out * sigmoid(hidden_states @ weight.T)`` sequence.
 
 Kernel constraints:
-  - Requires VLLM_USE_HPC_GATED_MLA=1
+  - Requires VLLM_ENABLE_HPC_OPS=1
   - Requires the hpc package (.so) built for the current arch
   - Only sm100 / sm103 (compute capability 100, 103)
   - All three operands must be bfloat16 and contiguous
@@ -34,7 +34,7 @@ def hpc_gated_mla_supported(
     gating_type: str | None, attn_output_gate: torch.nn.Module | None
 ) -> bool:
     """Gate for running the MLA output gating through hpc.gated_mla_gemm."""
-    if not envs.VLLM_USE_HPC_GATED_MLA:
+    if not envs.VLLM_ENABLE_HPC_OPS:
         return False
 
     if attn_output_gate is None:
@@ -88,7 +88,7 @@ def hpc_gated_mla_supported(
         )
         return False
 
-    logger.info_once("HPC gated MLA enabled by set VLLM_USE_HPC_GATED_MLA.")
+    logger.info_once("HPC gated MLA enabled by set VLLM_ENABLE_HPC_OPS.")
     return True
 
 

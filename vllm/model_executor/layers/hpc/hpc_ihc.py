@@ -13,7 +13,7 @@ The eager path issues 20 / 5 / 15 kernels for pre / post / head; each HPC op is
 a single kernel.
 
 Constraints:
-  - Requires VLLM_ENABLE_HPC_IHC=1
+  - Requires VLLM_ENABLE_HPC_OPS=1
   - Requires the hpc package (.so) built for the current arch
   - Only sm100 / sm103 (compute capability 100, 103)
   - Only hc_mult == 4 and hidden_size in {4096, 6144}
@@ -48,7 +48,7 @@ _SUPPORTED_CAPABILITIES: frozenset[int] = frozenset({100, 103})
 
 def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
     """Shared gate for all three iHC ops."""
-    if not envs.VLLM_ENABLE_HPC_IHC:
+    if not envs.VLLM_ENABLE_HPC_OPS:
         return False
 
     if not has_hpc():
@@ -96,7 +96,7 @@ def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
         )
         return False
 
-    logger.info_once("HPC iHC enabled by set VLLM_ENABLE_HPC_IHC.")
+    logger.info_once("HPC iHC enabled by set VLLM_ENABLE_HPC_OPS.")
     return True
 
 

@@ -10,7 +10,7 @@ scatters the result back over the channels (``HYV4HCPostLayer``). The final
 
 NOTE: Each of the three steps has an optional single-kernel HPC replacement
 (``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). They are only constructed
-when the hpc package is installed, ``VLLM_ENABLE_HPC_IHC=1`` and the shape /
+when the hpc package is installed, ``VLLM_ENABLE_HPC_OPS=1`` and the shape /
 device constraints hold; otherwise the eager path below runs unchanged.
 TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
 requires restructuring the decoder-layer forward scheduling.

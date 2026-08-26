@@ -6,7 +6,7 @@ NOTE: The reference implementation also offers a fused MLA preprocessing
 wrapper, which is not available here, so this port keeps the eager MLA path
 with an FP8 indexer cache. TODO: restore the fused preprocessing once the
 kernel lands. The HPC gated-MLA GEMM *is* wired up: it replaces the eager
-output gating when the hpc package is installed, ``VLLM_USE_HPC_GATED_MLA=1``
+output gating when the hpc package is installed, ``VLLM_ENABLE_HPC_OPS=1``
 and the elementwise/dtype/alignment constraints hold.
 
 The per-head learnable sink is supported through `.flashmla_sparse`, which
