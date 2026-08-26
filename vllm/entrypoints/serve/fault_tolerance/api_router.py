@@ -38,16 +38,26 @@ def _validate_payload(body: dict) -> tuple[str, dict, str]:
 
 
 @router.post(
-    "/fault_tolerance/apply",
+    "/v1/fault_tolerance/apply",
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.ACCEPTED.value: {"model": dict},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
     },
 )
+@router.post(
+    "/fault_tolerance/apply",
+    dependencies=[Depends(validate_json_request)],
+    deprecated=True,
+    include_in_schema=False,
+)
 async def process_fault_tolerance_instruction(
     raw_request: Request, background_tasks: BackgroundTasks
 ):
+    if not raw_request.url.path.startswith("/v1/"):
+        logger.warning_once(
+            "POST /fault_tolerance/apply is deprecated; use /v1/fault_tolerance/apply."
+        )
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
@@ -95,8 +105,13 @@ async def _run_fault_recovery(
         )
 
 
-@router.get("/fault_tolerance/status")
+@router.get("/v1/fault_tolerance/status")
+@router.get("/fault_tolerance/status", deprecated=True, include_in_schema=False)
 async def get_status(raw_request: Request):
+    if not raw_request.url.path.startswith("/v1/"):
+        logger.warning_once(
+            "GET /fault_tolerance/status is deprecated; use /v1/fault_tolerance/status."
+        )
     client: EngineClient = raw_request.app.state.engine_client
     return JSONResponse(content=await client.get_status())
 
