@@ -1600,6 +1600,34 @@ def _rocm_aiter_fp8_attn_fake(
     )
 
 
+def _situv2_a8w4_enabled() -> bool:
+    """Whether the a8w4 SiTU MoE path is active, per vLLM *or* aiter.
+
+    Two separately named env vars have to agree here. aiter picks the
+    gate/up-interleaved afp8 (``_gui_``) FlyDSL SiTU kernel from its own
+    ``AITER_SITUV2_A8W4``, while vLLM picks the matching weight shuffle
+    (``guinterleave``) and ``gate_mode`` from
+    ``VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4``.
+
+    Setting only the aiter one left the interleave kernel reading
+    separated-layout weights, which produces degenerate output with no error
+    and no warning (https://github.com/vllm-project/vllm/issues/52442).
+    Deriving from both makes that mismatch unreachable.
+    """
+    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4:
+        return True
+    if os.getenv("AITER_SITUV2_A8W4", "0").lower() in ("true", "1"):
+        logger.warning_once(
+            "AITER_SITUV2_A8W4 is set but VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 "
+            "is not. aiter will run the gate/up-interleaved a8w4 SiTU kernel, "
+            "so vLLM is enabling the matching interleaved weight layout. "
+            "Set VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 explicitly to silence "
+            "this."
+        )
+        return True
+    return False
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1628,6 +1656,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls a8w4 SiTU fused MoE variant.
+            Also implied by aiter's own AITER_SITUV2_A8W4, which must not
+            disagree with it (see _situv2_a8w4_enabled).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1696,7 +1726,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _MOE_SITUV2_A8W4 = _situv2_a8w4_enabled()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1726,7 +1756,7 @@ class rocm_aiter_ops:
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._MOE_SITUV2_A8W4 = _situv2_a8w4_enabled()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
