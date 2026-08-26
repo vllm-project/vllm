@@ -185,6 +185,8 @@ def release_pinned_state(
 
     for runtime in runtimes:
         del runtime._host_cache
+        del runtime.registered_host_pool
+        del runtime.hot_backing
 
 
 def hisparse_prefill_staging_remap(
@@ -308,8 +310,10 @@ class HiSparseRuntime:
     """Per-cache host/hot data plane and GPU replacement state."""
 
     hot: PagedCacheView
+    hot_backing: torch.Tensor
     hot_block_table: torch.Tensor
     _host_cache: torch.Tensor
+    registered_host_pool: torch.Tensor
 
     def __init__(
         self,
@@ -385,10 +389,14 @@ class HiSparseRuntime:
             num_blocks=num_blocks,
             block_size=block_size,
         )
+        self.hot_backing = raw_tensor
         self.hot_block_table = block_table
 
     def bind_source_cache(
-        self, kv_cache: torch.Tensor, *, explicitly_registered: bool = False
+        self,
+        kv_cache: torch.Tensor,
+        *,
+        registered_host_pool: torch.Tensor | None = None,
     ) -> None:
         if kv_cache.dtype != self.kv_dtype or kv_cache.shape[-1] != self.row_width:
             raise ValueError(
@@ -407,10 +415,13 @@ class HiSparseRuntime:
         # unpin at shutdown); torch's is_pinned() only recognizes its own
         # caching-host-allocator memory, so also accept ranges the model
         # allocator explicitly registered.
-        if not (kv_cache.is_pinned() or explicitly_registered):
+        if not (kv_cache.is_pinned() or registered_host_pool is not None):
             raise ValueError("HiSparse host-resident KV pool must be pinned memory.")
 
         self._host_cache = kv_cache.view(-1, kv_cache.shape[-1])
+        self.registered_host_pool = (
+            registered_host_pool if registered_host_pool is not None else kv_cache
+        )
 
     def stage_prefill_cache(
         self,
