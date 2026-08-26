@@ -54,6 +54,7 @@ class TieringOffloadingMetrics:
     )
     ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
     ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
+    PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
 
 
 @dataclass

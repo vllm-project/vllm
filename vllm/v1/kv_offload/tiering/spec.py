@@ -241,6 +241,28 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=("tier",),
         )
+        metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of per-job promotion latency from secondary tiers"
+                    "to the primary tier, labeled by tier, in seconds."
+                ),
+                labelnames=("tier",),
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                    5,
+                    10,
+                ),
+            )
+        )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
