@@ -4,6 +4,7 @@
 "align") models: scheduler chunk splitting, partial tail registration, CoW
 on partial hits, and same-step deferral."""
 
+from math import lcm
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -68,12 +69,64 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
     manager.get_computed_blocks.assert_not_called()
 
 
-def test_mamba_align_split_partial_tail_schedule():
+def make_full_mamba_manager(
+    *,
+    dcp_world_size: int,
+    hash_block_size: int = 2,
+    full_block_size: int = 4,
+    mamba_block_size: int = 4,
+    num_blocks: int = 32,
+    use_eagle: bool = False,
+    num_prefill_checkpoint_blocks: int = 0,
+):
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=full_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+                ),
+            ),
+        ],
+    )
+    scheduler_block_size = lcm(
+        full_block_size * dcp_world_size,
+        mamba_block_size,
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+    )
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 4])
+def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
     at the prompt's last hash boundary (registering the partial tail), then
     the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
     0 -> 8192 -> 9728 -> 9984 -> 10000."""
     block_size = 512
+    scheduler_block_size = block_size * dcp_world_size
     hash_block_size = 32
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
@@ -81,7 +134,10 @@ def test_mamba_align_split_partial_tail_schedule():
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
         hash_block_size=hash_block_size,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=scheduler_block_size,
         mamba_partial_cache_hit=True,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     split = Scheduler._mamba_block_aligned_split
 
@@ -109,6 +165,7 @@ def test_mamba_align_split_partial_tail_schedule():
     # stops at the next block boundary (10240), later chunk ends re-align.
     req2 = make_request("1", [0] * 12000, hash_block_size, sha256)
     req2.num_computed_tokens = 9984
+    assert req2.num_computed_tokens % scheduler_block_size != 0
     assert split(self=mock, request=req2, num_new_tokens=2016) == 256
     req2.num_computed_tokens = 10240
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
@@ -126,6 +183,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         use_eagle=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
     split = Scheduler._mamba_block_aligned_split
@@ -164,6 +222,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         use_eagle=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
     split = Scheduler._mamba_block_aligned_split
@@ -408,6 +467,85 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert moved[0].block_hash_num_tokens == 6
 
 
+def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
+    hash_block_size = 2
+    mamba_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+
+    owner = make_request("owner", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(owner)
+    assert manager.allocate_slots(owner, 6, num_computed, computed_blocks) is not None
+    manager.free(owner)
+    manager.new_step_starts()
+
+    partial_hash = owner.block_hashes[2]
+    partial_block = manager.block_pool.get_cached_block(partial_hash, [1])
+    assert partial_block is not None
+    partial_block_id = partial_block[0].block_id
+
+    replay = make_request(
+        "replay",
+        [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6],
+        hash_block_size,
+        sha256,
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == 6
+
+    realigned_blocks = manager.allocate_slots(replay, 2, num_computed, computed_blocks)
+    assert realigned_blocks is not None
+    mamba_cow_block_id = realigned_blocks.get_block_ids()[1][0]
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert KVCacheBlockCopy(partial_block_id, mamba_cow_block_id) in copies
+    manager.block_pool.free_blocks(retained)
+
+    replay.num_computed_tokens = 8
+    manager.new_step_starts()
+    final_blocks = manager.allocate_slots(replay, 6)
+    assert final_blocks is not None
+
+    checkpoint_block_id, running_block_id = final_blocks.get_block_ids()[1]
+    assert len({mamba_cow_block_id, checkpoint_block_id, running_block_id}) == 3
+    mamba_blocks = manager.get_blocks(replay.request_id).blocks[1]
+    assert mamba_blocks[2].block_id == checkpoint_block_id
+    assert mamba_blocks[3].block_id == running_block_id
+
+
+def test_internal_checkpoint_requires_block_aligned_start():
+    hash_block_size = 2
+    mamba_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("producer", list(range(50)), hash_block_size, sha256)
+
+    # Compute token 0 first, so the next query starts at token 1, which is not
+    # aligned to the Mamba block size.
+    assert manager.allocate_slots(request, 1) is not None
+    request.num_computed_tokens = 1
+    manager.new_step_starts()
+
+    new_blocks = manager.allocate_slots(request, 49)
+
+    assert new_blocks is not None
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    checkpoint_block_idx = 48 // mamba_block_size - 1
+    assert mamba_blocks[checkpoint_block_idx].is_null
+    assert not mamba_blocks[-1].is_null
+    checkpoint_hash = request.block_hashes[48 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
     first continuation does not need another Mamba block."""
@@ -506,6 +644,7 @@ def test_take_partial_tail_offloads_returns_cow_target():
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
+                    num_prefill_checkpoint_blocks=1,
                 ),
             ),
         ],
@@ -1499,3 +1638,151 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
 
     assert num_computed == mamba_block_size
     assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_hybrid_partial_hash_hit_uses_cow_under_dcp(dcp_world_size: int):
+    hash_block_size = 2
+    physical_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=dcp_world_size,
+        hash_block_size=hash_block_size,
+        full_block_size=physical_block_size,
+        mamba_block_size=physical_block_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+
+    req0 = make_request("dcp-owner", [0, 0, 1, 1, 2, 2], 2, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    partial_hash = req0.block_hashes[2]
+    partial_full_block = manager.block_pool.get_cached_block(partial_hash, [0])
+    partial_mamba_block = manager.block_pool.get_cached_block(partial_hash, [1])
+    assert partial_full_block is not None
+    assert partial_mamba_block is not None
+
+    req1 = make_request("dcp-replay", [0, 0, 1, 1, 2, 2, 3, 3], 2, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+    full_block_size = physical_block_size * dcp_world_size
+    assert [len(group) for group in computed_blocks.blocks] == [
+        (6 + full_block_size - 1) // full_block_size,
+        2,
+    ]
+
+    new_blocks = manager.allocate_slots(req1, 2, num_computed, computed_blocks)
+    assert new_blocks is not None
+    full_new_block_id = new_blocks.get_block_ids()[0][0]
+    mamba_new_block_id = new_blocks.get_block_ids()[1][0]
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert KVCacheBlockCopy(partial_full_block[0].block_id, full_new_block_id) in copies
+    assert (
+        KVCacheBlockCopy(partial_mamba_block[0].block_id, mamba_new_block_id) in copies
+    )
+    manager.block_pool.free_blocks(retained)
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4])
+def test_dcp_partial_hit_resumes_on_replicated_mamba_snapshot(
+    dcp_world_size: int,
+):
+    block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=dcp_world_size,
+        hash_block_size=block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator._cache_hit_alignment_tokens == block_size
+    assert manager.coordinator.single_type_managers[0].block_size == (
+        block_size * dcp_world_size
+    )
+    assert manager.coordinator.single_type_managers[1].block_size == block_size
+
+    prefix = list(range(12))
+    req0 = make_request("snapshot-owner", prefix, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 12, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request(
+        "snapshot-replay", prefix + list(range(12, 16)), block_size, sha256
+    )
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 12
+    assert [len(group) for group in computed_blocks.blocks] == [
+        (12 + block_size * dcp_world_size - 1) // (block_size * dcp_world_size),
+        3,
+    ]
+    partial_full_block = computed_blocks.blocks[0][-1]
+    new_blocks = manager.allocate_slots(req1, 4, num_computed, computed_blocks)
+    assert new_blocks is not None
+    full_new_block_id = new_blocks.get_block_ids()[0][0]
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert KVCacheBlockCopy(partial_full_block.block_id, full_new_block_id) in copies
+    assert all(
+        copy.src_block_id != computed_blocks.blocks[1][-1].block_id for copy in copies
+    )
+    manager.block_pool.free_blocks(retained)
+
+
+def test_dcp_joint_hit_is_bounded_by_replicated_mamba_snapshots():
+    block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=2,
+        hash_block_size=block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+    )
+    prefix = list(range(12))
+    req0 = make_request("joint-owner", prefix, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+    manager.new_step_starts()
+
+    replay_tokens = prefix + list(range(12, 16))
+    req1 = make_request("joint-before", replay_tokens, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 8
+    assert [len(group) for group in computed_blocks.blocks] == [1, 2]
+
+    req0.num_computed_tokens = 8
+    assert manager.allocate_slots(req0, 4) is not None
+    manager.new_step_starts()
+
+    req2 = make_request("joint-after", replay_tokens, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req2)
+    assert num_computed == 12
+    assert [len(group) for group in computed_blocks.blocks] == [2, 3]
+
+
+def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=2,
+        hash_block_size=hash_block_size,
+        full_block_size=4,
+        mamba_block_size=4,
+        use_eagle=True,
+    )
+
+    req0 = make_request("eagle-owner", [7] * 6, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 4
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 2) is not None
+    req0.num_computed_tokens = 6
+    manager.new_step_starts()
+
+    req1 = make_request("eagle-replay", [7] * 6 + [9] * 2, 2, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 4
+    assert [len(group) for group in computed_blocks.blocks] == [1, 1]
+    assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
