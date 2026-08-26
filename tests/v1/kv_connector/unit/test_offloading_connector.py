@@ -574,7 +574,15 @@ def test_mamba_cpu_offload_boundary(
     )
 
     _PROMPT_SIZE: int = block_size * 2
-    _PROMPT_TEXT = "Hi. Give me a set of trivia questions and their answers "
+    # Cold prefill and offload-resume are not bit-exact (selective_scan_fn over
+    # the whole prompt vs selective_state_update for the recomputed token), so
+    # exact-text equality only holds while the rounding difference never flips a
+    # greedy argmax. Use a long, highly predictable prompt: it needs no "...."
+    # padding and keeps top-1 ahead of top-2 by >2.8 logprobs at every step.
+    _PROMPT_TEXT = (
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+    )
 
     # build prompt ids to match prompt_size
     tokenizer = llm.get_tokenizer()

@@ -130,6 +130,27 @@ def test_b12x_backend_registration_priority_and_selection(
     assert isinstance(initializer(**kwargs), kernel_cls)
 
 
+def test_b12x_module_lookup_is_dynamo_safe(monkeypatch) -> None:
+    import vllm.utils.b12x as b12x_utils
+
+    module = types.ModuleType("b12x.gemm.blockscaled")
+    module.run = lambda x: x + 1  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        b12x_utils._B12X_SUBMODULES,
+        "b12x.gemm.blockscaled",
+        module,
+    )
+
+    @torch.compile(backend="eager", fullgraph=True)
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        blockscaled = b12x_utils.get_b12x_blockscaled()
+        assert blockscaled is not None
+        return blockscaled.run(x)  # type: ignore[attr-defined]
+
+    x = torch.ones(1)
+    torch.testing.assert_close(forward(x), x + 1)
+
+
 def test_b12x_tensor_fp8_can_implement_supported_config() -> None:
     config = FP8ScaledMMLinearLayerConfig(
         activation_quant_key=kFp8StaticTensorSym,
