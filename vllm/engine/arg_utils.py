@@ -420,6 +420,30 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+def _parallel_drafting_batched_tokens_floor(
+    max_num_batched_tokens: int,
+    max_num_seqs: int,
+    speculative_config: SpeculativeConfig | None,
+) -> int:
+    """Floor for ``max_num_batched_tokens`` under parallel drafting.
+
+    Parallel drafting (DFlash/DSpark) issues ``num_speculative_tokens + 1``
+    tokens per request in a single decode step that cannot be chunked, so the
+    scheduler's token capacity has a lower bound of
+    ``max_num_seqs * (num_speculative_tokens + 1)``. Below it, the drafter's
+    input-buffer index arithmetic and the torch.compile forward ranges both
+    overflow.
+    """
+    if (
+        speculative_config is None
+        or not speculative_config.parallel_drafting
+        or max_num_seqs <= 0
+    ):
+        return max_num_batched_tokens
+    floor = max_num_seqs * (speculative_config.num_speculative_tokens + 1)
+    return max(max_num_batched_tokens, floor)
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -2355,19 +2379,21 @@ class EngineArgs:
             and speculative_config.parallel_drafting
             and self.max_num_seqs is not None
         ):
-            min_batched_tokens = self.max_num_seqs * (
-                speculative_config.num_speculative_tokens + 1
+            raised = _parallel_drafting_batched_tokens_floor(
+                self.max_num_batched_tokens,
+                self.max_num_seqs,
+                speculative_config,
             )
-            if self.max_num_batched_tokens < min_batched_tokens:
+            if raised > self.max_num_batched_tokens:
                 logger.info(
                     "Raising max_num_batched_tokens from %s to %s to cover the "
                     "parallel-drafting decode step (%s seqs x %s tokens/request).",
                     self.max_num_batched_tokens,
-                    min_batched_tokens,
+                    raised,
                     self.max_num_seqs,
                     speculative_config.num_speculative_tokens + 1,
                 )
-                self.max_num_batched_tokens = min_batched_tokens
+                self.max_num_batched_tokens = raised
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
