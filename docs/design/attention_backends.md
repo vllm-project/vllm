@@ -127,6 +127,14 @@ Priority is **1 = highest** (tried first).
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
+>
+> On Blackwell, when the FlashAttention backend is selected, `head_size=256` is served
+> by a dedicated FA4 kernel that requires a KV cache block size of 128 (advertised
+> automatically, so it is picked as long as `--block-size` is not pinned) and does not
+> support logit soft capping, attention sinks, mm_prefix/R-SWA masking, DCP, or windowed
+> encoder attention. Those configurations transparently fall back to FA2. A pinned
+> `--block-size` that is not a multiple of 128 instead makes FlashAttention ineligible
+> for such models, which is an error if the backend was requested explicitly.
 
 ## MiniMax M3 Sparse Attention Backends
 

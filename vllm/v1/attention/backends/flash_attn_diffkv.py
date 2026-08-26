@@ -87,6 +87,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             head_size_v=FlashAttentionDiffKVBackend.head_size_v,
             has_sinks=self.sinks is not None,
         )
+        self.fa4_hd256 = False
 
     def do_kv_cache_update(
         self,
