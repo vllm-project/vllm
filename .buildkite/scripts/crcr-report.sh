@@ -63,7 +63,10 @@ fi
 # One callback per job, matching HUD's per-job crcr_workflow_job schema.
 # delivery_id is synthetic: the nightly path has no upstream dispatch to borrow
 # one from, so build+job is used as the idempotency key.
-python3 .buildkite/scripts/crcr_report.py \
+# Resolved from this script's location: the pipeline runs it from
+# /vllm-workspace/tests, so a repo-relative path would not resolve.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${SCRIPT_DIR}/crcr_report.py" \
     --build-json "${BUILD_JSON}" \
     --callback-url "${CALLBACK_URL}" \
     --oidc-token "${OIDC_TOKEN}" \
