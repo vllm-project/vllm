@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
@@ -13,6 +14,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -22,6 +24,7 @@ else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    ECConnectorWorkerMetadata = object
 
 
 class LogprobsLists(NamedTuple):
@@ -49,6 +52,45 @@ class LogprobsLists(NamedTuple):
         )
 
 
+class SamplingMaskLists(NamedTuple):
+    # [num_kept_tokens]
+    token_ids: np.ndarray
+    # [num_generated_tokens + 1]
+    offsets: np.ndarray
+    # [num_reqs + 1]
+    cu_num_generated_tokens: list[int] | None = None
+
+    def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
+        if self.cu_num_generated_tokens is None:
+            start_idx = req_idx
+        else:
+            start_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = start_idx + num_positions
+        flat_start = self.offsets[start_idx]
+        flat_end = self.offsets[end_idx]
+        return SamplingMaskLists(
+            self.token_ids[flat_start:flat_end],
+            self.offsets[start_idx : end_idx + 1] - flat_start,
+            None,
+        )
+
+    def to_nested_list(self) -> list[list[int]]:
+        """Convert CSR representation to ``list[list[int]]``."""
+        return [
+            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
+            for i in range(len(self.offsets) - 1)
+        ]
+
+    @staticmethod
+    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
+        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
+        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
+        offsets = np.empty(len(counts) + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
+        return SamplingMaskLists(token_ids, offsets)
+
+
 class LogprobsTensors(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
@@ -56,27 +98,38 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
-    # [num_reqs]
+    # [num_reqs + 1]
     cu_num_generated_tokens: list[int] | None = None
+    # [num_reqs + 1]. Set instead of cu_num_generated_tokens when the
+    # boundaries only exist on device (adaptive verification); rides along on
+    # the async D2H copy.
+    cu_num_generated_tokens_tensor: torch.Tensor | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
+        if cu_num_generated_tokens is None:
+            if self.cu_num_generated_tokens_tensor is not None:
+                cu_num_generated_tokens = self.cu_num_generated_tokens_tensor.tolist()
+            else:
+                cu_num_generated_tokens = self.cu_num_generated_tokens
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens
-            if cu_num_generated_tokens is not None
-            else self.cu_num_generated_tokens,
+            cu_num_generated_tokens,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
         if self.logprob_token_ids.device.type == "cpu":
             return self
+        cu_tensor = self.cu_num_generated_tokens_tensor
+        if cu_tensor is not None:
+            cu_tensor = cu_tensor.to("cpu", non_blocking=True)
         return LogprobsTensors(
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
             self.cu_num_generated_tokens,
+            cu_tensor,
         )
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
@@ -84,10 +137,42 @@ class LogprobsTensors(NamedTuple):
         assert self.cu_num_generated_tokens is None, (
             "filter can't be used with cu_num_generated_tokens"
         )
+        assert self.cu_num_generated_tokens_tensor is None, (
+            "filter can't be used with cu_num_generated_tokens_tensor"
+        )
         return LogprobsTensors(
             self.logprob_token_ids[mask],
             self.logprobs[mask],
             self.selected_token_ranks[mask],
+        )
+
+    @staticmethod
+    def cat(
+        tensors: Sequence["LogprobsTensors"],
+        cu_num_generated_tokens: list[int] | None = None,
+    ) -> "LogprobsTensors":
+        """Concatenate flattened logprob tensors."""
+        assert tensors
+        assert cu_num_generated_tokens is not None or all(
+            tensor.cu_num_generated_tokens is None for tensor in tensors
+        )
+        if len(tensors) == 1:
+            tensor = tensors[0]
+            if cu_num_generated_tokens is None:
+                return tensor
+            return tensor._replace(cu_num_generated_tokens=cu_num_generated_tokens)
+        # The multi-chunk path rebuilds boundaries from the CPU layout, which
+        # the device-only boundaries of adaptive verification never use.
+        assert all(tensor.cu_num_generated_tokens_tensor is None for tensor in tensors)
+        return LogprobsTensors(
+            logprob_token_ids=torch.cat(
+                [tensor.logprob_token_ids for tensor in tensors]
+            ),
+            logprobs=torch.cat([tensor.logprobs for tensor in tensors]),
+            selected_token_ranks=torch.cat(
+                [tensor.selected_token_ranks for tensor in tensors]
+            ),
+            cu_num_generated_tokens=cu_num_generated_tokens,
         )
 
     @staticmethod
@@ -226,6 +311,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
+
+    def is_empty(self):
+        return (
+            not self.finished_sending
+            and not self.finished_recving
+            and not self.ec_connector_worker_meta
+        )
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -280,6 +373,9 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    # ``None`` when ``return_sampling_mask`` is off.
+    sampling_masks: SamplingMaskLists | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
@@ -291,6 +387,32 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        return output
+
+    @staticmethod
+    def with_ec_conn_output_only(
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return an otherwise-empty output carrying `ec_connector_output`."""
+        return ModelRunnerOutput.with_ec_conn_output(
+            EMPTY_MODEL_RUNNER_OUTPUT, ec_connector_output
+        )
+
+    @staticmethod
+    def with_ec_conn_output(
+        output: "ModelRunnerOutput",
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return `output` carrying `ec_connector_output`.
+
+        The shared empty output is copied rather than written to, so callers
+        must use the return value.
+        """
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
         return output
 
 
@@ -331,8 +453,10 @@ def make_empty_encoder_model_runner_output(
     # Give every request its own contiguous index
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
-    # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+    # An encoder instance never samples, so it emits no tokens at all. The
+    # scheduler finishes these requests once their prompt is fully encoded
+    # (see `Scheduler.update_from_output`).
+    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]

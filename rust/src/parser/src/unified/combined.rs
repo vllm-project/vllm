@@ -7,7 +7,7 @@ use vllm_tokenizer::DynTokenizer;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::reasoning::ReasoningParser;
-use crate::tool::{StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Unified parser that composes existing reasoning and tool parsers.
 pub struct CombinedParser {
@@ -79,8 +79,8 @@ impl UnifiedParser for CombinedParser {
             || self.tool.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        self.tool.as_ref().and_then(|parser| parser.structural_tag_model())
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        self.tool.as_ref().and_then(|parser| parser.structural_tag_builder())
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
@@ -269,10 +269,7 @@ mod tests {
     fn combined_parser_emits_tool_calls_from_visible_content() {
         let tool = Qwen3XmlToolParser::create(&test_tools()).unwrap();
         let mut parser = CombinedParser::new(None, Some(tool));
-        assert!(matches!(
-            parser.structural_tag_model(),
-            Some(crate::tool::StructuralTagModel::Qwen3)
-        ));
+        assert!(parser.structural_tag_builder().is_some());
 
         let output = collect(
             &mut parser,
