@@ -136,6 +136,7 @@ steps:
   key: extract-hidden-states-integration
   timeout_in_minutes: 20
   device: h200_18gb
+  working_dir: "/vllm-workspace"
   source_file_dependencies:
     - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
@@ -144,12 +145,13 @@ steps:
     - tests/v1/kv_connector/extract_hidden_states_integration
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+    - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":nvidia: (L4) Extract Hidden States Integration"
   key: extract-hidden-states-integration-2-gpus
   timeout_in_minutes: 20
   num_devices: 2
+  working_dir: "/vllm-workspace"
   source_file_dependencies:
     - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
@@ -158,7 +160,7 @@ steps:
     - tests/v1/kv_connector/extract_hidden_states_integration
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'distributed' v1/kv_connector/extract_hidden_states_integration
+    - pytest -v -s -m 'distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":nvidia: (H200) Regression"
   key: regression
