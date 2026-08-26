@@ -95,6 +95,7 @@ class RequestState:
         all_token_ids: list[int],
         num_computed_tokens: int,
         max_tokens: int,
+        future_token_ids: list[int] | None = None,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
@@ -109,6 +110,9 @@ class RequestState:
         )
         self.prefill_len.np[req_idx] = prefill_len
         self.total_len.stage_write_elem(req_idx, prefill_len)
+        if future_token_ids:
+            assert prefill_len + len(future_token_ids) <= self.max_model_len
+            all_token_ids = all_token_ids + future_token_ids
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
