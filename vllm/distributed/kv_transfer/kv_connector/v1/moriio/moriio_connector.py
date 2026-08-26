@@ -1708,7 +1708,9 @@ class MoRIIOConnectorWorker:
         slack = ptr % page_size
         end = 0
         for layer_name in kv_caches:
-            _, region_len = next(iter(self._iter_layer_registration_regions(layer_name)))
+            _, region_len = next(
+                iter(self._iter_layer_registration_regions(layer_name))
+            )
             end = max(end, kv_caches[layer_name].data_ptr() - ptr + region_len)
         reg_nbytes = ((slack + end + page_size - 1) // page_size) * page_size
         if reg_nbytes > nbytes:
@@ -1716,9 +1718,7 @@ class MoRIIOConnectorWorker:
                 f"shared KV backing too small for page-aligned MR: "
                 f"need {reg_nbytes}, have {nbytes}"
             )
-        reg = torch.as_strided(
-            base, (reg_nbytes,), (1,), 0 if slack == 0 else -slack
-        )
+        reg = torch.as_strided(base, (reg_nbytes,), (1,), 0 if slack == 0 else -slack)
         mr_ptr = reg.data_ptr()
         return reg, {
             name: cache.data_ptr() - mr_ptr for name, cache in kv_caches.items()
@@ -1818,9 +1818,7 @@ class MoRIIOConnectorWorker:
                 kv_caches_base_addr.append(base_addr)
                 base_addr_idx += 1
 
-        shared_backing = (
-            len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
-        )
+        shared_backing = len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
         shared_mr = None
         if shared_backing:
             reg_tensor, self.kv_layer_mr_offset = self._build_shared_kv_mr(kv_caches)
@@ -1830,8 +1828,8 @@ class MoRIIOConnectorWorker:
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = shared_mr or self.moriio_wrapper.register_local_tensor(
-                kv_cache
+            moriio_mem_metadata = shared_mr or (
+                self.moriio_wrapper.register_local_tensor(kv_cache)
             )
             self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                 moriio_mem_metadata
