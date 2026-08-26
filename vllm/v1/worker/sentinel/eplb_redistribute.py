@@ -280,34 +280,69 @@ def reload_experts_from_disk(
     )
 
     moe_layers = list(model.moe_layers)
-    prefixes = {f"{moe_layers[i].layer_name}.{e}.": (i, e) for i, e in reload_set}
+    prefix_renames = getattr(
+        getattr(model, "hf_to_vllm_mapper", None), "orig_to_new_prefix", {}
+    )
+
+    def ckpt_prefix(layer_idx: int) -> str:
+        prefix = moe_layers[layer_idx].layer_name + "."
+        for orig, new in prefix_renames.items():
+            if new and prefix.startswith(new):
+                return orig + prefix[len(new) :]
+        return prefix
+
+    # Two checkpoint layouts:
+    # - per-expert: '<layer>.<expert_id>.<proj>' — reload only reassigned experts.
+    # - fused: '<layer>.<proj>' (one tensor holding all experts) — reload the
+    #   whole tensor. The weight loader writes each expert through the rebuilt
+    #   expert map, so every local slot receives its new logical expert's data.
+    expert_prefixes = {f"{ckpt_prefix(i)}{e}.": (i, e) for i, e in reload_set}
+    fused_prefixes = {ckpt_prefix(i): i for i, _ in reload_set}
 
     loader = DefaultModelLoader(vllm_config.load_config)
     loader.local_expert_ids = None
 
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
 
-    matched: set[str] = set()
+    matched: set[tuple[int, int]] = set()
+    fused_matched: set[int] = set()
+
+    def match_per_expert(name: str) -> tuple[int, int] | None:
+        for prefix, pair in expert_prefixes.items():
+            if name.startswith(prefix):
+                return pair
+        return None
+
+    def match_fused(name: str) -> int | None:
+        for prefix, layer_idx in fused_prefixes.items():
+            if name.startswith(prefix) and not name[len(prefix)].isdigit():
+                return layer_idx
+        return None
 
     def filtered_iter() -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, tensor in all_weights:
-            for prefix in prefixes:
-                if name.startswith(prefix):
-                    matched.add(prefix)
-                    yield name, tensor
-                    break
+            if (pair := match_per_expert(name)) is not None:
+                matched.add(pair)
+                yield name, tensor
+            elif (layer_idx := match_fused(name)) is not None:
+                fused_matched.add(layer_idx)
+                yield name, tensor
 
     logger.info("[FT] Reloading %d (layer, expert) pair(s) from disk.", len(reload_set))
 
     loaded = model.load_weights(filtered_iter())
 
-    unmatched = [pair for p, pair in prefixes.items() if p not in matched]
+    unmatched = [
+        pair
+        for pair in reload_set
+        if pair not in matched and pair[0] not in fused_matched
+    ]
     if unmatched:
         raise RuntimeError(
             f"[FT] {len(unmatched)} (layer, expert) pair(s) had no matching "
             f"checkpoint weight, e.g. {unmatched[:5]}. The model's expert "
-            f"weights likely use a layout that does not follow "
-            f"'<layer_name>.<expert_id>.' (e.g. fused experts)."
+            f"weights use a layout that follows neither "
+            f"'<layer_name>.<expert_id>.' nor fused '<layer_name>.<proj>'."
         )
 
     logger.info(
