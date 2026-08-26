@@ -747,8 +747,7 @@ class AsyncLLM(EngineClient):
             except Exception as e:
                 if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
                     logger.info(
-                        "[Elastic EP] Retired rank stopped receiving EngineCore "
-                        "outputs"
+                        "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
                     )
                     output_processor.propagate_error(e)
                     return
