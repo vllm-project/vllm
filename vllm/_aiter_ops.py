@@ -3133,6 +3133,36 @@ class rocm_aiter_ops:
         ]
 
     @staticmethod
+    @functools.cache
+    def is_bpreshuffle_blockscale_gemm_tuned(n: int, k: int) -> bool:
+        """Whether AITER's merged a8w8_blockscale_bpreshuffle tuned table has
+        rows for this (N, K) on the current GPU (gfx + CU count). Mirrors
+        is_triton_gemm_w8a8_tuned: untuned shapes would fall to the C++
+        default-heuristic instance, which can lose to the Triton path at small M,
+        so the b-preshuffle backend is only selected for covered shapes."""
+        try:
+            from aiter import AITER_CONFIGS
+            from aiter.jit.utils.chip_info import get_cu_num
+            from aiter.jit.utils.chip_info import get_gfx_runtime as get_gfx
+
+            csv_path = AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+            df = pd.read_csv(csv_path)
+            if "gfx" in df.columns:
+                df = df[df["gfx"] == get_gfx()]
+            if "cu_num" in df.columns:
+                df = df[df["cu_num"].astype(int) == int(get_cu_num())]
+            return bool(((df["N"].astype(int) == n) & (df["K"].astype(int) == k)).any())
+        except Exception as e:  # noqa: BLE001
+            logger.warning_once(
+                "Could not read the AITER bpreshuffle tuned table (%r); treating "
+                "(N=%d, K=%d) as untuned.",
+                e,
+                n,
+                k,
+            )
+            return False
+
+    @staticmethod
     def is_shuffled_per_token_w8a8_gemm_tuned(
         N: int, K: int, q_dtype_w: torch.dtype
     ) -> bool:
@@ -3157,6 +3187,26 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_weight
 
         return shuffle_weight(tensor, layout=layout)
+
+    @staticmethod
+    def unshuffle_weight(
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+    ) -> torch.Tensor:
+        """Exact inverse of aiter.ops.shuffle.shuffle_weight for a 2-D [N, K]
+        weight (the layout the CK b-preshuffle GEMMs consume). Used by
+        consumers that need the plain row-major weight back (e.g. MLA weight
+        absorption dequantizing kv_b_proj) after a kernel preshuffled it in
+        place. Pure torch; a one-time copy."""
+        assert tensor.ndim == 2, "unshuffle_weight expects a 2-D [N, K] weight"
+        n, k = tensor.shape
+        in_lane, ik = layout
+        bk = ik * 2
+        k_lane = 16 // tensor.element_size()
+        assert n % in_lane == 0 and k % bk == 0, f"cannot unshuffle shape {tuple(tensor.shape)}"
+        # shuffle_weight: view(N//BN, BN, K//BK, BK//KL, KL).permute(0, 2, 3, 1, 4)
+        x = tensor.contiguous().view(n // in_lane, k // bk, bk // k_lane, in_lane, k_lane)
+        x = x.permute(0, 3, 1, 2, 4).contiguous()
+        return x.view(n, k)
 
     @staticmethod
     def shuffle_weight_a16w4(

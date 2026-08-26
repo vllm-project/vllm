@@ -393,12 +393,28 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # ~74% of the 8K-prefill compute gap vs ATOM. Env-gated while a
         # prototype; requires weights preshuffled at load (see
         # process_weights_after_loading below).
-        self.use_bpreshuffle = (
+        bpre_requested = (
             not current_platform.is_fp8_fnuz()
             and not _on_gfx1250
             and os.environ.get("VLLM_ROCM_USE_AITER_BPRESHUFFLE_BLOCKSCALE", "0")
             == "1"
         )
+        # Tuned-shape gate (same idea as is_triton_gemm_w8a8_tuned): only
+        # commit a layer to the preshuffled layout when AITER's bpreshuffle
+        # table covers its (N, K) on this GPU; otherwise keep the triton/CK
+        # path, whose own tables do cover it.
+        self.use_bpreshuffle = (
+            bpre_requested and rocm_aiter_ops.is_bpreshuffle_blockscale_gemm_tuned(n, k)
+        )
+        if bpre_requested and not self.use_bpreshuffle:
+            logger.info_once(
+                "AITER b-preshuffle blockscale GEMM requested but (N=%d, K=%d) has "
+                "no tuned rows for this GPU; using the %s path for this shape.",
+                n,
+                k,
+                "triton" if self.use_triton else "plain CK",
+                scope="global",
+            )
         # Set per-layer in process_weights_after_loading: True only once the
         # layer's weight has actually been preshuffled.
         self.bpre_shuffled = False
@@ -415,15 +431,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
 
         if self.use_bpreshuffle:
-            # kv_b_proj's weight has a second consumer: MLA weight absorption
-            # (attention layer process_weights_after_loading, which the model
-            # loader runs AFTER quant-method processing) dequantizes
-            # layer.weight raw via get_and_maybe_dequant_weights() to build
-            # the decode W_UK/W_UV tensors. Shuffling it would feed shuffled
-            # bytes into that dequant and silently corrupt every decode step,
-            # so leave it in the plain layout (triton/CK fallback in apply).
-            if "kv_b_proj" in getattr(layer, "prefix", ""):
-                return
+            # NOTE: consumers that need the plain row-major weight back (MLA
+            # weight absorption dequantizes kv_b_proj.weight after this runs)
+            # go through get_and_maybe_dequant_weights(), which undoes the
+            # shuffle via rocm_aiter_ops.unshuffle_weight when the layer's
+            # kernel reports bpre_shuffled. Every layer can therefore be
+            # shuffled here.
             # One-time (16,16) tile preshuffle into the layout the CK
             # b_preshuffle GEMM consumes; shape [N, K] is preserved.
             w = params.weight
