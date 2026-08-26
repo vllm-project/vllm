@@ -133,6 +133,9 @@ class BaseFrontendArgs:
     """If set to True, enable prompt_tokens_details in usage."""
     enable_per_request_metrics: bool = False
     """If set to True, include per-request timing metrics in API responses."""
+    omit_unset_chat_completion_fields: bool = False
+    """If set to True, omit unset vLLM-specific fields from non-streaming
+    Chat Completions responses. OpenAI-compatible fields are unaffected."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
