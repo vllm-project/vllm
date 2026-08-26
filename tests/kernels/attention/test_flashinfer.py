@@ -25,6 +25,7 @@ except ImportError:
 import torch
 
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
@@ -33,6 +34,19 @@ DTYPES = [torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
+
+
+_TEST_KV_LAYOUTS = {"NHD": KVCacheLayout.LBNHC, "HND": KVCacheLayout.LBHNC}
+
+
+def _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, name: str):
+    """The impl reads its layout from cache_config via a property now; the
+    module-level get_kv_cache_layout() these tests used to patch is gone."""
+    monkeypatch.setattr(
+        flashinfer_backend.FlashInferImpl,
+        "kv_cache_layout",
+        property(lambda self: _TEST_KV_LAYOUTS[name]),
+    )
 
 
 def ref_paged_attn(
@@ -317,7 +331,7 @@ def test_flashinfer_kv_cache_shape_matches_stride_order(
 ) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
-    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: cache_layout)
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, cache_layout)
 
     shape = flashinfer_backend.FlashInferBackend.get_kv_cache_shape(
         num_blocks=1392,
@@ -361,7 +375,7 @@ def test_flashinfer_cascade_passes_kv_tuple(monkeypatch) -> None:
     impl.is_kvcache_nvfp4 = False
     impl.head_size = 8
     impl.num_kv_heads = 1
-    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, "NHD")
 
     seen_kv_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
@@ -615,6 +629,7 @@ def _make_nvfp4_fa2_prefill_impl(
     impl._nvfp4_fa2_cu_k = torch.zeros(2, dtype=torch.int32)
     impl.alibi_slopes = torch.ones(1) if alibi else None
     impl.num_kv_heads = 1
+    impl.sinks = None
     return impl
 
 
@@ -1093,7 +1108,7 @@ def test_nvfp4_fa2_prefill_keeps_asymmetric_heads_on_native_fallback(
 def test_nvfp4_fa2_prefill_keeps_alibi_on_legacy_scratch(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
-    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, "NHD")
     monkeypatch.setattr(
         flashinfer_backend, "_is_flash_attn_varlen_func_available", lambda: True
     )
@@ -1328,7 +1343,7 @@ def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
         "can_use_trtllm_attention",
         lambda num_heads, num_kv_heads, is_prefill=False: False,
     )
-    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, "NHD")
 
     head_size = 64
     head_size_v = 128
@@ -1369,7 +1384,7 @@ def test_flashinfer_impl_same_head_nvfp4_views_cover_compact_pages(
 ) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
-    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: cache_layout)
+    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, cache_layout)
 
     num_blocks = 2
     num_kv_heads = 3
