@@ -336,7 +336,8 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         transfer_job.keys, transfer_job.req_context
                     )
-                    self._update_backpressure(tier, job_metadata)
+                    if completed_job.success:
+                        self._update_backpressure(tier, job_metadata)
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int

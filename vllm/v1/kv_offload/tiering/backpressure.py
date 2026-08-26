@@ -304,7 +304,6 @@ class EMABackpressureDetector(BackpressureDetector):
                 self._ema = sum(self._warmup_samples) / len(self._warmup_samples)
                 self._last_update = now
             return
-        self._apply_idle_decay()
         self._ema = self._alpha * s_per_mib + (1 - self._alpha) * self._ema
         self._last_update = now
         if self._ema > self._high:
