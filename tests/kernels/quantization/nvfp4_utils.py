@@ -97,8 +97,15 @@ def dequant_nvfp4_kv_cache(
     global_scale: float,
     head_size: int,
     block_size: int,
+    swizzled: bool = True,
 ) -> torch.Tensor:
-    """Dequantize an NVFP4 KV cache with 4x4-swizzled block scales.
+    """Dequantize an NVFP4 KV cache.
+
+    The cache-write kernel stores K block scales LINEARLY and V block scales
+    4x4-swizzled (for the SM100 trtllm-gen MHA kernel) — see
+    csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu. Pass ``swizzled=False``
+    when dequantizing K. Unswizzling linear data scrambles it and pulls in
+    bytes from never-written positions (NaN scales).
 
     The input must be in HND layout so that the last two dims are
     (block_size, last_dim).  For NHD caches, permute to HND first.
@@ -124,12 +131,15 @@ def dequant_nvfp4_kv_cache(
     # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
     batch_shape = sf_swizzled.shape[:-2]
     T, S = block_size, scale_dim
-    sg = S // 4
-    sf_reshape = sf_swizzled.reshape(*batch_shape, T // 4, 4, sg, 4)
-    ndim = sf_reshape.ndim
-    # Swap the last four dims: (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
-    perm = list(range(ndim - 4)) + [ndim - 4, ndim - 1, ndim - 3, ndim - 2]
-    sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
+    if swizzled:
+        sg = S // 4
+        sf_reshape = sf_swizzled.reshape(*batch_shape, T // 4, 4, sg, 4)
+        ndim = sf_reshape.ndim
+        # Swap last four dims: (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
+        perm = list(range(ndim - 4)) + [ndim - 4, ndim - 1, ndim - 3, ndim - 2]
+        sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
+    else:
+        sf_linear = sf_swizzled.reshape(*batch_shape, T, S)
     sf_f32 = sf_linear.view(torch.float8_e4m3fn).to(torch.float32)
 
     # Unpack fp4
