@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.cpu.common import (
+    CPUCacheTierInfo,
     CPULoadStoreSpec,
     CPUOffloadingMetrics,
 )
@@ -42,6 +43,7 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_blocks: int,
+        tier_info: CPUCacheTierInfo | None = None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
@@ -50,6 +52,11 @@ class CPUOffloadingManager(OffloadingManager):
     ):
         self.medium: Medium = Medium.CPU
         self._num_blocks: int = num_blocks
+        # Rendered once: the label values are static, and re-deriving them per
+        # step would be wasted work on the scheduler path.
+        self._info_labelvalues: tuple[str, ...] | None = (
+            tier_info.as_labelvalues() if tier_info is not None else None
+        )
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -306,6 +313,11 @@ class CPUOffloadingManager(OffloadingManager):
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()
+
+        if self._info_labelvalues is not None:
+            stats.set_gauge(
+                CPUOffloadingMetrics.CPU_CONFIG_INFO, 1, self._info_labelvalues
+            )
 
         # Compute cache usage.
         num_used = (

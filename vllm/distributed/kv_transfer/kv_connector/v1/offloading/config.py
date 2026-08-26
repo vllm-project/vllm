@@ -11,6 +11,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -28,6 +29,19 @@ from vllm.v1.kv_offload.config import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _blocks_hold_tokens(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a block in this layer's cache holds tokens.
+
+    MambaSpec is not an AttentionSpec: a block holds one recurrent state
+    regardless of block_size. HiddenStateCacheSpec is an AttentionSpec but its
+    blocks hold activations, not tokens; the grouping code excludes it by name
+    for the same reason (see kv_cache_utils.py).
+    """
+    return isinstance(kv_cache_spec, AttentionSpec) and not isinstance(
+        kv_cache_spec, HiddenStateCacheSpec
+    )
 
 
 def build_offloading_config(
@@ -49,6 +63,10 @@ def build_offloading_config(
                 parallel_config.decode_context_parallel_size,
             ),
             layer_names=tuple(group.layer_names),
+            blocks_hold_tokens=all(
+                _blocks_hold_tokens(layer_spec)
+                for layer_spec in iter_layer_specs(group.kv_cache_spec)
+            ),
         )
         for group in kv_cache_config.kv_cache_groups
     )
