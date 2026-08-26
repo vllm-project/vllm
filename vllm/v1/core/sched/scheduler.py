@@ -64,12 +64,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import (
-    HiSparseImportTarget,
-    Request,
-    RequestStatus,
-    StreamingUpdate,
-)
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
@@ -484,15 +479,22 @@ class Scheduler(SchedulerInterface):
 
     def _get_local_prefix_cache_hit(
         self, request: Request
-    ) -> tuple[KVCacheBlocks, int, int, bool]:
+    ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
         connector = self.connector
+        if connector is not None and connector.prefix_completion_group_ids:
+            return self.kv_cache_manager.get_computed_blocks_for_group_completion(
+                request, connector.prefix_completion_group_ids
+            )
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
-            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
+            return (
+                *self.kv_cache_manager.get_computed_blocks_for_connector(request),
+                None,
+            )
 
         blocks, num_local, shared_prefix_boundary = (
             self.kv_cache_manager.get_computed_blocks(request)
         )
-        return blocks, num_local, shared_prefix_boundary, False
+        return blocks, num_local, shared_prefix_boundary, False, None
 
     def _reserve_prefill_lookahead(
         self,
@@ -865,6 +867,7 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
+                        max_group_completion_tokens,
                     ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
@@ -876,11 +879,20 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
+                        if max_group_completion_tokens is None:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, block_aligned_local
+                                )
                             )
-                        )
+                        else:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens_capped(
+                                    request,
+                                    block_aligned_local,
+                                    max_group_completion_tokens + partial_tail,
+                                )
+                            )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -921,6 +933,23 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
+                        elif max_group_completion_tokens is not None:
+                            completed_prefix = (
+                                num_new_local_computed_tokens
+                                + num_external_computed_tokens
+                            )
+                            new_computed_blocks = (
+                                self.kv_cache_manager.truncate_group_completion_blocks(
+                                    new_computed_blocks,
+                                    num_new_local_computed_tokens,
+                                    completed_prefix,
+                                    self.connector.prefix_completion_group_ids,
+                                )
+                            )
+                            if self.kv_cache_manager.hisparse_coordinator.needs_hot(
+                                new_computed_blocks.blocks
+                            ):
+                                request.hisparse_host_import = True
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -2860,8 +2889,8 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        import_target = request.hisparse_import_target
-        request.hisparse_import_target = HiSparseImportTarget.NONE
+        host_import_pending = request.hisparse_host_import_pending
+        request.hisparse_host_import_pending = False
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
@@ -2887,13 +2916,9 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            if import_target is HiSparseImportTarget.HOST:
+            if host_import_pending:
                 self.kv_cache_manager.hisparse_coordinator.complete_host_import(
                     request.request_id, request.num_computed_tokens
-                )
-            elif import_target is HiSparseImportTarget.DEVICE:
-                self.kv_cache_manager.hisparse_coordinator.complete_device_import(
-                    request.request_id
                 )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 

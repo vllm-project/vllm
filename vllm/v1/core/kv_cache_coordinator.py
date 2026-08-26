@@ -333,7 +333,6 @@ class KVCacheCoordinator(ABC):
         self.hisparse_coordinator.commit_computed_blocks(
             request_id,
             new_computed_blocks,
-            num_local_computed_tokens,
         )
         if hisparse_host_import:
             assert num_external_computed_tokens > 0

@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
@@ -302,6 +303,37 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.worker_kv_bytes_per_block == 16
     assert offloading_config.parallel.world_size == 6
     assert offloading_config.cache.blocks_per_chunk == 2
+
+
+def test_hisparse_offloads_only_indexer_group():
+    source = KVCacheGroupSpec(
+        ["source"],
+        _full_attention_spec(),
+        block_pool_id=None,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
+    )
+    indexer = KVCacheGroupSpec(
+        ["indexer"],
+        _full_attention_spec(),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=4,
+    )
+    config = _make_vllm_config()
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config), config, kv_cache_config
+    )
+
+    assert [
+        (group.group_id, group.layer_names) for group in offloading_config.groups
+    ] == [(1, ("indexer",))]
+    assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
 
 
 def test_zero_blocks_skips_tensor_layout_validation():

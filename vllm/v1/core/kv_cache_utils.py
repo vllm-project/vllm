@@ -1370,7 +1370,6 @@ def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
-HISPARSE_INDEXER_SOURCE_SUFFIX = ".hisparse_source"
 
 
 def _get_hisparse_hma_config(
@@ -1437,28 +1436,13 @@ def _get_hisparse_hma_config(
         name: spec.copy_with_new_block_size(gpu_block_size)
         for name, spec in indexer_specs.items()
     }
-    source_specs: dict[str, KVCacheSpec] = {}
-    for name, spec in specs.items():
-        if name not in indexer_specs:
-            source_specs[name] = spec
-            continue
-        assert isinstance(spec, MLAAttentionSpec)
-        gpu_spec = gpu_indexer_specs[name]
-        assert isinstance(gpu_spec, MLAAttentionSpec)
-        assert spec.num_states % gpu_spec.num_states == 0
-        kernel_pages_per_host_block = spec.num_states // gpu_spec.num_states
-        source_specs[f"{name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"] = replace(
-            spec,
-            alignment=None,
-            page_size_padded=(kernel_pages_per_host_block * gpu_spec.page_size_bytes),
-        )
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
     assert indexer_group_spec is not None
     indexer_group = KVCacheGroupSpec(
         list(indexer_specs),
         indexer_group_spec,
         block_pool_id=0,
-        enable_prefix_caching=False,
+        enable_prefix_caching=True,
         enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
@@ -1533,10 +1517,10 @@ def _get_hisparse_hma_config(
     if current:
         append_hot_group(current)
 
-    source_group_spec = UniformTypeKVCacheSpecs.from_specs(source_specs)
+    source_group_spec = UniformTypeKVCacheSpecs.from_specs(host_specs)
     assert source_group_spec is not None
     source_group = KVCacheGroupSpec(
-        list(source_specs),
+        list(host_specs),
         source_group_spec,
         block_pool_id=None,
         enable_kv_transfer=False,
@@ -1572,7 +1556,7 @@ def _get_hisparse_hma_config(
         *(group.kv_cache_spec.page_size_bytes for group in hot_groups)
     )
     gpu_stride = round_up(gpu_stride, hot_page_alignment)
-    host_page = sum(spec.page_size_bytes for spec in source_specs.values())
+    host_page = sum(spec.page_size_bytes for spec in host_specs.values())
     host_num_blocks = host_budget // host_page
     gpu_num_blocks = available_memory // gpu_stride
     override = vllm_config.cache_config.num_gpu_blocks_override
@@ -1593,7 +1577,7 @@ def _get_hisparse_hma_config(
             host_resident=True,
             block_pool_id=None,
         )
-        for name, spec in source_specs.items()
+        for name, spec in host_specs.items()
     ]
     gpu_size = gpu_stride * gpu_num_blocks
     tensors.extend(

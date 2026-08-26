@@ -68,27 +68,6 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
     assert worker._pending_invalid_block_ids == []
 
 
-def test_hisparse_worker_includes_indexer_sources_in_host_cow_copies():
-    """Host copy-on-write must read indexer pages from the source cache."""
-    worker = object.__new__(HiSparseWorker)
-    hot = torch.empty((2, 4, 2))
-    host = torch.empty((8, 2))
-    source = torch.empty_like(hot)
-    indexer = torch.empty_like(hot)
-    runtime = SimpleNamespace(
-        backup_caches=lambda: (hot, host),
-    )
-    worker.cache_handles = [SimpleNamespace(runtime=runtime)]
-    worker.cache_pairs = [(source, indexer)]
-    worker.hot_backing = hot
-
-    worker._init_backup_plan(
-        torch.device("cpu"), max_model_len=4, max_concurrent_batches=1
-    )
-
-    assert worker.host_caches == (host, source)
-
-
 def test_hisparse_spill_batches_wait_for_reused_staging(monkeypatch):
     """A spill batch must not overwrite staging still used by its predecessor."""
     worker = object.__new__(HiSparseWorker)
@@ -218,54 +197,6 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert second_follower.runtime.index_group is second_leader.runtime.index_group
     assert first_leader.runtime.index_group is not second_leader.runtime.index_group
     assert len(plans) == len(streams) == 2
-
-
-def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
-    worker = object.__new__(HiSparseWorker)
-    worker.kernel_block_size = 4
-    worker.blocks_per_kv_block = 2
-    worker.source_group_id = 2
-    worker.indexer_group_id = 0
-    worker.src_cpu = torch.empty(2, dtype=torch.int32)
-    worker.dst_cpu = torch.empty(2, dtype=torch.int32)
-    worker.src_gpu = torch.empty(2, dtype=torch.int32)
-    worker.dst_gpu = torch.empty(2, dtype=torch.int32)
-    worker._restore_staging_event = MagicMock()
-    worker.cache_pairs = [(torch.empty(1), torch.empty(1))]
-    copied: list[tuple[list[int], list[int]]] = []
-    current_stream = MagicMock()
-
-    def copy_blocks(source, indexer, src, dst):
-        copied.append((src.tolist(), dst.tolist()))
-
-    monkeypatch.setattr(
-        torch.ops._C_cache_ops, "hisparse_copy_blocks", copy_blocks, raising=False
-    )
-    monkeypatch.setattr(
-        torch.accelerator, "current_stream", lambda device: current_stream
-    )
-    scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[
-            SimpleNamespace(
-                req_id="direct", block_ids=([10], [], [1]), num_computed_tokens=4
-            ),
-            SimpleNamespace(
-                req_id="host", block_ids=([20], [], [2]), num_computed_tokens=4
-            ),
-        ],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[],
-            new_block_ids=[],
-            num_computed_tokens=[],
-            resumed_req_ids=set(),
-        ),
-    )
-
-    worker.restore_prefix(scheduler_output, {"direct"})
-
-    assert copied == [([4], [20])]
-    worker._restore_staging_event.synchronize.assert_called_once_with()
-    worker._restore_staging_event.record.assert_called_once_with(current_stream)
 
 
 def test_bind_kv_cache(default_vllm_config):

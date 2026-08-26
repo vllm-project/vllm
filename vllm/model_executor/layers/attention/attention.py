@@ -450,7 +450,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = torch.tensor([])
-        self.hisparse_indexer_source: tuple[torch.Tensor, torch.Tensor] | None = None
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)

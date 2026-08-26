@@ -70,7 +70,6 @@ HiSparseConnector                          HiSparseConnector
        │ connector metadata                       ├─ host bytes
        │ - page transfers                         ├─ copy scheduling
        │ - block-table replacements               └─ per-layer hot state
-       │ - indexer restore readiness                     │
        └───────────────────────────────────────────────►│
        ◄──────── connector worker metadata ─────────────┘
                     enqueued and completed transfer IDs
@@ -138,6 +137,20 @@ A host import reads through a bounded decoder-GPU staging pool before copying
 into registered host memory. Pages needed immediately are mirrored into their
 resident destinations during that copy. Both landing targets then use the same
 fused decode resolver described above.
+
+## Indexer KV offloading
+
+HiSparse does not keep a private CPU copy of indexer KV. The indexer remains a
+normal prefix-cacheable GPU cache group. If `OffloadingConnector` is configured
+with HiSparse, it stores and restores that group through the generic KV
+offloading path; HiSparse continues to own only the sparse MLA host tier.
+
+The two prefix sources can have different hit lengths. When the HiSparse host
+prefix extends beyond the GPU-resident indexer prefix, the scheduler asks
+`OffloadingConnector` to restore only the missing indexer suffix, capped at the
+host prefix boundary. If that suffix is unavailable, all groups fall back to
+the shorter prefix they share. NIXL P/D transfers continue to place indexer KV
+directly in its GPU group.
 
 ## Spill transaction
 
@@ -212,6 +225,7 @@ the same command, output, and cache-resolution boundaries.
   capturable.
 - Compatible layers still share one miss plan.
 - Index-sharing followers release their private LRU state before memory sizing.
+- Indexer KV is untouched by HiSparse unless a generic KV offloader is configured.
 - Resident and hot leases can still share one packed HMA allocation.
 - No device scalar readback or CPU/device metadata round trip is added.
 - The abstraction wraps the fused kernel; it does not add another kernel

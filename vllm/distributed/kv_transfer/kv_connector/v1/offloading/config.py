@@ -8,6 +8,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    KVCacheGroupRole,
     MLAAttentionSpec,
 )
 from vllm.v1.kv_offload.config import (
@@ -23,6 +24,16 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
+def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
+    if kv_cache_config.hisparse_host_num_blocks is None:
+        return tuple(range(len(kv_cache_config.kv_cache_groups)))
+    return tuple(
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+    )
+
+
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -35,8 +46,15 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
+    selected_groups = tuple(
+        (group_id, kv_cache_config.kv_cache_groups[group_id])
+        for group_id in get_offloading_group_ids(kv_cache_config)
+    )
+    if not selected_groups:
+        raise ValueError("KV offloading found no eligible cache groups.")
     groups = tuple(
         OffloadingGroupConfig(
+            group_id=group_id,
             tokens_per_block=(
                 group.kv_cache_spec.block_size
                 * (
@@ -47,7 +65,7 @@ def build_offloading_config(
             ),
             layer_names=tuple(group.layer_names),
         )
-        for group in kv_cache_config.kv_cache_groups
+        for group_id, group in selected_groups
     )
 
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
@@ -91,11 +109,20 @@ def build_offloading_config(
         blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
 
     worker_kv_bytes_per_block = 0
-    if kv_cache_config.num_blocks > 0 and kv_cache_config.kv_cache_tensors:
+    all_groups_selected = len(selected_groups) == len(kv_cache_config.kv_cache_groups)
+    if (
+        all_groups_selected
+        and kv_cache_config.num_blocks > 0
+        and kv_cache_config.kv_cache_tensors
+    ):
         # Every KVCacheTensor describes placement within the same backing allocation,
         # so its size is the total, not a per-tensor share.
         total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
+    elif kv_cache_config.num_blocks > 0:
+        worker_kv_bytes_per_block = sum(
+            group.kv_cache_spec.page_size_bytes for _, group in selected_groups
+        )
 
     single_group_spec = (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec

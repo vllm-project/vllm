@@ -53,7 +53,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.request import HiSparseImportTarget
 
 pytestmark = pytest.mark.cpu_test
 
@@ -167,7 +166,7 @@ def make_hisparse_kv_cache_config(
             ["indexer"],
             source_spec,
             block_pool_id=0,
-            enable_prefix_caching=False,
+            enable_prefix_caching=True,
             enable_kv_transfer=transfer_device_cache,
             role=KVCacheGroupRole.HISPARSE_INDEXER,
         ),
@@ -223,6 +222,55 @@ def make_hisparse_kv_cache_manager(
     )
 
 
+def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
+    manager = make_hisparse_kv_cache_manager(
+        32,
+        16,
+        enable_caching=True,
+    )
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
+    spill_counts = {spill.transfer_id: 1 for spill in spills}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
+    _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
+    evicted_indexer_id = indexer_blocks[2].block_id
+    manager.free(original)
+    manager.block_pool.evict_blocks({evicted_indexer_id})
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    blocks, num_local, _, diverged, max_completion = (
+        manager.get_computed_blocks_for_group_completion(resumed, frozenset({1}))
+    )
+
+    assert diverged
+    assert num_local == 2 * HISPARSE_BLOCK_SIZE
+    assert max_completion == HISPARSE_BLOCK_SIZE
+    assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
+
+    completed = manager.truncate_group_completion_blocks(
+        blocks,
+        num_local,
+        num_local + max_completion,
+        frozenset({1}),
+    )
+    resumed.hisparse_host_import = True
+    allocated = manager.allocate_slots(
+        resumed,
+        num_new_tokens=1,
+        num_new_computed_tokens=num_local,
+        new_computed_blocks=completed,
+        num_external_computed_tokens=max_completion,
+    )
+
+    assert allocated is not None
+    source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
+    assert len(source) == len(indexer) == len(resident) == 4
+    assert len(hot) == 2
+    assert all(block.is_null for block in resident[:2])
+
+
 def allocate_external_prefix(
     manager: KVCacheManager, request: Request, num_tokens: int
 ) -> KVCacheBlocks | None:
@@ -258,7 +306,7 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
         is None
     )
     assert manager.hisparse_coordinator.has_pending_reclamation()
-    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
     assert spills
     spill_counts = {transfer.transfer_id: 1 for transfer in spills}
     manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
@@ -279,7 +327,7 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     first.num_computed_tokens = 128
     assert manager.allocate_slots(first, num_new_tokens=16) is None
     assert manager.hisparse_coordinator.has_pending_reclamation()
-    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
     assert spills
     spill_counts = {transfer.transfer_id: 1 for transfer in spills}
     manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
@@ -304,7 +352,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert len(blocks[2]) == 2
     assert blocks[3] == []
 
-    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
     assert len(spills) == 2
     assert all(spill.after_forward for spill in spills)
     spill_counts = {spill.transfer_id: 1 for spill in spills}
@@ -346,11 +394,11 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
     request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
     assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
-    first = coordinator.build_offload_command([]).page_transfers
+    first = coordinator.build_offload_command().page_transfers
     assert len(first) == 1
 
     coordinator.plan_prefix_materialization(request.request_id, len(tokens))
-    second = coordinator.build_offload_command([]).page_transfers
+    second = coordinator.build_offload_command().page_transfers
     assert len(second) == 1
     assert first[0].transfer_id != second[0].transfer_id
 
@@ -481,7 +529,7 @@ def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
 
     assert allocated is not None
     assert request.hisparse_host_import
-    assert request.hisparse_import_target is HiSparseImportTarget.HOST
+    assert request.hisparse_host_import_pending
     source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
@@ -516,15 +564,15 @@ def test_hisparse_host_import_decision_survives_capacity_retry():
 
     assert allocate_external_prefix(manager, first, len(tokens)) is not None
     assert not first.hisparse_host_import
-    assert first.hisparse_import_target is HiSparseImportTarget.DEVICE
+    assert not first.hisparse_host_import_pending
 
     assert allocate_external_prefix(manager, second, len(tokens)) is None
-    assert second.hisparse_import_target is HiSparseImportTarget.NONE
+    assert not second.hisparse_host_import_pending
 
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
     assert second.hisparse_host_import
-    assert second.hisparse_import_target is HiSparseImportTarget.HOST
+    assert second.hisparse_host_import_pending
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
     assert all(block.is_null for block in resident[:-1])
     assert not resident[-1].is_null

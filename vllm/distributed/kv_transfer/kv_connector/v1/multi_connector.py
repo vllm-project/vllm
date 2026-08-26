@@ -3,6 +3,7 @@
 import copy
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -235,6 +236,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
+    @cached_property
+    def prefix_completion_group_ids(self) -> frozenset[int]:
+        group_sets = [
+            connector.prefix_completion_group_ids
+            for connector in self._connectors
+            if connector.prefix_completion_group_ids
+        ]
+        if not group_sets:
+            return frozenset()
+        return group_sets[0].intersection(*group_sets[1:])
+
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
@@ -431,6 +443,26 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
+        return to_return
+
+    def get_num_new_matched_tokens_capped(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        max_num_new_tokens: int,
+    ) -> tuple[int | None, bool]:
+        to_return = (0, False)
+        for i, connector in enumerate(self._connectors):
+            if not connector.prefix_completion_group_ids:
+                continue
+            tokens, load_async = connector.get_num_new_matched_tokens_capped(
+                request, num_computed_tokens, max_num_new_tokens
+            )
+            if tokens is None:
+                return None, False
+            if to_return[0] == 0 and tokens > 0:
+                self._requests_to_connector[request.request_id] = i
+                to_return = (tokens, load_async)
         return to_return
 
     def update_state_after_alloc(

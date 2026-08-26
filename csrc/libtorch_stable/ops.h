@@ -677,16 +677,6 @@ void hisparse_backup_layers(torch::stable::Tensor const& hot_backing,
                             int64_t num_items, int64_t src_block_stride,
                             int64_t src_block_size, int64_t src_rows);
 
-void hisparse_backup_indexer(torch::stable::Tensor const& src_cache,
-                             torch::stable::Tensor const& src_indices,
-                             torch::stable::Tensor& host_cache,
-                             torch::stable::Tensor const& dst_slots,
-                             int64_t value_bytes);
-
-void hisparse_copy_blocks(torch::stable::Tensor const& src_cache,
-                          torch::stable::Tensor& dst_cache,
-                          torch::stable::Tensor const& src_block_ids,
-                          torch::stable::Tensor const& dst_block_ids);
 #endif  // !USE_ROCM
 
 // NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla

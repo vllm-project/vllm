@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import prometheus_client
 import pytest
 
 from tests.conftest import VllmRunner
@@ -27,11 +28,24 @@ def _num_hisparse_spills(runner: VllmRunner) -> int:
     return coordinator.next_spill_id
 
 
+def _offload_load_bytes() -> float:
+    return sum(
+        sample.value
+        for metric in prometheus_client.REGISTRY.collect()
+        if metric.name == "vllm:kv_offload_load_bytes"
+        for sample in metric.samples
+        if sample.name == "vllm:kv_offload_load_bytes_total"
+    )
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
+@pytest.mark.parametrize("kv_offloading_size", [None, 1], ids=["standalone", "offload"])
 def test_hisparse_spill_and_prefix_restore(
-    monkeypatch: pytest.MonkeyPatch, vllm_runner: type[VllmRunner]
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
+    kv_offloading_size: int | None,
 ):
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
@@ -61,6 +75,8 @@ def test_hisparse_spill_and_prefix_restore(
         max_num_batched_tokens=1024,
         max_num_seqs=4,
         num_gpu_blocks_override=56,
+        kv_offloading_size=kv_offloading_size,
+        disable_log_stats=False,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
         compilation_config={"cudagraph_capture_sizes": [1, 4]},
@@ -69,4 +85,10 @@ def test_hisparse_spill_and_prefix_restore(
         runner.generate_greedy(pressure, max_tokens=8)
 
         assert _num_hisparse_spills(runner) > 0
-        assert runner.generate_greedy([target], max_tokens=8) == expected
+        load_bytes = _offload_load_bytes()
+        actual = runner.generate_greedy([target], max_tokens=8)
+        runner.generate_greedy([[42]], max_tokens=1)
+
+        assert actual == expected
+        if kv_offloading_size is not None:
+            assert _offload_load_bytes() > load_bytes

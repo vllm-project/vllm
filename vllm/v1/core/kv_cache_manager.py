@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import HiSparseImportTarget, Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -351,6 +351,45 @@ class KVCacheManager:
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
+
+    def get_computed_blocks_for_group_completion(
+        self,
+        request: Request,
+        completion_group_ids: frozenset[int],
+    ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
+        """Preserve deeper local groups while a connector restores lagging ones."""
+        if not self.prefix_cache_lookup_enabled(request):
+            return self.empty_kv_cache_blocks, 0, 0, False, None
+
+        persistent_group_ids = {
+            group_id
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if group.enable_prefix_caching
+        }
+        completion_group_ids = completion_group_ids.intersection(persistent_group_ids)
+        fixed_group_ids = persistent_group_ids - completion_group_ids
+        if not completion_group_ids or not fixed_group_ids:
+            return *self.get_computed_blocks(request), False, None
+
+        coordinator = self.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, request.num_tokens - 1
+        )
+        local_hit = min(per_group_hits[group_id] for group_id in persistent_group_ids)
+        completion_boundary = min(
+            per_group_hits[group_id] for group_id in fixed_group_ids
+        )
+        if completion_boundary <= local_hit:
+            return *self.get_computed_blocks(request), False, None
+
+        blocks = self.truncate_group_completion_blocks(
+            self.create_kv_cache_blocks(computed),
+            local_hit,
+            completion_boundary,
+            completion_group_ids,
+        )
+        return blocks, local_hit, 0, True, completion_boundary - local_hit
 
     def _lacks_device_capacity(
         self,
@@ -721,14 +760,11 @@ class KVCacheManager:
             )
 
         request.hisparse_host_import = hisparse_host_import
-        if allow_hisparse_host_import and num_external_computed_tokens > 0:
-            request.hisparse_import_target = (
-                HiSparseImportTarget.HOST
-                if hisparse_host_import
-                else HiSparseImportTarget.DEVICE
-            )
-        else:
-            request.hisparse_import_target = HiSparseImportTarget.NONE
+        request.hisparse_host_import_pending = (
+            allow_hisparse_host_import
+            and num_external_computed_tokens > 0
+            and hisparse_host_import
+        )
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
@@ -1009,6 +1045,37 @@ class KVCacheManager:
                 num_blocks = min(num_blocks, len(group_blocks))
             else:
                 assert num_blocks <= len(group_blocks)
+            truncated.append(list(group_blocks[:num_blocks]))
+        return self.create_kv_cache_blocks(tuple(truncated))
+
+    def truncate_group_completion_blocks(
+        self,
+        blocks: KVCacheBlocks,
+        num_local_computed_tokens: int,
+        num_completed_tokens: int,
+        completion_group_ids: frozenset[int],
+    ) -> KVCacheBlocks:
+        """Keep connector-completed groups at the pre-transfer local boundary."""
+        truncated: list[list[KVCacheBlock]] = []
+        for group_id, (group_blocks, manager, group) in enumerate(
+            zip(
+                blocks.blocks,
+                self.coordinator.single_type_managers,
+                self.kv_cache_config.kv_cache_groups,
+                strict=True,
+            )
+        ):
+            if not group.enable_prefix_caching:
+                truncated.append(list(group_blocks))
+                continue
+            endpoint = (
+                num_local_computed_tokens
+                if group_id in completion_group_ids
+                else num_completed_tokens
+            )
+            assert endpoint % manager.block_size == 0
+            num_blocks = endpoint // manager.block_size
+            assert num_blocks <= len(group_blocks)
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
