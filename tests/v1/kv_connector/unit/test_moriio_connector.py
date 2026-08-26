@@ -734,8 +734,11 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _read_scheduler(kv_cache_config: KVCacheConfig) -> MoRIIOConnectorScheduler:
+def _read_scheduler(
+    kv_cache_config: KVCacheConfig, disable_hma: bool = False
+) -> MoRIIOConnectorScheduler:
     vllm_config = create_vllm_config(role="kv_producer", read_mode=True)
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
     with set_current_vllm_config(vllm_config):
         connector = MoRIIOConnector(
             vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
@@ -751,6 +754,28 @@ def test_hma_blocks_per_sw_two_groups():
     assert scheduler._is_hma_required is True
     # cdiv(32, 16) + 1 == 3 for the sliding-window group; 0 for full attention.
     assert scheduler.blocks_per_sw == [0, 3]
+
+
+@pytest.mark.parametrize(
+    "swa_enabled, disable_hma, expected_is_hma",
+    [
+        (True, False, True),  # sliding-window group present, HMA enabled
+        (True, True, False),  # sliding-window group present but HMA disabled
+        (False, False, False),  # full-attention only, HMA not needed
+    ],
+)
+def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
+    """_is_hma_required tracks both the KV cache groups and the
+    --disable-hybrid-kv-cache-manager flag. When HMA is off,
+    get_exchange_clipped_blocks must be a no-op."""
+    config = (
+        _make_hybrid_kv_cache_config() if swa_enabled else _make_test_kv_cache_config()
+    )
+    scheduler = _read_scheduler(config, disable_hma=disable_hma)
+    assert scheduler._is_hma_required is expected_is_hma
+    if not expected_is_hma:
+        blocks = [[1, 2, 3, 4, 5]]
+        assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
 def test_non_sliding_window_hybrid_is_rejected():
@@ -805,6 +830,54 @@ def test_get_exchange_clipped_blocks_clips_only_sw_group():
     clipped = scheduler.get_exchange_clipped_blocks([full, sw])
     assert clipped[0] == full
     assert clipped[1] == [22, 23, 24]
+
+
+def test_metadata_hma_block_ids_preserved_per_group():
+    """add_new_req stores per-group (BlockIds) block lists unchanged for both
+    the recv (read) and save (write) legs, so the hybrid group structure
+    reaches the worker intact."""
+    metadata = MoRIIOConnectorMetadata()
+
+    # Full-attention group (6 blocks) + a sliding-window group already clipped
+    # to its in-window tail (3 blocks).
+    fa_blocks = [0, 1, 2, 3, 4, 5]
+    sw_blocks = [10, 11, 12]
+    local_block_ids = [fa_blocks, sw_blocks]
+    remote_block_ids = [[100, 101, 102, 103, 104, 105], [200, 201, 202]]
+
+    base_params = {
+        "remote_engine_id": "remote-engine",
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 6301,
+        "remote_notify_port": 61005,
+        "remote_block_ids": remote_block_ids,
+    }
+
+    # Recv (read) leg: both local and remote ids stay per-group.
+    metadata.add_new_req(
+        request_id="recv-req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={**base_params, "transfer_id": "recv-req"},
+    )
+    recv_meta = metadata.reqs_to_recv["recv-req"]
+    assert recv_meta.local_block_ids == [fa_blocks, sw_blocks]
+    assert recv_meta.remote_block_ids == remote_block_ids
+
+    # Save (write) leg: the decode peer allocates its own blocks, so
+    # remote_block_ids may be empty; the local per-group structure is kept.
+    metadata.add_new_req(
+        request_id="save-req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            **base_params,
+            "transfer_id": "save-req",
+            "remote_block_ids": [],
+        },
+        write_mode=True,
+    )
+    save_meta = metadata.reqs_to_save["save-req"]
+    assert save_meta.local_block_ids == [fa_blocks, sw_blocks]
+    assert save_meta.remote_block_ids == []
 
 
 def test_match_local_to_remote_tails_per_group():
