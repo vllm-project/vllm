@@ -21,7 +21,9 @@ import pytest
 from pydantic import ValidationError
 
 from vllm.config.scheduler import SchedulerConfig
-from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
+)
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
