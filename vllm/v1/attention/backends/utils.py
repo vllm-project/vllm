@@ -8,6 +8,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Protocol,
+    cast,
 )
 
 import numpy as np
@@ -375,7 +376,10 @@ def get_num_attention_heads_from_layers(
     )
     if not attn_layers:
         return None
-    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    heads = {
+        cast(Any, getattr(layer, "impl", layer)).num_heads
+        for layer in attn_layers.values()
+    }
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."

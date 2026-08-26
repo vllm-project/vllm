@@ -69,6 +69,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -1197,6 +1198,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
 
         before_placeholder = {
             "image": "<|image@placeholder|>",
@@ -1223,12 +1225,17 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
                 )
             else:
                 num_tokens = int(grid_thw.prod()) // merge_length
-            return after_placeholder[modality] * num_tokens
+            placeholder_ids = cached_encode(
+                tokenizer, after_placeholder[modality], add_special_tokens=False
+            )
+            return placeholder_ids * num_tokens
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=before_placeholder[modality],
+                target=cached_encode(
+                    tokenizer, before_placeholder[modality], add_special_tokens=False
+                ),
                 replacement=partial(get_replacement_ernie45vl, modality=modality),
             )
             for modality in ("image", "video")
