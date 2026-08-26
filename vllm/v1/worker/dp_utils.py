@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
+from vllm.config.fault_tolerance import ft_tp_barrier_required
 from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -57,10 +58,9 @@ def _run_ar(
     if dead_dp_ranks := get_dp_group().dead_dp_ranks:
         # A dead rank's column stays 0 after the SUM allreduce; rewrite it
         # with aggregate-neutral values (0 is not neutral for min / all(==1)).
-        dead_cols = sorted(dead_dp_ranks)
-        tensor[0, dead_cols] = torch.iinfo(torch.int32).max
-        tensor[2, dead_cols] = 1
-        tensor[3, dead_cols] = torch.iinfo(torch.int32).max
+        int_max = torch.iinfo(tensor.dtype).max
+        reduction_identities = tensor.new_tensor([int_max, 0, 1, int_max])
+        tensor[:, sorted(dead_dp_ranks)] = reduction_identities[:, None]
     return tensor
 
 
@@ -149,10 +149,7 @@ def _synchronize_dp_ranks(
     # Per-step barrier over the TP cpu group: a faulted sibling stops
     # arriving, so survivors fail here on the host instead of leaving
     # an orphaned TP collective running on device.
-    if (
-        parallel_config.enable_fault_tolerance
-        and parallel_config.tensor_parallel_size > 1
-    ):
+    if ft_tp_barrier_required(parallel_config):
         dist.barrier(group=get_tp_group().cpu_group)
 
     # Only the NCCL path leaves `tensor` on device. With Gloo -- the default

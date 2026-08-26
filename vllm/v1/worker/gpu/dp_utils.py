@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.fault_tolerance import ft_tp_barrier_required
 from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -67,10 +68,10 @@ def sync_cudagraph_and_dp_padding(
     dist.all_reduce(tensor, group=group)
 
     if parallel_config.enable_fault_tolerance:
-        if parallel_config.tensor_parallel_size > 1:
-            # Per-step barrier over the TP cpu group: a faulted sibling stops
-            # arriving, so survivors fail here on the host instead of leaving
-            # an orphaned TP collective running on device.
+        # Per-step barrier over the TP cpu group: a faulted sibling stops
+        # arriving, so survivors fail here on the host instead of leaving
+        # an orphaned TP collective running on device.
+        if ft_tp_barrier_required(parallel_config):
             dist.barrier(group=get_tp_group().cpu_group)
 
         if dead_dp_ranks := get_dp_group().dead_dp_ranks:
