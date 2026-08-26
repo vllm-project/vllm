@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 import torch
 
@@ -1307,6 +1307,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
+    humming_input_schema: Any | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1357,8 +1358,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             convert_to_humming_moe_kernel_format,
         )
 
+        # A caller that knows the checkpoint's activation scheme passes a
+        # HummingInputSchema; otherwise the conversion falls back to
+        # VLLM_HUMMING_INPUT_QUANT_CONFIG.
         convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "mxfp4"}
+            layer,
+            quant_config={"quant_method": "mxfp4"},
+            input_schema=humming_input_schema,
         )
         return (
             layer.w13_weight,
