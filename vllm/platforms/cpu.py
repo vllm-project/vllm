@@ -31,24 +31,19 @@ else:
     VllmConfig = None
 
 
-def _cpu_mamba_backend(model_config) -> str:
+def _cpu_mamba_backend(vllm_config: VllmConfig) -> str:
     """Return the CPU state backend selected by the model configuration."""
+    model_config = vllm_config.model_config
     if model_config is None:
         return "none"
 
     hf_config = getattr(model_config, "hf_text_config", None)
     model_type = str(getattr(hf_config, "model_type", "")).lower()
     architecture = str(getattr(model_config, "architecture", "")).lower()
-    supported_gdn = (
-        "qwen3_5" in model_type
-        or "qwen3_next" in model_type
-        or "olmo_hybrid" in model_type
-        or "qwen3_5" in architecture
-        or "qwen3next" in architecture
-        or "olmo_hybrid" in architecture
+    layer_types = getattr(hf_config, "layer_types", None)
+    has_linear_attention = isinstance(layer_types, (list, tuple)) and (
+        "linear_attention" in layer_types
     )
-    layer_types = getattr(hf_config, "layer_types", None) or ()
-    has_linear_attention = "linear_attention" in layer_types
 
     try:
         has_inner_state = bool(model_config.has_inner_state)
@@ -57,9 +52,38 @@ def _cpu_mamba_backend(model_config) -> str:
 
     if not (has_inner_state or has_linear_attention):
         return "none"
-    if supported_gdn and has_linear_attention:
+
+    fallback_backend = model_type or architecture or "unknown"
+    if not has_linear_attention:
+        return fallback_backend
+
+    try:
+        model_cls, _ = model_config.registry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+    except Exception:
+        return fallback_backend
+
+    try:
+        state_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    except Exception:
+        return fallback_backend
+
+    if not isinstance(state_dtypes, tuple) or len(state_dtypes) != 2:
+        return fallback_backend
+
+    if vllm_config.cache_config.mamba_ssm_cache_dtype == "float16":
+        cache_dtype = torch.float16
+    elif vllm_config.cache_config.mamba_ssm_cache_dtype == "bfloat16":
+        cache_dtype = torch.bfloat16
+    else:
+        return fallback_backend
+
+    if state_dtypes[1] == cache_dtype:
         return "gdn"
-    return model_type or architecture or "unknown"
+
+    return fallback_backend
 
 
 def get_max_threads(pid=0):
@@ -217,7 +241,7 @@ class CpuPlatform(Platform):
             torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
-            mamba_backend = _cpu_mamba_backend(model_config)
+            mamba_backend = _cpu_mamba_backend(vllm_config)
             if (
                 cache_config.mamba_ssm_cache_dtype in ("float16", "bfloat16")
                 and mamba_backend == "gdn"

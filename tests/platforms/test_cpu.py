@@ -4,9 +4,31 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.platforms.cpu import CpuPlatform
+
+
+class _FakeModel:
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls, vllm_config: VllmConfig
+    ) -> tuple[torch.dtype, torch.dtype]:
+        state_dtype = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }.get(vllm_config.cache_config.mamba_ssm_cache_dtype, torch.float32)
+        return torch.float32, state_dtype
+
+
+class _FakeRegistry:
+    @staticmethod
+    def resolve_model_cls(
+        architecture: str,
+        model_config: SimpleNamespace,
+    ) -> tuple[type[_FakeModel], str]:
+        return _FakeModel, architecture
 
 
 def _cpu_config(
@@ -26,6 +48,7 @@ def _cpu_config(
             model_type=model_type,
             layer_types=layer_types,
         ),
+        registry=_FakeRegistry,
     )
     config = VllmConfig(cache_config=cache_config)
     config.model_config = model_config
