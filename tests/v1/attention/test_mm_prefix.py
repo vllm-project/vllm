@@ -671,15 +671,40 @@ def test_flashinfer_mm_prefix_combination_rejections(monkeypatch):
         use_sparse=False,
         device_capability=DeviceCapability(8, 0),
     )
-    assert "NVFP4" in FlashInferBackend.supports_combination(
+    # Plain NVFP4 is served by the fa2 kernels on pre-SM100 devices, where the
+    # variant reads the packed cache through its scale-factor tensors.
+    assert (
+        FlashInferBackend.supports_combination(
+            head_size=128,
+            block_size=16,
+            kv_cache_dtype="nvfp4",
+            has_sink=False,
+            use_mm_prefix=True,
+            **common,
+        )
+        is None
+    )
+    assert probed[-1] == (torch.bfloat16, torch.uint8, torch.bfloat16, 128)
+    # On SM100 the same dtype is served by trtllm-gen, which cannot run a
+    # custom attention variant.
+    assert "SM100" in FlashInferBackend.supports_combination(
         head_size=128,
         block_size=16,
         kv_cache_dtype="nvfp4",
         has_sink=False,
         use_mm_prefix=True,
+        **{**common, "device_capability": DeviceCapability(10, 0)},
+    )
+    # The store-time scale-search variants exist only in trtllm-gen.
+    assert "nvfp4_4over6" in FlashInferBackend.supports_combination(
+        head_size=128,
+        block_size=16,
+        kv_cache_dtype="nvfp4_4over6",
+        has_sink=False,
+        use_mm_prefix=True,
         **common,
     )
-    assert "FP8" in FlashInferBackend.supports_combination(
+    assert "fp8" in FlashInferBackend.supports_combination(
         head_size=128,
         block_size=16,
         kv_cache_dtype="fp8",

@@ -111,11 +111,6 @@ logger = init_logger(__name__)
 # ``MaskMode::kCustom`` through ``variant_owns_mask`` so the FA2 kernel
 # evaluates this hook on every KV tile; under kNone interior tiles would
 # skip it entirely.
-_KV_CACHE_TORCH_DTYPES: dict = {
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-}
-
 MM_PREFIX_VARIANT_NAME = "VllmMMPrefixAttention"
 # Bump when the declaration changes: the URI keyed off this version is
 # FlashInfer's JIT cache key, and a stale cached module would otherwise be
@@ -164,6 +159,17 @@ struct VllmMMPrefixAttention : AttentionVariantBase {
 """
 
 
+def _mm_prefix_variant_kv_is_packed_fp4(dtype_kv: torch.dtype) -> bool:
+    """Whether this KV dtype is FlashInfer's packed NVFP4 storage.
+
+    ``get_dtype_for_flashinfer`` maps every NVFP4 cache dtype to ``uint8``,
+    which the customize-module generator in turn maps to
+    ``__nv_fp4x2_e2m1``; the kernel then needs the per-block scale factors to
+    dequantize, so the variant has to declare them as additional tensors.
+    """
+    return dtype_kv == FP4_DTYPE
+
+
 def _mm_prefix_jit_args(
     dtype_q: torch.dtype, dtype_kv: torch.dtype, dtype_o: torch.dtype, head_dim: int
 ) -> list:
@@ -174,6 +180,13 @@ def _mm_prefix_jit_args(
         f"vllm_mm_prefix_{_short(dtype_q)}_{_short(dtype_kv)}_{_short(dtype_o)}"
         f"_fa2_hd{head_dim}_v{MM_PREFIX_VARIANT_VERSION}"
     )
+    tensor_names = ["mm_q_ranges"]
+    tensor_dtypes = ["int32_t"]
+    if _mm_prefix_variant_kv_is_packed_fp4(dtype_kv):
+        # These exact names make the generator emit the scale-factor stride
+        # setters (GetFP4ScaleStrides) the fp4 KV load path reads.
+        tensor_names += ["maybe_k_cache_sf", "maybe_v_cache_sf"]
+        tensor_dtypes += ["uint8_t", "uint8_t"]
     return [
         uri,
         dtype_q,
@@ -182,8 +195,8 @@ def _mm_prefix_jit_args(
         torch.int32,  # idtype
         head_dim,  # head_dim_qk
         head_dim,  # head_dim_vo
-        ["mm_q_ranges"],
-        ["int32_t"],
+        tensor_names,
+        tensor_dtypes,
         ["mm_sw_left", "mm_clamp_sw", "sm_scale"],
         ["double", "double", "double"],
         MM_PREFIX_VARIANT_NAME,
@@ -614,13 +627,70 @@ class FlashInferBackend(AttentionBackend):
             return False
         model_config = vllm_config.model_config
         cache_dtype = vllm_config.cache_config.cache_dtype
-        if cache_dtype not in ("auto", "float16", "bfloat16"):
-            # Quantized KV needs either the trtllm-gen path (nvfp4) or fp8
-            # kernels; the fa2 JIT variant covers neither.
+        if cls._mm_prefix_kv_cache_reason(cache_dtype) is not None:
             return False
         head_dim = model_config.get_head_size()
         dtype = model_config.dtype
-        return _mm_prefix_jit_available(dtype, dtype, dtype, head_dim)
+        kv_dtype = cls._mm_prefix_variant_kv_dtype(cache_dtype, dtype)
+        return _mm_prefix_jit_available(dtype, kv_dtype, dtype, head_dim)
+
+    @classmethod
+    def _mm_prefix_variant_kv_dtype(
+        cls, cache_dtype: "CacheDType | None", model_dtype: torch.dtype
+    ) -> torch.dtype:
+        """KV dtype the mm-prefix variant is compiled for.
+
+        An explicit unquantized cache dtype overrides the model dtype, so the
+        variant is built for the dtype the kernel will actually read.
+        """
+        if cache_dtype is None or cache_dtype == "auto":
+            return model_dtype
+        unquantized = {"float16": torch.float16, "bfloat16": torch.bfloat16}
+        if cache_dtype in unquantized:
+            return unquantized[cache_dtype]
+        return cls.get_dtype_for_flashinfer(cache_dtype)
+
+    @classmethod
+    def _mm_prefix_kv_cache_reason(
+        cls,
+        cache_dtype: "CacheDType | None",
+        device_capability: "DeviceCapability | None" = None,
+    ) -> str | None:
+        """Why this KV cache dtype cannot serve mm-prefix, or None.
+
+        The mask-owning variant runs on the fa2 prefill kernels. Those read a
+        packed NVFP4 cache through the scale-factor tensors, so plain
+        ``nvfp4`` is fine wherever the fa2 path serves it; NVFP4 on SM100 is
+        served by the trtllm-gen kernels instead, which cannot run a custom
+        attention variant. The store-time scale-search variants
+        (e.g. ``nvfp4_4over6``) exist only in the trtllm-gen kernels.
+        """
+        if cache_dtype is None or cache_dtype in ("auto", "float16", "bfloat16"):
+            return None
+        if cache_dtype.startswith("nvfp4"):
+            if cache_dtype != "nvfp4":
+                return (
+                    f"mm_prefix is not supported with {cache_dtype}: the "
+                    "store-time scale search is implemented only in the "
+                    "trtllm-gen kernels, which cannot run the mm-prefix "
+                    "attention variant"
+                )
+            is_sm100 = (
+                device_capability.major == 10
+                if device_capability is not None
+                else current_platform.is_device_capability_family(100)
+            )
+            if is_sm100:
+                return (
+                    "mm_prefix is not supported with an NVFP4 KV cache on "
+                    "SM100: NVFP4 is served there by the trtllm-gen kernels, "
+                    "which cannot run the mm-prefix attention variant"
+                )
+            return None
+        return (
+            f"mm_prefix is not supported with a {cache_dtype} KV cache on the "
+            "fa2 attention-variant path"
+        )
 
     @classmethod
     def validate_configuration(
@@ -686,17 +756,11 @@ class FlashInferBackend(AttentionBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         if use_mm_prefix:
-            if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
-                return (
-                    "mm_prefix is not supported with an NVFP4 KV cache: NVFP4 "
-                    "requires the trtllm-gen kernels, which cannot run the "
-                    "mm-prefix JIT variant"
-                )
-            if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
-                return (
-                    "mm_prefix is not supported with an FP8 KV cache on the "
-                    "fa2 JIT variant path"
-                )
+            kv_reason = cls._mm_prefix_kv_cache_reason(
+                kv_cache_dtype, device_capability
+            )
+            if kv_reason is not None:
+                return kv_reason
             if has_sink:
                 return "mm_prefix is not supported with sinks"
             if block_size is not None and block_size >= 128:
@@ -708,7 +772,7 @@ class FlashInferBackend(AttentionBackend):
             # and dtypes: hybrid models select their backend per group, and a
             # variant that only compiled for the global head size would first
             # be built (and possibly fail) at runtime otherwise.
-            kv_torch_dtype = _KV_CACHE_TORCH_DTYPES.get(kv_cache_dtype, dtype)
+            kv_torch_dtype = cls._mm_prefix_variant_kv_dtype(kv_cache_dtype, dtype)
             if not _mm_prefix_jit_available(dtype, kv_torch_dtype, dtype, head_size):
                 return (
                     "mm_prefix requires the FlashInfer mm-prefix JIT variant, "
@@ -1507,7 +1571,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         FlashInfer's process-level JIT cache.
         """
         if self._mm_prefill_wrapper is None:
-            assert not self.use_dcp and not self.is_kvcache_nvfp4
+            assert not self.use_dcp
             dtype = self.model_config.dtype
             self._mm_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
@@ -2547,10 +2611,29 @@ class FlashInferImpl(AttentionImpl):
                         if getattr(layer, "mm_prefix_clamp_sliding_window", False)
                         else 0
                     )
+                    # A packed NVFP4 cache is handed over as the fp4 data
+                    # views plus the per-block scale factors the variant
+                    # declares; other dtypes pass the cache as-is. The
+                    # additional tensors are positional, in declaration
+                    # order, ahead of the scalars.
+                    if self.is_kvcache_nvfp4:
+                        assert nvfp4_kv_data is not None
+                        assert nvfp4_kv_block_scales is not None
+                        mm_kv_cache: (
+                            torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+                        ) = nvfp4_kv_data
+                        mm_extra_tensors: tuple[torch.Tensor, ...] = (
+                            nvfp4_kv_block_scales[0],
+                            nvfp4_kv_block_scales[1],
+                        )
+                    else:
+                        mm_kv_cache = kv_cache_tuple
+                        mm_extra_tensors = ()
                     mm_wrapper.run(
                         prefill_query,
-                        kv_cache_tuple,
+                        mm_kv_cache,
                         mm_prefill_ranges,
+                        *mm_extra_tensors,
                         float(sw_n),
                         float(clamp_sw),
                         # The wrapper folds q/k scales into sm_scale only on
