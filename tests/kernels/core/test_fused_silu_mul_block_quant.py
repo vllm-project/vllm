@@ -201,13 +201,11 @@ def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
     # hidden_size) exceeds INT32_MAX.
     num_tokens = (2**31 - 1) // (2 * hidden_size) + 2
 
-    x = torch.randn(
-        num_tokens, hidden_size * 2, dtype=torch.bfloat16, device="cuda"
-    )
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=torch.bfloat16, device="cuda")
     out, scales = ops.silu_and_mul_per_block_quant(
         x, group_size, quant_dtype, None, False
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     expected_out, expected_scales = ops.silu_and_mul_per_block_quant(
         x[-1:].contiguous(), group_size, quant_dtype, None, False
