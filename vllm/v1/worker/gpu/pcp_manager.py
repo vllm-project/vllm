@@ -15,10 +15,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_sampled_and_draft_tokens,
-    prepare_pos_seq_lens,
 )
-from vllm.v1.worker.gpu.states import RequestState
 
 logger = init_logger(__name__)
 
@@ -48,7 +45,6 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
-        req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -64,7 +60,8 @@ class PCPManager:
         self.cp_interleave = cp_interleave
 
         self._global_batch: InputBatch | None = None
-        self._req_states = req_states
+        self._local_batch: InputBatch | None = None
+        self._local_gather_idx: torch.Tensor | None = None
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
@@ -75,11 +72,6 @@ class PCPManager:
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
             if max_num_local_reqs is not None and max_num_tokens is not None
-            else None
-        )
-        self._local_req_idx = (
-            torch.arange(max_num_local_reqs, dtype=torch.int32, device=device)
-            if max_num_local_reqs is not None
             else None
         )
         self._local_block_tables: tuple[torch.Tensor, ...] | None
@@ -144,10 +136,20 @@ class PCPManager:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "MRV2 PCP does not support speculative decoding yet."
-            )
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if (
+                speculative_config.method != "mtp"
+                or speculative_config.use_multi_module_mtp()
+            ):
+                raise NotImplementedError(
+                    "MRV2 PCP only supports single-module MTP speculative decoding."
+                )
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "MRV2 PCP with MTP does not support CUDA graphs yet. "
+                    "Set -cc.cudagraph_mode=NONE."
+                )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         if (
             is_sparse_mla
@@ -317,12 +319,8 @@ class PCPManager:
         return segments_by_rank, per_rank_num_tokens
 
     def partition_batch(self, input_batch: InputBatch) -> InputBatch:
-        assert self._req_states is not None
         assert self._input_buffers is not None
-        req_states = self._req_states
         input_buffers = self._input_buffers
-        if input_batch.num_draft_tokens > 0:
-            raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
 
         global_batch = input_batch
         self._global_batch = global_batch
@@ -414,11 +412,20 @@ class PCPManager:
         local_gather_idx = self._padded_gather_idx[
             rank_token_start : rank_token_start + num_local_tokens_padded
         ]
+        self._local_gather_idx = local_gather_idx
         torch.index_select(
             global_batch.input_ids,
             0,
             local_gather_idx,
             out=input_buffers.input_ids[:num_local_tokens_padded],
+        )
+        # Keep the GPU request-state cursor materialized by prepare_inputs().
+        # The CPU cursor can lag after speculative rejection.
+        torch.index_select(
+            global_batch.positions,
+            0,
+            local_gather_idx,
+            out=input_buffers.positions[:num_local_tokens_padded],
         )
 
         local_query_start_loc_np = np.empty(
@@ -434,17 +441,16 @@ class PCPManager:
         local_to_global_req_idx = async_copy_to_gpu(
             local_to_global_req_idx_np, device=self.device
         )
-        local_start_pos = async_copy_to_gpu(local_start_pos_np, device=self.device)
-
-        assert self._local_req_idx is not None
-        prepare_pos_seq_lens(
-            self._local_req_idx[:num_local_reqs],
-            local_query_start_loc,
-            local_start_pos,
-            input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
-        )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
+        if num_local_tokens > 0:
+            local_end_positions = torch.index_select(
+                input_buffers.positions,
+                0,
+                local_query_start_loc[1:] - 1,
+            )
+            seq_lens.copy_(local_end_positions + 1)
+        else:
+            seq_lens.zero_()
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
@@ -467,18 +473,9 @@ class PCPManager:
             cu_num_logits = torch.zeros(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
-        logits_indices = combine_sampled_and_draft_tokens(
-            input_buffers.input_ids,
-            local_to_global_req_idx,
-            req_states.last_sampled_tokens,
-            local_query_start_loc,
-            seq_lens,
-            req_states.prefill_len.gpu,
-            req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            1,
-        )
+        # Local logits are never sampled. The complete hidden-state tensor is
+        # restored first and sampled with the untouched global InputBatch.
+        logits_indices = local_query_start_loc[1:] - 1
 
         local_prefill_len_np = global_batch.prefill_len_np[
             local_to_global_batch_req_idx_np
@@ -504,7 +501,7 @@ class PCPManager:
             )
             dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_local_reqs]
 
-        return replace(
+        local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
@@ -541,6 +538,8 @@ class PCPManager:
             cu_num_logits_np=cu_num_logits_np,
             prompt_lens=None,
         )
+        self._local_batch = local_batch
+        return local_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -611,6 +610,40 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
+    def local_batch_for(self, global_batch: InputBatch) -> InputBatch | None:
+        """Return this step's local view, never a stale view from an older step."""
+        if global_batch is not self._global_batch:
+            return None
+        return self._local_batch
+
+    def localize_tensor(
+        self,
+        tensor: torch.Tensor,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._local_gather_idx is not None
+        num_local_tokens = self._local_gather_idx.shape[0]
+        torch.index_select(
+            tensor,
+            0,
+            self._local_gather_idx,
+            out=out[:num_local_tokens],
+        )
+        return out[:num_local_tokens]
+
+    def localize_input_ids_for_draft(
+        self,
+        global_input_ids: torch.Tensor,
+        local_batch: InputBatch,
+    ) -> torch.Tensor:
+        """Reuse the consumed target-input buffer for rank-local draft IDs.
+
+        The target forward has finished, no supported post-forward path reads
+        these local IDs, and partition_batch rematerializes them next step.
+        """
+        assert local_batch is self._local_batch
+        return self.localize_tensor(global_input_ids, local_batch.input_ids)
+
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
@@ -653,7 +686,6 @@ def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
-    req_states: RequestState,
     block_tables: BlockTables,
     cls: type[PCPManager] = PCPManager,
 ) -> PCPManager | None:
@@ -672,7 +704,6 @@ def maybe_build_pcp_manager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
-        req_states=req_states,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         block_tables=block_tables,

@@ -239,6 +239,7 @@ class DraftModelSpeculator(BaseSpeculator):
         causal: bool | Mapping[int, bool] = True,
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        is_prefilling: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
@@ -294,6 +295,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            is_prefilling=is_prefilling,
         )
         return attn_metadata
 
