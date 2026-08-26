@@ -386,37 +386,16 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
-        # gfx950-dsr1-opt prototype: route dense blockscale GEMMs through the
-        # CK bpreshuffle backend (ATOM's path). Microbench on MI355X / AITER
-        # eb84cb022 shows it beats the triton path in 28/30 DSR1 shape/M
-        # configs (+20..55% typical, up to +144%); trace-level it accounts for
-        # ~74% of the 8K-prefill compute gap vs ATOM. Env-gated while a
-        # prototype; requires weights preshuffled at load (see
-        # process_weights_after_loading below).
         bpre_requested = (
             not current_platform.is_fp8_fnuz()
             and not _on_gfx1250
             and os.environ.get("VLLM_ROCM_USE_AITER_BPRESHUFFLE_BLOCKSCALE", "0")
             == "1"
         )
-        # Tuned-shape gate (same idea as is_triton_gemm_w8a8_tuned): only
-        # commit a layer to the preshuffled layout when AITER's bpreshuffle
-        # table covers its (N, K) on this GPU; otherwise keep the triton/CK
-        # path, whose own tables do cover it.
         self.use_bpreshuffle = (
             bpre_requested and rocm_aiter_ops.is_bpreshuffle_blockscale_gemm_tuned(n, k)
         )
-        if bpre_requested and not self.use_bpreshuffle:
-            logger.info_once(
-                "AITER b-preshuffle blockscale GEMM requested but (N=%d, K=%d) has "
-                "no tuned rows for this GPU; using the %s path for this shape.",
-                n,
-                k,
-                "triton" if self.use_triton else "plain CK",
-                scope="global",
-            )
-        # Set per-layer in process_weights_after_loading: True only once the
-        # layer's weight has actually been preshuffled.
+        # Set per-layer in process_weights_after_loading
         self.bpre_shuffled = False
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -431,14 +410,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
 
         if self.use_bpreshuffle:
-            # NOTE: consumers that need the plain row-major weight back (MLA
-            # weight absorption dequantizes kv_b_proj.weight after this runs)
-            # go through get_and_maybe_dequant_weights(), which undoes the
-            # shuffle via rocm_aiter_ops.unshuffle_weight when the layer's
-            # kernel reports bpre_shuffled. Every layer can therefore be
-            # shuffled here.
-            # One-time (16,16) tile preshuffle into the layout the CK
-            # b_preshuffle GEMM consumes; shape [N, K] is preserved.
             w = params.weight
             replace_parameter(
                 layer,
@@ -449,10 +420,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ),
             )
             self.bpre_shuffled = True
-            # Have this layer's activation-scale producer emit the kernel's
-            # column-major layout directly, so the GEMM op needs no transpose
-            # copy (the compile-time rms/allreduce/act quant fusions carry the
-            # flag through to the fused producer ops).
+            # Ensure scaler producer ops emit the column-major layout
             self.quant_fp8.transpose_scale = True
 
     @classmethod

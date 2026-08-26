@@ -171,18 +171,33 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 @functools.cache
 def _load_gemm_tuned_configs(
-    q_dtype_w: torch.dtype, csv_path: str
+    q_dtype_w: torch.dtype | None, csv_path: str, match_device: bool = False
 ) -> set[tuple[int, int, int]]:
     try:
         df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        if q_dtype_w is not None and "q_dtype_w" in df.columns:
+            df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        if match_device:
+            from aiter.jit.utils.chip_info import get_cu_num
+            from aiter.jit.utils.chip_info import get_gfx_runtime as get_gfx
+
+            if "gfx" in df.columns:
+                df = df[df["gfx"] == get_gfx()]
+            if "cu_num" in df.columns:
+                df = df[df["cu_num"].astype(int) == int(get_cu_num())]
         return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
     except Exception:
         return set()
 
 
-def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+def _check_kernel_tuned(
+    N: int,
+    K: int,
+    q_dtype_w: torch.dtype | None,
+    csv_path: str,
+    match_device: bool = False,
+) -> bool:
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path, match_device)
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -794,12 +809,7 @@ def _rocm_aiter_gemm_a8w8_blockscale_bpreshuffle_impl(
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_blockscale_bpreshuffle
 
-    # B preshuffled (shuffle_weight (16,16)). The kernel reads the activation
-    # group scales column-major: shape [M, G], contiguous, holding the bytes of
-    # As.T (the same layout AITER's quant producers emit with
-    # transpose_scale=True). If the producer already emitted that layout the
-    # caller passes scale_transposed=True and As goes straight through;
-    # otherwise convert here, inside the op impl (torch.compile-safe).
+    # B preshuffled (shuffle_weight (16,16))
     if not scale_transposed:
         m, g = As.shape
         As = As.transpose(0, 1).contiguous().view(m, g)
@@ -1001,10 +1011,6 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     assert result is not None
     out, res_out, scale = result[0], result[1], result[2]
     if transpose_scale:
-        # The pinned AITER (v0.1.19) has no in-kernel transposed-scale mode for
-        # this launcher; emit the column-major-bytes layout here (one small
-        # copy per layer). Switch to the launcher's transpose_scale flag once
-        # the AITER pin includes it.
         scale = scale.transpose(0, 1).contiguous().view(scale.shape)
     return out, res_out, scale
 
@@ -1336,8 +1342,6 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
         dtype_quant=FP8_DTYPE,
     )
     if transpose_scale:
-        # aiter's act+quant kernel has no transposed-scale mode; emit the
-        # column-major-bytes layout here (dense-MLP layers only).
         scale = scale.transpose(0, 1).contiguous().view(scale.shape)
     return out, scale
 
@@ -3133,34 +3137,16 @@ class rocm_aiter_ops:
         ]
 
     @staticmethod
-    @functools.cache
     def is_bpreshuffle_blockscale_gemm_tuned(n: int, k: int) -> bool:
         """Whether AITER's merged a8w8_blockscale_bpreshuffle tuned table has
-        rows for this (N, K) on the current GPU (gfx + CU count). Mirrors
-        is_triton_gemm_w8a8_tuned: untuned shapes would fall to the C++
-        default-heuristic instance, which can lose to the Triton path at small M,
-        so the b-preshuffle backend is only selected for covered shapes."""
-        try:
-            from aiter import AITER_CONFIGS
-            from aiter.jit.utils.chip_info import get_cu_num
-            from aiter.jit.utils.chip_info import get_gfx_runtime as get_gfx
+        rows for this (N, K) on the current GPU. Mirrors is_triton_gemm_w8a8_tuned:
+        untuned shapes would fall to the C++ default-heuristic instance, which can
+        lose to the Triton path at small M, so the b-preshuffle backend is only
+        selected for covered shapes."""
+        from aiter import AITER_CONFIGS
 
-            csv_path = AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-            df = pd.read_csv(csv_path)
-            if "gfx" in df.columns:
-                df = df[df["gfx"] == get_gfx()]
-            if "cu_num" in df.columns:
-                df = df[df["cu_num"].astype(int) == int(get_cu_num())]
-            return bool(((df["N"].astype(int) == n) & (df["K"].astype(int) == k)).any())
-        except Exception as e:  # noqa: BLE001
-            logger.warning_once(
-                "Could not read the AITER bpreshuffle tuned table (%r); treating "
-                "(N=%d, K=%d) as untuned.",
-                e,
-                n,
-                k,
-            )
-            return False
+        csv_path = AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        return _check_kernel_tuned(n, k, None, csv_path, match_device=True)
 
     @staticmethod
     def is_shuffled_per_token_w8a8_gemm_tuned(
@@ -3192,11 +3178,7 @@ class rocm_aiter_ops:
     def unshuffle_weight(
         tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
-        """Exact inverse of aiter.ops.shuffle.shuffle_weight for a 2-D [N, K]
-        weight (the layout the CK b-preshuffle GEMMs consume). Used by
-        consumers that need the plain row-major weight back (e.g. MLA weight
-        absorption dequantizing kv_b_proj) after a kernel preshuffled it in
-        place. Pure torch; a one-time copy."""
+        # May need the row-major weight back after a kernel preshuffled it in-place
         assert tensor.ndim == 2, "unshuffle_weight expects a 2-D [N, K] weight"
         n, k = tensor.shape
         in_lane, ik = layout
