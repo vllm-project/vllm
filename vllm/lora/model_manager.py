@@ -13,6 +13,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LoRAMapping,
@@ -120,6 +121,10 @@ class LoRAModelManager:
         self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
+
+        self.supported_modules_to_save = (
+            {"score", "classifier"} if self.is_pooling_model else set()
+        )
 
         # When the engine is started with enable_mixed_moe_lora_format=True
         # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
@@ -517,6 +522,17 @@ class LoRAModelManager:
                         self.lora_config,
                         self.model.config,
                     ),
+                )
+
+            if module_name in self.supported_modules_to_save:
+                new_module = ClassificationHeadWithLoRA(module)
+                new_module.create_lora_weights(
+                    self.lora_slots, self.lora_config, self.model.config
+                )
+                new_module = replace_submodule(
+                    self.model,
+                    module_name,
+                    new_module,
                 )
 
             # Some matched modules can be unsupported by LoRA wrappers
