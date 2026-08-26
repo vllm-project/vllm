@@ -416,11 +416,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
-        # the standard prefill path.
+        # the standard prefill path. Head counts that are not a multiple of 16
+        # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
+        # is the same head-count predicate the decode path uses.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
-            and (self.num_heads % 16 == 0 or 0 < self.num_heads < 16)
+            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -480,11 +482,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         # After kv_b_proj decompression, K has num_heads heads (same as Q).
         # So gqa_ratio=1 and num_head_k=num_heads for the PS kernel.
-        # Non-divisor head counts (e.g. K3's 12/rank at TP8) are padded to 16 in
-        # _mla_fp8_prefill_attn; build the PS metadata for the padded head count so
-        # the work/reduce maps match. This also lowers the partial-tile count:
-        # gcd(16, cu_num=256)=16 (~960 tiles) vs gcd(12,256)=4 (~4032), saving ~6 GiB.
-        num_head_k = max(16, self.num_heads)
+        # Head counts that are not a multiple of 16 (K3: 12/rank at TP8,
+        # 24/rank at TP4) are replicate-padded up to one in
+        # _mla_fp8_prefill_attn; build the PS metadata for that padded head
+        # count so the work/reduce maps match what the kernel is handed. This
+        # also lowers the partial-tile count: gcd(16, cu_num=256)=16
+        # (~960 tiles) vs gcd(12,256)=4 (~4032), saving ~6 GiB.
+        num_head_k = AiterMLAHelper.get_fp8_prefill_num_heads(self.num_heads)
         v_head_dim = self.mla_dims.v_head_dim
         # gqa_ratio = 1
         # qlen_granularity = _FP8_PREFILL_TILE_Q // max(gqa_ratio, 1)
@@ -586,11 +590,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kv_indptr_cpu = qo_indptr_cpu.clone()
         seq_lens_cpu = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(torch.int32)
 
-        # Non-divisor head counts (e.g. K3's 12/rank at TP8) are padded to 16 in
-        # _mla_fp8_prefill_attn; build the PS metadata for the padded head count so
-        # the work/reduce maps match. This also lowers the partial-tile count:
-        # gcd(16, cu_num=256)=16 (~960 tiles) vs gcd(12,256)=4 (~4032), saving ~6 GiB.
-        num_head_k = max(16, self.num_heads)
+        # Head counts that are not a multiple of 16 (K3: 12/rank at TP8,
+        # 24/rank at TP4) are replicate-padded up to one in
+        # _mla_fp8_prefill_attn; build the PS metadata for that padded head
+        # count so the work/reduce maps match what the kernel is handed. This
+        # also lowers the partial-tile count: gcd(16, cu_num=256)=16
+        # (~960 tiles) vs gcd(12,256)=4 (~4032), saving ~6 GiB.
+        num_head_k = AiterMLAHelper.get_fp8_prefill_num_heads(self.num_heads)
         # gqa_ratio = 1
         # qhead_granularity = max(gqa_ratio, 1)
         # qlen_granularity = _FP8_PREFILL_TILE_Q // qhead_granularity
@@ -951,8 +957,31 @@ class AiterMLAHelper:
         return -(-num_heads // m) * m
 
     @staticmethod
-    def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
-        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+    def get_fp8_prefill_num_heads(num_heads: int) -> int:
+        """Head count the FP8 PS asm prefill runs at: the next multiple of 16.
+
+        Deliberately *not* ``get_actual_mla_num_heads``. That one carves out
+        native H24 when ``_aiter_mla_native_h24_supported()``, which probes the
+        asm *decode* reducer and metadata. The prefill is a different kernel
+        pair (``mla_prefill_ps_asm_fwd`` + ``mla_reduce_v1``) with no such
+        probe, so 24 heads pad to 32 here even on a native-H24 build.
+
+        The PS metadata in ``_init_fp8_prefill_ps_buffers``/``build()`` must be
+        sized with this same function, or the work/reduce maps describe a
+        different head count than the kernel is handed.
+        """
+        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
+        return -(-num_heads // m) * m
+
+    @staticmethod
+    def get_mla_padded_q(
+        num_heads: int, q: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        m = (
+            target_heads
+            if target_heads is not None
+            else AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        )
         if num_heads == m:
             return q
         if m % num_heads == 0:
@@ -1061,12 +1090,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
-        # KV cache is FP8, and supports non-divisor small head counts via pad-to-16.
+        # KV cache is FP8. Head counts that are not a multiple of 16 are
+        # replicate-padded up to one (see _mla_fp8_prefill_attn).
         from vllm.utils.torch_utils import is_quantized_kv_cache
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
-            and (self.num_heads % 16 == 0 or 0 < self.num_heads < 16)
+            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
         )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
@@ -1109,19 +1139,25 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         fp8_dtype = current_platform.fp8_dtype()
         total_q = q.shape[0]
-        # PS asm prefill + mla_reduce_v1 require 16-aligned heads and the PS
-        # metadata is built for max(16, num_heads). For non-divisor small head
-        # counts (K3 = 12/rank at TP8) replicate-pad q/k/v to 16 — MLA attention
-        # is independent per query head over the shared KV, so the padding heads
-        # cannot affect the real ones (exact, same as the decode path) — then
-        # slice the output back to the real head count.
+        # PS asm prefill + mla_reduce_v1 require 16-aligned heads, and the PS
+        # metadata is built for get_fp8_prefill_num_heads(num_heads). For head
+        # counts that are not a multiple of 16 (K3 = 12/rank at TP8, 24/rank at
+        # TP4) replicate-pad q/k/v up to that count, then slice the output back
+        # to the real head count.
+        #
+        # Exact, not approximate: after kv_b_proj gqa_ratio is 1, so q, k and v
+        # all carry num_heads heads and attention is independent per head.
+        # Padding all three identically makes padded head j a duplicate of real
+        # head j % num_heads, so the real heads [0:num_heads] are bit-identical
+        # to the unpadded result. Same argument as the decode path; only the
+        # target width differs.
         _real_nhead = self.num_heads
-        _pad16 = _real_nhead < 16
-        if _pad16:
-            q = AiterMLAHelper.get_mla_padded_q(_real_nhead, q)
-            k = AiterMLAHelper.get_mla_padded_q(_real_nhead, k)
-            v = AiterMLAHelper.get_mla_padded_q(_real_nhead, v)
-        nhead = 16 if _pad16 else self.num_heads
+        nhead = AiterMLAHelper.get_fp8_prefill_num_heads(_real_nhead)
+        _pad = nhead != _real_nhead
+        if _pad:
+            q = AiterMLAHelper.get_mla_padded_q(_real_nhead, q, nhead)
+            k = AiterMLAHelper.get_mla_padded_q(_real_nhead, k, nhead)
+            v = AiterMLAHelper.get_mla_padded_q(_real_nhead, v, nhead)
         v_head_dim = self.v_head_dim
         tile_q = _FP8_PREFILL_TILE_Q
 
@@ -1154,7 +1190,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             ((num_partial_tiles * tile_q, nhead), torch.float32),
             ((total_q, nhead), torch.float32),
         ]
-        if _pad16:
+        if _pad:
             # The ASM and reduce kernels write a [total_q, nhead, v_head_dim]
             # buffer.  With unpadded heads that aliases the caller's
             # [total_q, nhead * v_head_dim] output, so write straight into it;
@@ -1163,7 +1199,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         workspace = current_workspace_manager()
         logits, attn_lse, final_lse, *pad_out = workspace.get_simultaneous(*scratch)
-        out_3d = pad_out[0] if _pad16 else out.view(total_q, nhead, v_head_dim)
+        out_3d = pad_out[0] if _pad else out.view(total_q, nhead, v_head_dim)
 
         # Phase 1: persistent-scheduling assembly prefill kernel.
         self._mla_prefill_ps_asm_fwd(
@@ -1201,7 +1237,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             final_lse,
         )
 
-        if _pad16:
+        if _pad:
             out.view(total_q, _real_nhead, v_head_dim).copy_(out_3d[:, :_real_nhead, :])
 
     def forward_mha(

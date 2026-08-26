@@ -43,8 +43,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 # DeepSeek-style MLA head dims after kv_b_proj decompression (q/k carry the
-# nope+rope dims, v carries v_head_dim). FP8 prefill requires 16-aligned heads.
-NUM_HEADS = 16
+# nope+rope dims, v carries v_head_dim).
+#
+# The kernel requires 16-aligned heads, so _mla_fp8_prefill_attn replicate-pads
+# q/k/v up to get_fp8_prefill_num_heads(num_heads) and slices the output back.
+# Cover all three regimes -- a K3 rank sees 12 heads at TP8 and 24 at TP4:
+#   12 -> padded to 16 (non-divisor, tile+slice)
+#   16 -> no padding, output aliases the caller's buffer
+#   24 -> padded to 32 (only reachable above 16; the metadata sizing in
+#         _init_fp8_prefill_ps_buffers must agree with the forward, or the
+#         work/reduce maps describe a different head count than the kernel gets)
+HEAD_COUNTS = [12, 16, 24]
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
 QK_HEAD_DIM = QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM  # 192
@@ -77,14 +86,14 @@ def _workspace_manager():
     reset_workspace_manager()
 
 
-def _make_impl():
+def _make_impl(num_heads: int):
     """Minimal AiterMLAImpl exposing only what _mla_fp8_prefill_attn reads."""
     from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
 
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
 
     impl = object.__new__(AiterMLAImpl)
-    impl.num_heads = NUM_HEADS
+    impl.num_heads = num_heads
     impl.v_head_dim = V_HEAD_DIM
     impl.scale = SCALE
     impl._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
@@ -95,6 +104,7 @@ def _make_impl():
 def _build_prefill_metadata(
     seq_lens: list[int],
     device: torch.device,
+    num_heads: int,
     attn_out_dtype: torch.dtype = ATTN_OUT_DTYPE,
 ):
     """Build metadata with the production builder and output dtype."""
@@ -107,7 +117,7 @@ def _build_prefill_metadata(
     max_q = max(seq_lens)
 
     builder = object.__new__(AiterMLAMetadataBuilder)
-    builder.num_heads = NUM_HEADS
+    builder.num_heads = num_heads
     builder.mla_dims = SimpleNamespace(v_head_dim=V_HEAD_DIM)
     builder._init_fp8_prefill_ps_buffers(
         max_num_reqs=len(seq_lens),
@@ -137,34 +147,51 @@ def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tenso
     return out.transpose(0, 1)  # [S, H, Dv]
 
 
+@pytest.mark.parametrize("num_heads", HEAD_COUNTS)
 @pytest.mark.parametrize("seq_len", [128, 512])
 @torch.inference_mode()
-def test_fp8_prefill_matches_reference(seq_len: int) -> None:
+def test_fp8_prefill_matches_reference(seq_len: int, num_heads: int) -> None:
     device = torch.device("cuda")
     torch.manual_seed(0)
 
-    metadata, total_q = _build_prefill_metadata([seq_len], device)
+    metadata, total_q = _build_prefill_metadata([seq_len], device, num_heads)
 
-    q = torch.randn(
-        total_q, NUM_HEADS, QK_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
-    )
-    k = torch.randn(
-        total_q, NUM_HEADS, QK_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
-    )
-    v = torch.randn(total_q, NUM_HEADS, V_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device)
+    qkv_kwargs = dict(dtype=ATTN_OUT_DTYPE, device=device)
+    q = torch.randn(total_q, num_heads, QK_HEAD_DIM, **qkv_kwargs)
+    k = torch.randn(total_q, num_heads, QK_HEAD_DIM, **qkv_kwargs)
+    v = torch.randn(total_q, num_heads, V_HEAD_DIM, **qkv_kwargs)
     out = torch.zeros(
-        total_q, NUM_HEADS * V_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
+        total_q, num_heads * V_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
     )
 
-    impl = _make_impl()
+    impl = _make_impl(num_heads)
     impl._mla_fp8_prefill_attn(q, k, v, metadata, out)
 
     out_ref = _reference(q, k, v)
 
     assert torch.isfinite(out).all()
     torch.testing.assert_close(
-        out.view(total_q, NUM_HEADS, V_HEAD_DIM).float(),
+        out.view(total_q, num_heads, V_HEAD_DIM).float(),
         out_ref.float(),
         atol=ATOL,
         rtol=RTOL,
     )
+
+
+@pytest.mark.parametrize("num_heads", HEAD_COUNTS)
+def test_fp8_prefill_metadata_width_matches_forward(num_heads: int) -> None:
+    """The PS metadata must be built for the head count the kernel is handed.
+
+    ``_init_fp8_prefill_ps_buffers``/``build()`` size the work and reduce maps
+    from ``num_head_k``, while ``_mla_fp8_prefill_attn`` pads q/k/v to its own
+    target. If the two ever diverge the kernel silently reads maps describing a
+    different head count, so pin them to one another rather than to a literal.
+    """
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    width = AiterMLAHelper.get_fp8_prefill_num_heads(num_heads)
+    assert width % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
+    assert width >= num_heads
+    assert width - num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+    # Every count the enable gate accepts must have a usable padded width.
+    assert AiterMLAHelper.is_valid_num_heads(num_heads)
