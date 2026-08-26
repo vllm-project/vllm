@@ -35,6 +35,7 @@ from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     get_draft_quant_config,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
@@ -335,12 +336,14 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
         )
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_substr={"hyper_connection_mixer.block_inject_weight": None}
+        )
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=["hyper_connection_mixer.block_inject_weight"],
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 @support_torch_compile(
@@ -436,12 +439,14 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
                 if remapped_name is not None:
                     yield remapped_name, weight
 
+        mapper = WeightsMapper(
+            orig_to_new_substr={"hyper_connection_mixer.block_inject_weight": None}
+        )
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=["hyper_connection_mixer.block_inject_weight"],
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(remap_weight_names())
+        return loader.load_weights(remap_weight_names(), mapper=mapper)
 
 
 __all__ = ["Qwen4ExpMTP", "Qwen4ExpMultiTokenPredictor"]

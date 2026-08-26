@@ -564,19 +564,21 @@ class Qwen4ExpModel(nn.Module):
         )
         # Non-persistent PLE state rebuilt in __init__; skip any ckpt
         # column for them.
-        skip_substrs = [
+        skip_substrs = (
             "hashstats_",
             "token_lookup",
             "hyper_connection_mixer.block_inject_weight",
-        ]
+        )
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_substr={substr: None for substr in skip_substrs}
+        )
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=skip_substrs,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
         loaded = loader.load_weights(
             weights,
-            mapper=self.hf_to_vllm_mapper,
+            mapper=mapper,
         )
         return loaded
 
@@ -799,12 +801,14 @@ class Qwen4ExpForCausalLM(
         return positions.unsqueeze(0).expand(3, -1), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_substr={"mtp.": None}
+        )
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=["mtp."],
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 class Qwen4ExpProcessingInfo(Qwen3VLProcessingInfo):
@@ -990,13 +994,15 @@ class Qwen4ExpForConditionalGeneration(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_substr={"mtp.": None},
+            orig_to_new_prefix={"visual.": None} if self.language_model_only else {},
+        )
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["visual."] if self.language_model_only else None,
-            skip_substrs=["mtp."],
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
