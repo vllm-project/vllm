@@ -198,7 +198,11 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     for this request.
     """
     engine_errored = engine.errored and not engine.is_running
-    if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored:
+    keep_alive = (
+        envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH
+        or engine.should_keep_api_server_alive
+    )
+    if not keep_alive and engine_errored:
         server.should_exit = True
 
 
