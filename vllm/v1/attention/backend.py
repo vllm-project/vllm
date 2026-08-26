@@ -951,12 +951,16 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        v_norm: bool = False,
     ):
         """
         If `fused_qk_norm_rope_kvcache_supported` returns True, this method
         will be called by the fused custom op. Applies QK-norm + RoPE and
         writes K/V to the KV cache. Results are written to the pre-allocated
         q_out and k_out tensors; V is split from QKV at the graph level.
+
+        When v_norm is True, a weightless RMS norm is applied to V before the
+        KV-cache write (e.g. Gemma4's has_weight=false v_norm).
         """
         raise NotImplementedError
 

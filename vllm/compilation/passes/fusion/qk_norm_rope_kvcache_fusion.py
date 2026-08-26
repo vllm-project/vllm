@@ -33,7 +33,7 @@ P = ParamSpec("P")
 
 # Head sizes the fused kernel fused_qk_norm_rope_cache_pts_quant_shuffle() supports
 # Other sizes hard-abort, so skip those layers.
-SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
+SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256, 512)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     rms_norm_eps: float,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    v_norm: bool = False,
     layer_name: str = "",
 ) -> torch.Tensor:
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
@@ -68,6 +69,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             is_neox,
             kv_cache,
             layer_slot_mapping,
+            v_norm,
         )
     else:
         # Profiling/dummy run: define q_out/k_out (consumed by attention).
@@ -87,6 +89,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     rms_norm_eps: float,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    v_norm: bool = False,
     layer_name: str = "",
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
@@ -134,6 +137,7 @@ class QkNormRopeKvCachePattern:
         eps: float,
         is_neox: bool,
         quant_query: bool,
+        v_norm: bool,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -143,6 +147,7 @@ class QkNormRopeKvCachePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.quant_query = quant_query
+        self.v_norm = v_norm
 
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
@@ -179,11 +184,11 @@ class QkNormRopeKvCachePattern:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
-        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps, None)
         q_flat = q_normed.view(-1, self.q_size)
 
         k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
-        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps, None)
         k_flat = k_normed.view(-1, self.k_size)
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
@@ -191,6 +196,9 @@ class QkNormRopeKvCachePattern:
         q_rope = q_rope.view(-1, self.num_heads, self.head_size)
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        if self.v_norm:
+            # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
+            v = vllm.ir.ops.rms_norm(v, None, self.eps, None)
         dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
         return dummy, q_rope, k_rope, v
 
@@ -229,6 +237,7 @@ class QkNormRopeKvCachePattern:
             rms_norm_eps=self.eps,
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
+            v_norm=self.v_norm,
             layer_name=self.layer_name,
         )
         return results[0], results[1], results[2], v
@@ -244,11 +253,11 @@ class QkNormRopeKvCachePattern:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
-        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps, None)
         q_flat = q_normed.view(-1, self.q_size)
 
         k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
-        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps, None)
         k_flat = k_normed.view(-1, self.k_size)
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
@@ -269,6 +278,9 @@ class QkNormRopeKvCachePattern:
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        if self.v_norm:
+            # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
+            v = vllm.ir.ops.rms_norm(v, None, self.eps, None)
         dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
         return dummy, q_rope_fp8, k_rope, v, q_scale_out
 
@@ -308,6 +320,7 @@ class QkNormRopeKvCachePattern:
             rms_norm_eps=self.eps,
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
+            v_norm=self.v_norm,
             layer_name=self.layer_name,
         )
         # Re-apply the quant on the kernel's bf16 q_out; fused op does not quant q.
@@ -467,12 +480,14 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
                     for quant_q in [False, True]:
-                        QkNormRopeKvCachePattern(
-                            layer=layer,
-                            eps=epsilon,
-                            is_neox=neox,
-                            quant_query=quant_q,
-                        ).register(self.patterns)
+                        for v_norm in [False, True]:
+                            QkNormRopeKvCachePattern(
+                                layer=layer,
+                                eps=epsilon,
+                                is_neox=neox,
+                                quant_query=quant_q,
+                                v_norm=v_norm,
+                            ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
