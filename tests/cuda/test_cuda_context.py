@@ -278,5 +278,58 @@ def test_device_control_id_unknown_uuid_still_raises(monkeypatch):
         NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-deadbeef")
 
 
+def test_short_uuid_uniquely_matches(monkeypatch):
+    """A short-form UUID that identifies exactly one GPU resolves to its index."""
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    uuids = [
+        "GPU-abc12345-1111-2222-3333-444455556666",
+        "GPU-def45678-1111-2222-3333-444455556666",
+        "GPU-789abcde-1111-2222-3333-444455556666",
+        "GPU-fed32100-1111-2222-3333-444455556666",
+    ]
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-def") == 1
+
+
+def test_short_uuid_ambiguous_raises(monkeypatch):
+    """An ambiguous short-form prefix matches multiple GPUs → raise ValueError.
+
+    NVIDIA documents `CUDA_VISIBLE_DEVICES=GPU-<prefix>` as valid ONLY when the
+    prefix uniquely identifies one GPU. Silently binding to the first match
+    would attach vLLM to the wrong device.
+    """
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    uuids = [
+        "GPU-abc12345-1111-2222-3333-444455556666",
+        "GPU-abcdef99-1111-2222-3333-444455556666",
+        "GPU-78900000-1111-2222-3333-444455556666",
+        "GPU-00011122-1111-2222-3333-444455556666",
+    ]
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    with pytest.raises(ValueError) as excinfo:
+        NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-abc")
+    msg = str(excinfo.value)
+    assert "Ambiguous" in msg
+    assert "[0, 1]" in msg
+
+
+def test_short_uuid_no_match_reraises(monkeypatch):
+    """Zero matches must re-raise the original `NVMLError_NotFound`."""
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    uuids = [
+        "GPU-abc12345-1111-2222-3333-444455556666",
+        "GPU-def45678-1111-2222-3333-444455556666",
+    ]
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    with pytest.raises(pynvml.NVMLError_NotFound):
+        NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-xyz")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

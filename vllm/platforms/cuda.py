@@ -744,11 +744,25 @@ class NvmlCudaPlatform(CudaPlatformBase):
             # short form (see https://docs.nvidia.com/deploy/topics/topic_5_2_1.html),
             # but `nvmlDeviceGetHandleByUUID` requires an exact 36-char match.
             # Fall back to a prefix scan so vLLM behaves like CUDA/PyTorch/nvidia-smi.
-            for i in range(pynvml.nvmlDeviceGetCount()):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                if pynvml.nvmlDeviceGetUUID(handle).startswith(device_id):
-                    return i
-            raise
+            # NVIDIA only accepts a short prefix when it uniquely identifies one
+            # device; collect every match and reject ambiguity instead of
+            # silently binding to the first one.
+            matches = [
+                i
+                for i in range(pynvml.nvmlDeviceGetCount())
+                if pynvml.nvmlDeviceGetUUID(
+                    pynvml.nvmlDeviceGetHandleByIndex(i)
+                ).startswith(device_id)
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if not matches:
+                raise
+            raise ValueError(
+                f"Ambiguous short UUID {device_id!r}: "
+                f"matches physical devices {matches}. "
+                f"Provide a longer prefix that uniquely identifies one GPU."
+            ) from None
 
     @classmethod
     @cache
