@@ -42,6 +42,13 @@ void moe_align_block_size(
     torch::stable::Tensor num_tokens_post_pad,
     std::optional<torch::stable::Tensor> maybe_expert_map);
 
+void fused_globalize_align_block_size(
+    torch::stable::Tensor topk_idx, torch::stable::Tensor psum,
+    int64_t rank_expert_offset, int64_t global_num_experts,
+    int64_t local_num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_ids, torch::stable::Tensor expert_ids,
+    torch::stable::Tensor num_tokens_post_pad);
+
 void batched_moe_align_block_size(
     int64_t max_tokens_per_batch, int64_t block_size,
     const torch::stable::Tensor& expert_num_tokens,
