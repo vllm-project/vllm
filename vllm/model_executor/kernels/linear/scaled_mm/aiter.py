@@ -31,6 +31,22 @@ from .ScaledMMLinearKernel import (
 
 logger = init_logger(__name__)
 
+# Static E8M0 weight scales are checkpoint parameters; upcasting them to fp32
+# on every forward pass emits redundant small kernels (~236 __lshift__ launches
+# per DSv4 decode step on gfx942). Cache by data_ptr (stable for process
+# lifetime and CUDA-graph safe). Dynamic activation scales are not cached.
+_E8M0_WS_FP32_CACHE: dict[int, torch.Tensor] = {}
+
+
+def _cached_upcast_e8m0_weight_scale(bs: torch.Tensor) -> torch.Tensor:
+    key = bs.data_ptr()
+    cached = _E8M0_WS_FP32_CACHE.get(key)
+    if cached is not None and cached.shape == bs.shape:
+        return cached
+    upcast = _upcast_e8m0_to_fp32(bs).contiguous()
+    _E8M0_WS_FP32_CACHE[key] = upcast
+    return upcast
+
 
 class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     @classmethod
@@ -446,7 +462,10 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             else:
                 As = As.to(torch.float32)
 
-            Bs = Bs.to(torch.float32)
+            if Bs.dtype == torch.float8_e8m0fnu:
+                Bs = _cached_upcast_e8m0_weight_scale(Bs)
+            else:
+                Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
         if self.use_triton:
