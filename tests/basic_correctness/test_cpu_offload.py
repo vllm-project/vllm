@@ -109,7 +109,8 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
         with vllm_runner(
             "Qwen/Qwen3.5-0.8B",
             enforce_eager=True,
-            gpu_memory_utilization=0.05,
+            # allocate more vram as Qwen 3.5 has 1.6 GiB of weights
+            gpu_memory_utilization=0.3,
             max_model_len=128,
             max_num_seqs=1,
             enable_prefix_caching=False,
