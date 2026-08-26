@@ -94,6 +94,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
 )
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    profile_cudagraph_memory as _profile_cudagraph_memory,
+)
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
@@ -124,6 +127,11 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.sample.batch_shard import (
+    BatchSharder,
+    all_to_all_logits,
+    gather_sampler_output,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -307,6 +315,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
+        self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -400,6 +409,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.num_speculative_steps
             + self.model_state.num_new_sampled_tokens_per_step
         )
+
+        if self.parallel_config.enable_batch_sharded_sampling:
+            if hasattr(self.model, "compute_logits_local"):
+                self.batch_sharder = BatchSharder(
+                    max_num_reqs=self.max_num_reqs,
+                    max_num_logits_per_req=self.decode_query_len,
+                    device=self.device,
+                )
+                logger.info("Batch-sharded sampling enabled.")
+            else:
+                logger.warning_once(
+                    "Disabling batch-sharded sampling: %s does not implement "
+                    "compute_logits_local",
+                    type(self.model).__name__,
+                )
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
@@ -499,7 +523,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+    ) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -533,12 +559,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
             max_num_blocks_per_group.append(max_num_blocks)
 
+        target_attn_layer_names = None
+        if isinstance(self.speculator, DraftModelSpeculator):
+            # Adaptive verification validates target attention separately.
+            target_attn_layer_names = {
+                layer_name
+                for group in self.kv_cache_config.kv_cache_groups
+                for layer_name in group.layer_names
+            } - self.speculator.draft_attn_layer_names
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
+            self.kv_cache_config,
+            self.vllm_config,
+            self.device,
         )
-        attn_cg_support = attn_cg_support.narrow(
-            *self.model_state.get_additional_cg_support()
-        )
+        additional_attn_cg_support = self.model_state.get_additional_cg_support()
+        attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
@@ -551,6 +586,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc=self.input_buffers.query_start_loc,
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             max_total_logits=get_max_chunk_logits(self.vocab_size),
+            vllm_config=self.vllm_config,
+            target_layer_names=target_attn_layer_names,
+            additional_attn_cg_support=additional_attn_cg_support,
         )
 
         self.block_tables = BlockTables(
@@ -585,6 +623,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            is_profiling=is_profiling,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -618,7 +657,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kernel_block_sizes,
             self.vllm_config,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        if is_profiling:
+            self.kv_connector = NO_OP_KV_CONNECTOR
+        else:
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -832,9 +874,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
 
+    @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+        """Estimate the GPU memory required to capture CUDA graphs."""
+        return _profile_cudagraph_memory(self)
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -925,7 +968,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
-        for req_id in finished_req_ids:
+        # Sorted so every TP rank frees request slots in the same order.
+        # Features like batch-sharded sampling derive rank request ownership
+        # from the slot index.
+        for req_id in sorted(finished_req_ids):
             self._remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
@@ -1325,8 +1371,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
-        sample_hidden_states = hidden_states[input_batch.logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
+        shard_metadata = None
+        global_input_batch = input_batch
+        if self.batch_sharder is not None:
+            # Shard the inputs along the batch dimension to sample in parallel
+            # across TP ranks.
+            input_batch, sorted_logits_indices, grammar_output, shard_metadata = (
+                self.batch_sharder.shard_sampler_inputs(input_batch, grammar_output)
+            )
+            # The hidden states must be gathered in rank-owner-sorted order
+            # before computing the partial-vocab logits, so that the all-to-all
+            # produces full-vocab logits for just the locally-owned requests.
+            sample_hidden_states = hidden_states[sorted_logits_indices]
+            local_logits = self.model.compute_logits_local(sample_hidden_states)
+            logits = all_to_all_logits(local_logits, shard_metadata)
+            logits = logits[:, : self.vocab_size]
+        else:
+            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
+
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1337,7 +1400,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
+        sampler_output: SamplerOutput | None
+        if input_batch.num_reqs == 0:
+            # This rank owns no requests this step. It contributes an
+            # all-padding block to the gather below.
+            sampler_output = None
+        elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
             sampler_output = self.sampler(logits, input_batch)
         else:
@@ -1351,6 +1419,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.draft_logits,
             )
 
+        if shard_metadata is not None:
+            # Gather the sharded sampler outputs from the TP ranks into a single
+            # sampler output.
+            assert self.sampler is not None
+            sampler_output = gather_sampler_output(
+                sampler_output,
+                shard_metadata,
+                device=self.device,
+                global_batch=global_input_batch,
+                local_batch=input_batch,
+                gather_num_nans=self.sampler.compute_nans,
+                logprobs_dims=self.sampler.get_logprobs_dims(
+                    global_input_batch.idx_mapping_np,
+                    # Rejection sampler does not return logprob token ids.
+                    include_token_ids=(
+                        global_input_batch.num_draft_tokens == 0
+                        or self.rejection_sampler is None
+                    ),
+                ),
+            )
+
+        assert sampler_output is not None
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
     def postprocess_sampled(
@@ -1521,12 +1611,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings, self.kv_cache_config
             )
             assert block_tables is not None
+            attn_groups = self.attn_groups
+            if dummy_run and is_profile:
+                # Mamba layers take a cheap warmup path with no metadata;
+                # attention metadata is still built so those kernels tune.
+                attn_groups = [
+                    [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
             attn_metadata = self.model_state.prepare_attn(
                 input_batch,
                 batch_desc.cg_mode,
                 block_tables,
                 slot_mappings,
-                self.attn_groups,
+                attn_groups,
                 self.kv_cache_config,
                 # FULL replay reads capture-time metadata buffers. Re-stage them
                 # from the zeroed dummy block tables instead of retaining state
