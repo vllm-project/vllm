@@ -440,13 +440,7 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
 
 @dataclass
 class ReqMeta:
-    """Metadata for a single request.
-
-    ``local_block_ids`` / ``remote_block_ids`` are per KV cache group: one
-    block-id list per group (length 1 for non-hybrid models). For hybrid
-    sliding-window models the sliding-window groups carry only their clipped
-    in-window tail.
-    """
+    """Metadata for a single request."""
 
     transfer_id: TransferId
     local_block_ids: list[list[int]]
