@@ -47,6 +47,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
+    routed_experts_prompt_start: int = 0
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
@@ -135,6 +136,7 @@ request = EngineCoreRequest(
         stop_token_ids=[151643],
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},
+        routed_experts_prompt_start=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     ),
     pooling_params=None,
@@ -409,9 +411,14 @@ class EngineCoreReadyResponse:
     max_num_seqs: int
     max_num_batched_tokens: int
     instance_id: str
+    supports_lora: bool
+    max_loras: int
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -430,6 +437,11 @@ ready_response = EngineCoreReadyResponse(
     max_num_seqs=256,
     max_num_batched_tokens=8192,
     instance_id="test-instance",
+    supports_lora=True,
+    max_loras=8,
+    weight_transfer_backend="nccl",
+    enable_sleep_mode=True,
+    supports_draft_weight_updates=True,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
