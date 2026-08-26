@@ -19,8 +19,8 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
 )
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
@@ -788,4 +788,121 @@ def test_promoted_tail_stops_calling_into_the_pool_each_decode_step(
         manager.cache_blocks(req, num_tokens=len(prompt_token_ids) + i + 1)
     assert calls == calls_after_promotion, (
         "decode inside an already-promoted block must not call into the pool"
+    )
+
+
+def _mamba_align_manager(
+    hash_block_size: int, block_size: int
+) -> tuple[BlockPool, MambaManager]:
+    spec = MambaSpec(
+        shapes=((8,),),
+        dtypes=(torch.float32,),
+        block_size=block_size,
+        mamba_cache_mode="align",
+        num_speculative_blocks=0,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    manager = MambaManager(
+        kv_cache_spec=spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    return pool, manager
+
+
+def test_mamba_partial_tail_registers_the_boundary_when_it_is_not_superseded():
+    """Positive control for the refusal test below.
+
+    On an un-promoted tail block MambaManager._cache_partial_tail_block still
+    registers the boundary and records all three pieces of follow-up
+    bookkeeping, the last of which hands the CoW block to a KV connector for
+    partial-tail offload.  Without this the refusal test could pass vacuously.
+    """
+    hash_block_size, block_size = 2, 6
+    kv_cache_group_id = 0
+    pool, manager = _mamba_align_manager(hash_block_size, block_size)
+
+    # 10 prompt tokens: block 0 is full, block 1 holds tokens 6..9, and the
+    # last prompt hash boundary is 10 -- inside block 1.
+    req = make_request("0", list(range(10)), hash_block_size, sha256)
+    blocks = pool.get_new_blocks(2)
+    manager.req_to_blocks[req.request_id] = blocks
+
+    partial_hash = manager._cache_partial_tail_block(req, num_tokens=10)
+
+    assert partial_hash is not None
+    assert pool.get_cached_block(
+        boundary_hash(req, hash_block_size, 10), [kv_cache_group_id]
+    ) == [blocks[1]]
+    assert manager._partial_hit_reqs[req.request_id] == (1, blocks[1])
+    assert manager.num_cached_block[req.request_id] == 1
+    assert manager._producer_partial_tail_reqs[req.request_id] == (blocks[1], 10)
+
+
+def test_mamba_partial_tail_skips_all_bookkeeping_when_the_boundary_is_superseded():
+    """The Mamba caller must treat a superseded boundary as "nothing happened".
+
+    cache_partial_block now has two reasons to return None -- null block, and a
+    boundary the block has outgrown.  MambaManager._cache_partial_tail_block
+    keys three updates off that value, and the third,
+    _producer_partial_tail_reqs, is what makes allocate_new_blocks hand the CoW
+    block to a KV connector for offload under the *boundary* sub-hash.
+
+    Skipping it is the only correct behaviour: the pool has just refused to
+    publish that key locally, and the block records coverage of a later
+    boundary, so offloading it would advertise a superseded key to an external
+    store backed by the wrong state.  That is the same corruption this module's
+    other tests pin, one surface further out.
+
+    This state is not reachable from MambaManager on its own -- its
+    ``num_tokens != latest_prompt_hash_boundary`` guard fires the boundary
+    exactly once, so a block it targets is never already promoted past it.  The
+    promotion is therefore forced out of band here, to pin the contract for any
+    future caller rather than to reproduce a live bug.
+    """
+    hash_block_size, block_size = 2, 6
+    kv_cache_group_id = 0
+    pool, manager = _mamba_align_manager(hash_block_size, block_size)
+
+    req = make_request("0", list(range(10)), hash_block_size, sha256)
+    blocks = pool.get_new_blocks(2)
+    manager.req_to_blocks[req.request_id] = blocks
+
+    # Force the tail block past the boundary: a 12-token request promotes both
+    # blocks, so block 1 carries a full-block hash covering 12 >= 10 tokens.
+    promoter = make_request("1", list(range(12)), hash_block_size, sha256)
+    pool.cache_full_blocks(
+        request=promoter,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=kv_cache_group_id,
+    )
+    assert blocks[1].block_hash_num_tokens == 12
+    pool.take_events()
+
+    assert manager._cache_partial_tail_block(req, num_tokens=10) is None
+
+    # None of the three updates may happen, and nothing may be published --
+    # not in the cache map, not on the event stream.
+    assert req.request_id not in manager._partial_hit_reqs
+    assert req.request_id not in manager.num_cached_block
+    assert req.request_id not in manager._producer_partial_tail_reqs
+    assert (
+        pool.get_cached_block(
+            boundary_hash(req, hash_block_size, 10), [kv_cache_group_id]
+        )
+        is None
+    )
+    assert pool.take_events() == []
+    assert blocks[1].block_hash_num_tokens == 12, (
+        "the refusal must not shorten the block's recorded coverage"
     )
