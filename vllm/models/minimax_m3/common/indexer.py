@@ -159,7 +159,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=128,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,

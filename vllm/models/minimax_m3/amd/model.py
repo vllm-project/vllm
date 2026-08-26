@@ -699,7 +699,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
         return FullAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=self.impl.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             head_size_v=self.head_dim,
