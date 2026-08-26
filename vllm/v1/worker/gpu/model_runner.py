@@ -64,14 +64,14 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
-from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.worker.block_table import SlotMappingMode, get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
@@ -546,9 +546,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         block_sizes = []
         max_num_blocks_per_group = []
+        slot_mapping_modes = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            slot_mapping_modes.append(
+                SlotMappingMode.NONE
+                if isinstance(spec, HiSparseHotSpec)
+                else SlotMappingMode.TOKEN_TO_KV_SLOT
+            )
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -602,6 +608,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
+            slot_mapping_modes=slot_mapping_modes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
