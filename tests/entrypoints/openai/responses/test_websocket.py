@@ -367,7 +367,7 @@ def test_cli_arg_max_websocket_connections_default():
         pathlib.Path(__file__).resolve().parents[4]
         / "vllm"
         / "entrypoints"
-        / "openai"
+        / "launchers"
         / "cli_args.py"
     )
     source = cli_args_path.read_text()
@@ -441,6 +441,13 @@ def _ensure_api_router_importable():
             for k, v in attrs.items():
                 setattr(mod, k, v)
             sys.modules[modname] = mod
+
+
+# websocket.py imports sanitize_message, which executes
+# vllm.entrypoints.serve.__init__ and pulls in torch. Install the stubs at
+# import time so the tests above do not depend on execution order.
+if "torch" not in sys.modules:
+    _ensure_api_router_importable()
 
 
 @pytest.mark.asyncio
