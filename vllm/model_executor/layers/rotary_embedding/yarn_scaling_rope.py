@@ -39,8 +39,8 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
-        # HF derives the final YaRN mscale from the mscale ratio when both ratio
-        # parameters are present and no explicit attention factor overrides it.
+        # Derive HF's YaRN mscale ratio while preserving vLLM's legacy
+        # attention multiplier when no explicit attention factor overrides it.
         if (
             attention_factor is None
             and apply_yarn_scaling
@@ -50,6 +50,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
             attention_factor = float(
                 yarn_get_mscale(self.scaling_factor, mscale)
                 / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+                * attn_factor
             )
 
         # HF supplies the final YaRN mscale as `attention_factor`; use it when set.

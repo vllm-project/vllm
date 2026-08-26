@@ -77,6 +77,45 @@ def test_apply_interleaved_rope():
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
+@torch.inference_mode()
+def test_mrope_ignores_yarn_magnitude_fields(default_vllm_config):
+    rope_parameters = {
+        "rope_type": "yarn",
+        "rope_theta": 10000,
+        "factor": 2.0,
+        "original_max_position_embeddings": 16,
+        "mrope_section": [2, 1, 1],
+    }
+    expected_rope = get_rope(
+        head_size=8,
+        max_position=32,
+        is_neox_style=True,
+        rope_parameters=rope_parameters,
+        dtype=torch.float32,
+    )
+    actual_rope = get_rope(
+        head_size=8,
+        max_position=32,
+        is_neox_style=True,
+        rope_parameters={
+            **rope_parameters,
+            "apply_yarn_scaling": False,
+            "mscale": 2.0,
+            "mscale_all_dim": 1.0,
+        },
+        dtype=torch.float32,
+    )
+
+    positions = torch.tensor([[0, 1], [0, 1], [0, 1]])
+    query = torch.randn(2, 8)
+    key = torch.randn(2, 8)
+    expected_query, expected_key = expected_rope.forward_native(positions, query, key)
+    actual_query, actual_key = actual_rope.forward_native(positions, query, key)
+
+    torch.testing.assert_close(actual_query, expected_query)
+    torch.testing.assert_close(actual_key, expected_key)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only test."
 )

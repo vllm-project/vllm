@@ -37,6 +37,28 @@ def test_llama_4_scaling_uses_transformers_rope_parameters():
     }
 
 
+def test_mistral_attention_uses_transformers_rope_parameters(monkeypatch):
+    def skip_llama_attention_init(_self, *_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.mistral.LlamaAttention.__init__",
+        skip_llama_attention_init,
+    )
+    config = Ministral3Config()
+
+    attention = MistralAttention(
+        config=config,
+        hidden_size=config.hidden_size,
+        num_heads=config.num_attention_heads,
+        num_kv_heads=config.num_key_value_heads,
+    )
+
+    assert attention.do_llama_4_scaling
+    assert attention.llama_4_scaling_beta == 0.1
+    assert attention.llama_4_scaling_original_max_position_embeddings == 16384
+
+
 def test_llama_4_scaling_requires_complete_rope_parameters():
     config = SimpleNamespace(rope_parameters={"llama_4_scaling_beta": 0.1})
 
