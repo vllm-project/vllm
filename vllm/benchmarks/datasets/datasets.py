@@ -648,45 +648,52 @@ class RandomDataset(BenchmarkDataset):
         source_token_pool: list[int] = []
         if self.dataset_path:
             ext = Path(self.dataset_path).suffix.lower()
+            # Collect all candidate text entries first, then shuffle once with
+            # the class-isolated RNG (self._rng). Never touch global random /
+            # np.random state -- see the RNG-isolation note in __init__.
+            source_texts: list[str] = []
             if ext == ".json":
                 with open(self.dataset_path, encoding="utf-8") as f:
                     raw = json.load(f)
-                raw = [
-                    d for d in raw
-                    if len(d.get("conversations",
-                                 d.get("conversation", []))) >= 2
-                ]
-                random.seed(self.random_seed)
-                random.shuffle(raw)
                 for d in raw:
-                    conv = d.get("conversations",
-                                 d.get("conversation", []))
-                    source_token_pool.extend(
-                        tokenizer.encode(conv[0]["value"]))
-                    if len(source_token_pool) >= max(input_lens) * 2:
-                        break
+                    conv = d.get("conversations", d.get("conversation", []))
+                    if len(conv) < 2:
+                        continue
+                    text = conv[0].get("value", "")
+                    if text:
+                        source_texts.append(text)
             elif ext == ".jsonl":
                 with open(self.dataset_path, encoding="utf-8") as f:
                     for line in f:
-                        obj = json.loads(line.strip())
-                        if "prompt" in obj:
-                            source_token_pool.extend(
-                                tokenizer.encode(obj["prompt"]))
-                        if len(source_token_pool) >= max(input_lens) * 2:
-                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        obj = json.loads(line)
+                        text = obj.get("prompt", "")
+                        if text:
+                            source_texts.append(text)
             elif ext == ".txt":
                 with open(self.dataset_path, encoding="utf-8") as f:
                     for line in f:
-                        source_token_pool.extend(
-                            tokenizer.encode(line.strip()))
-                        if len(source_token_pool) >= max(input_lens) * 2:
-                            break
+                        line = line.strip()
+                        if line:
+                            source_texts.append(line)
             else:
                 raise ValueError(
                     f"Unsupported dataset file extension: {ext}. "
                     "Supported formats: .json (ShareGPT), "
                     ".jsonl (custom), .txt (plain text)."
                 )
+
+            # Shuffle the full candidate set (not just the file head) so the
+            # token pool is a random sample of the dataset, using the isolated
+            # generator for reproducibility without disturbing global RNG.
+            self._rng.shuffle(source_texts)
+            for text in source_texts:
+                source_token_pool.extend(tokenizer.encode(text))
+                if len(source_token_pool) >= max(input_lens) * 2:
+                    break
+
             if not source_token_pool:
                 raise ValueError(
                     f"No valid data found in {self.dataset_path}."
