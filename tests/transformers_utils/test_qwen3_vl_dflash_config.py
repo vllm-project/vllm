@@ -5,7 +5,11 @@ import json
 
 import pytest
 
-from vllm.transformers_utils.config import get_config, get_hf_text_config
+from vllm.transformers_utils.config import (
+    get_config,
+    get_hf_text_config,
+    uses_mrope,
+)
 from vllm.transformers_utils.configs.qwen3_vl_dflash import (
     Qwen3VLDFlashConfig,
 )
@@ -90,8 +94,13 @@ def test_qwen3_vl_dflash_config_is_normalized_without_remote_code(tmp_path):
     assert config.markov_rank == 256
     assert config.target_layer_ids == [1, 7, 13, 19, 25]
     assert config.eagle_aux_hidden_state_layer_ids == [2, 8, 14, 20, 26]
-    assert config.rope_parameters["mrope_section"] == [24, 20, 20]
+    assert "mrope_section" not in config.rope_parameters
+    assert "mrope_interleaved" not in config.rope_parameters
+    assert config.rope_parameters["rope_theta"] == 5000000
+    assert config.source_text_config["rope_scaling"]["mrope_section"] == [24, 20, 20]
+    assert config.get_text_config() is config
     assert get_hf_text_config(config) is config
+    assert not uses_mrope(config)
 
 
 @pytest.mark.parametrize(

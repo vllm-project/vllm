@@ -118,10 +118,18 @@ class Qwen3VLDFlashConfig(Qwen3Config):
                 f"({draft_num_layers}); got {layer_types!r}."
             )
 
-        rope_parameters = text.get("rope_parameters") or text.get("rope_scaling") or {}
-        if not isinstance(rope_parameters, Mapping):
+        source_rope_parameters = (
+            text.get("rope_parameters") or text.get("rope_scaling") or {}
+        )
+        if not isinstance(source_rope_parameters, Mapping):
             raise ValueError("text_config.rope_scaling must be an object.")
-        rope_parameters = dict(rope_parameters)
+        rope_parameters = dict(source_rope_parameters)
+        # Parallel drafting produces logical 1-D positions. For text
+        # positions, Qwen3-VL's three M-RoPE axes are identical, so ordinary
+        # RoPE is functionally equivalent and avoids the unsupported draft
+        # M-RoPE path. source_text_config retains the target-side parameters.
+        rope_parameters.pop("mrope_interleaved", None)
+        rope_parameters.pop("mrope_section", None)
         rope_parameters.setdefault("rope_theta", text.get("rope_theta", 1_000_000.0))
 
         source_architectures = list(architectures or [])

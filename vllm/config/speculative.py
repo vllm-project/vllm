@@ -361,29 +361,12 @@ def _validate_qwen3_vl_dspark(
         for rope_config in rope_configs
     )
     if has_mrope:
-        mrope_section = getattr(draft_hf_config, "mrope_section", None)
-        if mrope_section is None:
-            mrope_section = next(
-                rope_config["mrope_section"]
-                for rope_config in rope_configs
-                if isinstance(rope_config, Mapping) and "mrope_section" in rope_config
-            )
-        head_dim = draft_hf_config.head_dim
-        if (
-            not isinstance(mrope_section, (list, tuple))
-            or any(
-                not isinstance(section, int)
-                or isinstance(section, bool)
-                or section <= 0
-                for section in mrope_section
-            )
-            or sum(mrope_section) != head_dim // 2
-        ):
-            raise ValueError(
-                "Qwen3-VL DSpark mrope_section must contain positive integer "
-                f"sections summing to head_dim / 2 ({head_dim // 2}); got "
-                f"{mrope_section}."
-            )
+        raise ValueError(
+            "Qwen3-VL DSpark draft checkpoints must use logical 1-D RoPE. "
+            "Training-side qwen3_vl_dflash configs are normalized to 1-D RoPE "
+            "automatically; flattened configs must not copy mrope_section into "
+            "the draft config."
+        )
 
 
 @config

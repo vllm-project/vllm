@@ -81,12 +81,7 @@ def _make_qwen3_vl_dspark_configs(target_model_type="qwen3_vl"):
         vocab_size=151936,
         draft_vocab_size=151936,
         mask_token_id=151669,
-        rope_parameters={
-            "rope_type": "default",
-            "rope_theta": 5000000.0,
-            "mrope_interleaved": True,
-            "mrope_section": [24, 20, 20],
-        },
+        rope_parameters={"rope_type": "default", "rope_theta": 5000000.0},
         dflash_config={
             "block_size": 16,
             "layer_types": ["full_attention", "full_attention"],
@@ -176,17 +171,11 @@ def test_qwen3_vl_dspark_rejects_inconsistent_aux_layer_ids():
 
 
 @pytest.mark.skip_global_cleanup
-def test_qwen3_vl_dspark_accepts_valid_mrope_draft_positions():
+def test_qwen3_vl_dspark_rejects_mrope_draft_positions():
     target_config, draft_config = _make_qwen3_vl_dspark_configs()
-    _validate_qwen3_vl_dspark(target_config, draft_config, 16)
+    draft_config.hf_config.rope_parameters["mrope_section"] = [24, 20, 20]
 
-
-@pytest.mark.skip_global_cleanup
-def test_qwen3_vl_dspark_rejects_invalid_mrope_sections():
-    target_config, draft_config = _make_qwen3_vl_dspark_configs()
-    draft_config.hf_config.rope_parameters["mrope_section"] = [24, 20, 19]
-
-    with pytest.raises(ValueError, match="summing to head_dim / 2"):
+    with pytest.raises(ValueError, match="logical 1-D RoPE"):
         _validate_qwen3_vl_dspark(target_config, draft_config, 16)
 
 
