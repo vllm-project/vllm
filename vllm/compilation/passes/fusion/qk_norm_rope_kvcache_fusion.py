@@ -196,11 +196,11 @@ class QkNormRopeKvCachePattern:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
-        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps, None)
+        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
         q_flat = q_normed.view(-1, self.q_size)
 
         k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
-        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps, None)
+        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
         k_flat = k_normed.view(-1, self.k_size)
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
@@ -210,7 +210,7 @@ class QkNormRopeKvCachePattern:
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
         if self.v_norm:
             # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
-            v = vllm.ir.ops.rms_norm(v, None, self.eps, None)
+            v = vllm.ir.ops.rms_norm(v, None, self.eps)
         dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, layer_name)
         return dummy, q_rope, k_rope, v
 
@@ -267,11 +267,11 @@ class QkNormRopeKvCachePattern:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
-        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps, None)
+        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
         q_flat = q_normed.view(-1, self.q_size)
 
         k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
-        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps, None)
+        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
         k_flat = k_normed.view(-1, self.k_size)
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
@@ -294,7 +294,7 @@ class QkNormRopeKvCachePattern:
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
         if self.v_norm:
             # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
-            v = vllm.ir.ops.rms_norm(v, None, self.eps, None)
+            v = vllm.ir.ops.rms_norm(v, None, self.eps)
         dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, layer_name)
         return dummy, q_rope_fp8, k_rope, v, q_scale_out
 
@@ -374,6 +374,50 @@ class QkNormRopeKvCachePattern:
 
         view_to_reshape(gm)
 
+    @staticmethod
+    def _pin_split_sizes(pattern, sizes: list[int]) -> None:
+        """Restore literal qkv split sizes in a search pattern.
+
+        Walks the PatternExpr tree and replaces the (wildcarded) size list of
+        each ``aten.split_with_sizes`` node with the concrete ``sizes`` so that
+        different attention shapes produce distinct, non-duplicate patterns.
+        """
+        seen: set[int] = set()
+
+        def is_split(p) -> bool:
+            fns = getattr(p, "fns", None)
+            if fns is None:
+                return False
+            fns = fns if isinstance(fns, (list, tuple)) else [fns]
+            return any(
+                "split_with_sizes" in str(getattr(fn, "_name", fn)) for fn in fns
+            )
+
+        def walk(p) -> None:
+            if id(p) in seen:
+                return
+            seen.add(id(p))
+            if is_split(p):
+                args = list(p.args)
+                if len(args) >= 2 and isinstance(args[1], list):
+                    args[1] = list(sizes)
+                    p.args = tuple(args)
+                    # _TargetArgsExpr precomputes flat_args_kwargs at __init__ and
+                    # matching uses that, not .args -- recompute after mutating.
+                    p.flat_args_kwargs = p.flatten(p.args, p.kwargs)
+            for coll in (getattr(p, "outputs", None), getattr(p, "args", None)):
+                if not coll:
+                    continue
+                for a in coll:
+                    if hasattr(a, "args") or hasattr(a, "outputs") or hasattr(a, "fns"):
+                        walk(a)
+                    elif isinstance(a, (list, tuple)):
+                        for x in a:
+                            if hasattr(x, "args") or hasattr(x, "fns"):
+                                walk(x)
+
+        walk(pattern)
+
     def _register(self, pattern, replacement, pm_pass) -> None:
         trace_fn = QkNormRopeKvCachePattern.wrap_trace_fn(
             pm.fwd_only,
@@ -387,17 +431,23 @@ class QkNormRopeKvCachePattern:
         inputs = self.get_inputs()
         argnames = [*inspect.signature(pattern).parameters.keys()]
         search_gm = trace_fn(pattern, inputs)
-        # With a wildcard layer_name input, per-layer patterns only differ by
-        # their concrete head shapes (num_heads/head_size/split sizes). Keep
-        # those ints literal (ignore only SymInt) so distinct shapes stay
-        # distinct patterns; otherwise int-wildcarding collapses them into
-        # duplicates. Dynamic batch is a SymInt and stays a wildcard.
-        ignore_types = (torch.SymInt,) if _USE_LAYERNAME else (int, torch.SymInt)
+        # Ignore int/SymInt so the concrete traced batch dim (and dynamic-shape
+        # SymInts) match the graph's symbolic batch as wildcards.
         search_fn_pattern = pm.fx_to_pattern(
             search_gm,
-            ignore_types=ignore_types,
+            ignore_types=(int, torch.SymInt),
             argnames=argnames,
         )
+        # With a wildcard layer_name input (VLLM_USE_LAYERNAME), the only thing
+        # distinguishing this layer's shape (e.g. Gemma4 sliding-256 vs full-512)
+        # from another is the qkv split sizes -- but ignore_types just wildcarded
+        # them, collapsing the two shapes into a duplicate pattern. Restore the
+        # split sizes as literals so each shape stays a distinct, correctly
+        # replaced pattern while the batch dim remains a wildcard.
+        if _USE_LAYERNAME:
+            self._pin_split_sizes(
+                search_fn_pattern, [self.q_size, self.k_size, self.v_size]
+            )
 
         pm.register_replacement(
             pattern,
