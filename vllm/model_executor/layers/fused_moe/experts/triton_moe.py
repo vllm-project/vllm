@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -453,21 +454,39 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 )
 
         a2q_scale: torch.Tensor | None = None
+        use_dsv4_fused_act_quant = (
+            envs.VLLM_USE_DSV4_FUSED_ACT_QUANT
+            and self.activation_config.clamp_limit is not None
+            and expert_map is not None
+            and expert_map.dtype == torch.int32
+            and topk_ids.dtype == torch.int32
+            and current_platform.is_cuda()
+        )
 
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
         # when conditions permit (gated SiLU, fp8 block quant with
-        # group_size=128, no LoRA requiring the BF16 intermediate).
+        # group_size=128, no LoRA requiring the BF16 intermediate). The
+        # DeepSeek-V4 specialization also applies its finite SwiGLU clamp and
+        # skips non-local EP assignments.
         if (
             activation == MoEActivation.SILU
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
             and not is_deep_gemm_e8m0_used()
+            and (self.activation_config.clamp_limit is None or use_dsv4_fused_act_quant)
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
                 intermediate_cache1.view(-1, N),
                 group_size=128,
                 quant_dtype=current_platform.fp8_dtype(),
+                clamp_limit=(
+                    self.activation_config.clamp_limit
+                    if use_dsv4_fused_act_quant
+                    else None
+                ),
+                expert_ids=(topk_ids.view(-1) if use_dsv4_fused_act_quant else None),
+                expert_map=expert_map if use_dsv4_fused_act_quant else None,
             )
         else:
             self.activation(

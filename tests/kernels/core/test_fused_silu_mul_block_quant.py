@@ -128,6 +128,87 @@ def test_silu_and_mul_per_block_quant(
     )
 
 
+@pytest.mark.parametrize("num_tokens", [6, 128, 1024])
+@pytest.mark.parametrize("use_expert_map", [False, True])
+@torch.inference_mode()
+def test_dsv4_clamp_and_expert_filter(
+    default_vllm_config,
+    num_tokens: int,
+    use_expert_map: bool,
+) -> None:
+    """Guard clamped BF16 math and skipping invalid or non-local rows."""
+    if not current_platform.is_cuda():
+        pytest.skip("The persistent expert-filtering kernel is CUDA-only")
+
+    device = "cuda"
+    hidden_size = 2048
+    group_size = 128
+    clamp_limit = 10.0
+    torch.manual_seed(0)
+
+    x = (
+        torch.randn(num_tokens, hidden_size * 2, dtype=torch.bfloat16, device=device)
+        * 8
+    )
+    expert_ids = torch.arange(num_tokens, dtype=torch.int32, device=device) % 4
+    expert_ids[::11] = -1
+    expert_map = None
+    if use_expert_map:
+        expert_map = torch.tensor([0, -1, 1, -1], dtype=torch.int32, device=device)
+
+    valid = expert_ids >= 0
+    if expert_map is not None:
+        valid &= expert_map[expert_ids.clamp(min=0)] >= 0
+
+    gate, up = x.float().chunk(2, dim=-1)
+    gate = gate.clamp(max=clamp_limit)
+    up = up.clamp(min=-clamp_limit, max=clamp_limit)
+    # The unfused MoE activation computes SiLU and multiplication in BF16.
+    activated = F.silu(gate.to(torch.bfloat16)) * up.to(torch.bfloat16)
+    ref_out, ref_scales = per_token_group_quant_fp8(
+        activated, group_size=group_size, use_ue8m0=False
+    )
+
+    output = torch.full(
+        (num_tokens, hidden_size),
+        1.0,
+        dtype=current_platform.fp8_dtype(),
+        device=device,
+    )
+    scales = torch.full(
+        (num_tokens, hidden_size // group_size),
+        -1.0,
+        dtype=torch.float32,
+        device=device,
+    )
+    torch.ops._C.silu_and_mul_per_block_quant(
+        output,
+        x,
+        scales,
+        group_size,
+        None,
+        False,
+        clamp_limit,
+        expert_ids,
+        expert_map,
+        1,
+    )
+
+    torch.testing.assert_close(scales[valid], ref_scales[valid], rtol=2e-3, atol=1e-5)
+    ref_dequant = ref_out[valid].float() * ref_scales[valid].repeat_interleave(
+        group_size, dim=1
+    )
+    output_dequant = output[valid].float() * scales[valid].repeat_interleave(
+        group_size, dim=1
+    )
+    # CUDA's packed FP8 conversion can choose an adjacent E4M3 bin at exact
+    # ties; 0.125 is the tolerance used by vLLM's other fused FP8 tests.
+    torch.testing.assert_close(ref_dequant, output_dequant, rtol=0.125, atol=5e-2)
+
+    assert torch.all(output[~valid].float() == 1.0)
+    assert torch.all(scales[~valid] == -1.0)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("num_tokens", [128])
