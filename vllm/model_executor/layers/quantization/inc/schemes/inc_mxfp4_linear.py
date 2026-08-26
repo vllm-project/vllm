@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm._custom_ops as ops
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.model_executor.parameter import (
@@ -25,16 +26,21 @@ class INCMxfp4LinearMethod(INCLinearScheme):
     E2M1 weights packed two per byte with per-group E8M0 scales
     (group_size=32, no global scale). The platform kernel is selected by
     ``init_mxfp4_linear_kernel`` (FlashInfer / Marlin on CUDA, ``fp4_gemm``
-    on XPU).
+    on XPU). Hadamard rotation currently requires CUDA.
     """
 
-    def __init__(self, layer_config: "INCLayerConfig") -> None:
+    def __init__(
+        self,
+        layer_config: "INCLayerConfig",
+        rotation_block_size: int | None = None,
+    ) -> None:
         if not isinstance(layer_config.group_size, int):
             raise ValueError(
                 "INC MXFP4 requires scalar group_size, "
                 f"but found group_size={layer_config.group_size!r}."
             )
         self.group_size = layer_config.group_size or 32
+        self.rotation_block_size = rotation_block_size
         self.kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
 
     @classmethod
@@ -94,4 +100,14 @@ class INCMxfp4LinearMethod(INCLinearScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.rotation_block_size is not None:
+            if x.shape[-1] % self.rotation_block_size:
+                raise ValueError(
+                    f"Linear input width {x.shape[-1]} is not divisible by "
+                    f"AutoRound rotation block_size={self.rotation_block_size}"
+                )
+            original_shape = x.shape
+            x = x.unflatten(-1, (-1, self.rotation_block_size)).contiguous().clone()
+            x = ops.hadacore_transform(x)
+            x = x.flatten(-2, -1).reshape(original_shape)
         return self.kernel.apply_weights(layer, x, bias)
