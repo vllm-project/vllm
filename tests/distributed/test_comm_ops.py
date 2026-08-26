@@ -326,7 +326,7 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
         ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB - 1),
         ("mnnvl", 103, 2, 1, None),
         ("mnnvl", 103, 12, 3, None),
-        ("mnnvl", 103, 8, 1, None),
+        ("mnnvl", 103, 8, 1, 64 * flashinfer_all_reduce.MiB - 1),
         ("trtllm", 103, 8, 2, None),
         ("mnnvl", 90, 8, 2, None),
     ],
