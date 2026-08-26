@@ -148,6 +148,21 @@ class ParserManager:
 
             return _CohereCommandParser
 
+        if (
+            reasoning_parser_name == "muse_glimmer"
+            or tool_parser_name == "muse_glimmer"
+        ):
+            from vllm.parser.muse_glimmer import MuseGlimmerParser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _MuseGlimmerParser(MuseGlimmerParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+
+            return _MuseGlimmerParser
+
         from vllm.parser.abstract_parser import DelegatingParser
 
         r_cls = reasoning_parser_cls

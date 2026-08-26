@@ -1,25 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for the MuseGlimmer ATEM tool parser and reasoning parser.
+"""Low-level tests for MuseGlimmer reasoning and ATEM tool parsing.
 
-MuseGlimmer writes every turn as a sequence of channel-scoped messages rather
-than JSON, so the two parsers are tested together: the reasoning parser strips
-the reasoning span and forwards the remaining channels as content, and the tool
-parser reads ATEM markup out of those channels.
-
-Four areas, in order:
-
-  1. non-streaming tool-call extraction, including channel scoping (an
-     ``<atem:invoke>`` echoed inside reasoning must never become a call);
-  2. the reasoning -> tool-parser handoff, which regressed once by returning
-     ``content=None`` and starving the tool parser;
-  3. streaming, where markers routinely straddle chunk boundaries, plus
-     truncation isolation for an unterminated ``to=self`` block;
-  4. tool-name normalization against the tools registered on the request.
-
-These drive the parsers directly and need no checkpoint. The tests that require
-a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
+End-to-end streaming and tokenizer coverage lives in
+``test_muse_glimmer_parse_delta.py``.
 """
 
 import json
@@ -40,19 +25,6 @@ def _fresh_parsers():
     global R, T
     R = MuseGlimmerReasoningParser(object())
     T = MuseGlimmerToolParser(object())
-
-
-# Any framing token that must NEVER appear in surfaced reasoning/content.
-_FRAMING = [
-    "<|start|>",
-    "<|message|>",
-    "<|eom|>",
-    "<|eot|>",
-    "to=self",
-    "to=user",
-    "to=read.read",
-    "<atem:",
-]
 
 
 class _FakeReq:
@@ -99,7 +71,10 @@ def test_single_tool_call_after_reasoning():
     }
 
 
-def test_parallel_calls_across_eom_boundaries():
+def test_sequential_tool_channels_across_eom_boundaries():
+    # The model emits one tool call per channel; a turn may carry several
+    # consecutive tool channels (e.g. in assistant history). Not parallel
+    # generation -- the parser must segment each channel into its own call.
     raw = (
         "<|start|>assistant to=math.add<|message|>"
         '<atem:function_calls>\n<atem:invoke name="math.add">\n'
@@ -179,10 +154,11 @@ def test_reasoning_then_user_answer():
         " to=self<|message|>thinking<|eom|>"
         "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, framed = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
     assert reasoning == "thinking", repr(reasoning)
-    assert content == "The answer is 42.", repr(content)
-    assert not MuseGlimmerToolParser.extract_tool_calls(T, content, None).tools_called
+    out = MuseGlimmerToolParser.extract_tool_calls(T, framed, None)
+    assert out.content == "The answer is 42.", repr(out.content)
+    assert not out.tools_called
 
 
 def test_plain_content_without_framing_passes_through():
@@ -195,7 +171,7 @@ def test_plain_content_without_framing_passes_through():
     )
 
 
-def test_reasoning_then_parallel_calls():
+def test_reasoning_then_sequential_tool_channels():
     raw = (
         " to=self<|message|>need two calls<|eom|>"
         "<|start|>assistant to=math.add<|message|>"
@@ -215,58 +191,32 @@ def test_reasoning_then_parallel_calls():
     )
 
 
-# ----------------------------------------------------------------- streaming
+# ---------------------------------------------------------- reasoning boundary
 
 
-def _stream(raw: str, chunk: int):
-    """Feed ``raw`` incrementally in ``chunk``-char steps through BOTH streaming
-    parsers; return (reasoning, content, tool_calls)."""
-    reasoning, content, toolcalls = [], [], []
-    prev = ""
-    i = 0
-    while i < len(raw):
-        cur = raw[: i + chunk]
-        delta = cur[len(prev) :]
-        dm = MuseGlimmerReasoningParser.extract_reasoning_streaming(
-            R, prev, cur, delta, [], [], []
-        )
-        if dm is not None:
-            if getattr(dm, "reasoning", None):
-                reasoning.append(dm.reasoning)
-            content_delta = getattr(dm, "content", None)
-            # Tool-channel content is an internal handoff to the tool parser,
-            # not client-visible content from the unified parser.
-            if content_delta and "<atem:function_calls>" not in content_delta:
-                content.append(content_delta)
-        dt = MuseGlimmerToolParser.extract_tool_calls_streaming(
-            T, prev, cur, delta, [], [], [], _FakeReq()
-        )
-        if dt is not None and dt.tool_calls:
-            toolcalls.extend(dt.tool_calls)
-        prev = cur
-        i += chunk
-    return "".join(reasoning), "".join(content), toolcalls
+def test_reasoning_end_requires_a_post_reasoning_channel():
+    """``is_reasoning_end`` must fire once the turn leaves ``to=self`` for the
+    ``to=user`` answer OR a tool channel -- this is the gate the structured-
+    outputs backend uses to start applying the JSON grammar. It must NOT fire
+    while still reasoning, nor for a channel header the model merely quotes
+    inside an open reasoning span.
+    """
+    tokenizer = SimpleNamespace(decode=lambda token_ids: "".join(map(chr, token_ids)))
+    parser = MuseGlimmerReasoningParser(tokenizer)
 
+    def is_end(text):
+        return parser.is_reasoning_end(list(map(ord, text)))
 
-def _fn_of(tc):
-    fn = tc.function
-    if isinstance(fn, dict):
-        return fn.get("name"), fn.get("arguments")
-    return fn.name, fn.arguments
+    reasoning = " to=self<|message|>thinking"
+    answer = "<|eom|><|start|>assistant to=user<|message|>"
+    tool = "<|eom|><|start|>assistant to=weather.get<|message|>"
+    echoed = ' to=user<|message|> <atem:invoke name="weather.get">'
 
+    assert is_end(reasoning + answer)
+    assert is_end(reasoning + tool)
+    assert not is_end(reasoning)
+    assert not is_end(reasoning + echoed)
 
-RAW_TOOLCALL = (
-    " to=self<|message|>I should read the hostname file to answer.<|eom|>"
-    "<|start|>assistant to=read.read<|message|>"
-    '<atem:function_calls>\n<atem:invoke name="read.read">\n'
-    '<atem:parameter name="path">/etc/hostname</atem:parameter>\n'
-    "</atem:invoke>\n</atem:function_calls>"
-)
-
-RAW_ANSWER = (
-    " to=self<|message|>Think about it.<|eom|>"
-    "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
-)
 
 # NO closing <|eom|> -> truncated CoT
 RAW_TRUNCATED = (
@@ -277,47 +227,6 @@ RAW_TRUNCATED = (
 )
 
 
-def _check_toolcall_stream(chunk):
-    reasoning, content, tcs = _stream(RAW_TOOLCALL, chunk)
-    # (a) no framing token leaks into reasoning or content
-    for f in _FRAMING:
-        assert f not in reasoning, (
-            f"framing {f!r} leaked into reasoning (chunk={chunk})"
-        )
-        assert f not in content, f"framing {f!r} leaked into content (chunk={chunk})"
-    # (b) exactly one tool_call with correct name + args
-    assert len(tcs) == 1, f"expected 1 tool_call, got {len(tcs)} (chunk={chunk})"
-    name, args = _fn_of(tcs[0])
-    assert name == "read.read", name
-    assert json.loads(args) == {"path": "/etc/hostname"}, args
-    assert tcs[0].index == 0 and tcs[0].type == "function" and tcs[0].id
-    # (c) reasoning captured separately and clean
-    assert reasoning == "I should read the hostname file to answer.", repr(reasoning)
-    assert content == "", repr(content)
-
-
-def test_streaming_toolcall_chunk3():
-    _check_toolcall_stream(3)
-
-
-def test_streaming_toolcall_charwise():
-    # worst case: markers arrive one char at a time (mid-marker deltas)
-    _check_toolcall_stream(1)
-
-
-def test_streaming_toolcall_bigchunks():
-    _check_toolcall_stream(17)
-
-
-def test_streaming_reasoning_then_content():
-    reasoning, content, tcs = _stream(RAW_ANSWER, 3)
-    for f in _FRAMING:
-        assert f not in reasoning and f not in content, f
-    assert reasoning == "Think about it.", repr(reasoning)
-    assert content == "The answer is 42.", repr(content)
-    assert tcs == []
-
-
 def test_truncated_cot_no_toolcall_nonstreaming():
     out = MuseGlimmerToolParser.extract_tool_calls(T, RAW_TRUNCATED, _FakeReq())
     assert not out.tools_called and out.tool_calls == []
@@ -326,11 +235,6 @@ def test_truncated_cot_no_toolcall_nonstreaming():
         R, RAW_TRUNCATED, _FakeReq()
     )
     assert reasoning and "Maybe I should call" in reasoning, repr(reasoning)
-
-
-def test_truncated_cot_no_toolcall_streaming():
-    _, _, tcs = _stream(RAW_TRUNCATED, 3)
-    assert tcs == [], f"truncated CoT invoke leaked as streaming tool call: {tcs}"
 
 
 # ------------------------------------------------------- name normalization

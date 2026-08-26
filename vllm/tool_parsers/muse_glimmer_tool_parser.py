@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ATEM tool-call parser for MuseGlimmer.
 
-Faithful port of the MuseGlimmer ``response_schema`` tool-call contract from the
-HuggingFace MuseGlimmer export (``convert_muse_glimmer_weights_to_hf.py``:
-``MUSE_GLIMMER_RESPONSE_SCHEMA``).
+Implements the MuseGlimmer response schema's tool-call contract.
 
 MuseGlimmer emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
 
@@ -35,7 +33,7 @@ Usage: ``--enable-auto-tool-choice --tool-call-parser muse_glimmer``
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 
 import regex as re
 from openai.types.responses import ToolChoiceFunction
@@ -56,6 +54,24 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.reasoning.muse_glimmer_utils import (
+    FUNCTION_CALLS_OPEN as _FUNCTION_CALLS_OPEN,
+)
+from vllm.reasoning.muse_glimmer_utils import (
+    MSG_HEADER_RE as _MSG_HEADER_RE,
+)
+from vllm.reasoning.muse_glimmer_utils import (
+    REASONING_RECIPIENT as _REASONING_RECIPIENT,
+)
+from vllm.reasoning.muse_glimmer_utils import (
+    USER_RECIPIENT as _USER_RECIPIENT,
+)
+from vllm.reasoning.muse_glimmer_utils import (
+    advance_emitted,
+    iter_messages,
+    safe_open_body,
+    visible_channels,
+)
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
@@ -63,42 +79,13 @@ from vllm.tool_parsers.abstract_tool_parser import (
 
 logger = init_logger(__name__)
 
-# --- Message framing -------------------------------------------------------
-# An assistant message header. All three parts are optional except the
-# <|message|> terminator:
-#   "<|start|>assistant to=get_weather<|message|>"  -- after an <|eom|> boundary
-#   " to=self<|message|>"                           -- first message of a turn
-#                                                      (the prompt already ended
-#                                                      with "<|start|>assistant")
-#   "<|message|>"                                   -- bare recipient (public CoT
-#                                                      / untagged content)
-_MSG_HEADER_RE = re.compile(
-    r"(?:<\|start\|>\s*assistant)?[^\S\n]*(?:to=(?P<rcpt>[A-Za-z0-9_.\-]+))?<\|message\|>"
-)
-_MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
-
-# Recipients whose bodies are NOT tool calls.
-_REASONING_RECIPIENT = "self"
-_USER_RECIPIENT = "user"
-
-# Structural markers that must never reach the client. A streamed body is held
-# back by up to len(marker)-1 characters so a marker split across two chunks is
-# not emitted as content.
-_STRUCTURAL_MARKERS = ("<|eom|>", "<|eot|>", "<|start|>", "<|message|>")
-_MAX_MARKER_LEN = max(len(m) for m in _STRUCTURAL_MARKERS)
-# A trailing " to=NAME" that could still grow into a bare message header (the
-# first message of a turn has no <|start|> prefix -- the prompt ends with
-# "<|start|>assistant", so the model's first emitted text is " to=self<|message|>").
-_OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
-
-# --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
+# --- Tool-call extraction --------------------------------------------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
 _NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
 _PARAM_RE = re.compile(
     r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)</atem:parameter>',
     re.DOTALL,
 )
-_FUNCTION_CALLS_OPEN = "<atem:function_calls>"
 
 
 def _decode_value(raw: str):
@@ -110,73 +97,6 @@ def _decode_value(raw: str):
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return raw
-
-
-def _iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
-    """Segment *text* into assistant messages.
-
-    Yields ``(recipient, body, closed)`` per message, where ``recipient`` is
-    ``None`` for a bare ``<|message|>`` header and ``closed`` is False for a
-    message that has not (yet) seen ``<|eom|>`` / ``<|eot|>``.
-
-    A message is also terminated by the start of the NEXT header. Without that,
-    a reasoning block whose ``<|eom|>`` is missing (truncation, or a chunk
-    dropped at the reasoning -> tool transition) would absorb the tool-call
-    message that follows it and the call would be lost -- the same defect the
-    subtractive regexes have.
-    """
-    pos = 0
-    while pos < len(text):
-        header = _MSG_HEADER_RE.search(text, pos)
-        if header is None:
-            return
-        body_start = header.end()
-        end = _MSG_END_RE.search(text, body_start)
-        nxt = _MSG_HEADER_RE.search(text, body_start)
-        body_end = end.start() if end is not None else len(text)
-        closed = end is not None
-        if nxt is not None and nxt.start() < body_end:
-            body_end = nxt.start()
-            closed = False
-            next_pos = nxt.start()
-        else:
-            next_pos = end.end() if end is not None else len(text)
-        body = text[body_start:body_end]
-        # A body can never legitimately contain <|start|>. Seeing one means the
-        # next header is only partially generated (its <|message|> has not
-        # arrived), so the regex above could not recognise it yet. Cut there,
-        # otherwise the streamed body would grow to include the next header and
-        # then shrink back once it completes.
-        start_tok = body.find("<|start|>")
-        if start_tok != -1:
-            body = body[:start_tok]
-            closed = False
-        yield header.group("rcpt"), body, closed
-        pos = next_pos
-
-
-def _trailing_partial_marker_len(text: str) -> int:
-    """Length of the longest suffix of *text* that prefixes a structural marker."""
-    max_overlap = min(len(text), _MAX_MARKER_LEN - 1)
-    for overlap in range(max_overlap, 0, -1):
-        suffix = text[-overlap:]
-        if any(marker.startswith(suffix) for marker in _STRUCTURAL_MARKERS):
-            return overlap
-    return 0
-
-
-def _safe_open_body(body: str) -> str:
-    """Trim the tail of a still-growing body to what is safe to emit now.
-
-    Holds back anything that could still turn out to be structural, so the
-    emitted prefix only ever grows. Chunks under speculative decoding are large
-    enough that markers routinely straddle them.
-    """
-    tail_to = _OPEN_TAIL_TO_RE.search(body)
-    if tail_to is not None:
-        return body[: tail_to.start()]
-    partial = _trailing_partial_marker_len(body)
-    return body[: len(body) - partial] if partial else body
 
 
 class MuseGlimmerToolParser(ToolParser):
@@ -197,8 +117,8 @@ class MuseGlimmerToolParser(ToolParser):
         super().__init__(tokenizer, tools)
         # Streaming cursors. vLLM constructs one ToolParser per request, so
         # instance state is per-stream.
-        self._streamed_content_len: int = 0
-        self._streamed_reasoning_len: int = 0
+        self._emitted_content = ""
+        self._emitted_reasoning = ""
         self._emitted_tool_calls: int = 0
 
     def adjust_request(
@@ -247,7 +167,7 @@ class MuseGlimmerToolParser(ToolParser):
         """
         bodies = [
             body
-            for rcpt, body, _closed in _iter_messages(text)
+            for rcpt, body, _closed in iter_messages(text)
             if rcpt is not None
             and rcpt != _REASONING_RECIPIENT
             and rcpt != _USER_RECIPIENT
@@ -263,34 +183,6 @@ class MuseGlimmerToolParser(ToolParser):
             )
             return text
         return ""
-
-    @classmethod
-    def _visible_channels(cls, text: str) -> tuple[str, str, bool, bool]:
-        """Return ``(content, reasoning, content_open, reasoning_open)``.
-
-        The ``*_open`` flags say whether that channel's LAST message is still
-        being generated; only then must the caller hold back a partial
-        structural marker. Tracking them per channel matters: a closed
-        reasoning block whose text happens to end in ``<`` would otherwise stay
-        permanently truncated while a later content message is open.
-        """
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        content_open = False
-        reasoning_open = False
-        for rcpt, body, closed in _iter_messages(text):
-            if rcpt == _REASONING_RECIPIENT:
-                reasoning_parts.append(body)
-                reasoning_open = not closed
-            elif rcpt is None or rcpt == _USER_RECIPIENT:
-                content_parts.append(body)
-                content_open = not closed
-        return (
-            "".join(content_parts),
-            "".join(reasoning_parts),
-            content_open,
-            reasoning_open,
-        )
 
     # ---------------- tool name binding ----------------
 
@@ -363,7 +255,7 @@ class MuseGlimmerToolParser(ToolParser):
     @classmethod
     def _extract_content(cls, text: str) -> str | None:
         """Return the user-facing body, or the raw text when unframed."""
-        content, reasoning, _c_open, _r_open = cls._visible_channels(text)
+        content, reasoning, _c_open, _r_open = visible_channels(text)
         if content:
             return content
         # No framing at all -> the whole thing is plain content.
@@ -445,26 +337,30 @@ class MuseGlimmerToolParser(ToolParser):
         if not previous_text:
             # First delta of the tool phase (parse_delta resets previous_text
             # to "" when it hands the stream over). Reset the cursors.
-            self._streamed_content_len = 0
-            self._streamed_reasoning_len = 0
+            self._emitted_content = ""
+            self._emitted_reasoning = ""
             self._emitted_tool_calls = 0
 
         try:
             registered = self._registered_names(request)
             calls = self._parse_tool_calls(current_text, registered)
-            content, reasoning, content_open, reasoning_open = self._visible_channels(
-                current_text
+            content, reasoning, content_open, reasoning_open = visible_channels(
+                current_text, withhold_open_untagged=True
             )
 
             # Trim the tail of a channel that is still growing, so the emitted
             # prefix never shrinks between deltas.
             if content_open:
-                content = _safe_open_body(content)
+                content = safe_open_body(content)
             if reasoning_open:
-                reasoning = _safe_open_body(reasoning)
+                reasoning = safe_open_body(reasoning)
 
-            content_delta = content[self._streamed_content_len :]
-            reasoning_delta = reasoning[self._streamed_reasoning_len :]
+            content_delta, self._emitted_content = advance_emitted(
+                self._emitted_content, content
+            )
+            reasoning_delta, self._emitted_reasoning = advance_emitted(
+                self._emitted_reasoning, reasoning
+            )
 
             tool_deltas: list[DeltaToolCall] = []
             for i in range(self._emitted_tool_calls, len(calls)):
@@ -484,8 +380,6 @@ class MuseGlimmerToolParser(ToolParser):
             if not content_delta and not reasoning_delta and not tool_deltas:
                 return None
 
-            self._streamed_content_len = len(content)
-            self._streamed_reasoning_len = len(reasoning)
             self._emitted_tool_calls = len(calls)
 
             message = DeltaMessage()
