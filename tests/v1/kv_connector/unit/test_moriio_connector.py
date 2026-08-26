@@ -796,13 +796,13 @@ def test_token_count_basis_uses_full_attention_group():
     assert scheduler._token_count_block_size == 16
 
 
-def test_get_sw_clipped_blocks_clips_only_sw_group():
-    """get_sw_clipped_blocks keeps the full group intact and clips the
+def test_get_exchange_clipped_blocks_clips_only_sw_group():
+    """get_exchange_clipped_blocks keeps the full group intact and clips the
     sliding-window group to its in-window tail."""
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     full = [10, 11, 12, 13, 14]
     sw = [20, 21, 22, 23, 24]
-    clipped = scheduler.get_sw_clipped_blocks([full, sw])
+    clipped = scheduler.get_exchange_clipped_blocks([full, sw])
     assert clipped[0] == full
     assert clipped[1] == [22, 23, 24]
 
@@ -823,7 +823,7 @@ def test_single_group_path_unchanged():
     assert scheduler._is_hma_required is False
     assert scheduler.blocks_per_sw == [0]
     blocks = [[1, 2, 3, 4, 5]]
-    assert scheduler.get_sw_clipped_blocks(blocks) == blocks
+    assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
 def test_hybrid_write_mode_rejected():

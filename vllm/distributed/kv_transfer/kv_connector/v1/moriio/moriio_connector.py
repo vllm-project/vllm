@@ -411,7 +411,7 @@ class MoRIIOConnectorScheduler:
             )
         )
         # Only sliding-window hybrids (e.g. Gemma) are supported: those are the
-        # groups get_sw_clipped_blocks knows how to transfer. Any other
+        # groups get_exchange_clipped_blocks knows how to transfer. Any other
         # non-full-attention group (Mamba/SSM, chunked-local attention, ...)
         # would be silently mistransferred, so fail closed instead.
         if self._is_hma_required:
@@ -437,12 +437,20 @@ class MoRIIOConnectorScheduler:
                 "(sliding-window attention). Use READ mode, or pass "
                 "--disable-hybrid-kv-cache-manager."
             )
-        # Per-group sliding-window block budget: cdiv(window, block_size) + 1
-        # (the +1 conservatively covers a block straddling the window edge).
-        # 0 for full-attention groups (no clipping).
-        self.blocks_per_sw = self._compute_blocks_per_sw(
-            kv_cache_config, self.block_size
-        )
+        # Gather Sliding Window sizes for each kv cache group (if any) in number of
+        # blocks per KV cache group. This is used to clip the local attention window.
+        sw_sizes_tokens: list[tuple[int, int]] = [
+            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            else (0, self.block_size)
+            for g in kv_cache_config.kv_cache_groups
+        ]
+        # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
+        # account for boundary overlap eg window isn't fully aligned with blocks.
+        self.blocks_per_sw = [
+            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
+            for n_tokens, block_size in sw_sizes_tokens
+        ]
         # Chunked-prefill last-chunk detection counts tokens as
         # len(block_ids[g]) * block_size. Use an unclipped full-attention group
         # (blocks_per_sw == 0) and its own block size: sliding-window groups are
@@ -524,26 +532,7 @@ class MoRIIOConnectorScheduler:
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
-    @staticmethod
-    def _compute_blocks_per_sw(
-        kv_cache_config: "KVCacheConfig", block_size: int
-    ) -> list[int]:
-        """Per-group sliding-window block budget.
-
-        Returns one entry per KV cache group: the number of blocks that cover
-        the sliding window for a ``SlidingWindowSpec`` group, else 0 (meaning
-        "keep every block", used for full-attention groups).
-        """
-        budgets: list[int] = []
-        for group in kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            if isinstance(spec, SlidingWindowSpec):
-                budgets.append(cdiv(spec.sliding_window, spec.block_size) + 1)
-            else:
-                budgets.append(0)
-        return budgets
-
-    def get_sw_clipped_blocks(
+    def get_exchange_clipped_blocks(
         self,
         block_ids: BlockIds,
     ) -> BlockIds:
@@ -802,7 +791,7 @@ class MoRIIOConnectorScheduler:
                             # Get unhashed blocks to pull from remote. Clip our
                             # own sliding-window groups so per-group lengths
                             # line up with the (already clipped) remote tails.
-                            local_group_ids = self.get_sw_clipped_blocks(
+                            local_group_ids = self.get_exchange_clipped_blocks(
                                 blocks.get_block_ids()
                             )
                             local_block_ids = self._match_local_to_remote_tails(
@@ -1104,7 +1093,7 @@ class MoRIIOConnectorScheduler:
 
         # Per-group prefill blocks, with sliding-window groups clipped to the
         # in-window tail the decode leg needs to pull.
-        computed_block_ids = self.get_sw_clipped_blocks(block_ids)
+        computed_block_ids = self.get_exchange_clipped_blocks(block_ids)
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = any(len(group) > 0 for group in computed_block_ids)
 
