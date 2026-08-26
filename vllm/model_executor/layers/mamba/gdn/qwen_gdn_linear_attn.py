@@ -212,6 +212,7 @@ def fi_chunk_gated_delta_rule(
     fi_beta = beta.to(torch.float32)
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.to(torch.int64)
+    from vllm.envs import VLLM_BATCH_INVARIANT
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
@@ -221,6 +222,7 @@ def fi_chunk_gated_delta_rule(
         initial_state=fi_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        use_cp=False if VLLM_BATCH_INVARIANT else "auto",
     )
     # FlashInfer returns (output, state) when output_final_state=True,
     # or just output when output_final_state=False.
@@ -1368,50 +1370,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            if envs.VLLM_BATCH_INVARIANT and not torch.cuda.is_current_stream_capturing():
-                # Per-sequence causal_conv1d_fn: the batched Triton kernel is not
-                # reduction-order invariant — batch geometry changes internal tiling,
-                # causing NaN in some GDN layers at large batch sizes.
-                _nql = non_spec_query_start_loc.tolist()
-                _dev = mixed_qkv_non_spec_T.device
-                _conv_pieces: list[torch.Tensor] = []
-                for _ci in range(len(_nql) - 1):
-                    _cs = _nql[_ci]
-                    _ce = _nql[_ci + 1]
-                    _csi = int(non_spec_state_indices_tensor[_ci].item())  # type: ignore[index]
-                    _has_init_i = (
-                        has_initial_state[_ci : _ci + 1]
-                        if has_initial_state is not None
-                        else None
-                    )
-                    _conv_out_i = causal_conv1d_fn(
-                        mixed_qkv_non_spec_T[:, _cs:_ce],
-                        conv_weights,
-                        self.conv1d.bias,
-                        activation=self.activation,
-                        conv_states=conv_state[_csi : _csi + 1],
-                        has_initial_state=_has_init_i,
-                        cache_indices=torch.zeros(1, dtype=torch.int32, device=_dev),
-                        query_start_loc=torch.tensor(
-                            [0, _ce - _cs], dtype=torch.int32, device=_dev
-                        ),
-                    ).transpose(0, 1)
-                    _conv_pieces.append(_conv_out_i)
-                mixed_qkv_non_spec = torch.cat(_conv_pieces, dim=0)
-            else:
-                # - "cache_indices" updates the conv_state cache in positions
-                #   pointed to by "state_indices_tensor"
-                mixed_qkv_non_spec = causal_conv1d_fn(
-                    mixed_qkv_non_spec_T,
-                    conv_weights,
-                    self.conv1d.bias,
-                    activation=self.activation,
-                    conv_states=conv_state,
-                    has_initial_state=has_initial_state,
-                    cache_indices=non_spec_state_indices_tensor,
-                    query_start_loc=non_spec_query_start_loc,
-                    metadata=attn_metadata,
-                ).transpose(0, 1)
+            # - "cache_indices" updates the conv_state cache in positions
+            #   pointed to by "state_indices_tensor"
+            mixed_qkv_non_spec = causal_conv1d_fn(
+                mixed_qkv_non_spec_T,
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=has_initial_state,
+                cache_indices=non_spec_state_indices_tensor,
+                query_start_loc=non_spec_query_start_loc,
+                metadata=attn_metadata,
+            ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
