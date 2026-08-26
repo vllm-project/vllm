@@ -36,6 +36,9 @@ from vllm.model_executor.layers.quantization.utils import flashinfer_utils
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_input_tensor_strategy_moe,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -91,6 +94,16 @@ def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):
     assert torch.equal(padded_w31, expected)
 
 
+def test_static_fp8_moe_input_scales_remain_scalar() -> None:
+    a1_scale, a2_scale = process_fp8_input_tensor_strategy_moe(
+        torch.tensor([0.25, 0.5]),
+        torch.tensor([0.75, 0.6]),
+        enable_eplb=False,
+    )
+
+    assert a1_scale.ndim == a2_scale.ndim == 0
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
@@ -108,10 +121,12 @@ def test_model_load_and_run(
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
 
-    with vllm_runner(model_id, enforce_eager=True) as llm:
+    with vllm_runner(model_id, enforce_eager=True, **kwargs) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
@@ -142,8 +157,10 @@ def test_online_quantization(
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
 
     model_dtype = "auto"
     if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
@@ -156,6 +173,7 @@ def test_online_quantization(
         dtype=model_dtype,
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
+        **kwargs,
     ) as llm:
 
         def check_model(model):
@@ -384,7 +402,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 @pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
-@pytest.mark.parametrize("weight_block_size", [None, [1, 1]])
+@pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking
 # (excluding device sharding) must also be applied to the reloaded weights
 #
@@ -415,6 +433,8 @@ def test_fp8_reloading(
 
     # Set model config as model_config.dtype is required in Fp8LinearMethod.
     default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.moe_backend = "triton"
+    layer_size = 128 if weight_block_size is not None else 1
     with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
@@ -422,14 +442,14 @@ def test_fp8_reloading(
         )
 
         if method_cls is Fp8LinearMethod:
-            layer = torch.nn.Linear(1, 1)
+            layer = torch.nn.Linear(layer_size, layer_size)
             method = method_cls(config)
             method.create_weights(
                 layer=layer,
-                input_size_per_partition=1,
-                output_partition_sizes=[1],
-                input_size=1,
-                output_size=1,
+                input_size_per_partition=layer_size,
+                output_partition_sizes=[layer_size],
+                input_size=layer_size,
+                output_size=layer_size,
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
@@ -439,16 +459,16 @@ def test_fp8_reloading(
             layer = FusedMoEFactory(
                 num_experts=1,
                 top_k=1,
-                hidden_size=1,
-                intermediate_size=1,
+                hidden_size=layer_size,
+                intermediate_size=layer_size,
             )
             layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
                 num_experts=1,
-                hidden_size=1,
-                intermediate_size_per_partition=1,
+                hidden_size=layer_size,
+                intermediate_size_per_partition=layer_size,
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )

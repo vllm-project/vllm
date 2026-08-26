@@ -70,7 +70,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     cutlass_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
 )
@@ -255,7 +254,6 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -565,6 +563,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         if self.block_quant:
             assert self.weight_block_size is not None
+            assert self.moe_block_shape is not None
+            moe_block_shape = self.moe_block_shape
             layer.weight_block_size = self.weight_block_size
             tp_size = get_tensor_model_parallel_world_size()
             block_n, block_k = (
@@ -584,7 +584,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     )
                 # Use the refined block grid for the scale parameters; the
                 # loader upsamples the checkpoint scales accordingly.
-                block_n, block_k = self.moe_block_shape
+                block_n, block_k = moe_block_shape
             if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
                 # Required by row parallel
                 if self.weight_scale_refine is None:
@@ -593,7 +593,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         f"{intermediate_size_per_partition} is not divisible by "
                         f"weight quantization block_k = {block_k}."
                     )
-                block_n, block_k = self.moe_block_shape
+                block_n, block_k = moe_block_shape
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
