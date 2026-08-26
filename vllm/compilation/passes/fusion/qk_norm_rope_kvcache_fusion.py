@@ -20,7 +20,13 @@ from vllm.model_executor.layers.attention.attention import (
     get_attention_context,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    _USE_LAYERNAME,
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -51,9 +57,10 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     rms_norm_eps: float,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    v_norm: bool = False,
-    layer_name: str = "",
+    v_norm: bool,
+    layer_name: LayerNameType,
 ) -> torch.Tensor:
+    layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_qk_norm_rope_kvcache_update(
@@ -89,8 +96,8 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     rms_norm_eps: float,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    v_norm: bool = False,
-    layer_name: str = "",
+    v_norm: bool,
+    layer_name: LayerNameType,
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -172,6 +179,10 @@ class QkNormRopeKvCachePattern:
         if self.quant_query:
             q_scale = empty_fp32(1)
             inputs += [q_scale]
+        if _USE_LAYERNAME:
+            # layer_name is lifted to a graph input in this build, so it must be
+            # a pattern input (wildcard) rather than a baked constant string.
+            inputs.append(_encode_layer_name(self.layer_name))
         return inputs
 
     def pattern_non_fp8_quant_query(
@@ -181,6 +192,7 @@ class QkNormRopeKvCachePattern:
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
+        layer_name: LayerNameType,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
@@ -199,7 +211,7 @@ class QkNormRopeKvCachePattern:
         if self.v_norm:
             # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
             v = vllm.ir.ops.rms_norm(v, None, self.eps, None)
-        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, layer_name)
         return dummy, q_rope, k_rope, v
 
     def replacement_non_fp8_quant_query(
@@ -209,6 +221,7 @@ class QkNormRopeKvCachePattern:
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
+        layer_name: LayerNameType,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q_out = torch.empty(
             qkv.shape[0],
@@ -238,7 +251,7 @@ class QkNormRopeKvCachePattern:
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
             v_norm=self.v_norm,
-            layer_name=self.layer_name,
+            layer_name=layer_name,
         )
         return results[0], results[1], results[2], v
 
@@ -250,6 +263,7 @@ class QkNormRopeKvCachePattern:
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
         q_scale: torch.Tensor,
+        layer_name: LayerNameType,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
@@ -281,7 +295,7 @@ class QkNormRopeKvCachePattern:
         if self.v_norm:
             # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
             v = vllm.ir.ops.rms_norm(v, None, self.eps, None)
-        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, layer_name)
         return dummy, q_rope_fp8, k_rope, v, q_scale_out
 
     def replacement_fp8_quant_query(
@@ -292,6 +306,7 @@ class QkNormRopeKvCachePattern:
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
         q_scale: torch.Tensor,
+        layer_name: LayerNameType,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q_out = torch.empty(
             qkv.shape[0],
@@ -321,7 +336,7 @@ class QkNormRopeKvCachePattern:
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
             v_norm=self.v_norm,
-            layer_name=self.layer_name,
+            layer_name=layer_name,
         )
         # Re-apply the quant on the kernel's bf16 q_out; fused op does not quant q.
         # Same explicit auto_functionalized form as the pattern: [1] = quantized
@@ -372,9 +387,15 @@ class QkNormRopeKvCachePattern:
         inputs = self.get_inputs()
         argnames = [*inspect.signature(pattern).parameters.keys()]
         search_gm = trace_fn(pattern, inputs)
+        # With a wildcard layer_name input, per-layer patterns only differ by
+        # their concrete head shapes (num_heads/head_size/split sizes). Keep
+        # those ints literal (ignore only SymInt) so distinct shapes stay
+        # distinct patterns; otherwise int-wildcarding collapses them into
+        # duplicates. Dynamic batch is a SymInt and stays a wildcard.
+        ignore_types = (torch.SymInt,) if _USE_LAYERNAME else (int, torch.SymInt)
         search_fn_pattern = pm.fx_to_pattern(
             search_gm,
-            ignore_types=(int, torch.SymInt),
+            ignore_types=ignore_types,
             argnames=argnames,
         )
 
@@ -390,34 +411,83 @@ class QkNormRopeKvCachePattern:
     def register(self, pm_pass: PatternMatcherPass) -> None:
         # make_fx counts `self` in bound-method code params; wrap as plain fns.
         # Distinct names per branch so mypy doesn't see one name, two signatures.
-        if self.quant_query:
+        # When _USE_LAYERNAME, layer_name is lifted to a graph input and must be
+        # matched as a pattern input; otherwise it is baked in as a constant.
+        _ln = _encode_layer_name(self.layer_name)
+        if self.quant_query and _USE_LAYERNAME:
 
-            def pattern_q(qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale):
+            def pattern_ql(
+                qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale, layer_name
+            ):
                 return self.pattern_fp8_quant_query(
-                    qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
+                    qkv,
+                    positions,
+                    q_weight,
+                    k_weight,
+                    cos_sin_cache,
+                    q_scale,
+                    layer_name,
                 )
 
-            def replacement_q(
+            def replacement_ql(
+                qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale, layer_name
+            ):
+                return self.replacement_fp8_quant_query(
+                    qkv,
+                    positions,
+                    q_weight,
+                    k_weight,
+                    cos_sin_cache,
+                    q_scale,
+                    layer_name,
+                )
+
+            self._register(pattern_ql, replacement_ql, pm_pass)
+        elif self.quant_query:
+
+            def pattern_qc(qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale):
+                return self.pattern_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale, _ln
+                )
+
+            def replacement_qc(
                 qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
             ):
                 return self.replacement_fp8_quant_query(
-                    qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale, _ln
                 )
 
-            self._register(pattern_q, replacement_q, pm_pass)
+            self._register(pattern_qc, replacement_qc, pm_pass)
+        elif _USE_LAYERNAME:
+
+            def pattern_nl(
+                qkv, positions, q_weight, k_weight, cos_sin_cache, layer_name
+            ):
+                return self.pattern_non_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, layer_name
+                )
+
+            def replacement_nl(
+                qkv, positions, q_weight, k_weight, cos_sin_cache, layer_name
+            ):
+                return self.replacement_non_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, layer_name
+                )
+
+            self._register(pattern_nl, replacement_nl, pm_pass)
         else:
 
-            def pattern_noq(qkv, positions, q_weight, k_weight, cos_sin_cache):
+            def pattern_nc(qkv, positions, q_weight, k_weight, cos_sin_cache):
                 return self.pattern_non_fp8_quant_query(
-                    qkv, positions, q_weight, k_weight, cos_sin_cache
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, _ln
                 )
 
-            def replacement_noq(qkv, positions, q_weight, k_weight, cos_sin_cache):
+            def replacement_nc(qkv, positions, q_weight, k_weight, cos_sin_cache):
                 return self.replacement_non_fp8_quant_query(
-                    qkv, positions, q_weight, k_weight, cos_sin_cache
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, _ln
                 )
 
-            self._register(pattern_noq, replacement_noq, pm_pass)
+            self._register(pattern_nc, replacement_nc, pm_pass)
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +524,11 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
+        # When _USE_LAYERNAME, layer_name is a wildcard pattern input, so all
+        # layers of the same shape produce an identical pattern; register each
+        # distinct shape once to avoid duplicate-pattern errors.
+        registered_shapes: set[tuple[int, int, int, int]] = set()
+
         for _, layer in attn_layers.items():
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
                 continue
@@ -477,6 +552,16 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            shape_key = (
+                layer.num_heads,
+                layer.num_kv_heads,
+                layer.head_size,
+                layer.head_size_v,
+            )
+            if _USE_LAYERNAME:
+                if shape_key in registered_shapes:
+                    continue
+                registered_shapes.add(shape_key)
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
                     for quant_q in [False, True]:
