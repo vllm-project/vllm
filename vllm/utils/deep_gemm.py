@@ -334,7 +334,7 @@ def supports_block_size_multiple_of() -> bool:
 
 @contextlib.contextmanager
 def _block_size_multiple_scope(
-    value: tuple[int, int] | None,
+    value: list[int] | tuple[int, int] | None,
 ):
     """Apply a block-size constraint for one normal GEMM launch.
 
@@ -346,6 +346,8 @@ def _block_size_multiple_scope(
             yield
             return
 
+        assert len(value) == 2
+        value = tuple(value)
         if any(multiple <= 0 for multiple in value):
             raise ValueError("block-size multiples must be positive")
 

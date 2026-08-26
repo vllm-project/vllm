@@ -30,26 +30,6 @@ from .BlockScaledMMLinearKernel import (
 )
 
 
-def _launch_fp8_gemm_nt(
-    A: torch.Tensor,
-    As: torch.Tensor,
-    B: torch.Tensor,
-    Bs: torch.Tensor,
-    output: torch.Tensor,
-    use_deep_gemm_e8m0: bool,
-    block_size_multiple_of: tuple[int, int] | None = None,
-) -> None:
-    torch.ops.vllm.fp8_gemm_nt_op(
-        A,
-        As,
-        B,
-        Bs,
-        output,
-        use_deep_gemm_e8m0,
-        block_size_multiple_of,
-    )
-
-
 class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def __init__(self, config: FP8ScaledMMLinearLayerConfig):
         super().__init__(config)
@@ -146,7 +126,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             device=A.device,
         )
         block_size_multiple_of = self._block_size_multiple_plan.get(A.shape[0])
-        _launch_fp8_gemm_nt(
+        torch.ops.vllm.fp8_gemm_nt_op(
             A,
             As,
             B,
@@ -167,17 +147,12 @@ def _fp8_gemm_nt_op(
     use_deep_gemm_e8m0: bool,
     block_size_multiple_of: list[int] | None = None,
 ) -> None:
-    block_size_multiple = (
-        None
-        if block_size_multiple_of is None
-        else (block_size_multiple_of[0], block_size_multiple_of[1])
-    )
     fp8_gemm_nt(
         (q_input, input_scale),
         (weight, weight_scale),
         output,
         is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
-        block_size_multiple_of=block_size_multiple,
+        block_size_multiple_of=block_size_multiple_of,
     )
 
 
