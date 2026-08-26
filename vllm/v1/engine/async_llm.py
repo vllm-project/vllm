@@ -383,6 +383,7 @@ class AsyncLLM(EngineClient):
             )
 
         if isinstance(params, SamplingParams) and params.n > 1:
+            # TODO (NickLucche) Batch check admission check for all n requests
             self.check_admission(params.n, request_id)
 
         if isinstance(prompt, AsyncGenerator):
