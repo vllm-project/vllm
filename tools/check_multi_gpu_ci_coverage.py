@@ -29,6 +29,15 @@ the test declares too. Only the three literal forms this repo's CI configs
 actually use are interpreted (`distributed`, `distributed(num_gpus=N)`,
 `not distributed`); any other `-m`/`-k` expression is treated as
 unconstrained rather than guessed at, to avoid false gap reports.
+
+Also flags a second, separate finding category: hand-rolled runtime GPU-count
+skip guards (`if <condition mentioning device_count/world_size/num_gpus/...>:
+pytest.skip(...)`) that bypass the marker convention entirely. These are the
+root cause of the blind spots above -- a test using one isn't just missing
+from a `-m`/`num_devices` cross-check, it's invisible to this tool (and any
+other static analysis) from the start. This is a heuristic, not proof of a
+bug: it flags the *pattern*, not whether the guard's actual value is
+correct or already covered. Human judgment decides whether to migrate.
 """
 
 import argparse
@@ -175,6 +184,83 @@ def find_gpu_requirements() -> dict[str, set[int]]:
             requirements[path.relative_to(REPO_ROOT).as_posix()] = needed
 
     return requirements
+
+
+_GPU_GUARD_IDENTIFIERS = {
+    "device_count",
+    "world_size",
+    "num_gpus",
+    "gpu_count",
+    "n_gpu",
+    "num_devices",
+    "gpu_tier",
+}
+
+
+def _mentions_gpu_guard(node: ast.expr) -> bool:
+    """True if any Name/Attribute inside `node` looks GPU-count-related.
+    Substring match, not exact -- catches fixture/variable names like
+    `num_gpus_available` that embed a guard keyword without equaling it."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            identifier = n.id
+        elif isinstance(n, ast.Attribute):
+            identifier = n.attr
+        else:
+            continue
+        if any(kw in identifier for kw in _GPU_GUARD_IDENTIFIERS):
+            return True
+    return False
+
+
+def _is_pytest_skip_call(func: ast.expr) -> bool:
+    """True for `pytest.skip(...)` specifically (not `@pytest.mark.skip`,
+    which is a decorator, not a runtime call, and already static)."""
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "skip"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pytest"
+    )
+
+
+def find_hand_rolled_skip_guards() -> dict[str, list[int]]:
+    """AST-scan tests/ for `if <condition mentioning GPU count>: ...
+    pytest.skip(...)` -- runtime skip guards that bypass the marker
+    convention (multi_gpu_test/gpu_tier_mark/multi_gpu_marks/
+    pytest.mark.distributed) this tool relies on to see requirements at
+    all. Returns {repo-relative path: [line numbers of the `if`]}.
+
+    Heuristic, not proof: flags the *pattern* of a hand-rolled GPU-count
+    guard so it can be migrated to a statically-visible marker; doesn't
+    evaluate whether the guard's value is itself correct or already
+    covered by CI."""
+    findings: dict[str, list[int]] = {}
+    for path in sorted(TESTS_DIR.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        lines: list[int] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if not any(isinstance(n, ast.Compare) for n in ast.walk(node.test)):
+                continue
+            if not _mentions_gpu_guard(node.test):
+                continue
+            has_skip_call = any(
+                isinstance(stmt, ast.Call) and _is_pytest_skip_call(stmt.func)
+                for stmt in ast.walk(node)
+            )
+            if has_skip_call:
+                lines.append(node.lineno)
+
+        if lines:
+            findings[path.relative_to(REPO_ROOT).as_posix()] = lines
+
+    return findings
 
 
 def _strip_env_prefix(cmd: str) -> str:
@@ -391,14 +477,37 @@ def main() -> int:
                 reason = f"best covering job(s) {jobs} only provision {have}"
             gaps.append((rel_path, needed, reason))
 
-    if not gaps:
+    hand_rolled = find_hand_rolled_skip_guards()
+
+    if not gaps and not hand_rolled:
         print("No world_size/num_devices gaps found.")
         return 0
 
-    print(f"Found {len(gaps)} unsatisfied GPU requirement(s):\n")
-    for rel_path, needed, reason in gaps:
-        print(f"  {rel_path} (num_gpus={needed}): {reason}")
-    return 1
+    exit_code = 0
+
+    if gaps:
+        exit_code = 1
+        print(f"Found {len(gaps)} unsatisfied GPU requirement(s):\n")
+        for rel_path, needed, reason in gaps:
+            print(f"  {rel_path} (num_gpus={needed}): {reason}")
+
+    if hand_rolled:
+        exit_code = 1
+        if gaps:
+            print()
+        total = sum(len(lines) for lines in hand_rolled.values())
+        print(
+            f"Found {total} hand-rolled GPU-count skip guard(s) in "
+            f"{len(hand_rolled)} file(s) -- these bypass the marker "
+            "convention and are invisible to the checks above; consider "
+            "migrating to multi_gpu_test/gpu_tier_mark/multi_gpu_marks/"
+            "pytest.mark.distributed(num_gpus=N):\n"
+        )
+        for rel_path, lines in sorted(hand_rolled.items()):
+            line_list = ", ".join(f"L{n}" for n in lines)
+            print(f"  {rel_path}: {line_list}")
+
+    return exit_code
 
 
 if __name__ == "__main__":
