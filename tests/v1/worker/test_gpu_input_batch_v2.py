@@ -6,7 +6,12 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    InputBuffers,
+    prepare_pos_seq_lens,
+)
+from vllm.v1.worker.gpu.mm.rope import RopeState
 
 DEVICE = current_platform.device_type
 
@@ -51,3 +56,69 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     assert torch.equal(
         batch.query_start_loc.cpu(), torch.from_numpy(batch.query_start_loc_np)
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires a CUDA-like device"
+)
+def test_prepare_pos_seq_lens_separates_physical_and_rope_positions():
+    device = torch.device(DEVICE)
+    idx_mapping = torch.tensor([1, 0], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    num_computed_tokens = torch.tensor([20, 10], dtype=torch.int32, device=device)
+    rope_offsets = torch.tensor([200, 100], dtype=torch.int64, device=device)
+    positions = torch.empty(5, dtype=torch.int64, device=device)
+    rope_positions = torch.empty_like(positions)
+    seq_lens = torch.empty(4, dtype=torch.int32, device=device)
+
+    prepare_pos_seq_lens(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        positions,
+        seq_lens,
+        rope_positions,
+        rope_offsets,
+    )
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(positions.cpu(), torch.tensor([10, 11, 12, 20, 21]))
+    torch.testing.assert_close(
+        rope_positions.cpu(), torch.tensor([110, 111, 112, 220, 221])
+    )
+    torch.testing.assert_close(
+        seq_lens.cpu(), torch.tensor([13, 22, 0, 0], dtype=torch.int32)
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires a CUDA-like device"
+)
+def test_rope_state_applies_request_static_offsets():
+    device = torch.device(DEVICE)
+    state = RopeState(
+        num_dims=3,
+        has_delta=True,
+        max_num_reqs=2,
+        max_num_tokens=5,
+        max_model_len=32,
+        device=device,
+    )
+    state.prefill_delta.gpu.zero_()
+    idx_mapping = torch.tensor([1, 0], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    prefill_lens = torch.zeros(2, dtype=torch.int32, device=device)
+    num_computed_tokens = torch.tensor([20, 10], dtype=torch.int32, device=device)
+    rope_offsets = torch.tensor([200, 100], dtype=torch.int64, device=device)
+
+    state.prepare_positions(
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed_tokens,
+        rope_offsets,
+    )
+    torch.accelerator.synchronize()
+
+    expected = torch.tensor([110, 111, 112, 220, 221]).expand(3, -1)
+    torch.testing.assert_close(state.get_positions(5).cpu(), expected)

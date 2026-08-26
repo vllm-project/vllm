@@ -42,6 +42,7 @@ class CachedRequestState:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     output_token_ids: list[int]
+    rope_profile_factor: float | None = None
 
     mrope_positions: torch.Tensor | None = None
     mrope_position_delta: int | None = None

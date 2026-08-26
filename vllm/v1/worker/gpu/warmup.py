@@ -140,6 +140,11 @@ def run_mixed_prefill_decode_warmup(
         return block_ids
 
     sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
+    rope_profile_factor = (
+        model_runner.request_static_yarn.factors[0]
+        if model_runner.request_static_yarn is not None
+        else None
+    )
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.scheduled_new_reqs = [
@@ -153,6 +158,7 @@ def run_mixed_prefill_decode_warmup(
             num_computed_tokens=0,
             lora_request=None,
             prefill_token_ids=decode_token_ids,
+            rope_profile_factor=rope_profile_factor,
         ),
     ]
     decode_prefill_output.num_scheduled_tokens = {
@@ -183,6 +189,7 @@ def run_mixed_prefill_decode_warmup(
             num_computed_tokens=0,
             lora_request=None,
             prefill_token_ids=prefill_token_ids,
+            rope_profile_factor=rope_profile_factor,
         ),
     ]
     mixed_output.num_scheduled_tokens = {
@@ -290,6 +297,11 @@ def warmup_kernels(
     else:
         sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None
+    rope_profile_factor = (
+        model_runner.request_static_yarn.factors[0]
+        if model_runner.request_static_yarn is not None
+        else None
+    )
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
     next_block_id = 1
@@ -312,6 +324,7 @@ def warmup_kernels(
                 sampling_params,
                 pooling_params,
                 mm_features=warmup_mm_features,
+                rope_profile_factor=rope_profile_factor,
             ),
             block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
             prefill_token_ids=prompt_token_ids,

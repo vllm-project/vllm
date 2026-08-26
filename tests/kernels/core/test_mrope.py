@@ -283,3 +283,81 @@ def test_mrope_torch_compile_tracing(
 
     except Exception as e:
         pytest.fail(f"forward_cuda failed to trace with torch.compile inductor: {e}")
+
+
+def test_request_static_yarn_mrope_profiles_match_static_references(
+    default_vllm_config,
+):
+    head_size = 64
+    original_max_position = 32
+    factors = [1.0, 2.0, 4.0]
+    common_parameters = {
+        "mrope_interleaved": True,
+        "mrope_section": [11, 11, 10],
+        "rope_type": "yarn",
+        "rope_theta": 10_000_000,
+        "partial_rotary_factor": 1.0,
+        "original_max_position_embeddings": original_max_position,
+    }
+    combined = get_rope(
+        head_size=head_size,
+        max_position=original_max_position * 4,
+        rope_parameters={
+            **common_parameters,
+            "factor": 4.0,
+            "request_static_factors": factors,
+        },
+        dtype=torch.float32,
+    )
+    assert combined.scaling_factor_to_offset == {
+        1.0: 0,
+        2.0: 128,
+        4.0: 384,
+    }
+
+    positions, query, key = generate_test_data(
+        num_tokens=7,
+        num_q_heads=2,
+        num_kv_heads=1,
+        head_size=head_size,
+        max_position_embeddings=original_max_position * 4,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    native_parameters = dict(common_parameters)
+    native_parameters["rope_type"] = "default"
+    native_parameters.pop("original_max_position_embeddings")
+    native = get_rope(
+        head_size=head_size,
+        max_position=original_max_position,
+        rope_parameters=native_parameters,
+        dtype=torch.float32,
+    )
+    native_query, native_key = native.forward_native(
+        positions,
+        query.clone(),
+        key.clone(),
+    )
+    for factor in factors:
+        static = get_rope(
+            head_size=head_size,
+            max_position=int(original_max_position * factor),
+            rope_parameters={**common_parameters, "factor": factor},
+            dtype=torch.float32,
+        )
+        expected_query, expected_key = static.forward_native(
+            positions,
+            query.clone(),
+            key.clone(),
+        )
+        offset_positions = positions + combined.scaling_factor_to_offset[factor]
+        actual_query, actual_key = combined.forward_native(
+            offset_positions,
+            query.clone(),
+            key.clone(),
+        )
+        torch.testing.assert_close(actual_query, expected_query, rtol=0, atol=0)
+        torch.testing.assert_close(actual_key, expected_key, rtol=0, atol=0)
+        if factor == 1.0:
+            torch.testing.assert_close(expected_query, native_query, rtol=0, atol=0)
+            torch.testing.assert_close(expected_key, native_key, rtol=0, atol=0)

@@ -724,6 +724,29 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 for idx in engine_indexes
             }
 
+        self.counter_request_static_yarn_factor: dict[float, dict[int, Counter]] = {}
+        request_static_yarn = vllm_config.model_config.request_static_yarn_config
+        if request_static_yarn is not None:
+            counter_request_static_yarn_factor = self._counter_cls(
+                name="vllm:request_static_yarn_factor",
+                documentation=(
+                    "Count of completed requests by selected request-static "
+                    "YaRN factor."
+                ),
+                labelnames=labelnames + ["factor"],
+            )
+            for factor in request_static_yarn.factors:
+                labelvalues_with_factor = {
+                    idx: labelvalues + [f"{factor:g}"]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                }
+                self.counter_request_static_yarn_factor[factor] = (
+                    create_metric_per_engine(
+                        counter_request_static_yarn_factor,
+                        labelvalues_with_factor,
+                    )
+                )
+
         #
         # Histograms of counts
         #
@@ -1232,6 +1255,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_request_success[finished_request.finish_reason][
                 engine_idx
             ].inc()
+            if finished_request.rope_profile_factor is not None:
+                self.counter_request_static_yarn_factor[
+                    finished_request.rope_profile_factor
+                ][engine_idx].inc()
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )

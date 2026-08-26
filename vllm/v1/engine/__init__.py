@@ -156,6 +156,8 @@ class EngineCoreRequest(
     abort_immediately: bool = False
 
     session_id: str | None = None
+    rope_profile_factor: float | None = None
+    rope_profile_id: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

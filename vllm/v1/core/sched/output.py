@@ -44,6 +44,8 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
+    rope_profile_factor: float | None = None
+    rope_profile_id: str | None = None
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
@@ -73,6 +75,8 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
+            rope_profile_factor=request.rope_profile_factor,
+            rope_profile_id=request.rope_profile_id,
             prefill_token_ids=prefill_token_ids,
         )
 
