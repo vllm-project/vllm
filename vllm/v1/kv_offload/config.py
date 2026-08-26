@@ -14,6 +14,10 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Whether blocks in this cache holds tokens, which is what makes
+    # tokens_per_block meaningful and a block count convertible to a token
+    # count. False for Mamba, for example.
+    blocks_hold_tokens: bool = True
 
 
 @dataclass(frozen=True)
