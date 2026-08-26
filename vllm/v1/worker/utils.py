@@ -392,7 +392,13 @@ def allocate_kv_cache(
 
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
-    buf = torch.zeros(sizes.pop(), dtype=torch.int8, device=device)
+    raw_size = sizes.pop()
+    page_size = 4096
+    buf = torch.zeros(
+        ((raw_size + page_size - 1) // page_size) * page_size,
+        dtype=torch.int8,
+        device=device,
+    )
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
