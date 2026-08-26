@@ -3579,6 +3579,8 @@ class GPUModelRunner(
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        disable_full_attention_graph: bool = False,
+        attention_chunk_bucket: int | None = None,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -3615,12 +3617,16 @@ class GPUModelRunner(
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
+                attention_chunk_bucket=attention_chunk_bucket,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
+            num_tokens_padded,
+            disable_full=(
+                use_cascade_attn or has_encoder_output or disable_full_attention_graph
+            ),
         )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
@@ -3886,6 +3892,35 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+            # ZoomKV's full graph captures only the sparse, GPU-only,
+            # single-token route. Keep short requests on piecewise/eager dense
+            # attention, then enable the sparse full graph once every active
+            # request reaches the configured threshold.
+            attn_cfg = self.vllm_config.attention_config
+            is_zoomkv = str(attn_cfg.backend).upper().endswith("ZOOMKV")
+            disable_zoomkv_full_graph = False
+            attention_chunk_bucket = None
+            if is_zoomkv:
+                seq_lens_after_step = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                    + num_scheduled_tokens_np
+                )
+                attention_chunk_bucket = (
+                    self.cudagraph_dispatcher.get_zoomkv_chunk_bucket(
+                        int(seq_lens_after_step.max())
+                    )
+                )
+                min_sparse_len = max(
+                    int(attn_cfg.zoomkv_full_attention_threshold),
+                    int(attn_cfg.zoomkv_sink_size)
+                    + int(attn_cfg.zoomkv_local_size)
+                    + 2 * int(attn_cfg.zoomkv_final_topk),
+                )
+                disable_zoomkv_full_graph = (
+                    attention_chunk_bucket is None
+                    or int(seq_lens_after_step.min()) < min_sparse_len
+                )
+
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
@@ -3914,6 +3949,8 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                disable_full_attention_graph=disable_zoomkv_full_graph,
+                attention_chunk_bucket=attention_chunk_bucket,
             )
 
             logger.debug(
@@ -4038,6 +4075,16 @@ class GPUModelRunner(
         has_encoder_input = (
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
+
+        # A request enters its first decode forward when all prompt tokens were
+        # computed by the previous scheduler step. Make that prefill/decode
+        # boundary explicit so all prefill-side GPU work (including KV-cache
+        # and block-summary updates) is complete before decode starts.
+        num_computed_tokens_np = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        num_prompt_tokens_np = self.input_batch.num_prompt_tokens[:num_reqs]
+
+        if np.any(num_computed_tokens_np == num_prompt_tokens_np):
+            torch.accelerator.synchronize()
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -5276,6 +5323,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        attention_chunk_bucket: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5388,6 +5436,7 @@ class GPUModelRunner(
                 # `force_num_active_loras` is used for cudagraph capture; because we
                 # need to capture graphs for specific num_active_loras counts
                 force_num_active_loras=num_active_loras,
+                attention_chunk_bucket=attention_chunk_bucket,
             )
         )
 
@@ -6184,6 +6233,7 @@ class GPUModelRunner(
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
+                attention_chunk_bucket=desc.attention_chunk_bucket,
             )
         self._dummy_run(
             desc.num_tokens,
@@ -6195,6 +6245,7 @@ class GPUModelRunner(
             num_active_loras=desc.num_active_loras,
             is_graph_capturing=True,
             profile_seq_lens=profile_seq_lens,
+            attention_chunk_bucket=desc.attention_chunk_bucket,
         )
 
     def _capture_cudagraphs(
@@ -6224,6 +6275,12 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
+        attn_cfg = self.vllm_config.attention_config
+        zoomkv_full_decode = (
+            str(attn_cfg.backend).upper().endswith("ZOOMKV")
+            and cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and uniform_decode
+        )
         for batch_desc in batch_descriptors:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
@@ -6242,6 +6299,18 @@ class GPUModelRunner(
             self._warmup_and_capture(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                # ZoomKV allocates bucketed retrieval scratch lazily. Warm the
+                # largest context bucket before capture so graph construction
+                # performs no first-use allocations or extension setup.
+                profile_seq_lens=(
+                    min(
+                        self.max_model_len,
+                        batch_desc.attention_chunk_bucket * 16,
+                    )
+                    if zoomkv_full_decode
+                    and batch_desc.attention_chunk_bucket is not None
+                    else None
+                ),
                 allow_microbatching=allow_microbatching,
             )
             torch.accelerator.synchronize()

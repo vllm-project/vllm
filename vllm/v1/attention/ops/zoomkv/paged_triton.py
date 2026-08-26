@@ -59,6 +59,7 @@ def _assemble_context_batch_kernel(
     stride_valid_h,
     sink_size,
     local_size,
+    block_size,
     topk_len,
     n_ctx,
     BLOCK: tl.constexpr,
@@ -67,7 +68,8 @@ def _assemble_context_batch_kernel(
     h = tl.program_id(1)
     seq_len = tl.load(seq_lens_ptr + b)
     sink_len = tl.minimum(sink_size, seq_len)
-    local_start = tl.maximum(sink_len, seq_len - local_size)
+    raw_local_start = tl.maximum(sink_len, seq_len - local_size)
+    local_start = tl.maximum(sink_len, (raw_local_start // block_size) * block_size)
     local_len = seq_len - local_start
     offs = tl.arange(0, BLOCK)
     mask = offs < n_ctx
@@ -88,9 +90,7 @@ def _assemble_context_batch_kernel(
     # Past the true n_ctx for this request (variable local length): mark invalid.
     in_range = offs < (sink_len + local_len + topk_len)
     logical = tl.where(in_range, logical, -1)
-    tl.store(
-        out_ptr + b * stride_out_b + h * stride_out_h + offs, logical, mask=mask
-    )
+    tl.store(out_ptr + b * stride_out_b + h * stride_out_h + offs, logical, mask=mask)
     tl.store(
         valid_ptr + b * stride_valid_b + h * stride_valid_h + offs,
         logical >= 0,
@@ -201,9 +201,7 @@ def _paged_gather_kv_batch_kernel(
     b = tl.program_id(0)
     h = tl.program_id(1)
     t = tl.program_id(2)
-    logical = tl.load(
-        logical_ptr + b * stride_l_b + h * stride_l_h + t * stride_l_t
-    )
+    logical = tl.load(logical_ptr + b * stride_l_b + h * stride_l_h + t * stride_l_t)
     valid_token = logical >= 0
     logical_safe = tl.maximum(logical, 0)
     logical_block = logical_safe // block_size
@@ -254,6 +252,7 @@ def assemble_context(
     local_size: int,
     out: torch.Tensor | None = None,
     valid_out: torch.Tensor | None = None,
+    block_size: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Assemble sink/local/retrieval indices in one launch.
 
@@ -264,9 +263,11 @@ def assemble_context(
     """
     heads, topk_len = topk.shape
     sink_len = min(int(sink_size), int(seq_len))
-    local_start = max(sink_len, int(seq_len) - int(local_size))
+    raw_local_start = max(sink_len, int(seq_len) - int(local_size))
+    local_start = max(sink_len, (raw_local_start // int(block_size)) * int(block_size))
     local_len = int(seq_len) - local_start
-    n_ctx = sink_len + local_len + topk_len
+    base_local_len = int(seq_len) - raw_local_start
+    n_ctx = sink_len + base_local_len + topk_len
     if out is not None and out.shape[0] == heads and out.shape[1] >= n_ctx:
         out = out[:, :n_ctx]
     else:
@@ -305,6 +306,7 @@ def assemble_context_batch(
     local_size: int,
     out: torch.Tensor | None = None,
     valid_out: torch.Tensor | None = None,
+    block_size: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Batched assemble: topk [B, Hkv, topk], seq_lens [B] on device."""
     batch, heads, topk_len = topk.shape
@@ -319,9 +321,7 @@ def assemble_context_batch(
     ):
         out = out[:, :, :n_ctx]
     else:
-        out = torch.empty(
-            batch, heads, n_ctx, dtype=torch.int64, device=topk.device
-        )
+        out = torch.empty(batch, heads, n_ctx, dtype=torch.int64, device=topk.device)
     if (
         valid_out is not None
         and valid_out.shape[0] == batch
@@ -330,10 +330,11 @@ def assemble_context_batch(
     ):
         valid = valid_out[:, :, :n_ctx]
     else:
-        valid = torch.empty(
-            batch, heads, n_ctx, dtype=torch.bool, device=topk.device
-        )
-    seq_lens_dev = seq_lens.to(device=topk.device, dtype=torch.int64).contiguous()
+        valid = torch.empty(batch, heads, n_ctx, dtype=torch.bool, device=topk.device)
+    # Preserve the scheduler's native integer dtype.  Casting the one-element
+    # decode tensor from int32 to int64 launched an elementwise copy for every
+    # layer; Triton integer arithmetic supports either dtype directly.
+    seq_lens_dev = seq_lens.to(device=topk.device).contiguous()
     block = triton.next_power_of_2(n_ctx)
     _assemble_context_batch_kernel[(batch, heads)](
         topk.contiguous(),
@@ -348,6 +349,7 @@ def assemble_context_batch(
         valid.stride(1),
         int(sink_size),
         int(local_size),
+        int(block_size),
         topk_len,
         n_ctx,
         BLOCK=block,
@@ -391,6 +393,7 @@ def _paged_gather_from_topk_batch_kernel(
     n_ctx,
     head_dim,
     max_blocks,
+    num_physical_blocks,
     BLOCK_D: tl.constexpr,
 ):
     """Fused sink/local/topk logical-id assembly + paged K/V gather."""
@@ -399,7 +402,8 @@ def _paged_gather_from_topk_batch_kernel(
     t = tl.program_id(2)
     seq_len = tl.load(seq_lens_ptr + b)
     sink_len = tl.minimum(sink_size, seq_len)
-    local_start = tl.maximum(sink_len, seq_len - local_size)
+    raw_local_start = tl.maximum(sink_len, seq_len - local_size)
+    local_start = tl.maximum(sink_len, (raw_local_start // block_size) * block_size)
     local_len = seq_len - local_start
     in_sink = t < sink_len
     in_local = (t >= sink_len) & (t < sink_len + local_len)
@@ -416,7 +420,7 @@ def _paged_gather_from_topk_batch_kernel(
         t,
         tl.where(in_local, local_start + t - sink_len, selected),
     )
-    valid_token = (in_sink | in_local | in_topk) & (logical >= 0)
+    valid_token = (in_sink | in_local | in_topk) & (logical >= 0) & (logical < seq_len)
     logical_safe = tl.maximum(logical, 0)
     logical_block = logical_safe // block_size
     token_offset = logical_safe - logical_block * block_size
@@ -426,21 +430,32 @@ def _paged_gather_from_topk_batch_kernel(
         mask=valid_token & in_table,
         other=-1,
     )
-    valid_token = valid_token & in_table & (physical_block >= 0)
-    physical_safe = tl.maximum(physical_block, 0)
+    valid_token = (
+        valid_token
+        & in_table
+        & (physical_block >= 0)
+        & (physical_block < num_physical_blocks)
+    )
+    physical_safe = tl.maximum(0, tl.minimum(physical_block, num_physical_blocks - 1))
     offs_d = tl.arange(0, BLOCK_D)
     mask = offs_d < head_dim
+    # ``physical_block`` is int32. Large KV pools can exceed 262,144 blocks,
+    # so physical_block * stride_k_b may overflow 32-bit address arithmetic.
+    physical_safe_i64 = physical_safe.to(tl.int64)
+    token_offset_i64 = token_offset.to(tl.int64)
+    h_i64 = h.to(tl.int64)
+    offs_d_i64 = offs_d.to(tl.int64)
     k_offset = (
-        physical_safe * stride_k_b
-        + token_offset * stride_k_t
-        + h * stride_k_h
-        + offs_d * stride_k_d
+        physical_safe_i64 * stride_k_b
+        + token_offset_i64 * stride_k_t
+        + h_i64 * stride_k_h
+        + offs_d_i64 * stride_k_d
     )
     v_offset = (
-        physical_safe * stride_v_b
-        + token_offset * stride_v_t
-        + h * stride_v_h
-        + offs_d * stride_v_d
+        physical_safe_i64 * stride_v_b
+        + token_offset_i64 * stride_v_t
+        + h_i64 * stride_v_h
+        + offs_d_i64 * stride_v_d
     )
     key = tl.load(key_ptr + k_offset, mask=mask & valid_token, other=0.0)
     value = tl.load(value_ptr + v_offset, mask=mask & valid_token, other=0.0)
@@ -475,6 +490,7 @@ def paged_gather_kv_from_topk_batch(
     local_size: int,
     out_k: torch.Tensor | None = None,
     out_v: torch.Tensor | None = None,
+    output_bthd: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused batched gather: assemble sink/local/topk then load K/V.
 
@@ -484,22 +500,25 @@ def paged_gather_kv_from_topk_batch(
         seq_lens: [B] (CPU or CUDA)
         topk: [B, Hkv, final_topk]
     Returns:
-        out_k / out_v: [B, Hkv, sink+local+topk, D]
+        out_k / out_v: [B, Hkv, T, D], or [B, T, Hkv, D] when
+            ``output_bthd`` is true.
     """
     batch, heads, topk_len = topk.shape
     head_dim = key_cache.shape[-1]
     n_ctx = int(sink_size) + int(local_size) + topk_len
+    output_shape = (
+        (batch, n_ctx, heads, head_dim)
+        if output_bthd
+        else (batch, heads, n_ctx, head_dim)
+    )
     if (
         out_k is None
-        or out_k.shape != (batch, heads, n_ctx, head_dim)
+        or out_k.shape != output_shape
         or out_k.dtype != key_cache.dtype
         or out_k.device != key_cache.device
     ):
         out_k = torch.empty(
-            batch,
-            heads,
-            n_ctx,
-            head_dim,
+            output_shape,
             dtype=key_cache.dtype,
             device=key_cache.device,
         )
@@ -512,7 +531,12 @@ def paged_gather_kv_from_topk_batch(
         out_v = torch.empty_like(out_k)
     bt = block_table.contiguous()
     topk_c = topk.contiguous()
-    seq_lens_dev = seq_lens.to(device=topk.device, dtype=torch.int64).contiguous()
+    # Keep the scheduler's native integer dtype to avoid an int32 -> int64
+    # elementwise conversion in every layer of the decode hot path.
+    seq_lens_dev = seq_lens.to(device=topk.device).contiguous()
+    out_h_dim = 2 if output_bthd else 1
+    out_t_dim = 1 if output_bthd else 2
+
     _paged_gather_from_topk_batch_kernel[(batch, heads, n_ctx)](
         key_cache,
         value_cache,
@@ -533,12 +557,12 @@ def paged_gather_kv_from_topk_batch(
         topk_c.stride(0),
         topk_c.stride(1),
         out_k.stride(0),
-        out_k.stride(1),
-        out_k.stride(2),
+        out_k.stride(out_h_dim),
+        out_k.stride(out_t_dim),
         out_k.stride(3),
         out_v.stride(0),
-        out_v.stride(1),
-        out_v.stride(2),
+        out_v.stride(out_h_dim),
+        out_v.stride(out_t_dim),
         out_v.stride(3),
         int(block_size),
         int(sink_size),
@@ -547,6 +571,7 @@ def paged_gather_kv_from_topk_batch(
         n_ctx,
         head_dim,
         int(bt.shape[1]),
+        int(key_cache.shape[0]),
         BLOCK_D=triton.next_power_of_2(head_dim),
         num_warps=4,
     )
