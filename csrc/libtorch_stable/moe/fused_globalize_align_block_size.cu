@@ -172,6 +172,7 @@ static void fgas_launch(long* p_topk, const int* p_psum, int* p_sorted,
     fused_gas_kernel<false><<<1, FGAS_SB_THREADS, smem, stream>>>(
         p_topk, p_psum, p_sorted, p_expert, p_num, p_counts, P, reo, gne, numel,
         mntp, mnmb, local_e, topk, block_size);
+    STD_CUDA_CHECK(cudaGetLastError());
     return;
   }
 
@@ -195,9 +196,10 @@ static void fgas_launch(long* p_topk, const int* p_psum, int* p_sorted,
   attr.val.cooperative = 1;
   config.attrs = &attr;
   config.numAttrs = 1;
-  cudaLaunchKernelEx(&config, fused_gas_kernel<true>, p_topk, p_psum, p_sorted,
-                     p_expert, p_num, p_counts, P, reo, gne, numel, mntp, mnmb,
-                     local_e, topk, block_size);
+  STD_CUDA_CHECK(cudaLaunchKernelEx(&config, fused_gas_kernel<true>, p_topk,
+                                    p_psum, p_sorted, p_expert, p_num, p_counts,
+                                    P, reo, gne, numel, mntp, mnmb, local_e,
+                                    topk, block_size));
 }
 
 }  // namespace moe
