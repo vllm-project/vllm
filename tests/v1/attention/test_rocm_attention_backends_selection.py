@@ -34,6 +34,26 @@ def mock_get_cdna_version():
         yield
 
 
+def test_aiter_unified_attention_capture_preserves_query_start_locations():
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+
+    builder = object.__new__(RocmAiterUnifiedAttentionMetadataBuilder)
+    metadata = MagicMock()
+    metadata.seq_lens = torch.tensor([1048576], dtype=torch.int32)
+    builder.build = MagicMock(return_value=metadata)
+    common = MagicMock()
+    common.query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+
+    actual = builder.build_for_cudagraph_capture(common)
+
+    assert RocmAiterUnifiedAttentionBackend.get_builder_cls() is type(builder)
+    assert actual.seq_lens.tolist() == [1]
+    assert common.query_start_loc.tolist() == [0, 1]
+
+
 @pytest.mark.parametrize(
     "env_vars, selected_backend, expected_backend_path",
     [
