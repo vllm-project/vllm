@@ -63,6 +63,9 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
+from vllm.models.kimi_k3.amd.mla import (  # noqa: F401
+    ROCmMultiHeadLatentAttentionWrapper,
+)
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
