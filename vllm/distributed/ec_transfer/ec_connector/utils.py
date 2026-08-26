@@ -2,7 +2,79 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EC connector helper utilities."""
 
+from typing import TYPE_CHECKING, Any
+
+import torch
+
+from vllm.logger import init_logger
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
+
+logger = init_logger(__name__)
+
+
+class PlaceholderMetadataResolver:
+    """Resolves which processed keys a model needs published per modality.
+
+    Reads `MultiModalDataParser.embedding_fields`, the same declaration the
+    consumer's parser requires, so the two cannot drift. An empty set means
+    the modality cannot be delivered out of band, and the consumer will
+    process the media itself.
+    """
+
+    def __init__(self, model_config: "ModelConfig") -> None:
+        self._model_config = model_config
+        self._cache: dict[str, set[str]] = {}
+
+    def fields_for(self, modality: str) -> set[str]:
+        if modality in self._cache:
+            return self._cache[modality]
+
+        fields: set[str] = set()
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
+            fields = info.data_parser.placeholder_metadata_fields(modality)
+        except Exception:
+            logger.warning(
+                "Could not determine the placeholder metadata fields for "
+                "modality %s; the consumer will preprocess the media itself.",
+                modality,
+                exc_info=True,
+            )
+
+        self._cache[modality] = fields
+        return fields
+
+
+def collect_ec_item_metadata(
+    mm_features: "list[MultiModalFeatureSpec]",
+    resolver: PlaceholderMetadataResolver,
+) -> list[dict[str, Any]]:
+    """Build one `ec_items` entry per feature for `request_finished()`.
+
+    Each entry carries the feature's mm_hash plus whatever placeholder
+    metadata `resolver` says this model needs published for its modality, so
+    a consumer can skip the image transform. `data` is None for items served
+    from the processor cache, in which case the metadata is unavailable here
+    and the consumer has to fall back to processing the media itself.
+    """
+    items: list[dict[str, Any]] = []
+    for feature in mm_features:
+        metadata: dict[str, Any] = {}
+        if feature.data is not None:
+            wanted = resolver.fields_for(feature.modality)
+            metadata = {
+                key: value.tolist()
+                for key, value in feature.data.get_data().items()
+                if key in wanted and isinstance(value, torch.Tensor)
+            }
+        items.append({"mm_hash": feature.identifier, **metadata})
+    return items
 
 
 class ECOutputAggregator:

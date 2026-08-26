@@ -171,13 +171,14 @@ def _install_ec_test_patches(role, log):
             [f.identifier for f in (request.mm_features or [])],
         )
         skip, params = orig(self, request)
-        if params:
-            first = next(iter(params.values()))
+        transfers = (params or {}).get("transfers") or {}
+        if transfers:
+            first = next(iter(transfers.values()))
             log.info(
                 "producer request_finished peer_host=%s peer_port=%s mm_hashes=%s",
                 first.get("peer_host"),
                 first.get("peer_port"),
-                list(params.keys()),
+                list(transfers.keys()),
             )
         return skip, params
 
@@ -185,13 +186,14 @@ def _install_ec_test_patches(role, log):
 
     def _on_ensure_cache(orig, self, request, num_computed_tokens):
         params = getattr(request, "ec_transfer_params", None) or {}
-        if params:
-            first = next(iter(params.values()))
+        transfers = params.get("transfers") or {}
+        if transfers:
+            first = next(iter(transfers.values()))
             log.info(
                 "consumer ensure_cache peer_host=%s peer_port=%s mm_hashes=%s",
                 first.get("peer_host"),
                 first.get("peer_port"),
-                list(params.keys()),
+                list(transfers.keys()),
             )
         return orig(self, request, num_computed_tokens)
 

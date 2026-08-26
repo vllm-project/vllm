@@ -20,6 +20,10 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
     EmbeddingCache,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -43,6 +47,7 @@ class ECCPUScheduler:
         self._region = create_ec_shared_region(vllm_config)
         # Block allocator + LRU eviction policy for the shared region.
         self._cache = EmbeddingCache(self._region.num_blocks)
+        self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
 
         # mm_hash → block IDs allocated this step for GPU→mmap saves.
         self._pending_saves: dict[str, list[int]] = {}
@@ -173,9 +178,10 @@ class ECCPUScheduler:
         NIXL READ is still in flight (or was just started this step) defers
         the request, which the scheduler re-presents on a later step.
         """
-        params: dict[str, dict[str, Any]] = (
+        transfer_params: dict[str, Any] = (
             getattr(request, "ec_transfer_params", None) or {}
         )
+        params: dict[str, dict[str, Any]] = transfer_params.get("transfers") or {}
         if not params:
             return True
         pending = False
@@ -431,7 +437,12 @@ class ECCPUScheduler:
     ) -> tuple[bool, "dict[str, Any] | None"]:
         if not (self._nixl_enabled and self._is_producer):
             return False, None
-        params: dict[str, dict[str, Any]] = {}
+        if not request.mm_features:
+            return False, None
+
+        items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
+
+        transfers: dict[str, dict[str, Any]] = {}
         for feature in request.mm_features:
             mm_hash = feature.identifier
             entry = self._cache.get(mm_hash)
@@ -445,17 +456,19 @@ class ECCPUScheduler:
             size_bytes = (
                 feature.mm_position.length * self._hidden_dim * self._element_size
             )
-            params[mm_hash] = {
+            transfers[mm_hash] = {
                 "peer_host": self._peer_host,
                 "peer_port": self._peer_port,
                 "size_bytes": size_bytes,
             }
         logger.debug(
-            "EC producer: announcing NIXL-readable encodings req_id=%s params=%s",
+            "EC producer: announcing NIXL-readable encodings req_id=%s "
+            "items=%s transfers=%s",
             request.request_id,
-            params,
+            items,
+            transfers,
         )
-        return False, (params or None)
+        return False, {"ec_items": items, "transfers": transfers}
 
     def shutdown(self) -> None:
         self._pending_saves.clear()

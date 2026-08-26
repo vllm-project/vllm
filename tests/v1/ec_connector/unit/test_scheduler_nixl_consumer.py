@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
 
-import torch
-
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
@@ -83,26 +82,9 @@ def _consumer_sched(monkeypatch):
 
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", _region)
 
-    class _EC:
-        is_ec_producer = False
-        is_ec_consumer = True
-        engine_id = "e"
-        ec_enable_nixl = False  # build gate-off, then flip fields on
-
-    class _Model:
-        model = "test-model"
-        dtype = torch.float16
-        hf_config = None
-
-        def get_inputs_embeds_size(self):
-            return _HID
-
-    class _Cfg:
-        ec_transfer_config = _EC()
-        model_config = _Model()
-        max_concurrent_batches = 1
-
-    s = ECCPUScheduler(_Cfg())
+    # ec_enable_nixl defaults to False, so this builds gate-off; the fields
+    # below flip on the NIXL consumer state directly.
+    s = ECCPUScheduler(create_ec_vllm_config(ec_role="ec_consumer"))
     # Turn on NIXL consumer state without constructing real transports.
     s._nixl_enabled = True
     s._transport = _FakeTransport()
@@ -117,10 +99,12 @@ def _consumer_sched(monkeypatch):
 
 def _params(mm_hash, length):
     return {
-        mm_hash: {
-            "peer_host": "h",
-            "peer_port": 1,
-            "size_bytes": length * _HID * _ES,
+        "transfers": {
+            mm_hash: {
+                "peer_host": "h",
+                "peer_port": 1,
+                "size_bytes": length * _HID * _ES,
+            }
         }
     }
 
@@ -211,7 +195,7 @@ def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
 def test_size_mismatch_skips_transfer(monkeypatch):
     s = _consumer_sched(monkeypatch)
     # Advertised size disagrees with pos.length * hidden_dim * element_size.
-    bad = {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}
+    bad = {"transfers": {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}}
     req = _Request([_Feature("h1", 1)], params=bad)
     assert s.ensure_cache_available(req, 0) is True
     assert "h1" not in s._in_flight

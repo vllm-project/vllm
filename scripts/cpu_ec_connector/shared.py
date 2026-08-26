@@ -447,6 +447,13 @@ def _producer_encode(h, rendered: dict) -> tuple[dict, list[str]]:
     return resp.get("ec_transfer_params") or {}, events
 
 
+def _transfers(ec_params: dict) -> dict:
+    """Unwrap the connector-specific NIXL pull coordinates from an
+    ec_transfer_params dict (the other half is "ec_items" placeholder
+    metadata)."""
+    return (ec_params or {}).get("transfers") or {}
+
+
 # ---------------------------------------------------------------------------
 # Test functions
 # ---------------------------------------------------------------------------
@@ -486,12 +493,13 @@ def test_baseline(h, image: Path, prompt: str) -> None:
         f"producer save mm_hash={target_hash}",
         where="producer events [encode]",
     )
-    if target_hash not in ec_params:
+    transfers = _transfers(ec_params)
+    if target_hash not in transfers:
         raise AssertionError(
             f"producer response missing ec_transfer_params for {target_hash}; "
-            f"got keys={list(ec_params.keys())}"
+            f"got keys={list(transfers.keys())}"
         )
-    info = ec_params[target_hash]
+    info = transfers[target_hash]
     for key in ("peer_host", "peer_port", "size_bytes"):
         if key not in info:
             raise AssertionError(f"ec_transfer_params[{target_hash}] missing {key!r}")
@@ -540,7 +548,7 @@ def test_cache_reuse(h, prompt: str, n_repeat: int = 5) -> None:
     reset_encoder_cache(h.consumer.base_url)
     reset_prefix_cache(h.consumer.base_url)
     ec_params, _ = _producer_encode(h, rendered)
-    if target_hash not in ec_params:
+    if target_hash not in _transfers(ec_params):
         raise AssertionError(f"producer did not announce {target_hash}")
 
     pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
@@ -603,8 +611,9 @@ def test_multi_image(h, prompt: str, n_images: int = 3) -> None:
     reset_prefix_cache(h.consumer.base_url)
 
     ec_params, prod_sl = _producer_encode(h, rendered)
+    transfers = _transfers(ec_params)
     for hh in hashes:
-        if hh not in ec_params:
+        if hh not in transfers:
             raise AssertionError(f"producer omitted ec_transfer_params for {hh}")
         assert_event(
             prod_sl,
@@ -657,7 +666,7 @@ def test_concurrent_ec(h, prompt: str, k: int = 4) -> None:
         rendered = render(h.consumer.base_url, h.model, url, prompt)
         target_hash = rendered["features"]["mm_hashes"]["image"][0]
         ec_params, _ = _producer_encode(h, rendered)
-        if target_hash not in ec_params:
+        if target_hash not in _transfers(ec_params):
             raise AssertionError(f"producer did not announce {target_hash}")
         encoded.append((rendered, ec_params, target_hash))
     print(f"  pre-encoded {k} images on producer")
@@ -746,7 +755,7 @@ def test_pool_exhaustion(
         )
         hash_a = rendered_a["features"]["mm_hashes"]["image"][0]
         a_params, sl_a = _producer_encode(h, rendered_a)
-        if hash_a not in a_params:
+        if hash_a not in _transfers(a_params):
             raise AssertionError("producer did not announce A's encoding")
         m = re.search(
             rf"producer save mm_hash={hash_a} n_blocks=(\d+)", "\n".join(sl_a)
@@ -846,7 +855,7 @@ def test_producer_restart(
         reset_encoder_cache(h.consumer.base_url)
         reset_prefix_cache(h.consumer.base_url)
         ec_params_a, _ = _producer_encode(h, rendered_a)
-        if hash_a not in ec_params_a:
+        if hash_a not in _transfers(ec_params_a):
             raise AssertionError("producer did not announce hash A on first encode")
         resp_a = generate(
             h.consumer.base_url,
@@ -868,7 +877,7 @@ def test_producer_restart(
         reset_encoder_cache(h.consumer.base_url)
         reset_prefix_cache(h.consumer.base_url)
         ec_params_b, _ = _producer_encode(h, rendered_b)
-        if hash_b not in ec_params_b:
+        if hash_b not in _transfers(ec_params_b):
             raise AssertionError("producer did not announce hash B on second encode")
 
         pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()

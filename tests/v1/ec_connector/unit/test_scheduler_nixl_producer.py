@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
 
-import torch
-
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
@@ -23,6 +22,8 @@ class _Feature:
         self.mm_hash = mm_hash
         self.identifier = mm_hash
         self.mm_position = _Pos(0, length)
+        self.data = None
+        self.modality = "image"
 
 
 class _Request:
@@ -38,27 +39,7 @@ def _sched_gate_off(monkeypatch):
         )
 
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", _region)
-
-    class _EC:
-        is_ec_producer = True
-        is_ec_consumer = True
-        engine_id = "e"
-        ec_enable_nixl = False
-
-    class _Model:
-        model = "test-model"
-        dtype = torch.float16
-        hf_config = None
-
-        def get_inputs_embeds_size(self):
-            return 32
-
-    class _Cfg:
-        ec_transfer_config = _EC()
-        model_config = _Model()
-        max_concurrent_batches = 1
-
-    return ECCPUScheduler(_Cfg())
+    return ECCPUScheduler(create_ec_vllm_config(ec_role="ec_both"))
 
 
 def test_request_finished_gate_off_returns_none(monkeypatch):
@@ -83,7 +64,10 @@ def test_request_finished_producer_emits_params(monkeypatch):
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
     assert params == {
-        "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
+        "ec_items": [{"mm_hash": "h1"}],
+        "transfers": {
+            "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
+        },
     }
     s.shutdown()
 
@@ -102,7 +86,10 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
     assert params == {
-        "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
+        "ec_items": [{"mm_hash": "h1"}],
+        "transfers": {
+            "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
+        },
     }
     s.shutdown()
 
@@ -116,5 +103,7 @@ def test_request_finished_skips_unallocated_entry(monkeypatch):
 
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
-    assert params is None
+    # The item's placeholder metadata is still reported even though there's
+    # no cache entry to transfer.
+    assert params == {"ec_items": [{"mm_hash": "h1"}], "transfers": {}}
     s.shutdown()
