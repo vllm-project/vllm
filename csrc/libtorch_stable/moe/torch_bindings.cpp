@@ -41,6 +41,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     Tensor! num_tokens_post_pad,"
       "                     Tensor? maybe_expert_map) -> ()");
 
+  // Fused globalize + align + sort for the DeepEP-v2 humming INDEXED decode
+  // path (one launch; num_recv read on device from psum[-1], cudagraph-safe).
+  m.def(
+      "fused_globalize_align_block_size(Tensor! topk_idx, Tensor psum,"
+      "                     int rank_expert_offset, int global_num_experts,"
+      "                     int local_num_experts, int block_size,"
+      "                     Tensor! sorted_ids, Tensor! expert_ids,"
+      "                     Tensor! num_tokens_post_pad) -> ()");
+
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
   m.def(
@@ -136,6 +145,8 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("topk_softplus_sqrt", TORCH_BOX(&topk_softplus_sqrt));
   m.impl("moe_sum", TORCH_BOX(&moe_sum));
   m.impl("moe_align_block_size", TORCH_BOX(&moe_align_block_size));
+  m.impl("fused_globalize_align_block_size",
+         TORCH_BOX(&fused_globalize_align_block_size));
   m.impl("batched_moe_align_block_size",
          TORCH_BOX(&batched_moe_align_block_size));
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));

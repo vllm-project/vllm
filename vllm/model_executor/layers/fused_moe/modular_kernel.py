@@ -103,6 +103,9 @@ class ExpertTokensMetadata:
     expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
     psum_recv_per_rank: torch.Tensor | None = None
+    # local->global expert-id offset, set when globalization is deferred to the
+    # experts' fused align kernel.
+    rank_expert_offset: int | None = None
 
     @staticmethod
     def make_from_list(
@@ -1108,6 +1111,12 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        # Experts that globalize recv_topk_idx themselves let a capable prepare
+        # stage skip its standalone launch.
+        if getattr(fused_experts, "fuses_recv_globalize", lambda: False)() and hasattr(
+            prepare_finalize, "defer_globalize"
+        ):
+            prepare_finalize.defer_globalize = True
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
