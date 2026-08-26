@@ -1844,6 +1844,8 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             and getattr(shared_experts, "expert_gate", None) is None
             and gate_up is not None
             and down is not None
+            and getattr(gate_up, "tp_size", None) == 1
+            and getattr(down, "tp_size", None) == 1
             and getattr(gate_up, "bias", None) is None
             and getattr(down, "bias", None) is None
             and isinstance(

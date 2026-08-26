@@ -88,11 +88,13 @@ def _compatible_shared_experts() -> SimpleNamespace:
         weight=torch.empty((4, 4), dtype=torch.bfloat16),
         bias=None,
         quant_method=UnquantizedLinearMethod(),
+        tp_size=1,
     )
     down = SimpleNamespace(
         weight=torch.empty((4, 2), dtype=torch.bfloat16),
         bias=None,
         quant_method=UnquantizedLinearMethod(),
+        tp_size=1,
     )
     return SimpleNamespace(
         gate_up_proj=gate_up,
@@ -228,6 +230,20 @@ def test_modelopt_nvfp4_mega_moe_falls_back_for_incompatible_shared_experts(
     method.moe = SimpleNamespace(hidden_dim=4, intermediate_size=2)
     shared_experts = _compatible_shared_experts()
     setattr(shared_experts, attribute, value)
+
+    method.bind_shared_experts(shared_experts)
+
+    assert method._shared_experts_layer is None
+
+
+@pytest.mark.parametrize("projection", ["gate_up_proj", "down_proj"])
+def test_modelopt_nvfp4_mega_moe_does_not_fuse_tp_sharded_shared_experts(
+    projection: str,
+):
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    method.moe = SimpleNamespace(hidden_dim=4, intermediate_size=2)
+    shared_experts = _compatible_shared_experts()
+    getattr(shared_experts, projection).tp_size = 2
 
     method.bind_shared_experts(shared_experts)
 
