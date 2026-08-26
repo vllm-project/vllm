@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+import os
 import pickle
 import random
 import threading
@@ -658,10 +659,24 @@ def test_warning_logs(caplog_vllm):
         # "0 seconds" expected due to rounding of 1ms test interval
         with pytest.raises(TimeoutError):
             reader.dequeue(timeout=0.01, indefinite=False)
-        assert any(
-            "No available shared memory broadcast block found in 0 seconds"
-            in record.message
+        warning_messages = [
+            record.message
             for record in caplog_vllm.records
+            if "No available shared memory broadcast block found in 0 seconds"
+            in record.message
+        ]
+        assert warning_messages
+        assert any(
+            "role=local_reader" in message
+            and f"pid={os.getpid()}" in message
+            and "slot=0/10" in message
+            and "written_flag=0" in message
+            and "read_count=0/1" in message
+            and "reader_flags=[0]" in message
+            and "local_reader_index=0" in message
+            and "local_reader_flag=0" in message
+            and "waited_s=" in message
+            for message in warning_messages
         )
         caplog_vllm.clear()
 
@@ -677,6 +692,48 @@ def test_warning_logs(caplog_vllm):
         # Clean up when done
         writer.shutdown()
         reader.shutdown()
+
+
+def test_writer_warning_log_includes_wait_state(caplog_vllm):
+    with mock.patch(
+        "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",
+        new=0.001,
+    ):
+        writer = MessageQueue(
+            n_reader=1,
+            n_local_reader=1,
+            max_chunk_bytes=1024 * 1024,
+            max_chunks=1,
+        )
+        reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+        try:
+            writer.wait_until_ready()
+            reader.wait_until_ready()
+            writer.enqueue({"payload": "first"})
+
+            with pytest.raises(TimeoutError):
+                writer.enqueue({"payload": "second"}, timeout=0.01)
+
+            warning_messages = [
+                record.message
+                for record in caplog_vllm.records
+                if "No available shared memory broadcast block found in 0 seconds"
+                in record.message
+            ]
+            assert warning_messages
+            assert any(
+                "role=writer" in message
+                and f"pid={os.getpid()}" in message
+                and "slot=0/1" in message
+                and "written_flag=1" in message
+                and "read_count=0/1" in message
+                and "reader_flags=[0]" in message
+                and "waited_s=" in message
+                for message in warning_messages
+            )
+        finally:
+            writer.shutdown()
+            reader.shutdown()
 
 
 def _fake_disk_usage(free_bytes: int):

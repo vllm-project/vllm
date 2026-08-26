@@ -105,7 +105,9 @@ LONG_WAIT_TIME_LOG_MSG = (
     "in %d seconds. This typically happens "
     "when some processes are hanging or doing some "
     "time-consuming work (e.g. compilation, "
-    "weight/kv cache quantization)."
+    "weight/kv cache quantization). "
+    "Wait state: role=%s pid=%d slot=%d/%d written_flag=%d "
+    "read_count=%d/%d reader_flags=%s%s waited_s=%.3f"
 )
 
 
@@ -644,6 +646,29 @@ class MessageQueue:
         if self._spin_condition is not None:
             self._spin_condition.cancel()
 
+    def _long_wait_log_args(self, role: str, metadata_buffer, waited_s: float):
+        memory_fence()
+        reader_flags = list(metadata_buffer[1 : self.buffer.n_reader + 1])
+        reader_state = ""
+        if self._is_local_reader:
+            reader_state = (
+                f" local_reader_index={self.local_reader_rank}"
+                f" local_reader_flag={reader_flags[self.local_reader_rank]}"
+            )
+        return (
+            VLLM_RINGBUFFER_WARNING_INTERVAL,
+            role,
+            os.getpid(),
+            self.current_idx,
+            self.buffer.max_chunks,
+            metadata_buffer[0],
+            sum(reader_flags),
+            self.buffer.n_reader,
+            reader_flags,
+            reader_state,
+            waited_s,
+        )
+
     @contextmanager
     def acquire_write(self, timeout: float | None = None):
         assert self._is_writer, "Only writers can acquire write"
@@ -678,7 +703,10 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
                         logger.info(
-                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
+                            LONG_WAIT_TIME_LOG_MSG,
+                            *self._long_wait_log_args(
+                                "writer", metadata_buffer, elapsed
+                            ),
                         )
                         n_warning += 1
 
@@ -799,7 +827,12 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if read_timeout.should_warn():
                         logger.info(
-                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
+                            LONG_WAIT_TIME_LOG_MSG,
+                            *self._long_wait_log_args(
+                                "local_reader",
+                                metadata_buffer,
+                                time.monotonic() - read_timeout.started,
+                            ),
                         )
 
                     continue
