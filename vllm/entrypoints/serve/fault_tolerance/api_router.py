@@ -10,13 +10,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
+from vllm.v1.fault_tolerance.utils import ALLOWED_FT_INSTRUCTIONS, FaultToleranceRequest
 
 logger = init_logger(__name__)
 
 router = APIRouter()
-
-_ALLOWED_INSTRUCTIONS = {"retry", "scale_down"}
 
 
 def _validate_payload(body: dict) -> tuple[str, dict, str]:
@@ -25,7 +23,7 @@ def _validate_payload(body: dict) -> tuple[str, dict, str]:
     instruction = body.get("instruction")
     if not instruction:
         raise HTTPException(400, "'instruction' is required.")
-    if instruction not in _ALLOWED_INSTRUCTIONS:
+    if instruction not in ALLOWED_FT_INSTRUCTIONS:
         raise HTTPException(400, f"Invalid instruction: '{instruction}'.")
     params = body.get("params", {})
     if not isinstance(params, dict):
