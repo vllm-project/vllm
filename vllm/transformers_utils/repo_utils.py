@@ -253,7 +253,10 @@ def file_exists(
 
 # In offline mode the result can be a false negative
 def file_or_path_exists(
-    model: str | Path, config_name: str, revision: str | None
+    model: str | Path,
+    config_name: str,
+    revision: str | None,
+    token: str | bool | None = None,
 ) -> bool:
     if (local_path := Path(model)).exists():
         return (local_path / config_name).is_file()
@@ -271,7 +274,7 @@ def file_or_path_exists(
 
     if cached_filepath is None:
         # The config file is not cached - check if it exists on hf_hub
-        return file_exists(str(model), config_name, revision=revision)
+        return file_exists(str(model), config_name, revision=revision, token=token)
     # The config file is known to not exist in cache - we can return False
     return False
 
@@ -298,7 +301,10 @@ def get_model_path(model: str | Path, revision: str | None = None):
 
 
 def _try_download_from_hf_hub(
-    model: str | Path, file_name: str, revision: str | None
+    model: str | Path,
+    file_name: str,
+    revision: str | None,
+    token: str | bool | None = None,
 ) -> Path | None:
     """Try to download a file from HuggingFace Hub.
 
@@ -313,6 +319,7 @@ def _try_download_from_hf_hub(
                 model,
                 file_name,
                 revision=revision,
+                token=token,
             )
         )
     except huggingface_hub.errors.OfflineModeIsEnabled:
@@ -335,13 +342,16 @@ def _try_download_from_hf_hub(
 
 
 def get_hf_file_bytes(
-    file_name: str, model: str | Path, revision: str | None = "main"
+    file_name: str,
+    model: str | Path,
+    revision: str | None = "main",
+    token: str | bool | None = None,
 ) -> bytes | None:
     """Get file contents from HuggingFace repository as bytes."""
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        file_path = _try_download_from_hf_hub(model, file_name, revision)
+        file_path = _try_download_from_hf_hub(model, file_name, revision, token=token)
 
     if isinstance(file_path, Path) and file_path.is_file():
         with open(file_path, "rb") as file:
@@ -383,7 +393,10 @@ def try_get_local_file(
 
 
 def get_hf_file_to_dict(
-    file_name: str, model: str | Path, revision: str | None = "main"
+    file_name: str,
+    model: str | Path,
+    revision: str | None = "main",
+    token: str | bool | None = None,
 ):
     """
     Downloads a file from the Hugging Face Hub and returns
@@ -402,7 +415,7 @@ def get_hf_file_to_dict(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        file_path = _try_download_from_hf_hub(model, file_name, revision)
+        file_path = _try_download_from_hf_hub(model, file_name, revision, token=token)
 
     if isinstance(file_path, Path) and file_path.is_file():
         with open(file_path) as file:

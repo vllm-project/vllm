@@ -8,7 +8,7 @@ from dataclasses import asdict
 from functools import cache, partial, wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, NamedTuple, TypeAlias
 
 import huggingface_hub
 import torch
@@ -52,6 +52,10 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+_ST_TRANSFORMER_MODULE_TYPES = {
+    "sentence_transformers.models.Transformer",
+    "sentence_transformers.base.modules.transformer.Transformer",
+}
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
     "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
@@ -837,6 +841,32 @@ def get_config(
     return config
 
 
+
+class SentenceTransformersCrossEncoderConfig(NamedTuple):
+    """Metadata for the supported modular CrossEncoder layout."""
+
+    model_config: dict[str, Any]
+    pooler_config: dict[str, Any]
+    dense_config: dict[str, Any]
+    uses_message_format: bool
+
+
+def _try_get_sentence_transformers_config(
+    model: str | Path,
+    revision: str | None = None,
+    hf_token: bool | str | None = None,
+) -> dict[str, Any] | None:
+    config_name = "config_sentence_transformers.json"
+    config = get_hf_file_to_dict(config_name, model, revision, token=hf_token)
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise ValueError(
+            "config_sentence_transformers.json must contain a JSON object."
+        )
+    return config
+
+
 @cache
 def get_pooling_config(
     model: str,
@@ -1170,9 +1200,10 @@ def try_get_tokenizer_config(
 def try_get_dense_modules(
     model: str | Path,
     revision: str | None = None,
+    hf_token: bool | str | None = None,
 ) -> list[dict[str, Any]] | None:
     try:
-        modules = get_hf_file_to_dict("modules.json", model, revision)
+        modules = get_hf_file_to_dict("modules.json", model, revision, token=hf_token)
         if not modules:
             return None
 
@@ -1188,7 +1219,9 @@ def try_get_dense_modules(
             folder = module.get("path", "")
 
             config_path = f"{folder}/config.json" if folder else "config.json"
-            layer_config = get_hf_file_to_dict(config_path, model, revision)
+            layer_config = get_hf_file_to_dict(
+                config_path, model, revision, token=hf_token
+            )
             if not layer_config:
                 continue
             layer_config["folder"] = folder
@@ -1196,6 +1229,242 @@ def try_get_dense_modules(
         return layer_configs
     except Exception:
         return None
+
+
+@cache
+def get_sentence_transformers_cross_encoder_config(
+    model: str | Path,
+    revision: str | None = None,
+    hf_token: bool | str | None = None,
+) -> SentenceTransformersCrossEncoderConfig | None:
+    """Get metadata for the supported modular CrossEncoder layout.
+
+    Traditional CrossEncoder checkpoints without a Pooling module keep using
+    their existing sequence-classification path. Modular checkpoints that
+    contain Pooling fail closed unless their behavior can be reproduced exactly.
+
+    Args:
+        model: Local checkpoint path or Hugging Face model ID.
+        revision: Model revision to inspect.
+        hf_token: Hugging Face token for authenticated checkpoint access.
+
+    Returns:
+        Metadata for a supported Transformer-Pooling-Dense stack, or ``None``
+        when the checkpoint does not use the modular Pooling layout.
+
+    Raises:
+        ValueError: If a modular CrossEncoder uses unsupported semantics.
+    """
+    model_config = _try_get_sentence_transformers_config(model, revision, hf_token)
+    if model_config is None or model_config.get("model_type") != "CrossEncoder":
+        return None
+
+    modules = get_hf_file_to_dict("modules.json", model, revision, token=hf_token)
+    if not isinstance(modules, list):
+        return None
+    if not all(isinstance(module, dict) for module in modules):
+        raise ValueError("Sentence Transformers modules.json must contain objects.")
+
+    contains_pooling = any(module.get("type") in _ST_POOLING_MODULE_TYPES for module in modules)
+    is_supported_topology = (
+        len(modules) == 3
+        and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
+        and modules[1].get("type") in _ST_POOLING_MODULE_TYPES
+        and modules[2].get("type") in _DENSE_MODULE_TYPES
+    )
+    if not is_supported_topology:
+        if contains_pooling:
+            raise ValueError(
+                "Unsupported modular CrossEncoder topology. vLLM supports "
+                "Transformer -> Pooling -> Dense."
+            )
+        return None
+
+    if any(module.get("kwargs") for module in modules):
+        raise ValueError(
+            "vLLM does not support per-module kwargs in Sentence Transformers "
+            "CrossEncoder checkpoints."
+        )
+
+    if model_config.get("prompts") or model_config.get("default_prompt_name"):
+        raise ValueError(
+            "vLLM does not support saved prompts in Sentence Transformers "
+            "CrossEncoder checkpoints."
+        )
+    activation_fn = model_config.get("activation_fn")
+    if not isinstance(activation_fn, str) or not activation_fn:
+        raise ValueError(
+            "The Sentence Transformers CrossEncoder must define activation_fn."
+        )
+
+    transformer_module = modules[0]
+    if transformer_module.get("path", ""):
+        raise ValueError(
+            "The Transformer module must be stored at the checkpoint root."
+        )
+    transformer_config = get_hf_file_to_dict(
+        "sentence_bert_config.json", model, revision, token=hf_token
+    )
+    if not isinstance(transformer_config, dict):
+        raise ValueError(
+            "Unable to load sentence_bert_config.json from this Sentence "
+            "Transformers CrossEncoder checkpoint."
+        )
+    if (
+        transformer_config.get("transformer_task", "feature-extraction")
+        != "feature-extraction"
+    ):
+        raise ValueError(
+            "The Sentence Transformers Transformer must use the "
+            "feature-extraction task."
+        )
+    if transformer_config.get("module_output_name", "token_embeddings") != (
+        "token_embeddings"
+    ):
+        raise ValueError(
+            "The Sentence Transformers Transformer must output token_embeddings."
+        )
+    if transformer_config.get("processing_kwargs"):
+        raise ValueError(
+            "vLLM does not support processing_kwargs in Sentence Transformers "
+            "CrossEncoder checkpoints."
+        )
+
+    uses_message_format = False
+    modality_config = transformer_config.get("modality_config")
+    if modality_config is not None:
+        if not isinstance(modality_config, dict):
+            raise ValueError("modality_config must contain a JSON object.")
+        for modality, modality_params in modality_config.items():
+            if not isinstance(modality_params, dict) or (
+                modality_params.get("method") != "forward"
+                or modality_params.get("method_output_name") != "last_hidden_state"
+            ):
+                raise ValueError(
+                    "Each modality must use forward and output last_hidden_state; "
+                    f"got unsupported settings for {modality!r}."
+                )
+        if message_config := modality_config.get("message"):
+            if message_config.get("format") != "structured":
+                raise ValueError(
+                    "vLLM supports only structured Sentence Transformers "
+                    "message inputs."
+                )
+            uses_message_format = True
+
+    if uses_message_format:
+        has_template_file = file_or_path_exists(
+            model=model,
+            config_name="chat_template.jinja",
+            revision=revision,
+            token=hf_token,
+        )
+        tokenizer_config = None
+        if file_or_path_exists(
+            model=model,
+            config_name="tokenizer_config.json",
+            revision=revision,
+            token=hf_token,
+        ):
+            tokenizer_config = get_hf_file_to_dict(
+                "tokenizer_config.json", model, revision, token=hf_token
+            )
+        has_inline_template = isinstance(tokenizer_config, dict) and bool(
+            tokenizer_config.get("chat_template")
+        )
+        if not has_template_file and not has_inline_template:
+            raise ValueError(
+                "Structured Sentence Transformers CrossEncoder inputs require "
+                "a saved chat template."
+            )
+
+    pooling_module = modules[1]
+    pooling_folder = pooling_module.get("path", "")
+    pooling_config_path = (
+        f"{pooling_folder}/config.json" if pooling_folder else "config.json"
+    )
+    pooling_config = get_hf_file_to_dict(
+        pooling_config_path, model, revision, token=hf_token
+    )
+    if not isinstance(pooling_config, dict):
+        raise ValueError("Unable to load the Sentence Transformers Pooling config.")
+
+    pooling_mode = pooling_config.get("pooling_mode")
+    if isinstance(pooling_mode, list):
+        if len(pooling_mode) != 1:
+            raise ValueError(
+                "The Sentence Transformers CrossEncoder must use exactly one "
+                "pooling mode."
+            )
+        pooling_mode = pooling_mode[0]
+    pooling_types = {"cls": "CLS", "mean": "MEAN", "lasttoken": "LAST"}
+    if pooling_mode not in pooling_types:
+        raise ValueError(
+            "The Sentence Transformers CrossEncoder pooling mode must be "
+            "cls, mean, or lasttoken."
+        )
+    if pooling_mode == "cls" and file_or_path_exists(
+        model=model,
+        config_name="tokenizer_config.json",
+        revision=revision,
+        token=hf_token,
+    ):
+        tokenizer_pooling_config = get_hf_file_to_dict(
+            "tokenizer_config.json", model, revision, token=hf_token
+        )
+        if (
+            isinstance(tokenizer_pooling_config, dict)
+            and tokenizer_pooling_config.get("padding_side") == "left"
+        ):
+            raise ValueError(
+                "CLS pooling is not supported with left-padded Sentence "
+                "Transformers CrossEncoder inputs."
+            )
+    if pooling_config.get("include_prompt", True) is not True:
+        raise ValueError(
+            "The Sentence Transformers CrossEncoder must use include_prompt=true."
+        )
+    pooler_config = {"seq_pooling_type": pooling_types[pooling_mode]}
+
+    dense_module = modules[2]
+    dense_folder = dense_module.get("path", "")
+    dense_config_path = f"{dense_folder}/config.json" if dense_folder else "config.json"
+    loaded_dense_config = get_hf_file_to_dict(
+        dense_config_path, model, revision, token=hf_token
+    )
+    if not isinstance(loaded_dense_config, dict):
+        raise ValueError("Unable to load the Sentence Transformers Dense config.")
+    dense_config = dict(loaded_dense_config)
+    dense_config["folder"] = dense_folder
+
+    if dense_config.get("use_residual", False):
+        raise ValueError(
+            "vLLM does not support a residual Dense module in a Sentence "
+            "Transformers CrossEncoder."
+        )
+    module_input_name = dense_config.get("module_input_name", "sentence_embedding")
+    module_output_name = dense_config.get("module_output_name", module_input_name)
+    if module_input_name != "sentence_embedding" or module_output_name != "scores":
+        raise ValueError("The Dense module must map sentence_embedding to scores.")
+
+    in_features = dense_config.get("in_features")
+    if not isinstance(in_features, int) or in_features < 1:
+        raise ValueError("The Dense module must define a positive in_features.")
+    out_features = dense_config.get("out_features")
+    if not isinstance(out_features, int) or out_features < 1:
+        raise ValueError("The Dense module must define a positive out_features.")
+    dense_activation = dense_config.get("activation_function")
+    if not isinstance(dense_activation, str) or not dense_activation:
+        raise ValueError(
+            "The Sentence Transformers Dense module must define activation_function."
+        )
+
+    return SentenceTransformersCrossEncoderConfig(
+        model_config=model_config,
+        pooler_config=pooler_config,
+        dense_config=dense_config,
+        uses_message_format=uses_message_format,
+    )
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
