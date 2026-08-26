@@ -108,6 +108,7 @@ Batch invariance has been tested and verified on the following models:
 - **GPT-OSS**: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`
+- **EXAONE 4.0**: `LGAI-EXAONE/EXAONE-4.0-1.2B`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
