@@ -1064,8 +1064,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             self.input_dtype = None
 
-        self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
         )

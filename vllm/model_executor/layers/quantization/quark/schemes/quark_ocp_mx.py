@@ -60,8 +60,6 @@ class QuarkOCP_MX(QuarkScheme):
         input_quant_spec: dict[str, Any] | None,
         dynamic_mxfp4_quant: bool = False,
     ):
-        self.weight_quant_spec = weight_quant_spec
-        self.input_quant_spec = input_quant_spec
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
         self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
         self.input_dtype: str | None = None
