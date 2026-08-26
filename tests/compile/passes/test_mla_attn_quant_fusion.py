@@ -170,7 +170,7 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
     """Test model for MLA Attention + FP8 static quant fusion."""
 
     quant_key = kFp8StaticTensorSym
-    quant_config = Fp8Config()
+    quant_config = Fp8Config(is_checkpoint_fp8_serialized=True)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -272,6 +272,7 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
 
     quant_key = kFp8Dynamic128Sym
     quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
         weight_block_size=[128, 128],
     )
 

@@ -21,6 +21,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -61,6 +62,15 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
+def test_legacy_fp8_online_quantization_prompts_new_interface() -> None:
+    """Legacy FP8 online quantization directs users to its replacement."""
+    with pytest.raises(
+        ValueError,
+        match="--quantization fp8_per_tensor.*online/",
+    ):
+        Fp8Config()
 
 
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
@@ -121,20 +131,22 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     ),
     [
         # simple case - quantization='fp8_per_tensor'
-        (
+        pytest.param(
             "fp8_per_tensor",
             None,
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {},
+            id="fp8_per_tensor",
         ),
         # FP8 KV cache with the fp8_per_tensor shorthand.
-        (
+        pytest.param(
             "fp8_per_tensor",
             None,
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {"kv_cache_dtype": "fp8"},
+            id="fp8_per_tensor-fp8-kv-cache",
         ),
         pytest.param(
             "fp8_per_tensor",
@@ -165,15 +177,16 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             id="fp8_per_tensor-fp8-kv-cache-marlin",
         ),
         # simple case - quantization='fp8_per_block'
-        (
+        pytest.param(
             "fp8_per_block",
             None,
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
             {},
+            id="fp8_per_block",
         ),
         # quantization='online' with per-layer-kind overrides
-        (
+        pytest.param(
             "online",
             {
                 "linear": "fp8_per_block",
@@ -182,9 +195,10 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {},
+            id="online-fp8-per-block-linear-fp8-per-tensor-moe",
         ),
         # ignore with direct layer name
-        (
+        pytest.param(
             "fp8_per_tensor",
             # qkv_proj is fused from q_proj/k_proj/v_proj, so currently the
             # ignore regex must match the unfused shard names
@@ -193,13 +207,15 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {},
+            id="fp8_per_tensor-ignored-layers",
         ),
-        (
+        pytest.param(
             "mxfp4",
             None,
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
             {},
+            id="mxfp4",
         ),
     ],
 )

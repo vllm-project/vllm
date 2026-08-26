@@ -94,6 +94,7 @@ class Fp8Config(QuantizationConfig):
 
     def __init__(
         self,
+        is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
@@ -101,8 +102,14 @@ class Fp8Config(QuantizationConfig):
     ) -> None:
         super().__init__()
 
-        # Not used anymore, kept for backward compatibility.
-        self.is_checkpoint_fp8_serialized = True
+        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        if not is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "The `fp8` quantization method no longer supports online "
+                "quantization. Please use `--quantization fp8_per_tensor` "
+                "instead. See "
+                "https://docs.vllm.ai/en/stable/features/quantization/online/"
+            )
 
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
@@ -150,6 +157,7 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
+        is_checkpoint_fp8_serialized = "fp8" in quant_method
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
@@ -158,9 +166,8 @@ class Fp8Config(QuantizationConfig):
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
             )
-        assert "fp8" in quant_method
-
         return cls(
+            is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
