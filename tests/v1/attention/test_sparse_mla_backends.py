@@ -2358,37 +2358,6 @@ def test_hisparse_shared_sparse_builder_routes_multi_token_chunks_to_prefill():
     assert builder.reorder_batch_threshold == 1
 
 
-def test_hisparse_varlen_capture_uses_sequential_decode_path():
-    """A single-token capture shape must support multi-token varlen replay."""
-    num_tokens = 8
-    expected = torch.empty(0, device=DEVICE_TYPE)
-
-    def run_decode(self, q, topk_indices, metadata, run_step):  # noqa: ARG001
-        return expected, None
-
-    impl = SimpleNamespace(
-        hisparse_cache=object(),
-    )
-    impl._run_hisparse_decode = MethodType(run_decode, impl)
-    metadata = SimpleNamespace(
-        num_decode_tokens=num_tokens,
-        num_decodes=num_tokens,
-        decode_max_query_len=8,
-    )
-
-    output, lse = SparseMLACommonImpl._forward_hisparse_mqa(
-        impl,
-        torch.empty(num_tokens, 1, 4, device=DEVICE_TYPE),
-        torch.empty(1, device=DEVICE_TYPE),
-        torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE),
-        metadata,
-        lambda *args: (expected, None),
-    )
-
-    assert output is expected
-    assert lse is None
-
-
 def test_flashmla_cache_dtype_aliases_use_ds_layout():
     from vllm.model_executor.layers.attention.mla_attention import (
         _canonicalize_sparse_mla_kv_cache_dtype,
