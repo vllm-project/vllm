@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -35,7 +35,7 @@ from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 logger = init_logger(__name__)
 
@@ -103,11 +103,9 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
 
-        # Here we set the query start locs to 0. This is to
-        # cover up an invalid memory access in the prefix_prefil kernel
-        # that we run into during graph capture (#25985)
+        # Zero device query start locations to avoid invalid memory access in
+        # the prefix prefill kernel during graph capture (#25985).
         common_attn_metadata.query_start_loc.zero_()
-        common_attn_metadata.query_start_loc_cpu.zero_()
 
         return attn_metadata
 
@@ -244,17 +242,30 @@ class RocmAttentionBackend(AttentionBackend):
             AttentionType.ENCODER_ONLY,
         )
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """K and V as two head groups so the native HIP kernels address each side
+        as one contiguous region (x-packed interior applied in split_kv_cache)."""
+        if spec.state_content_bytes is not None:
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The native HIP kernels hardcode group-contiguous block addressing, so
+        # they need the K and V groups to span all blocks (H outermost within the layer)
+        # The Triton fallbacks are stride-aware, so block-interior LBHNC is also
+        # supported, just without the native kernels.
+        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -383,8 +394,8 @@ class RocmAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: logical [num_blocks, 2, block_size, num_kv_heads *
+                head_size] under LHBNC (physically K/V-group-first)
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -422,8 +433,10 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        # The bound view is logical [B, 2, N, H*hs]; split_kv_cache expects
+        # the K/V groups first.
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+            kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -480,7 +493,7 @@ class RocmAttentionImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+            kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )
 
         # Reshape the input keys and values and store them in the cache.
@@ -535,7 +548,7 @@ class RocmAttentionImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
+            kv_cache.transpose(0, 1),
             layer.num_kv_heads,  # type: ignore[attr-defined]
             layer.head_size,  # type: ignore[attr-defined]
         )
