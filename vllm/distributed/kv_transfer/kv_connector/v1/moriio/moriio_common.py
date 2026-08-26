@@ -14,6 +14,7 @@ import torch
 import zmq
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -443,8 +444,8 @@ class ReqMeta:
     """Metadata for a single request."""
 
     transfer_id: TransferId
-    local_block_ids: list[list[int]]
-    remote_block_ids: list[list[int]]
+    local_block_ids: BlockIds
+    remote_block_ids: BlockIds
     remote_host: str
     remote_port: int
     remote_handshake_port: int
@@ -480,7 +481,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def add_new_req(
         self,
         request_id: ReqId,
-        local_block_ids: list[list[int]],
+        local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
@@ -555,7 +556,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             )
         )
 
-        # Per-group block ids (list[list[int]]); [] on the WRITE producer leg.
+        # Per-group block ids (BlockIds); [] on the WRITE producer leg.
         remote_block_ids = kv_transfer_params["remote_block_ids"] or []
 
         _req = ReqMeta(

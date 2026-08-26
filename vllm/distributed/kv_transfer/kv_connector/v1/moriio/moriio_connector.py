@@ -18,6 +18,7 @@ import torch
 import zmq
 
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -488,16 +489,16 @@ class MoRIIOConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        # Block-id lists are per KV cache group (list[list[int]]); a non-hybrid
+        # Block-id lists are per KV cache group (BlockIds); a non-hybrid
         # model simply has a single group (outer length 1).
-        self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
-        self._reqs_need_save: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._reqs_need_save: dict[ReqId, tuple[Request, BlockIds]] = {}
         # Snapshot of kv_transfer_params for chunked prefill recovery.
         self._req_kv_params: dict[ReqId, dict] = {}
 
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
-        self._reqs_need_pending_save: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_need_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -544,8 +545,8 @@ class MoRIIOConnectorScheduler:
 
     def get_sw_clipped_blocks(
         self,
-        block_ids: tuple[list[int], ...] | list[list[int]],
-    ) -> list[list[int]]:
+        block_ids: BlockIds,
+    ) -> BlockIds:
         """Clip each sliding-window group's block list to its in-window tail.
 
         Full-attention groups (budget 0) are left untouched. A no-op when HMA
@@ -560,9 +561,9 @@ class MoRIIOConnectorScheduler:
 
     @staticmethod
     def _match_local_to_remote_tails(
-        local_group_ids: list[list[int]],
-        remote_group_ids: list[list[int]],
-    ) -> list[list[int]]:
+        local_group_ids: BlockIds,
+        remote_group_ids: BlockIds,
+    ) -> BlockIds:
         """Per-group tail match of local blocks against remote block ids.
 
         Preserves the single-group behaviour: when the decode leg allocated
@@ -781,7 +782,7 @@ class MoRIIOConnectorScheduler:
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
-            local_block_ids = [list(g) for g in blocks.get_block_ids()]
+            local_block_ids: BlockIds = [list(g) for g in blocks.get_block_ids()]
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
             # Snapshot params now so chunked-prefill build_connector_meta
             # can recover them on the final chunk even if the live
@@ -964,7 +965,7 @@ class MoRIIOConnectorScheduler:
                 if new_block_ids is not None:
                     # WRITE mode is single-group (hybrid WRITE is rejected at
                     # init), but keep the per-group shape consistent so all
-                    # block-id lists are list[list[int]].
+                    # block-id lists are BlockIds.
                     new_group_ids = [list(g) for g in new_block_ids]
                     # A non-disagg request (no kv_transfer_params, e.g. smoke
                     # test) is never registered in _reqs_need_pending_save;
@@ -1094,7 +1095,7 @@ class MoRIIOConnectorScheduler:
             if self.mode == MoRIIOMode.WRITE:
                 self._release_write_prefill_blocks(request.request_id, params)
             else:
-                empty_groups: list[list[int]] = [[] for _ in self.blocks_per_sw]
+                empty_groups: BlockIds = [[] for _ in self.blocks_per_sw]
                 self._reqs_need_recv[request.request_id] = (request, empty_groups)
             params["do_remote_prefill"] = False
             return False, None
@@ -2721,8 +2722,8 @@ class MoRIIOConnectorWorker:
 
     def _read_blocks(
         self,
-        local_block_ids: list[list[int]],
-        remote_block_ids: list[list[int]],
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
         dst_engine_id: str,
         request_id: str,
         transfer_id: str,
