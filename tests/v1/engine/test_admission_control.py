@@ -34,6 +34,7 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
 
@@ -299,6 +300,67 @@ async def test_concurrent_single_request_admission_respects_limit():
     assert sum(result is None for result in results) == 1
     assert sum(isinstance(result, QueueOverflowError) for result in results) == 1
     assert len(request_states) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_n", [1, 3])
+async def test_parallel_admission_is_all_or_nothing(first_n: int):
+    """An n>1 request reserves either all its capacity or none of it."""
+    llm = _make_async_llm(max_num_queued_reqs=3)
+    request_states: dict[str, SimpleNamespace] = {}
+    llm.output_processor.get_num_unfinished_requests.side_effect = lambda: len(
+        request_states
+    )
+    llm.output_processor.has_request.side_effect = request_states.__contains__
+    llm.output_processor.add_request.side_effect = lambda request, *_args: (
+        request_states.__setitem__(request.request_id, _make_req_state(1))
+    )
+
+    async def add_request_async(_request):
+        await asyncio.sleep(0)
+
+    llm.engine_core = SimpleNamespace(
+        resources=SimpleNamespace(engine_dead=False),
+        add_request_async=AsyncMock(side_effect=add_request_async),
+        shutdown=MagicMock(),
+    )
+    llm.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+    )
+    llm.output_handler = None
+    llm.log_requests = False
+    llm._run_output_handler = MagicMock()
+    llm.input_processor = MagicMock()
+    llm.input_processor.assign_request_id.side_effect = lambda request: setattr(
+        request, "external_req_id", request.request_id
+    )
+
+    def make_request(request_id: str, n: int) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id=request_id,
+            prompt_token_ids=[1],
+            mm_features=None,
+            sampling_params=SamplingParams(n=n),
+            pooling_params=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+
+    second_n = 3 if first_n == 1 else 1
+    first = make_request("first", first_n)
+    second = make_request("second", second_n)
+    results = await asyncio.gather(
+        llm.add_request("first", first, first.params),
+        llm.add_request("second", second, second.params),
+        return_exceptions=True,
+    )
+
+    assert not isinstance(results[0], Exception)
+    assert isinstance(results[1], QueueOverflowError)
+    assert len(request_states) == first_n
+    assert llm.engine_core.add_request_async.await_count == first_n
 
 
 # ---------------------------------------------------------------------------

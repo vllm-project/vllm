@@ -382,10 +382,6 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if isinstance(params, SamplingParams) and params.n > 1:
-            # TODO (NickLucche) Batch check admission check for all n requests
-            self.check_admission(params.n, request_id)
-
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
@@ -481,14 +477,24 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request)
+        child_requests: list[EngineCoreRequest] = []
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            await self._add_request(
+            child_requests.append(child_request)
+
+        self.check_admission(parent_params.n, parent_request.request_id)
+        for idx, child_request in enumerate(child_requests):
+            self.output_processor.add_request(
                 child_request, prompt_text, parent_request, idx, queue
             )
+
+        for child_request in child_requests:
+            await self.engine_core.add_request_async(child_request)
+            if self.log_requests:
+                logger.info("Added request %s.", child_request.request_id)
         return queue
 
     async def _add_request(
