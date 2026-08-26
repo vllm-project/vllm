@@ -9,6 +9,9 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    CustomAllreduce,
+)
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 
 from ..utils import (
@@ -21,6 +24,29 @@ random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
 for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expected"),
+    [
+        (torch.float32, True),
+        (torch.float16, True),
+        (torch.bfloat16, True),
+        (torch.int8, False),
+        (torch.float8_e4m3fn, False),
+    ],
+)
+def test_custom_allreduce_filters_dtype(
+    dtype: torch.dtype,
+    expected: bool,
+) -> None:
+    communicator = CustomAllreduce.__new__(CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator._ptr = 0
+
+    assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
 
 
 @ray.remote(num_gpus=1, max_calls=1)

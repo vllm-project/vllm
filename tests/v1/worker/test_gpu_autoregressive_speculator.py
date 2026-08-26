@@ -104,6 +104,45 @@ def _make_speculator(
     return speculator
 
 
+@pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
+def test_speculator_uses_draft_model_hidden_size(hc_mult, expected):
+    hf_config = SimpleNamespace()
+    if hc_mult is not None:
+        hf_config.hc_mult = hc_mult
+    draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        get_hidden_size=lambda: 64,
+        get_vocab_size=lambda: 32,
+    )
+    speculative_config = SimpleNamespace(
+        method="mtp",
+        num_speculative_tokens=3,
+        draft_model_config=draft_model_config,
+        use_local_argmax_reduction=False,
+        draft_sample_method="greedy",
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=32,
+            dtype=torch.float32,
+            use_fp64_gumbel=False,
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_rank=0,
+        ),
+    )
+
+    speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
+
+    assert speculator.hidden_size == expected
+
+
 def test_mm_support_configured_after_model_load(monkeypatch):
     target_model_config = object()
     draft_model_config = object()
@@ -197,9 +236,11 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
 
     assert not speculator.supports_mm_inputs
     assert warning_messages == [
-        "Draft model _TextOnlyDraftModel does not support external multimodal "
-        "embeddings. Embeddings from the target model will not be passed to the "
-        "drafter; using text-only draft inputs instead."
+        (
+            "Draft model _TextOnlyDraftModel does not support external multimodal "
+            "embeddings. Embeddings from the target model will not be passed to the "
+            "drafter; using text-only draft inputs instead."
+        )
     ]
 
 

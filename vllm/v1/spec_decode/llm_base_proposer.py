@@ -94,7 +94,7 @@ class SpecDecodeBaseProposer:
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.hidden_size = self._get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # DeepSeek V4 MTP consumes the target's pre-hc_head residual stream,
@@ -319,6 +319,10 @@ class SpecDecodeBaseProposer:
             rocm_types.append(FlexAttentionMetadata)
 
             self.allowed_attn_types = tuple(rocm_types)
+
+    def _get_hidden_size(self) -> int:
+        """Return the hidden width consumed by the draft model."""
+        return self.draft_model_config.get_hidden_size()
 
     def _raise_if_padded_drafter_batch_disabled(self):
         if self.speculative_config.disable_padded_drafter_batch:
@@ -1383,6 +1387,7 @@ class SpecDecodeBaseProposer:
                 "Qwen3_5MoeForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
+                "Qwen4ExpForConditionalGeneration",
                 "Gemma4ForConditionalGeneration",
                 "Gemma4UnifiedForConditionalGeneration",
                 "Step3p7ForConditionalGeneration",

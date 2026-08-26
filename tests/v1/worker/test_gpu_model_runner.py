@@ -43,10 +43,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -1485,6 +1487,56 @@ def test_mamba_state_table_width_is_not_aligned():
     )
 
     assert block_tables[0].max_num_blocks_per_req == 1
+
+
+@pytest.mark.parametrize("wrap_uniform", [False, True])
+def test_circular_buffer_uses_custom_slot_mapping(wrap_uniform: bool):
+    circular_spec = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    spec = (
+        UniformTypeKVCacheSpecs(
+            block_size=8,
+            kv_cache_specs={"raw_key_cache": circular_spec},
+        )
+        if wrap_uniform
+        else circular_spec
+    )
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_model_len = 16
+    runner.max_encoder_len = 0
+    runner.max_num_reqs = 1
+    runner.max_num_tokens = 2
+    runner.num_spec_tokens = 0
+    runner.device = torch.device("cpu")
+    runner.model_config = SimpleNamespace(get_vocab_size=lambda: 8)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+    runner.vllm_config = SimpleNamespace(reasoning_config=None)
+    runner.cache_config = SimpleNamespace(use_replayssm=False)
+    runner.is_pooling_model = False
+    runner.input_batch = SimpleNamespace(
+        logitsprocs=None,
+        logitsprocs_need_output_token_ids=False,
+    )
+    runner._init_block_sizes = []
+    runner._init_kernel_block_sizes = []
+    runner._init_max_num_blocks = []
+    runner._init_slot_mapping_modes = []
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["raw"], kv_cache_spec=spec)],
+    )
+
+    runner.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes=[8])
+
+    block_table = runner.input_batch.block_table[0]
+    assert block_table.slot_mapping_mode == SlotMappingMode.NONE
+    assert block_table.max_num_blocks_per_req == 1
 
 
 def test_input_batch_with_kernel_block_sizes():

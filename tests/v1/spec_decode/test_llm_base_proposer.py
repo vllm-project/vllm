@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for SpecDecodeBaseProposer.initialize_attn_backend.
-
-Block tables are stored at kernel-block granularity, so the proposer's
-``block_size`` (used for slot-mapping math) must be the kernel block size,
-not the KV cache manager's block size — the two differ when manager blocks
-are split for the attention kernel. The value must also be deterministic:
-``_draft_attn_layer_names`` is a set, whose iteration order varies across
-processes, so anything derived from iteration order must not leak into
-``block_size``.
-"""
+"""Tests for the model-independent proposer attention initialization."""
 
 from types import SimpleNamespace
 
@@ -29,12 +20,13 @@ class _FakeAttentionGroup:
         self.kv_cache_spec = kv_cache_spec
         self.kv_cache_group_id = kv_cache_group_id
         self.kernel_block_size = None
+        self.builder = SimpleNamespace(kv_cache_spec=self.kv_cache_spec)
 
     def create_metadata_builders(self, vllm_config, device, kernel_block_size=None):
         self.kernel_block_size = kernel_block_size
 
     def get_metadata_builder(self):
-        return SimpleNamespace(kv_cache_spec=self.kv_cache_spec)
+        return self.builder
 
 
 def _make_proposer(
@@ -68,8 +60,7 @@ def _make_kv_cache_config(layer_names: set[str]) -> SimpleNamespace:
 
 
 def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
-    """The proposer's slot-mapping math runs against the kernel-granularity
-    block table, so block_size must come from kernel_block_sizes."""
+    """Slot math must use the block-table's kernel granularity."""
     layer_names = {"draft.0.self_attn.attn"}
     proposer = _make_proposer(monkeypatch, layer_names)
 
@@ -80,7 +71,6 @@ def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
 
     assert proposer.block_size == KERNEL_BLOCK_SIZE
     assert proposer.block_size != SCHEDULER_BLOCK_SIZE
-    # The metadata builder keeps receiving the kernel block size as well.
     assert proposer.draft_attn_groups[0].kernel_block_size == KERNEL_BLOCK_SIZE
 
 
@@ -96,8 +86,7 @@ def test_block_size_falls_back_to_kv_cache_spec(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch):
-    """_draft_attn_layer_names is a set; the attention groups built from it
-    must not depend on its (process-random) iteration order."""
+    """Attention group order must not depend on set iteration order."""
     layer_names = {"draft.c.attn", "draft.a.attn", "draft.b.attn"}
     expected_order = sorted(layer_names)
 

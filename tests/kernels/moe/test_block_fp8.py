@@ -351,3 +351,105 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             torch.accelerator.synchronize()
 
     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+
+
+def _dequant_block_fp8(
+    w_fp8: torch.Tensor, w_s: torch.Tensor, block_shape: list[int]
+) -> torch.Tensor:
+    """Dequantize a [N, K] fp8 weight with [Nb, Kb] block scales to fp32."""
+    n, k = w_fp8.shape
+    bn, bk = block_shape
+    s = w_s.repeat_interleave(bn, dim=0).repeat_interleave(bk, dim=1)
+    return w_fp8.to(torch.float32) * s[:n, :k]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1, 2, 3])
+@torch.inference_mode()
+def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
+    """TP-misaligned blockwise FP8 MoE (e.g. Qwen4Exp, intermediate
+    640 at TP=4 -> 160 per rank, not divisible by the checkpoint's 128 block).
+
+    The per-rank scale grid is refined from 128 to 32 (lossless: each 32-block
+    lies inside one global 128-block) so the Triton kernel can consume exact
+    per-shard scales. Simulates one TP rank's shard and checks:
+      1. the refined+sharded scales dequantize exactly like the global scales;
+      2. the Triton fused MoE kernel with block_shape=[32, 32] matches the
+         native-torch blockwise reference on the same shard.
+    """
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    M, E, topk = 8, 4, 2
+    hidden = 256
+    inter_full = 640
+    tp_size = 4
+    n_shard = inter_full // tp_size  # 160
+    ckpt_block = [128, 128]
+    refined_block = [32, 32]
+    factor = ckpt_block[0] // refined_block[0]  # 4
+
+    a = torch.randn((M, hidden), dtype=dtype) / 10
+    score = torch.randn((M, E), dtype=dtype)
+
+    (_, w1_full, w1_s_full, _), (_, w2_full, w2_s_full, _) = make_test_weights(
+        E,
+        inter_full,
+        hidden,
+        dtype,
+        torch.float8_e4m3fn,
+        per_out_ch_quant=False,
+        block_shape=ckpt_block,
+    )
+
+    # TP shard the weights (exact slicing, no scale involvement).
+    lo, hi = tp_rank * n_shard, (tp_rank + 1) * n_shard
+    w1 = torch.cat(
+        [w1_full[:, lo:hi], w1_full[:, inter_full + lo : inter_full + hi]], dim=1
+    )
+    w2 = w2_full[:, :, lo:hi]
+
+    # Refine the global 128-block scales to 32 blocks, then take the shard's
+    # slice -- mirrors the Fp8MoEMethod/RoutedExperts loading path.
+    w1_s32 = w1_s_full.repeat_interleave(factor, dim=-2).repeat_interleave(
+        factor, dim=-1
+    )
+    nb = n_shard // refined_block[0]  # 5 local 32-blocks per projection
+    gate_hi = w1_s32.shape[1] // 2
+    w1_s = torch.cat(
+        [
+            w1_s32[:, tp_rank * nb : (tp_rank + 1) * nb],
+            w1_s32[:, gate_hi + tp_rank * nb : gate_hi + (tp_rank + 1) * nb],
+        ],
+        dim=1,
+    )
+    w2_s32 = w2_s_full.repeat_interleave(factor, dim=-2).repeat_interleave(
+        factor, dim=-1
+    )
+    w2_s = w2_s32[:, :, tp_rank * nb : (tp_rank + 1) * nb]
+
+    # The refined per-shard scales must reproduce the global-scale dequant
+    # exactly (dequant full-width, then slice to the shard).
+    for e in range(E):
+        d32 = _dequant_block_fp8(w1[e, :n_shard], w1_s[e, :nb], refined_block)
+        d128 = _dequant_block_fp8(w1_full[e], w1_s_full[e], ckpt_block)[lo:hi]
+        assert torch.equal(d32, d128)
+        d32 = _dequant_block_fp8(w2[e], w2_s[e], refined_block)
+        d128 = _dequant_block_fp8(w2_full[e], w2_s_full[e], ckpt_block)[:, lo:hi]
+        assert torch.equal(d32, d128)
+
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        block_shape=refined_block,
+    )
+
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    with set_current_vllm_config(vllm_config):
+        ref_out = torch_w8a8_block_fp8_moe(
+            a, w1, w2, w1_s, w2_s, topk_weights, topk_ids, refined_block
+        )
+        out = fused_experts(
+            a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
+        )
+
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)

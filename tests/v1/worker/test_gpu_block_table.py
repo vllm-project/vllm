@@ -132,6 +132,42 @@ def test_block_tables_apply_staged_writes_single_group():
     )
 
 
+def test_block_tables_skip_custom_slot_mapping_groups():
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[8, 262144],
+        max_num_reqs=1,
+        max_num_batched_tokens=4,
+        max_num_blocks_per_group=[1, 1],
+        device=device,
+        kernel_block_sizes=[8, 262144],
+        slot_mapping_enabled=[False, True],
+    )
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([7], [12]),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.tensor([0], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    positions = torch.tensor([153797, 165757], dtype=torch.int64, device=device)
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=2,
+    )
+    torch.accelerator.synchronize()
+
+    assert slot_mappings[0].tolist() == [-1, -1]
+    assert slot_mappings[1].tolist() == [
+        12 * 262144 + 153797,
+        12 * 262144 + 165757,
+    ]
+
+
 def test_v1_block_table_move_row_clears_vacated_row():
     """condense() moves the last row into a freed slot; the vacated row must
     not keep stale block ids. Padded dummy-run batches dereference stale rows

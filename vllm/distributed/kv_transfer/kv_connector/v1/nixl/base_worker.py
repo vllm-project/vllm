@@ -72,6 +72,7 @@ from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -110,7 +111,12 @@ class NixlBaseConnectorWorker:
             # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
             # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
-            num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
+            # Count only the regions that actually hold SSM state; must match
+            # the descriptors emitted by _build_mamba_local.
+            num_ssm_regions = (
+                len(self._ssm_region_indices or self.block_len_per_layer)
+                * ssm_regions_per_layer
+            )
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -138,12 +144,17 @@ class NixlBaseConnectorWorker:
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
-            if _is_attention_spec(self._group_spec_types[i]):
-                fa_region_ids = np.arange(self.num_regions)[:, None]
+            spec_type = self._group_spec_types[i]
+            if _is_attention_spec(spec_type):
+                fa_region_ids = (
+                    np.flatnonzero(self._region_is_mla)
+                    if self._is_csa_linear and spec_type is CircularBufferSpec
+                    else np.arange(self.num_regions)
+                )[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
-            elif _is_ssm_spec(self._group_spec_types[i]):
+            elif _is_ssm_spec(spec_type):
                 # NOTE (NickLucche) SSM and Attention block regions can
                 # be exchanged arbitrarily by manager.  Therefore, descs
                 # are laid out as:
@@ -151,7 +162,11 @@ class NixlBaseConnectorWorker:
                 # num_fa_descs offset must be computed per-engine since
                 # P and D can have different num_blocks (and thus
                 # different FA desc counts).
-                ssm_region_ids = np.arange(num_ssm_regions)[:, None]
+                ssm_region_ids = (
+                    np.arange(num_ssm_regions, num_ssm_regions + 1)
+                    if i == self._ple_group_index
+                    else np.arange(num_ssm_regions)
+                )[:, None]
                 all_descs.append(
                     (
                         ssm_region_ids * logical_blocks
@@ -198,6 +213,10 @@ class NixlBaseConnectorWorker:
 
         # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
         fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
+        sharded_desc_end = len(src_blocks_data) - (
+            self._logical_num_blocks if self._ple_region_index is not None else 0
+        )
+        assert num_fa_descs <= sharded_desc_end
 
         assert block_size_ratio == 1 or fa_num_splits == 1 or all(fa_desc_replicated), (
             "Head-sharded attention reads with P_TP > D_TP and heterogeneous "
@@ -218,9 +237,11 @@ class NixlBaseConnectorWorker:
                         # SPLIT (full-attn): this rank's head slice.
                         chunk = local_len // fa_num_splits
                         handle.append((addr + fa_slot * chunk, chunk, dev))
-                else:
+                elif j < sharded_desc_end:
                     chunk = local_len // ssm_num_splits
                     handle.append((addr + p_idx * chunk, chunk, dev))
+                else:
+                    handle.append((addr, local_len, dev))
             yield handle
 
     def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
@@ -313,6 +334,24 @@ class NixlBaseConnectorWorker:
             isinstance(g.kv_cache_spec, MambaSpec)
             for g in kv_cache_config.kv_cache_groups
         )
+        self._is_csa_linear = any(
+            get_representative_spec_type(group.kv_cache_spec) is CircularBufferSpec
+            for group in kv_cache_config.kv_cache_groups
+        )
+        self._ple_group_index: int | None = None
+        if self._is_csa_linear:
+            ple_groups = [
+                (index, group)
+                for index, group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(group.kv_cache_spec, MambaSpec)
+                and group.kv_cache_spec.tp_replicated
+            ]
+            if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
+                raise ValueError(
+                    "CSA-linear NIXL requires exactly one PLE cache owner."
+                )
+            self._ple_group_index = ple_groups[0][0]
+
         if self._has_mamba:
             assert self._is_hma_required
             from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -327,6 +366,7 @@ class NixlBaseConnectorWorker:
                 spec
                 for spec in self._layer_specs.values()
                 if isinstance(spec, MambaSpec)
+                and (not self._is_csa_linear or not spec.tp_replicated)
             )
             self._conv_decomp = derive_mamba_conv_split(
                 mamba_spec,
@@ -549,6 +589,8 @@ class NixlBaseConnectorWorker:
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
+        self._ssm_region_indices = list[int]()
+        self._ple_region_index: int | None = None
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
@@ -580,6 +622,24 @@ class NixlBaseConnectorWorker:
             self.block_size = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
+    def _validate_csa_linear_tp_layout(self, remote_tp_size: int) -> None:
+        """Reject P/D pairs whose main-KV pages have different head layouts.
+
+        A rank at TP < total KV heads holds several heads per page, while a
+        rank at TP >= total KV heads holds exactly one (replicated beyond
+        that). CSA-linear pages are shared tensors that transfer as whole
+        block units, so endpoints on opposite sides of that boundary lay
+        them out differently and cannot exchange them.
+        """
+        assert self.transfer_topo is not None
+        total_kv_heads = self.transfer_topo.total_num_kv_heads
+        if (self.world_size < total_kv_heads) != (remote_tp_size < total_kv_heads):
+            raise ValueError(
+                "CSA-linear NIXL requires both endpoints on the same side of "
+                f"the KV-head sharding boundary ({total_kv_heads} KV heads): "
+                f"got local TP {self.world_size}, remote TP {remote_tp_size}."
+            )
+
     def _nixl_handshake(
         self,
         host: str,
@@ -590,6 +650,8 @@ class NixlBaseConnectorWorker:
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
+        if self._is_csa_linear:
+            self._validate_csa_linear_tp_layout(remote_tp_size)
 
         # the first time we connect to a remote agent.
         # be careful, the handshake happens in a background thread.
@@ -1079,6 +1141,11 @@ class NixlBaseConnectorWorker:
             transfer_mode=self._TRANSFER_MODE,
         )
 
+        if self._is_csa_linear and self.use_host_buffer:
+            raise NotImplementedError(
+                "NIXL host staging does not preserve CSA-linear shared tensors."
+            )
+
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
             assert len(self.host_xfer_buffers) == len(kv_caches), (
@@ -1104,7 +1171,8 @@ class NixlBaseConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses: list[int] = []
-
+        self._ssm_region_indices = []
+        self._ple_region_index = None
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
@@ -1162,6 +1230,14 @@ class NixlBaseConnectorWorker:
                 # layer registered it first.
                 idx = seen_base_addresses.index(base_addr)
                 self._region_is_mla[idx] |= is_mla_region
+                if isinstance(layer_spec, MambaSpec):
+                    if not layer_spec.tp_replicated:
+                        if idx not in self._ssm_region_indices:
+                            self._ssm_region_indices.append(idx)
+                    else:
+                        assert self._is_csa_linear
+                        assert self._ple_region_index in (None, idx)
+                        self._ple_region_index = idx
                 logger.debug("Skipping %s because it's already seen", layer_name)
                 continue
             logger.debug(
@@ -1173,6 +1249,13 @@ class NixlBaseConnectorWorker:
                 self.block_len_per_layer.append(
                     physical_page_size // self._physical_blocks_per_logical_kv_block
                 )
+                region_index = len(seen_base_addresses) - 1
+                if not layer_spec.tp_replicated:
+                    self._ssm_region_indices.append(region_index)
+                else:
+                    assert self._is_csa_linear
+                    assert self._ple_region_index is None
+                    self._ple_region_index = region_index
             else:
                 self.block_len_per_layer.append(physical_page_size)
             self._region_is_mla.append(is_mla_region)
@@ -1327,9 +1410,11 @@ class NixlBaseConnectorWorker:
         physical_per_logical = self._physical_blocks_per_logical_kv_block
         device_id = self.device_id
         block_arange = np.arange(num_blocks, dtype=np.uint64)
-
         parts: list[np.ndarray] = []
-        for i, base_addr in enumerate(base_addresses):
+
+        region_indices = self._ssm_region_indices or range(len(base_addresses))
+        for i in region_indices:
+            base_addr = base_addresses[i]
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
             page_stride = self.block_len_per_layer[i] * physical_per_logical
@@ -1338,6 +1423,12 @@ class NixlBaseConnectorWorker:
                 parts.append(self._stack_descs(blk_addrs + off, sz, device_id))
             # SSM temporal state follows the conv state.
             parts.append(self._stack_descs(blk_addrs + conv_size, ssm_size, device_id))
+
+        if (region_index := self._ple_region_index) is not None:
+            page_stride = self.block_len_per_layer[region_index] * physical_per_logical
+            block_addrs = base_addresses[region_index] + block_arange * page_stride
+            parts.append(self._stack_descs(block_addrs, page_stride, self.device_id))
+
         return np.concatenate(parts)
 
     def _build_mamba_remote(
@@ -1373,7 +1464,11 @@ class NixlBaseConnectorWorker:
         parts: list[np.ndarray] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+        region_indices = self._ssm_region_indices or range(
+            len(nixl_agent_meta.kv_caches_base_addr)
+        )
+        for i in region_indices:
+            base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             blk_addrs = base_addr + block_arange * page_stride
             for off, sz in conv_offsets:
@@ -1381,6 +1476,26 @@ class NixlBaseConnectorWorker:
             # SSM temporal state is also TP-sharded on the heads dimension.
             ssm_addrs = blk_addrs + conv_size_remote + local_offset * ssm_read_size
             parts.append(self._stack_descs(ssm_addrs, ssm_read_size, device_id))
+
+        if (region_index := self._ple_region_index) is not None:
+            local_page_stride = (
+                self.block_len_per_layer[region_index]
+                * self._physical_blocks_per_logical_kv_block
+            )
+            remote_page_stride = (
+                nixl_agent_meta.block_lens[region_index] * remote_physical_per_logical
+            )
+            if local_page_stride != remote_page_stride:
+                raise ValueError(
+                    "PLE pages require identical P/D geometry: "
+                    f"local={local_page_stride}, remote={remote_page_stride}."
+                )
+            block_addrs = (
+                nixl_agent_meta.kv_caches_base_addr[region_index]
+                + block_arange * remote_page_stride
+            )
+            parts.append(self._stack_descs(block_addrs, remote_page_stride, device_id))
+
         return np.concatenate(parts)
 
     @staticmethod

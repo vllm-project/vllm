@@ -14,11 +14,13 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    CircularBufferManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
@@ -59,6 +61,67 @@ def get_chunked_local_attention_manager(
         needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
+    block_size = 4
+    spec = CircularBufferSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
+    manager = CircularBufferManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        needs_kv_cache_zeroing=True,
+        max_admission_blocks_per_request=1,
+    )
+    request_id = "request"
+
+    assert (
+        manager.get_num_blocks_to_allocate(
+            request_id,
+            num_tokens=128,
+            new_computed_blocks=[block_pool.blocks[1]],
+            total_computed_tokens=0,
+            num_local_computed_tokens=0,
+            num_tokens_main_model=128,
+        )
+        == 1
+    )
+    blocks = manager.allocate_new_blocks(
+        request_id, num_tokens=128, num_tokens_main_model=128
+    )
+    assert len(blocks) == 1
+    assert not manager.records_new_block_ids
+    assert manager.take_new_block_ids() == []
+
+    for num_tokens in (256, 1024):
+        assert (
+            manager.get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                [],
+                total_computed_tokens=num_tokens - 1,
+                num_local_computed_tokens=0,
+                num_tokens_main_model=num_tokens,
+            )
+            == 0
+        )
+        assert manager.allocate_new_blocks(request_id, num_tokens, num_tokens) == []
+
+    manager.cache_blocks(request_id, 1024)
+    manager.remove_skipped_blocks(request_id, 1024)
+    assert manager.get_num_common_prefix_blocks(request_id) == 0
+    assert manager.get_num_skipped_tokens(1024) == 0
+    assert manager.req_to_blocks[request_id] == blocks
 
 
 def test_sliding_window_records_new_blocks_for_zeroing():

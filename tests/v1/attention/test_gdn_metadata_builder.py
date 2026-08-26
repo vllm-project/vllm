@@ -21,6 +21,9 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import (
+    mamba_get_block_table_tensor_triton,
+)
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -221,3 +224,44 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_aligned_block_table_triton_matches_pytorch():
+    device = torch.device("cuda")
+    seq_lens = torch.tensor(
+        [0, 1, 15, 16, 17, 31, 32, 33, 511, 512, 513],
+        dtype=torch.int32,
+        device=device,
+    ).repeat(6)[:65]
+    block_table_storage = torch.arange(
+        seq_lens.numel() * 128,
+        dtype=torch.int32,
+        device=device,
+    ).reshape(seq_lens.numel(), 128)
+    block_table = block_table_storage[:, ::2]
+    kv_cache_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        num_speculative_blocks=2,
+    )
+
+    start_indices = ((seq_lens - 1) // kv_cache_spec.block_size).clamp(min=0)
+    offsets = torch.arange(
+        1 + kv_cache_spec.num_speculative_blocks,
+        dtype=torch.int32,
+        device=device,
+    )
+    expected = torch.gather(
+        block_table,
+        1,
+        (start_indices.unsqueeze(1) + offsets).to(torch.int64),
+    )
+    actual = mamba_get_block_table_tensor_triton(
+        block_table,
+        seq_lens,
+        kv_cache_spec,
+    )
+
+    torch.testing.assert_close(actual, expected)

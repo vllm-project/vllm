@@ -26,6 +26,7 @@ class BlockTables:
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
@@ -39,6 +40,10 @@ class BlockTables:
 
         self.num_kv_cache_groups = len(self.block_sizes)
         assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
+        if slot_mapping_enabled is None:
+            slot_mapping_enabled = [True] * self.num_kv_cache_groups
+        assert len(slot_mapping_enabled) == self.num_kv_cache_groups
+        self._slot_mapping_enabled = slot_mapping_enabled
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -101,6 +106,9 @@ class BlockTables:
         )
         self.block_sizes_tensor = torch.tensor(
             self.kernel_block_sizes, dtype=torch.int32, device=self.device
+        )
+        self.slot_mapping_enabled = torch.tensor(
+            self._slot_mapping_enabled, dtype=torch.bool, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
@@ -196,6 +204,7 @@ class BlockTables:
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
+            self.slot_mapping_enabled,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
@@ -267,6 +276,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
     block_sizes,  # [num_kv_cache_groups]
+    slot_mapping_enabled,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
@@ -294,6 +304,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     block_size = tl.load(block_sizes + group_id)
+    mapping_enabled = tl.load(slot_mapping_enabled + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
@@ -302,7 +313,9 @@ def _compute_slot_mappings_kernel(
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
 
-        block_indices = positions // (block_size * CP_SIZE)
+        block_indices = tl.where(
+            mapping_enabled, positions // (block_size * CP_SIZE), 0
+        )
         block_offsets = positions % (block_size * CP_SIZE)
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices
@@ -320,4 +333,5 @@ def _compute_slot_mappings_kernel(
             slot_ids = block_numbers * block_size + local_offsets
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
+        slot_ids = tl.where(mapping_enabled, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

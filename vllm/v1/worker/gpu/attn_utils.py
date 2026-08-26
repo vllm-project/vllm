@@ -343,6 +343,33 @@ def _reshape_attention_kv_cache(
     return kv_cache.permute(*inv_order)
 
 
+def _reshape_mamba_kv_cache(
+    kv_raw_tensor: torch.Tensor,
+    page_size_bytes: int,
+    num_blocks: int,
+    packing: tuple[int, int] | None,
+) -> torch.Tensor:
+    """Create a block-major byte-page view for one Mamba layer."""
+    if packing is not None:
+        offset, block_stride = packing
+        assert offset + page_size_bytes <= block_stride
+        return torch.as_strided(
+            kv_raw_tensor,
+            size=(num_blocks, 1, 1, page_size_bytes),
+            stride=(block_stride, page_size_bytes, page_size_bytes, 1),
+            storage_offset=offset,
+        )
+
+    # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
+    # int8 page view per layer; the layer's bind_kv_cache unpacks
+    # each block's bytes into its conv/ssm state views. Keeping
+    # one tensor per layer lets the KV connector register it
+    # without special-casing Mamba.
+    return kv_raw_tensor[: num_blocks * page_size_bytes].view(
+        num_blocks, 1, 1, page_size_bytes
+    )
+
+
 def _reshape_kv_cache(
     attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor],
@@ -435,14 +462,12 @@ def _reshape_kv_cache(
 
             elif isinstance(kv_cache_spec, MambaSpec):
                 page_size_bytes = kv_cache_spec.page_size_bytes
-                # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
-                # int8 page view per layer; the layer's bind_kv_cache unpacks
-                # each block's bytes into its conv/ssm state views. Keeping
-                # one tensor per layer lets the KV connector register it
-                # without special-casing Mamba.
-                kv_caches[layer_name] = kv_raw_tensor[
-                    : num_blocks * page_size_bytes
-                ].view(num_blocks, 1, 1, page_size_bytes)
+                kv_caches[layer_name] = _reshape_mamba_kv_cache(
+                    kv_raw_tensor,
+                    page_size_bytes,
+                    num_blocks,
+                    packing,
+                )
             else:
                 raise NotImplementedError(
                     f"Unsupported KV cache spec type: {type(kv_cache_spec)}"

@@ -322,7 +322,13 @@ def align_moe_weights_for_fi(
 
     # Pad w13 and w2 along its intermediate dimension.
     padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-    padded_w13[:, : w13.shape[1], :] = w13
+    if is_act_and_mul:
+        padded_w13[:, :intermediate, :] = w13[:, :intermediate, :]
+        padded_w13[:, padded_intermediate : padded_intermediate + intermediate, :] = (
+            w13[:, intermediate:, :]
+        )
+    else:
+        padded_w13[:, :intermediate, :] = w13
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
