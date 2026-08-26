@@ -2,6 +2,9 @@ model_name: "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8"
 accuracy_threshold: 0.72
 num_questions: 1319
 num_fewshot: 5
+# Triton FP8 MoE JIT runs during memory profiling (no cache in fresh
+# containers); allow up to 40 min for startup before reporting healthy.
+startup_max_wait_seconds: 2400
 rocm_request_timeout_seconds: 1800
 request_timeout_seconds: 2400
 server_args: "--enforce-eager --max-model-len 4096"
