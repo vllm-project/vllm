@@ -19,6 +19,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
+    HiSparseConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
@@ -26,7 +29,6 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.types import SparseKVOffloadCommand
-from vllm.v1.hisparse.worker import HiSparseConnectorWorker
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
