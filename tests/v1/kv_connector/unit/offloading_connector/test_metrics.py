@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
+from vllm.v1.kv_offload.cpu.common import CPUCacheTierInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 
@@ -37,6 +38,7 @@ STORE_SIZE = _TransferMetricName.STORE_SIZE
 STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 PENDING_STORES = "vllm:kv_offload_pending_stores"
 LOOKUP_LATENCY = "vllm:kv_offload_lookup_latency_seconds"
+CPU_CONFIG_INFO = CPUOffloadingMetrics.CPU_CONFIG_INFO
 MY_COUNTER = "my_counter"
 MY_LABEL = "my_label"
 
@@ -637,6 +639,53 @@ def test_prom_metrics_lazily_observes_labeled_metric():
     assert counter.labelvalues == ("model", "0", "a")
     counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
     assert counter_def.kwargs["labelnames"] == ["model_name", "engine", MY_LABEL]
+
+
+def test_prom_metrics_pairs_cpu_tier_info_labels_with_their_values():
+    """Each CPU tier fact must land under its own label name.
+
+    Label values are bound positionally against the metric's declared
+    labelnames, and CPU_TIER_INFO_LABELS is a separate declaration from the
+    values as_labelvalues() renders, so nothing but the exported pairing
+    catches the two drifting apart. Uses the real CPU spec definitions, which
+    OffloadingSpecFactory resolves by default.
+    """
+    tier_info = CPUCacheTierInfo(
+        num_blocks=4096,
+        blocks_per_chunk=2,
+        kv_bytes_per_chunk=262144,
+        capacity_tokens=None,
+    )
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    labelvalues = tier_info.as_labelvalues()
+    prom_metrics.observe(
+        {
+            _StatsKey.TYPES: {CPU_CONFIG_INFO: _MetricType.GAUGE},
+            _StatsKey.DATA: {CPU_CONFIG_INFO: {labelvalues: 1}},
+        }
+    )
+
+    gauge = prom_metrics.offloading_metrics[(0, CPU_CONFIG_INFO, labelvalues)]
+    assert gauge.set_values == [1]
+    gauge_def = prom_metrics._offloading_metric_defs[CPU_CONFIG_INFO]
+    assert dict(zip(gauge_def.kwargs["labelnames"], gauge.labelvalues)) == {
+        "model_name": "model",
+        "engine": "0",
+        "num_blocks": "4096",
+        "blocks_per_chunk": "2",
+        "kv_bytes_per_chunk": "262144",
+        "capacity_tokens": "None",
+    }
 
 
 def test_prom_metrics_rejects_wrong_label_count():
