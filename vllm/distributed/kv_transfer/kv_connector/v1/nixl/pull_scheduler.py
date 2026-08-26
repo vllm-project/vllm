@@ -65,9 +65,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
-
         if (
             params is not None
             and params.get("do_remote_decode")
@@ -155,7 +152,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         if num_external_tokens > 0
                         else ()
                     )
-                    local_block_ids = self.get_sw_clipped_blocks(
+                    local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )
 
@@ -262,7 +259,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
-            block_ids = self.get_sw_clipped_blocks(block_ids)
+            block_ids = self.get_exchange_clipped_blocks(block_ids)
 
             remote_num_tokens = request.num_computed_tokens
 
@@ -277,4 +274,5 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            transfer_mode=self._TRANSFER_MODE,
         )

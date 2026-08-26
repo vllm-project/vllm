@@ -2,21 +2,54 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
 
+from collections.abc import Callable
+from functools import cache
+
 import torch
 import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+logger = init_logger(__name__)
+
+
+@cache
+def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | None:
+    """FlashInfer's radix top-k, or None for torch.topk.
+
+    The top-k spans the vocabulary, where the radix kernel is about twice
+    torch.topk.
+    """
+    if not current_platform.is_cuda():
+        return None
+    if not has_flashinfer():
+        logger.info_once(
+            "flashinfer is unavailable; vocab-parallel top-k uses torch.topk, "
+            "at roughly half the speed."
+        )
+        return None
+    from flashinfer import top_k
+
+    return top_k
+
+
+def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    impl = _flashinfer_topk()
+    if impl is None or not scores.is_cuda:
+        return torch.topk(scores, k, dim=-1)
+    return impl(scores, k, sorted=True, deterministic=True)
 
 
 # --8<-- [start:logits_processor]
@@ -66,12 +99,15 @@ class LogitsProcessor(PluggableLayer):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         if self.logits_as_input:
             logits = hidden_states
         else:
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+            logits = self._get_logits(
+                hidden_states, lm_head, embedding_bias, skip_gather
+            )
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
@@ -140,12 +176,16 @@ class LogitsProcessor(PluggableLayer):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if skip_gather:
+            return logits
 
         # Gather logits for TP
-        logits = self._gather_logits(logits)
+        if lm_head.tp_size > 1:
+            logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
         if logits is not None:
@@ -169,7 +209,7 @@ class LogitsProcessor(PluggableLayer):
                 "The local argmax reduction optimization is not supported for "
                 "non-positive logit scaling factors."
             )
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = lm_head.tp_size
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if self.soft_cap is not None:
@@ -203,6 +243,53 @@ class LogitsProcessor(PluggableLayer):
         max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
         top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
         return top_tokens.squeeze(-1).to(torch.int64)
+
+    def get_top_k_tokens(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        k: int,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Vocab-parallel top-k without all-gathering full logits.
+
+        The `get_top_tokens` reduction widened from one token to k, returning
+        the values as well as the global ids. Communication is
+        O(batch * 2k * tp_size) rather than O(batch * vocab_size).
+
+        Scale and soft cap are applied to the k selected values rather than
+        the whole vocabulary; both are monotonic, so the selection is the same
+        and only k entries are touched.
+        """
+        if self.scale <= 0.0 and self.scale != 1.0:
+            raise ValueError(
+                "The local top-k reduction optimization is not supported for "
+                "non-positive logit scaling factors."
+            )
+
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+
+        # Mask out padding entries beyond org_vocab_size on this shard.
+        num_pad = lm_head.shard_indices.num_org_vocab_padding
+        if num_pad > 0:
+            logits[..., -num_pad:] = -float("inf")
+
+        values, ids = _topk(logits, k)
+        # Convert shard-local indices to global vocab indices.
+        ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
+
+        if lm_head.tp_size > 1:
+            values = tensor_model_parallel_all_gather(values, dim=-1)
+            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+            values, selected = _topk(values, k)
+            ids = ids.gather(-1, selected)
+
+        values = values.float()
+        if self.scale != 1.0:
+            values = values * self.scale
+        if self.soft_cap is not None:
+            values = torch.tanh(values / self.soft_cap) * self.soft_cap
+        return ids, values
 
     def extra_repr(self) -> str:
         s = f"vocab_size={self.vocab_size}"

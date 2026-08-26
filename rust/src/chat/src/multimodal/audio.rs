@@ -107,6 +107,7 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            HashMap::new(),
         )
         .unwrap()
         .expect("Inkling multimodal support")
@@ -126,6 +127,7 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            HashMap::new(),
         )
         .unwrap()
         .expect("Qwen3-ASR multimodal support")

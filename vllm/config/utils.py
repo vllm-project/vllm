@@ -13,7 +13,7 @@ import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, get_type_hints, overload
 
 import torch
 from pydantic import ConfigDict
@@ -227,22 +227,38 @@ class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
 
-def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
-    processed_overrides = {}
+def update_config(config: ConfigT, overrides: Mapping[str, Any]) -> ConfigT:
+    return _update_config(config, overrides, type(config).__name__)
+
+
+def _update_config(
+    config: ConfigT, overrides: Mapping[str, Any], config_path: str
+) -> ConfigT:
+    processed_overrides: dict[str, Any] = {}
+    field_types = get_type_hints(type(config))
     for field_name, value in overrides.items():
-        assert hasattr(config, field_name), (
-            f"{type(config)} has no field `{field_name}`"
-        )
+        field_path = f"{config_path}.{field_name}"
+        if not hasattr(config, field_name):
+            raise ValueError(f"{field_path} is not a valid config field")
+
         current_value = getattr(config, field_name)
-        if is_dataclass(current_value) and not is_dataclass(value):
-            assert isinstance(value, dict), (
-                f"Overrides to {type(config)}.{field_name} must be a dict"
-                f"  or {type(current_value)}, but got {type(value)}"
-            )
-            value = update_config(
-                current_value,  # type: ignore[type-var]
-                value,
-            )
+        if is_dataclass(current_value):
+            expected_type = field_types[field_name]
+            if isinstance(value, Mapping):
+                value = _update_config(
+                    current_value,  # type: ignore[type-var]
+                    value,
+                    field_path,
+                )
+            elif not isinstance(value, expected_type):
+                expected_type_name = getattr(
+                    expected_type, "__name__", str(expected_type)
+                )
+                raise ValueError(
+                    f"Override for {field_path} must be a mapping or "
+                    f"{expected_type_name}, got {type(value).__name__}"
+                )
+
         processed_overrides[field_name] = value
     return replace(config, **processed_overrides)
 

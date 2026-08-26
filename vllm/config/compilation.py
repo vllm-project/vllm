@@ -700,10 +700,10 @@ class CompilationConfig:
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
 
-    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small
-    max_num_seqs, and prevents capture of many large graphs (>512) that would
-    greatly increase startup time with limited performance benefit.
+    If not specified, max_cudagraph_capture_size is capped at 512 by default,
+    or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
+    scenarios with small max_num_seqs, and limits capture of large graphs that
+    increase startup time and memory usage.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
@@ -768,11 +768,10 @@ class CompilationConfig:
         "vllm::mamba_mixer",
         "vllm::short_conv",
         "vllm::linear_attention",
-        "vllm::plamo2_mamba_mixer",
         "vllm::qwen_gdn_attention_core",
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
-        "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
@@ -905,10 +904,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -1001,12 +996,27 @@ class CompilationConfig:
             )
 
         for op in self.custom_ops:
-            if op[0] not in {"+", "-"} and op not in {"all", "none"}:
+            if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
                 raise ValueError(
                     f"Invalid syntax '{op}' for custom op, "
                     "must be 'all', 'none', '+op' or '-op' "
                     "(where 'op' is the registered op name)"
                 )
+
+        base_modes = [op for op in self.custom_ops if op in {"all", "none"}]
+        if len(base_modes) > 1:
+            raise ValueError(
+                "custom_ops can contain only one base mode: 'all' or 'none'"
+            )
+
+        enabled_ops = {op[1:] for op in self.custom_ops if op.startswith("+")}
+        disabled_ops = {op[1:] for op in self.custom_ops if op.startswith("-")}
+        conflicting_ops = sorted(enabled_ops & disabled_ops)
+        if conflicting_ops:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation(s): "
+                f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
+            )
 
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not supported for
@@ -1344,10 +1354,16 @@ class CompilationConfig:
                 )
 
     def is_custom_op_enabled(self, op: str) -> bool:
-        if "all" in self.custom_ops:
+        count_all = self.custom_ops.count("all")
+        count_none = self.custom_ops.count("none")
+        if count_all + count_none != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        if count_all:
             return f"-{op}" not in self.custom_ops
 
-        assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
 
     def resolve_cudagraph_mode_and_sizes(

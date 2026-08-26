@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
@@ -278,7 +279,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
-        self.support_fault_tolerance = False  # TODO: set to True when FT is supported.
+        self.support_fault_tolerance = (
+            get_current_vllm_config().parallel_config.enable_fault_tolerance
+        )
 
     def _make_all2all_kwargs(
         self,
@@ -359,6 +362,16 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             DeepEPLLAll2AllManager._last_mask = torch.zeros_like(current)
         has_fault = (current != DeepEPLLAll2AllManager._last_mask).any()
         return has_fault
+
+    def clean_buffers(self) -> None:
+        buf = DeepEPLLAll2AllManager._buffer
+        if buf is None:
+            return
+        buf.get_local_buffer_tensor(dtype=torch.int8, use_rdma_buffer=True).zero_()
+        torch.accelerator.synchronize()
+        buf.low_latency_clean_mask_buffer()
+        torch.accelerator.synchronize()
+        DeepEPLLAll2AllManager._last_mask = None
 
 
 @dataclass
@@ -565,6 +578,18 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         has_fault = (current != last).any()
         return has_fault
 
+    def clean_buffers(self) -> None:
+        if NixlEPAll2AllManager._buffer is None:
+            return
+        state = NixlEPAll2AllManager._buffer
+        state.buffer.get_local_buffer_tensor(
+            dtype=torch.int8, use_rdma_buffer=True
+        ).zero_()
+        torch.accelerator.synchronize()
+        state.buffer.clean_mask_buffer()
+        torch.accelerator.synchronize()
+        NixlEPAll2AllManager._last_mask = None
+
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
     """
@@ -709,17 +734,13 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
-        dispatch_dtype_bytes_per_elem: int = 0,
-        dispatch_scale_bytes_per_token: int = 0,
+        x_bytes_per_token: int,
+        x_sf_bytes_per_token: int,
     ):
         """Initialize (or grow) the MoeAlltoAll workspace."""
-        if dispatch_dtype_bytes_per_elem == 0:
-            hidden_bytes = hidden_size // 2
-        else:
-            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
         total_dispatch_payload_size_per_token = (
-            hidden_bytes
-            + dispatch_scale_bytes_per_token
+            x_bytes_per_token
+            + x_sf_bytes_per_token
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
@@ -860,6 +881,20 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 self.mapping = None
                 self.initialized = False
 
+    def checkpoint_prepare(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            self.moe_alltoall.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            from vllm.distributed.device_communicators.mnnvl_compat import (
+                CustomCommunicator,
+            )
+
+            self.moe_alltoall.checkpoint_restore(CustomCommunicator(self.cpu_group))
+
 
 class MoriAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, all2all_backend: str):
@@ -978,6 +1013,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         self._device_group = device_group
         self.handle_cache = Cache()
         self._num_sms: int | None = None
+        self._gin_checked = False
 
     def _make_all2all_kwargs(
         self,
@@ -1000,11 +1036,37 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             explicitly_destroy=True,
         )
 
+    def _check_gin_support(self, group) -> None:
+        from vllm.utils.nccl import query_nccl_gin_type
+
+        # ProcessGroupNCCL creates communicators lazily. Initialize this exact
+        # group before querying so a null comm pointer is not mistaken for
+        # missing GIN support.
+        probe = torch.zeros(1, device="cuda")
+        torch.distributed.all_reduce(probe, group=group)
+
+        gin_type = query_nccl_gin_type(group)
+        if gin_type is None:
+            raise RuntimeError(
+                "DeepEPv2 communicator properties query failed; "
+                "networking capability could not be determined."
+            )
+        if gin_type == 0:
+            raise RuntimeError(
+                "DeepEPv2 requires NCCL GIN (GPU-Initiated Networking). "
+                "This usually means IBGDA-capable InfiniBand NICs or drivers "
+                "are not available. See tools/ep_kernels/README.md for "
+                "requirements."
+            )
+
     def get_handle(self, kwargs):
         import deep_ep  # type: ignore[import-not-found]
 
         num_experts = kwargs.pop("num_experts", 256)
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+        if not self._gin_checked:
+            self._check_gin_support(buffer_kwargs["group"])
+            self._gin_checked = True
         logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
         handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.ElasticBuffer

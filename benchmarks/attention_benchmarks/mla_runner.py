@@ -931,10 +931,17 @@ def _run_single_benchmark(
             prefill_quant_op = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     fused_output = output_scale is not None and fuse_quant_op
+    mha_mode = getattr(config, "sparse_mla_mha_mode", "auto")
 
     # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
         results = []
+        impl._sparse_mla_force_masked_mha = (  # type: ignore[attr-defined]
+            mha_mode == "masked"
+        )
+        impl._sparse_mla_force_dense_mha = (  # type: ignore[attr-defined]
+            mha_mode == "dense"
+        )
         if has_decode:
             results.append(impl.forward_mqa(decode_inputs, kv_cache, metadata, layer))
         if has_prefill:

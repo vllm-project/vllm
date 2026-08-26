@@ -69,20 +69,29 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+    scatter_output_slices,
+)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -440,6 +449,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        # `pos_ids` is built on the host; stage it over non-blocking so the
+        # gather below doesn't index a device tensor with a CPU one.
+        pos_ids = pos_ids.to(rotary_pos_emb_full.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -453,13 +465,43 @@ class Ernie4_5_VisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
-    def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, num_pad=0
-    ) -> torch.Tensor:
-        hidden_states = self.patch_embed(hidden_states)
+    def prepare_encoder_metadata(
+        self,
+        grid_thw: torch.Tensor | list[list[int]],
+        *,
+        num_pad: int = 0,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute encoder metadata outside the CUDA graph.
 
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
+        Splits the rotary embeddings, ``cu_seqlens`` and ``max_seqlen`` out of
+        `forward` so they can be precomputed on the host side and fed into a
+        captured graph through fixed buffers. Shared by the eager path, CUDA
+        graph capture and CUDA graph replay
+
+        Args:
+            grid_thw: Per-frame grid sizes as a ``[num_frames, 3]`` tensor or
+                an equivalent list of ``[t, h, w]``.
+            num_pad: Legacy ``cu_seqlens`` padding
+            max_batch_size: If set, pad ``cu_seqlens`` to ``max_batch_size + 1``
+                entries for a fixed graph buffer shape.
+            max_seqlen_override: If set, use this value for ``max_seqlen``
+                instead of deriving it from ``cu_seqlens``. CUDA graph capture
+                bakes ``max_seqlen`` at capture time, so it must cover the
+                worst-case replay.
+            device: Device for the returned tensors. Defaults to ``self.device``.
+
+        Returns:
+            Dict with ``rotary_pos_emb``, ``cu_seqlens`` and ``max_seqlen``.
+        """
+        if device is None:
+            device = self.device
+        if not isinstance(grid_thw, torch.Tensor):
+            grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
+
+        rotary_pos_emb = self.rot_pos_emb(grid_thw).to(device)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
@@ -472,14 +514,60 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             cu_seqlens = torch.cat([zeros, cu_seqlens])
 
+        # Pad cu_seqlens to a fixed number of sequences so the CUDA graph
+        # replay buffer keeps a constant shape across batches.
+        if max_batch_size is not None:
+            num_seqs = cu_seqlens.numel() - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens = torch.cat(
+                    [
+                        cu_seqlens,
+                        cu_seqlens.new_full(
+                            (max_batch_size - num_seqs,), cu_seqlens[-1]
+                        ),
+                    ]
+                )
+
+        # max_seqlen is baked into the graph at capture time, so capture passes
+        # a worst-case override. compute_attn_mask_seqlen keeps it on CPU
+        # (consumed via .item()), avoiding a captured D2H copy.
+        if max_seqlen_override is not None:
+            max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
+        else:
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+
+        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+
+        return {
+            "rotary_pos_emb": rotary_pos_emb,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+        }
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor | None = None,
+        num_pad: int = 0,
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.patch_embed(hidden_states)
+
+        if encoder_metadata is None:
+            # Eager path: compute metadata inline
+            encoder_metadata = self.prepare_encoder_metadata(
+                grid_thw, num_pad=num_pad, device=hidden_states.device
+            )
+        rotary_pos_emb = encoder_metadata["rotary_pos_emb"]
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        max_seqlen = encoder_metadata["max_seqlen"]
+
         # add batch size
         if hidden_states.ndim == 2:
             hidden_states = hidden_states.unsqueeze(dim=1)
 
-        # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-
-        for i, blk in enumerate(self.blocks):
+        for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
@@ -702,7 +790,10 @@ class VariableResolutionResamplerModel(nn.Module):
             return x
 
         def fwd_placeholder(x, grid_thw, to_tensor=False):
-            grid_thw_cpu = grid_thw.cpu().numpy()
+            # The per-image grids drive the Python-level offset arithmetic
+            # below; the same read is wrapped on the cudagraph path.
+            with gpu_sync_allowed():
+                grid_thw_cpu = grid_thw.cpu().numpy()
             grid_t, grid_hw = grid_thw_cpu[:, 0], grid_thw_cpu[:, 1:]
             grid_hw_after_conv = grid_hw.prod(-1) // (self.spatial_conv_size**2)
 
@@ -724,8 +815,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets = torch.tensor(np.concatenate(slice_offsets, axis=-1)).to(
-                x.device
+            slice_offsets = async_tensor_h2d(
+                np.concatenate(slice_offsets, axis=-1), device=x.device
             )
 
             slice_offsets2 = []
@@ -741,8 +832,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets2 = torch.tensor(np.concatenate(slice_offsets2, axis=-1)).to(
-                x.device
+            slice_offsets2 = async_tensor_h2d(
+                np.concatenate(slice_offsets2, axis=-1), device=x.device
             )
 
             x_timestep_1 = torch.index_select(x, dim=0, index=slice_offsets)
@@ -986,7 +1077,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,
-        mm_kwargs: object,
+        mm_kwargs: Mapping[str, object],
     ) -> torch.Tensor:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -1020,48 +1111,49 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         pixel_values = pixel_values.to(hf_config.dtype)
         return pixel_values
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # when the prompt is not empty but the multimodal data is empty,
-        # directly invoke the tokenizer.
-        if "images" not in mm_data and "videos" not in mm_data and prompt != "":
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt)
-            tokenizer_output = BatchFeature(
-                dict(input_ids=[prompt_ids]), tensor_type="pt"
-            )
-            return tokenizer_output
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
+        if "images" not in mm_data and "videos" not in mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        mm_data = dict(mm_data)
         if "images" not in mm_data:
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
 
         # Check if HF processor supports video metadata
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         supports_video_metadata = getattr(
             hf_processor, "supports_video_metadata", False
         )
 
-        if mm_data["videos"] and not supports_video_metadata:
+        videos = mm_data["videos"]
+        assert isinstance(videos, Sequence)
+        if videos and not supports_video_metadata:
             # Old HF processor, unwrap tuple to pure frames
             logger.warning_once(
                 "HF processor doesn't support video metadata. "
                 "Timestamps will NOT be rendered. Please upgrade the model."
             )
-            mm_data["videos"] = [
-                v[0] if isinstance(v, tuple) else v for v in mm_data["videos"]
-            ]
+            mm_data["videos"] = [v[0] if isinstance(v, tuple) else v for v in videos]
 
         processor_output = self.info.ctx.call_hf_processor(
             hf_processor,
-            dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
-            dict(**mm_kwargs, **tok_kwargs),
+            dict(
+                text=[prompt_text], images=mm_data["images"], videos=mm_data["videos"]
+            ),
+            hf_processor_mm_kwargs,
         )
 
         # Divide the processor_output into two modalities: image and video.
@@ -1069,7 +1161,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             pixel_values = processor_output["images"]
             if pixel_values is not None:
                 processor_output["images"] = self._pixel_values_norm(
-                    pixel_values, mm_kwargs
+                    pixel_values, hf_processor_mm_kwargs
                 )
             for key in list(processor_output.keys()):
                 if processor_output[key] is None:
@@ -1095,7 +1187,9 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
                     ]
                     del processor_output["images"]
 
-        return processor_output
+        processed_data = processor_output
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -1104,6 +1198,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
 
         before_placeholder = {
             "image": "<|image@placeholder|>",
@@ -1130,12 +1225,17 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
                 )
             else:
                 num_tokens = int(grid_thw.prod()) // merge_length
-            return after_placeholder[modality] * num_tokens
+            placeholder_ids = cached_encode(
+                tokenizer, after_placeholder[modality], add_special_tokens=False
+            )
+            return placeholder_ids * num_tokens
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=before_placeholder[modality],
+                target=cached_encode(
+                    tokenizer, before_placeholder[modality], add_special_tokens=False
+                ),
                 replacement=partial(get_replacement_ernie45vl, modality=modality),
             )
             for modality in ("image", "video")
@@ -1156,11 +1256,11 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
 
@@ -1194,6 +1294,7 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
 
         image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -1256,7 +1357,12 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
     dummy_inputs=Ernie4_5_VLDummyInputsBuilder,
 )
 class Ernie4_5_VLMoeForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
+    nn.Module,
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsMRoPE,
+    SupportsEncoderCudaGraph,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1444,10 +1550,14 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                grid_thw = mm_feature.data["image_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 yield offset, t, h // spatial_conv_size, w // spatial_conv_size
             elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                grid_thw = mm_feature.data["video_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 yield (
                     offset,
                     t // temporal_conv_size,
@@ -1466,12 +1576,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         if pixel_values is None:
             return None
 
-        if pixel_values is not None:
-            return Ernie4_5_VLImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-            )
+        return Ernie4_5_VLImagePixelInputs(
+            type="pixel_values",
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -1482,12 +1591,184 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         if pixel_values_videos is None:
             return None
 
-        if pixel_values_videos is not None:
-            return Ernie4_5_VLVideoPixelInputs(
-                type="pixel_values_videos",
-                pixel_values_videos=pixel_values_videos,
-                video_grid_thw=video_grid_thw,
+        return Ernie4_5_VLVideoPixelInputs(
+            type="pixel_values_videos",
+            pixel_values_videos=pixel_values_videos,
+            video_grid_thw=video_grid_thw,
+        )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+    #
+    # Only the vision transformer (self.vision_model) is captured into the
+    # CUDA graph. The VariableResolutionResamplerModel (spatial merge +
+    # projection) runs eagerly in encoder_eager_forward / postprocess_
+    # encoder_output because its temporal path performs host-side (numpy)
+    # indexing that cannot be captured. Image only: video uses a temporal
+    # conv that changes the output token count, so it falls back to the
+    # eager multimodal path for now.
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            # Ernie consumes a single rotary freqs tensor (not cos/sin)
+            buffer_keys=[
+                "pixel_values",
+                "rotary_pos_emb",
+                "cu_seqlens",
+                "max_seqlen",
+            ],
+            # Post-merge embeddings, produced in postprocess_encoder_output,
+            # are at the LM hidden dim, used only for DP gather sizing.
+            out_hidden_size=self.config.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
+        # Min: a 224x224 image -> 16x16 patches (patch_size=14),
+        # spatial_merge_size=2 -> 8x8 = 64 output tokens.
+        min_budget = 64
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        m = self.vision_model.spatial_merge_size
+        grid_thw = mm_kwargs["image_grid_thw"].tolist()
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=(t * h * w) // m // m,
             )
+            for t, h, w in grid_thw
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {"pixel_values": pixel_values[:0], "image_grid_thw": grid_thw[:0]}
+
+        # Cumulative patch offsets for slicing the concatenated pixel_values.
+        patches_per_item = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).tolist()
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        return {"pixel_values": selected_pv, "image_grid_thw": grid_thw[indices]}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget,
+        max_batch_size,
+        max_frames_per_batch,
+        device,
+        dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        m = self.vision_model.spatial_merge_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        # Image-format grid (T=1): h=m, w=per_mm_item_output*m, so the merged
+        # token count per item equals per_mm_item_output.
+        grid_config = [[1, m, per_mm_item_output * m] for _ in range(max_batch_size)]
+
+        patch_embed = self.vision_model.patch_embed
+        in_channels = patch_embed.in_channels
+        patch_size = patch_embed.patch_size
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = in_channels * patch_size * patch_size
+        dummy_pixel_values = torch.randn(
+            total_patches, flattened_patch_size, device=device, dtype=dtype
+        )
+
+        # max_seqlen is baked at capture: worst case is one item consuming the
+        # full budget - seq_len = token_budget * spatial_merge_size**2.
+        metadata = self.vision_model.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * (m**2),
+            device=device,
+        )
+        values = metadata | {"pixel_values": dummy_pixel_values}
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self, mm_kwargs, max_batch_size, max_frames_per_batch, path: str = "default"
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        # The per-image grids are needed as Python ints to size the buffers.
+        with gpu_sync_allowed():
+            grid_thw_list = mm_kwargs["image_grid_thw"].tolist()
+        metadata = self.vision_model.prepare_encoder_metadata(
+            grid_thw_list, max_batch_size=max_batch_size
+        )
+        values = metadata | {
+            "pixel_values": mm_kwargs["pixel_values"],
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        # Graph captures the ViT only, and the resampler runs in
+        # postprocess_encoder_output.
+        pixel_values = values.pop("pixel_values")
+        return self.vision_model(pixel_values, encoder_metadata=values)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        # Eager fallback: run the full pipeline (ViT + resampler). The result
+        # is scattered directly, so it must be the post-merge embeddings.
+        pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
+        grid_thw = mm_kwargs["image_grid_thw"].to(
+            self.vision_model.device, non_blocking=True
+        )
+        image_features = self.vision_model(pixel_values, grid_thw)
+        return self.resampler_model(image_features, grid_thw)
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest,
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        # The graph output is the raw ViT features (pre-merge), padded to the
+        # token budget. Run the resampler eagerly on the valid portion using
+        # the actual batch grid_thw, then scatter the post-merge embeddings.
+        # Ernie only uses the single "default" encoder path.
+        output = outputs["default"]
+        assert batch_mm_kwargs is not None
+        grid_thw_cpu = batch_mm_kwargs["image_grid_thw"]
+        grid_thw = grid_thw_cpu.to(output.device, non_blocking=True)
+        # The valid token count slices the graph output for the eager
+        # resampler call, so it has to come back to the host.
+        num_valid = int(
+            (grid_thw_cpu[:, 0] * grid_thw_cpu[:, 1] * grid_thw_cpu[:, 2]).sum()
+        )
+        image_embeds = self.resampler_model(output[:num_valid], grid_thw)
+        scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 
     def _process_image_input(
         self, image_input: Ernie4_5_VLImageInputs
@@ -1530,7 +1811,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         return video_embeds.split(sizes.tolist())
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+        modalities: dict[
+            str, Ernie4_5_VLImageInputs | Ernie4_5_VLVideoInputs | None
+        ] = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
