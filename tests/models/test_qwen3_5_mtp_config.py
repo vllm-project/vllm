@@ -31,3 +31,17 @@ def test_mtp_override_recognizes_text_only_types(model_type, expected_arch):
     assert cfg.model_type == "qwen3_5_mtp"
     assert cfg.architectures == [expected_arch]
     assert cfg.n_predict == 1
+
+
+def test_mtp_override_preserves_explicit_qwen35_dspark_architecture():
+    cfg = PretrainedConfig(
+        model_type="qwen3_5_text",
+        architectures=["Qwen3DSparkModel"],
+        mtp_num_hidden_layers=1,
+    )
+
+    overridden = SpeculativeConfig.hf_config_override(cfg)
+
+    assert overridden.model_type == "qwen3_5_text"
+    assert overridden.architectures == ["Qwen3DSparkModel"]
+    assert not hasattr(overridden, "n_predict")
