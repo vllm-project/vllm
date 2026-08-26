@@ -46,7 +46,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseIndexGroupBuilder
+from vllm.v1.hisparse.runtime import HiSparseIndexGroupBuilder
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 

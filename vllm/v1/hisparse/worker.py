@@ -15,24 +15,20 @@ from vllm.v1.core.kv_cache_utils import (
     HISPARSE_RESIDENT_SUFFIX,
     get_unique_kv_cache_group_id,
 )
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
+from vllm.v1.hisparse.types import SparseKVPageTransfer
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
 )
-from vllm.v1.kv_offload.sparse.base import (
-    SparseKVOffloadCommand,
-    SparseKVPageTransfer,
-)
-from vllm.v1.kv_offload.sparse.hisparse_runtime import (
-    HiSparseCacheHandle,
-    release_pinned_state,
-)
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.hisparse.connector import (
+        HiSparseConnectorMetadata,
+    )
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -45,10 +41,13 @@ def _get_hisparse_cache(
     return hisparse_cache
 
 
-class HiSparseWorker:
+class HiSparseConnectorWorker:
     """Own HiSparse host/hot state and execute its worker-side transfers."""
 
-    def __init__(
+    def __init__(self) -> None:
+        self._initialized = False
+
+    def initialize(
         self,
         cache_handles: list[HiSparseCacheHandle],
         hot_backing: torch.Tensor,
@@ -57,16 +56,16 @@ class HiSparseWorker:
         max_concurrent_batches: int,
         pages_per_host_block: int,
         host_num_blocks: int,
-        source_group_id: int,
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
     ) -> None:
+        if self._initialized:
+            raise RuntimeError("HiSparse connector worker is already initialized.")
         resident = cache_handles[0].view
         assert resident is not None
         self.kernel_block_size = resident.block_size
         self.pages_per_host_block = pages_per_host_block
         self.host_num_blocks = host_num_blocks
-        self.source_group_id = source_group_id
         self.pinned_host_pools = pinned_host_pools
         self.cache_handles = cache_handles
         self.leader_runtimes = [
@@ -87,6 +86,7 @@ class HiSparseWorker:
             deque()
         )
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
+        self._initialized = True
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
         if indices.numel() > self.request_state_indices.numel():
@@ -96,6 +96,8 @@ class HiSparseWorker:
             )
         if torch.cuda.is_current_stream_capturing():
             return
+        # Attention indexes persistent request state by input-batch row. Refresh
+        # that indirection after every batch compaction or reorder.
         self.request_state_indices.fill_(-1)
         self.request_state_indices[: indices.numel()].copy_(indices)
         if self._pending_invalid_block_ids:
@@ -130,6 +132,8 @@ class HiSparseWorker:
             raise RuntimeError(
                 "HiSparse all-layer backup requires a uniform cache layout."
             )
+        # One kernel copies every layer, so its pointer table requires a common
+        # row and block geometry across the HiSparse caches.
         src_block_size, src_block_stride, src_rows = layouts[0][1:4]
         backing_ptr = self.hot_backing.data_ptr()
 
@@ -180,24 +184,23 @@ class HiSparseWorker:
         self._spill_staging_index = 0
         self._spill_staging_events = [torch.Event() for _ in range(spill_staging_count)]
 
-    def apply_scheduler_output(
+    def start_step(
         self,
-        command: SparseKVOffloadCommand | None,
-        scheduler_output: SchedulerOutput,
+        metadata: HiSparseConnectorMetadata,
+        request_state_indices: torch.Tensor | None,
     ) -> None:
-        host_copies = [
-            copy
-            for copy in scheduler_output.kv_cache_block_copies or ()
-            if copy.block_pool_id is None
-        ]
         copy_kv_cache_blocks_inplace(
             self.host_caches,
             self.host_num_blocks,
-            host_copies,
+            metadata.host_block_copies,
             self.host_write_event,
         )
-        transfers = command.page_transfers if command is not None else []
+        transfers = (
+            metadata.command.page_transfers if metadata.command is not None else []
+        )
         if transfers:
+            # A resident page cannot be reused until attention has finished
+            # reading it; defer only those spills that overlap this forward.
             self._post_forward_transfers = [
                 transfer for transfer in transfers if transfer.after_forward
             ]
@@ -206,16 +209,9 @@ class HiSparseWorker:
             )
         else:
             self._post_forward_transfers.clear()
-        block_ids = [
-            block_id
-            for request in scheduler_output.scheduled_new_reqs
-            for block_id in request.block_ids[self.source_group_id]
-        ]
-        for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
-            if new_block_ids is not None:
-                block_ids.extend(new_block_ids[self.source_group_id])
-
-        self._pending_invalid_block_ids.extend(block_ids)
+        self._pending_invalid_block_ids.extend(metadata.source_block_ids)
+        if request_state_indices is not None:
+            self.set_request_state_indices(request_state_indices)
 
     def invalidate_blocks(
         self, block_ids: list[int], request_state_indices: torch.Tensor
@@ -329,13 +325,17 @@ class HiSparseWorker:
         return enqueued, completed
 
     def shutdown(self) -> None:
+        if not self._initialized:
+            return
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
         )
+        self._initialized = False
 
 
 def init_hisparse_worker(
     *,
+    worker: HiSparseConnectorWorker,
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
     raw_tensors: dict[str, torch.Tensor],
@@ -346,7 +346,7 @@ def init_hisparse_worker(
     max_concurrent_batches: int,
     device: torch.device,
     pinned_host_pools: list[torch.Tensor],
-) -> HiSparseWorker:
+) -> None:
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
@@ -432,7 +432,7 @@ def init_hisparse_worker(
     assert resident is not None
     resident_block_size = resident.block_size
     assert block_size % resident_block_size == 0
-    return HiSparseWorker(
+    worker.initialize(
         cache_handles,
         hot_backing,
         max_num_reqs,
@@ -440,7 +440,6 @@ def init_hisparse_worker(
         max_concurrent_batches,
         block_size // resident_block_size,
         host_num_blocks,
-        source_group_id,
         device,
         pinned_host_pools,
     )
