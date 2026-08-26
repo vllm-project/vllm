@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 
 import pytest
 import torch
 from torch import nn
 
 import vllm.device_allocator.cumem as cumem
+import vllm.envs as envs
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
@@ -469,7 +471,14 @@ def test_deep_sleep_async():
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache():
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_deep_sleep_fp8_kvcache_mrv1():
+    # Regression test for https://github.com/vllm-project/vllm/pull/28783.
+    # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
+    # to restore correct output after level-2 sleep.
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+    envs.disable_envs_cache()
+
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 

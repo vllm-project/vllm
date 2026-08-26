@@ -256,9 +256,6 @@ class Worker(WorkerBase):
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
 
-        if not self.use_v2_model_runner and (tags is None or "kv_cache" in tags):
-            self.model_runner.post_kv_cache_wake_up()
-
         self.synchronize_device()
 
     def checkpoint_prepare(self) -> None:
