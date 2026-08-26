@@ -835,10 +835,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
-        # If this block has already been promoted to a full-block hash that
-        # covers at least as many tokens as the partial boundary, skip
-        # re-registering the stale partial entry (it was already superseded
-        # by the promotion and re-inserting it corrupts the cache index).
+        # boundary_tokens is derived from the fixed request.num_prompt_tokens,
+        # so this method re-fires on every decode step for the lifetime of the
+        # request -- including after cache_full_blocks has promoted the block
+        # past the boundary. Skip those calls once the block's own hash already
+        # covers the boundary. BlockPool.cache_partial_block refuses the same
+        # case, so this is belt-and-braces for correctness; what it adds is
+        # keeping the steady-state decode path out of the pool entirely rather
+        # than re-deriving the partial hash every step only to have it refused.
         target_block = blocks[block_idx]
         if (
             target_block.block_hash_num_tokens is not None

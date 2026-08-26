@@ -479,8 +479,14 @@ class BlockPool:
                 entry is partial within the owning cache block.
 
         Returns:
-            The hash key with group ID if a partial entry can be registered;
-            otherwise ``None`` for null blocks.
+            The hash key with group ID if a partial entry was registered.
+            ``None`` if the entry was refused: either ``block`` is a null
+            block, or ``block`` already carries a hash covering at least
+            ``num_tokens``, which means this boundary has been superseded
+            (see the promotion note below). Callers that key follow-up
+            bookkeeping off this value -- e.g.
+            ``MambaManager._cache_partial_tail_block`` -- must treat both
+            refusals the same way: nothing was registered.
         """
         if block.is_null:
             return None
@@ -493,30 +499,44 @@ class BlockPool:
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
         )
+        incoming_num_tokens = num_hash_blocks * self.hash_block_size
         already_cached = block.block_hash == block_hash_with_group_id or (
             self.cached_block_hash_to_block.contain(
                 block_hash_with_group_id, block.block_id
             )
         )
-        # Note the direction of the comparison: this only retires hashes that
-        # cover *fewer* tokens than the entry being registered, i.e. a partial
-        # entry growing forward within its block. It deliberately does not fire
-        # when the block already carries a longer hash -- that case is a caller
-        # trying to register a boundary the block has already outgrown, and the
-        # caller is responsible for not making that call at all. See
-        # FullAttentionManager._cache_partial_tail_block.
+        # The two branches below split on the direction of the comparison
+        # between the hash the block already carries and the one being
+        # registered, and they are not symmetric.
+        #
+        # Existing hash covers *fewer* tokens: a partial entry is growing
+        # forward inside its block (8 -> 10 tokens). The shorter key is
+        # genuinely superseded, so retire it and register the longer one.
+        #
+        # Existing hash covers *at least as many* tokens: the block has been
+        # promoted past this boundary -- cache_full_blocks already removed the
+        # partial key and announced it as BlockRemoved. Re-registering here
+        # would resurrect a retired key in cached_block_hash_to_block and emit
+        # a contradictory BlockStored for a hash the server has already told
+        # subscribers is gone. Refuse instead.
+        if (
+            not already_cached
+            and block.block_hash_num_tokens is not None
+            and block.block_hash_num_tokens >= incoming_num_tokens
+        ):
+            return None
         if (
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
-            and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
+            and block.block_hash_num_tokens < incoming_num_tokens
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
-            num_tokens=num_hash_blocks * self.hash_block_size,
+            num_tokens=incoming_num_tokens,
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
