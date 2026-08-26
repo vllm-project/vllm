@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -34,14 +40,93 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
+
+
+def resolve_layer_fused_shared_expert(
+    quant_config: "QuantizationConfig | None",
+    prefix: str,
+    shared_expert_name: str = "shared_experts",
+) -> bool:
+    """Resolve whether AITER fused shared-expert execution is enabled.
+
+    Args:
+        quant_config: Model quantization configuration.
+        prefix: MoE module prefix.
+        shared_expert_name: Shared-expert module name under ``prefix``.
+
+    Returns:
+        Whether AITER fused shared experts are enabled.
+
+    Raises:
+        ValueError: If requested shared-expert fusion is quantization-incompatible.
+    """
+    # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
+    # that returns None if AITER is not available.
+    fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+    fse_compatible, fse_reason = (
+        is_shared_expert_quant_fse_compatible(
+            quant_config,
+            f"{prefix}.experts",
+            f"{prefix}.{shared_expert_name}",
+        )
+        if fse_requested
+        else (True, None)
+    )
+    is_fused_shared_expert_enabled = fse_requested and fse_compatible
+    if fse_requested and not is_fused_shared_expert_enabled:
+        logger.warning(
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+            "cannot be enabled: %s.",
+            fse_reason,
+        )
+    return is_fused_shared_expert_enabled
+
+
+def is_model_fused_shared_expert_compatible(
+    layers: nn.ModuleList | Iterable[nn.Module],
+    moe_cls: type[nn.Module],
+    moe_name: str,
+) -> bool:
+    """Resolve one fused-shared-expert state for a model's MoE layers."""
+
+    def get_moe_layer(layer: nn.Module) -> nn.Module | None:
+        for name in moe_name.split("."):
+            layer = getattr(layer, name, None)
+            if layer is None:
+                return None
+        return layer
+
+    moe_layers = (
+        moe_layer
+        for layer in layers
+        if not isinstance(layer, PPMissingLayer)
+        and (moe_layer := get_moe_layer(layer)) is not None
+        and isinstance(moe_layer, moe_cls)
+    )
+
+    enabled = [
+        getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
+    ]
+    enabled_count = sum(enabled)
+    disabled_count = len(enabled) - enabled_count
+    if enabled_count > 0 and disabled_count > 0:
+        raise NotImplementedError(
+            "Fused shared experts must be enabled for all MoE layers; found "
+            f"{enabled_count} enabled and {disabled_count} disabled layers. "
+            "Per-layer fused shared experts is not yet supported. Please open "
+            "an issue."
+        )
+    return enabled_count > 0 and disabled_count == 0
 
 
 @triton.jit
@@ -280,25 +365,9 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_scale_swizzled: bool = True,
-    ocp_mx_scheme: str | None = None,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
-    if ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
-            pass  # No QDQ needed for these schemes
-        elif ocp_mx_scheme.endswith("a_fp8"):
-            # Perform QDQ (quantize and dequantize) on activation for emulation
-            # purpose, because there is no native kernel for weight in ocp_mx_scheme
-            # and activation in FP8. The implementation is based on existing
-            # non-emulation ops.
-            # TODO: Remove this `ocp_mx_scheme is not None` block and rely solely
-            # on `quantization_emulation`.
-            return _fp8_quantize_dequantize(A, A_scale)
-        # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
-        # weights are already dequantized, and we proceed with normal
-        # activation quantization below.
     if quant_dtype == current_platform.fp8_dtype():
         if quantization_emulation:
             return _fp8_quantize_dequantize(A, A_scale)

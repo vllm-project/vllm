@@ -76,6 +76,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
+        if self.pcp_rank > 0:
+            return
+
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
         # moment in which requests expiration is set (P side) and the moment in
