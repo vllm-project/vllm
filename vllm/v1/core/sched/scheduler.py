@@ -87,6 +87,7 @@ class Scheduler(SchedulerInterface):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
+        self.model_uses_xdrope = vllm_config.model_config.uses_xdrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
@@ -1223,6 +1224,7 @@ class Scheduler(SchedulerInterface):
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
                     uses_mrope=self.model_uses_mrope,
+                    uses_xdrope=self.model_uses_xdrope,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -1232,6 +1234,7 @@ class Scheduler(SchedulerInterface):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     uses_mrope=self.model_uses_mrope,
+                    uses_xdrope=self.model_uses_xdrope,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -2473,6 +2476,7 @@ class Scheduler(SchedulerInterface):
         return self._pause_state
 
     def set_pause_state(self, pause_state: PauseState) -> None:
+        logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
 
     def _free_request_blocks(self, request: Request):

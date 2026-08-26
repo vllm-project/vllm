@@ -719,7 +719,6 @@ Examples:
 
 Examples:
 
-- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
 - Molmo2 (prepends `bos_token`): [vllm/model_executor/models/molmo2.py](../../../vllm/model_executor/models/molmo2.py)
 - Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
