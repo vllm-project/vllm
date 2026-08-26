@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+    from vllm.v1.hisparse.runtime import (
         HiSparseIndexGroupBuilder,
     )
 

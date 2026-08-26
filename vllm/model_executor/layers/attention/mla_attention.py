@@ -306,7 +306,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+    from vllm.v1.hisparse.runtime import (
         HiSparseIndexGroupBuilder,
     )
 

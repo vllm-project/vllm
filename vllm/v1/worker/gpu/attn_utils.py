@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -15,6 +19,12 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.hisparse.connector import get_hisparse_worker
+from vllm.v1.hisparse.runtime import (
+    allocate_pinned_host_pool,
+    check_hisparse_host_memory,
+)
+from vllm.v1.hisparse.worker import HiSparseConnectorWorker, init_hisparse_worker
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
@@ -23,14 +33,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
-)
-from vllm.v1.kv_offload.sparse.hisparse_runtime import (
-    allocate_pinned_host_pool,
-    check_hisparse_host_memory,
-)
-from vllm.v1.kv_offload.sparse.hisparse_worker import (
-    HiSparseWorker,
-    init_hisparse_worker,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -296,15 +298,20 @@ def init_kv_cache(
     vllm_config: VllmConfig,
     block_tables: "BlockTables",
     kv_cache_allocation_context: AbstractContextManager | None = None,
-) -> tuple[dict[str, Any], "HiSparseWorker | None"]:
-    hisparse_worker = None
+) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
         if vllm_config.attention_config.hisparse_config is not None:
             kv_caches, raw_tensors, pinned_host_pools = _allocate_hisparse_kv_cache(
                 kv_cache_config, device, kernel_block_sizes, vllm_config
             )
-            hisparse_worker = init_hisparse_worker(
+            worker = (
+                get_hisparse_worker(get_kv_transfer_group())
+                if has_kv_transfer_group()
+                else HiSparseConnectorWorker()
+            )
+            init_hisparse_worker(
+                worker=worker,
                 forward_context=forward_context,
                 kv_cache_config=kv_cache_config,
                 raw_tensors=raw_tensors,
@@ -340,7 +347,7 @@ def init_kv_cache(
     runner_kv_caches.extend(
         cache for name, cache in kv_caches.items() if name not in forward_context
     )
-    return kv_caches, hisparse_worker
+    return kv_caches
 
 
 def build_slot_mappings_by_layer(

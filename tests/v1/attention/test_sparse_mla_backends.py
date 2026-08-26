@@ -60,8 +60,8 @@ from vllm.v1.attention.backends.utils import (
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops import flashmla
-from vllm.v1.kv_offload.sparse import hisparse_runtime
-from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+from vllm.v1.hisparse import runtime as hisparse_runtime
+from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
     ResolvedHiSparseConfig,

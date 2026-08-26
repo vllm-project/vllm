@@ -20,6 +20,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import select_common_block_size_from_constraints
+from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -43,7 +44,6 @@ from vllm.v1.kv_cache_interface import (
     replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.kv_offload.sparse.hisparse_runtime import ResolvedHiSparseConfig
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 

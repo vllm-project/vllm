@@ -6,11 +6,11 @@ from unittest.mock import MagicMock
 
 import torch
 
-import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
+import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_offload.sparse.base import SparseKVPageTransfer
-from vllm.v1.kv_offload.sparse.hisparse_worker import (
-    HiSparseWorker,
+from vllm.v1.hisparse.types import SparseKVPageTransfer
+from vllm.v1.hisparse.worker import (
+    HiSparseConnectorWorker,
 )
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
@@ -46,7 +46,7 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
 
 
 def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
-    worker = object.__new__(HiSparseWorker)
+    worker = object.__new__(HiSparseConnectorWorker)
     worker.request_state_indices = torch.arange(4, dtype=torch.int32)
     worker._pending_invalid_block_ids = [5]
     invalidations = []
@@ -70,10 +70,10 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 
 def test_hisparse_spill_batches_wait_for_reused_staging(monkeypatch):
     """A spill batch must not overwrite staging still used by its predecessor."""
-    worker = object.__new__(HiSparseWorker)
+    worker = object.__new__(HiSparseConnectorWorker)
     worker.kernel_block_size = 2
     worker.spill_row_capacity = 2
-    worker.blocks_per_kv_block = 1
+    worker.pages_per_host_block = 1
     worker.cache_handles = [
         SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0))
     ]
