@@ -26,7 +26,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
-
+ 
     @classmethod
     def build_metric_definitions(
         cls, extra_config: dict[str, Any]
@@ -60,6 +60,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "KV offload prepare_store call."
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
+            CPUOffloadingMetrics.EVICTIONS_TOTAL: OffloadingCounterMetadata(
+                documentation=(
+                    "Total number of KV cache blocks removed from the CPU "
+                    "offload cache to free space for incoming GPU-to-CPU stores."
+                ),
             ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))

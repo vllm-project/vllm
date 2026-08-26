@@ -1058,6 +1058,39 @@ def test_evictable_cache_block_count():
     assert manager._num_evictable_cache_blocks == 4
 
 
+def test_cpu_manager_reports_evictions_total_counter():
+    manager = make_cpu_manager(num_blocks=2, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert CPUOffloadingMetrics.EVICTIONS_TOTAL not in reduced
+
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[CPUOffloadingMetrics.EVICTIONS_TOTAL] == 1
+
+    manager.prepare_store(to_keys([4, 5]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([4, 5]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[CPUOffloadingMetrics.EVICTIONS_TOTAL] == 2
+
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert CPUOffloadingMetrics.EVICTIONS_TOTAL not in reduced
+
+
 def test_touch_forwards_req_context_to_policy(monkeypatch):
     """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
     manager = make_cpu_manager(num_blocks=4, cache_policy="lru")

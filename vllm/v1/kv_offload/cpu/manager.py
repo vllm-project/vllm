@@ -66,6 +66,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
+        self.evictions_in_current_batch: int = 0
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -212,6 +213,7 @@ class CPUOffloadingManager(OffloadingManager):
             for key, block in evicted:
                 self._free_block(block)
                 to_evict.append(key)
+            self.evictions_in_current_batch += len(evicted)
 
         if to_evict and self.events is not None:
             self.events.append(
@@ -329,4 +331,11 @@ class CPUOffloadingManager(OffloadingManager):
             )
             self.stores_skipped_in_current_batch = 0
 
-        return stats
+        if self.evictions_in_current_batch > 0:
+            stats.increase_counter(
+                CPUOffloadingMetrics.EVICTIONS_TOTAL,
+                self.evictions_in_current_batch,
+            )
+            self.evictions_in_current_batch = 0
+
+        return stats 
