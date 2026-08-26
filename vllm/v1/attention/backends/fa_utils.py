@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -79,6 +82,7 @@ def get_flash_attn_version(
     requires_softcap: bool = False,
     kv_cache_block_size: int | None = None,
     supports_fa4_hd256: bool = False,
+    vllm_config: "VllmConfig | None" = None,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -109,7 +113,8 @@ def get_flash_attn_version(
         # 2. override if passed by environment or config
         from vllm.config import get_current_vllm_config_or_none
 
-        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            vllm_config = get_current_vllm_config_or_none()
         if (
             vllm_config is not None
             and vllm_config.attention_config.flash_attn_version is not None

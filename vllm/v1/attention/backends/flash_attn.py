@@ -104,15 +104,19 @@ class FlashAttentionBackend(AttentionBackend):
             current_platform.is_device_capability_family(90)
             and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
             and head_size == 512
-            and get_flash_attn_version(head_size=head_size) == 4
+            and get_flash_attn_version(head_size=head_size, vllm_config=vllm_config)
+            == 4
         ):
             # The SM90 FP8-KV-dequant kernel uses a 64-token TMA tile/page.
             return 64
         return None
 
     @classmethod
-    def _get_fa4_hd256_block_size(cls) -> int | None:
-        vllm_config = get_current_vllm_config_or_none()
+    def _get_fa4_hd256_block_size(
+        cls, vllm_config: VllmConfig | None = None
+    ) -> int | None:
+        if vllm_config is None:
+            vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None or vllm_config.model_config is None:
             return None
 
@@ -123,6 +127,7 @@ class FlashAttentionBackend(AttentionBackend):
                 head_size=head_size,
                 head_size_v=cls.head_size_v,
                 supports_fa4_hd256=True,
+                vllm_config=vllm_config,
             )
             == 4
         ):
@@ -144,7 +149,7 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> list[int | MultipleOf]:
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
             return [block_size]
-        if block_size := cls._get_fa4_hd256_block_size():
+        if block_size := cls._get_fa4_hd256_block_size(vllm_config):
             return [block_size]
         return [MultipleOf(16)]
 
@@ -166,7 +171,7 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> int:
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
             return max(default_block_size, block_size)
-        if block_size := cls._get_fa4_hd256_block_size():
+        if block_size := cls._get_fa4_hd256_block_size(vllm_config):
             return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
