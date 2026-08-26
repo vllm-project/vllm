@@ -62,6 +62,14 @@ class PyAVVideoBackendMixin:
         duration = float(stream.duration * stream.time_base) if stream.duration else 0.0
         if total_frames == 0 and duration > 0 and fps > 0:
             total_frames = int(duration * fps)
+        elif duration > 0 and fps > 0 and total_frames > round(duration * fps) + 1:
+            # The header sample count can exceed the frames the presentation
+            # timeline actually holds — e.g. an mp4 edit list hides the decode
+            # lead-in of a stream-copied cut, but ``stream.frames`` still
+            # counts the hidden samples. Sampling indices past the visible
+            # range would silently collapse onto the last visible frame, so
+            # trust the (edit-list-aware) duration instead.
+            total_frames = round(duration * fps)
         return VideoSourceMetadata(total_frames, fps, duration)
 
     @staticmethod

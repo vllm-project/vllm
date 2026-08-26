@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# shellcheck disable=SC2329  # Every function in this file is only ever reached
+# transitively through handle_amd_runner_exit, the EXIT trap handler - shellcheck's
+# unused-function check doesn't do full reachability analysis from an indirectly
+# invoked entry point, so it flags the whole diagnostic-collection call chain as
+# dead code even though it runs live on every nonzero exit.
+
 # This script runs ROCm tests either directly in a native CI pod or inside the
 # corresponding Docker container. Multi-node tests continue to use Docker.
 #
@@ -77,6 +83,8 @@ export PYTHONFAULTHANDLER
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
 
+ci_started_at=$SECONDS
+
 ###############################################################################
 # Helper Functions
 ###############################################################################
@@ -122,6 +130,66 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+amd_ci_teardown_log() {
+  local event=$1
+  shift
+
+  printf '[amd-ci-teardown] event=%s' "${event}" >&2
+  if (($#)); then
+    printf ' %s' "$@" >&2
+  fi
+  printf '\n' >&2
+}
+
+run_docker_with_ci_timeout() {
+  local raw_timeout=${CONTAINER_TIMEOUT_S:-0}
+  local configured_timeout=0
+  local elapsed=0
+  local remaining_timeout=0
+  local status=0
+
+  if [[ ! "${raw_timeout}" =~ ^(0|[1-9][0-9]{0,5})$ ]]; then
+    amd_ci_teardown_log configuration_error \
+      "reason=invalid_timeout" "expected=integer_0_to_604800"
+    return 2
+  fi
+  configured_timeout=$((10#${raw_timeout}))
+  if ((configured_timeout > 604800)); then
+    amd_ci_teardown_log configuration_error \
+      "reason=invalid_timeout" "expected=integer_0_to_604800"
+    return 2
+  fi
+
+  remaining_timeout=${configured_timeout}
+  if ((configured_timeout > 0)); then
+    if ! command -v timeout >/dev/null 2>&1; then
+      amd_ci_teardown_log configuration_error \
+        "reason=timeout_command_not_found"
+      return 127
+    fi
+    elapsed=$((SECONDS - ci_started_at))
+    if ((elapsed >= configured_timeout)); then
+      amd_ci_teardown_log deadline_exhausted \
+        "mode=docker" "configured_s=${configured_timeout}" "elapsed_s=${elapsed}"
+      return 124
+    fi
+    remaining_timeout=$((configured_timeout - elapsed))
+  fi
+
+  amd_ci_teardown_log workload_started \
+    "mode=docker" "timeout_s=${remaining_timeout}"
+  if ((remaining_timeout == 0)); then
+    "$@" || status=$?
+  else
+    # Docker runs interactively, so keep it in the foreground process group.
+    # --verbose records both TERM and any KILL escalation caused by timeout.
+    timeout --verbose --foreground --signal=TERM --kill-after=10s \
+      "${remaining_timeout}s" "$@" || status=$?
+  fi
+  amd_ci_teardown_log workload_finished "mode=docker" "status=${status}"
+  return "${status}"
 }
 
 prepare_artifact_image() {
@@ -1523,13 +1591,15 @@ fi
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
-  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  export DCKR_VER
 
   # Parse the bracket syntax:  prefix ; [node0_cmds] && [node1_cmds]
   #   BASH_REMATCH[1] = prefix (everything before first bracket)
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
+    # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
     prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
     echo "PREFIX: ${prefix}"
 
@@ -1545,7 +1615,9 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
@@ -1581,15 +1653,17 @@ else
     ulimit_core_hard="-1"
   fi
    # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
-  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  coredump_flags=(--ulimit "core=0:$ulimit_core_hard")
   if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
     # Works around https://github.com/rocm/rocm-systems/issues/6206
-    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+    coredump_flags=(-e 'HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"')
   else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
-  docker run \
+  exit_code=0
+  # shellcheck disable=SC2086  # word splitting is intentional: both hold multiple docker flags
+  run_docker_with_ci_timeout docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -1597,7 +1671,7 @@ else
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
-    $coredump_flags \
+    "${coredump_flags[@]}" \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
@@ -1625,8 +1699,6 @@ else
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
-
-  exit_code=$?
-  handle_pytest_exit "$exit_code"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}" || exit_code=$?
+  handle_pytest_exit "${exit_code}"
 fi
