@@ -14,10 +14,21 @@ up as "skipped," not "failed," so it never trips CI red -- see
 investigation this tool came out of.
 
 Only catches tests that declare their requirement via `multi_gpu_test`,
-`gpu_tier_mark`, or `pytest.mark.distributed(num_gpus=N)` with a literal
-int. Tests that compute their GPU requirement at runtime from parametrize
-values (e.g. `world_size = tp_size * dp_size`) aren't visible to this tool
-until migrated to one of those markers.
+`multi_gpu_marks`, `gpu_tier_mark`, or `pytest.mark.distributed(num_gpus=N)`
+with a literal int. Tests that compute their GPU requirement at runtime
+from parametrize values (e.g. `world_size = tp_size * dp_size`) aren't
+visible to this tool until migrated to one of those markers.
+
+Also accounts for `-m` marker-expression selection: pytest's `distributed`
+marker matching is by exact-value equality, not `>=` -- a job running
+`-m 'distributed(num_gpus=2)'` selects *only* tests marked exactly
+`num_gpus=2`, never `num_gpus=4`, even though 2 < 4 might suggest partial
+coverage. A job's `num_devices:` alone is therefore not sufficient to prove
+coverage; the `-m` expression's exact-match value has to agree with what
+the test declares too. Only the three literal forms this repo's CI configs
+actually use are interpreted (`distributed`, `distributed(num_gpus=N)`,
+`not distributed`); any other `-m`/`-k` expression is treated as
+unconstrained rather than guessed at, to avoid false gap reports.
 """
 
 import argparse
@@ -25,7 +36,7 @@ import ast
 import re
 import shlex
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -36,15 +47,53 @@ TEST_AREAS_DIR = REPO_ROOT / ".buildkite" / "test_areas"
 TEST_AMD_YAML = REPO_ROOT / ".buildkite" / "test-amd.yaml"
 
 _ENV_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")
-_VALUE_FLAGS = {"-m", "-k", "--shard-id", "--num-shards"}
+_EXACT_NUM_GPUS_RE = re.compile(r"distributed\(num_gpus=(\d+)\)")
+# "-m" is handled separately (its value is semantically meaningful, see
+# GpuMarkConstraint); these are skipped as opaque flag values only.
+_VALUE_FLAGS = {"-k", "--shard-id", "--num-shards"}
 
 
 @dataclass
-class Coverage:
-    """Best `num_devices` seen for a test file, and which job(s) provided it."""
+class GpuMarkConstraint:
+    """What a step's `-m` expression implies about which `distributed`-marked
+    tests it actually selects. `covers_any=False` means the expression
+    excludes distributed tests entirely (`not distributed`); `exact_n` set
+    means it selects only tests whose `num_gpus` equals that value exactly
+    (pytest mark matching is equality, not `>=`); `exact_n=None` with
+    `covers_any=True` means no constraint on the value (no `-m` flag, or a
+    bare `distributed`)."""
 
-    max_num_devices: int = 0
-    jobs: list[str] = field(default_factory=list)
+    covers_any: bool = True
+    exact_n: int | None = None
+
+
+def _parse_mark_gpu_constraint(mark_expr: str | None) -> GpuMarkConstraint:
+    """Interpret a step's `-m` expression string, handling exactly the forms
+    this repo's CI configs use (`distributed`, `distributed(num_gpus=N)`,
+    `not distributed`). Anything else -- no `-m` flag, or a compound/other
+    expression -- is treated as unconstrained rather than guessed at."""
+    if mark_expr is None:
+        return GpuMarkConstraint()
+
+    stripped = mark_expr.strip()
+    if stripped == "not distributed":
+        return GpuMarkConstraint(covers_any=False)
+
+    m = _EXACT_NUM_GPUS_RE.fullmatch(stripped)
+    if m:
+        return GpuMarkConstraint(covers_any=True, exact_n=int(m.group(1)))
+
+    return GpuMarkConstraint()
+
+
+@dataclass
+class CoveringStep:
+    """One CI step that targets a given test file, and what it actually
+    selects/provisions for it."""
+
+    num_devices: int
+    constraint: GpuMarkConstraint
+    label: str
 
 
 def _call_name(func: ast.expr) -> str | None:
@@ -86,18 +135,22 @@ def _extract_int_kwarg(call: ast.Call, names: tuple[str, ...]) -> int | None:
     return None
 
 
-def find_gpu_requirements() -> dict[str, int]:
+def find_gpu_requirements() -> dict[str, set[int]]:
     """AST-scan tests/ for literal-int GPU requirements. Returns
-    {repo-relative path: max num_gpus required across all test functions
-    in that file}. Files with no declared requirement > 1 are omitted."""
-    requirements: dict[str, int] = {}
+    {repo-relative path: set of distinct num_gpus values required by test
+    functions in that file}. Files with no declared requirement > 1 are
+    omitted. A file can require more than one distinct value (e.g. some
+    tests need 2 GPUs, others need 4) -- each is checked against CI
+    coverage independently, since `-m 'distributed(num_gpus=N)'` selection
+    is exact-match, not `>=`."""
+    requirements: dict[str, set[int]] = {}
     for path in sorted(TESTS_DIR.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(), filename=str(path))
         except (SyntaxError, UnicodeDecodeError):
             continue
 
-        max_n = 0
+        needed: set[int] = set()
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -106,17 +159,20 @@ def find_gpu_requirements() -> dict[str, int]:
                 if not _is_pytest_mark_distributed(node.func):
                     continue
                 n = _extract_int_kwarg(node, ("num_gpus",))
-            elif name == "multi_gpu_test":
+            elif name in ("multi_gpu_test", "multi_gpu_marks"):
+                # multi_gpu_marks is the primitive multi_gpu_test wraps
+                # (tests/utils.py); also called directly for pytest.param
+                # marks=, e.g. test_common.py.
                 n = _extract_int_kwarg(node, ("num_gpus",))
             elif name == "gpu_tier_mark":
                 n = _extract_int_kwarg(node, ("min_gpus",))
             else:
                 continue
-            if n is not None:
-                max_n = max(max_n, n)
+            if n is not None and n > 1:
+                needed.add(n)
 
-        if max_n > 1:
-            requirements[path.relative_to(REPO_ROOT).as_posix()] = max_n
+        if needed:
+            requirements[path.relative_to(REPO_ROOT).as_posix()] = needed
 
     return requirements
 
@@ -132,9 +188,12 @@ def _strip_env_prefix(cmd: str) -> str:
         cmd = cmd[m.end() :]
 
 
-def _parse_pytest_command(cmd: str) -> tuple[list[str], list[str]] | None:
-    """Return (targets, ignored) for a `pytest ...` command string, or None
-    if this command doesn't invoke pytest at all (e.g. a `torchrun` line)."""
+def _parse_pytest_command(
+    cmd: str,
+) -> tuple[list[str], list[str], str | None] | None:
+    """Return (targets, ignored, mark_expr) for a `pytest ...` command
+    string, or None if this command doesn't invoke pytest at all (e.g. a
+    `torchrun` line). `mark_expr` is the raw `-m` value, if present."""
     cmd = _strip_env_prefix(cmd.strip())
     # commands are sometimes chained, e.g. "cd .. && pytest ...": only take
     # the part from the first "pytest" token onward.
@@ -151,6 +210,7 @@ def _parse_pytest_command(cmd: str) -> tuple[list[str], list[str]] | None:
 
     targets: list[str] = []
     ignored: list[str] = []
+    mark_expr: str | None = None
     i = 1
     while i < len(tokens):
         tok = tokens[i]
@@ -160,6 +220,12 @@ def _parse_pytest_command(cmd: str) -> tuple[list[str], list[str]] | None:
             i += 1
             if i < len(tokens):
                 ignored.append(tokens[i])
+        elif tok == "-m":
+            i += 1
+            if i < len(tokens):
+                mark_expr = tokens[i]
+        elif tok.startswith("-m="):
+            mark_expr = tok[len("-m=") :]
         elif tok in _VALUE_FLAGS:
             i += 1  # skip this flag's value, not a target
         elif tok.startswith("-"):
@@ -167,7 +233,7 @@ def _parse_pytest_command(cmd: str) -> tuple[list[str], list[str]] | None:
         else:
             targets.append(tok)
         i += 1
-    return targets, ignored
+    return targets, ignored, mark_expr
 
 
 def _normalize_to_tests_relative(target: str) -> str:
@@ -202,20 +268,21 @@ def _resolve_target_files(target: str, ignored: list[str]) -> list[Path]:
 
 
 def _record_coverage(
-    coverage: dict[str, Coverage], files: list[Path], num_devices: int, job_label: str
+    coverage: dict[str, list[CoveringStep]],
+    files: list[Path],
+    num_devices: int,
+    job_label: str,
+    constraint: GpuMarkConstraint,
 ) -> None:
     for f in files:
         rel = f.relative_to(REPO_ROOT).as_posix()
-        c = coverage.setdefault(rel, Coverage())
-        if num_devices > c.max_num_devices:
-            c.max_num_devices = num_devices
-            c.jobs = [job_label]
-        elif num_devices == c.max_num_devices:
-            c.jobs.append(job_label)
+        coverage.setdefault(rel, []).append(
+            CoveringStep(num_devices, constraint, job_label)
+        )
 
 
 def _process_step(
-    coverage: dict[str, Coverage],
+    coverage: dict[str, list[CoveringStep]],
     label: str,
     commands: list[str],
     num_devices: int,
@@ -224,14 +291,15 @@ def _process_step(
         parsed = _parse_pytest_command(cmd)
         if parsed is None:
             continue
-        targets, ignored = parsed
+        targets, ignored, mark_expr = parsed
+        constraint = _parse_mark_gpu_constraint(mark_expr)
         for target in targets:
             files = _resolve_target_files(target, ignored)
-            _record_coverage(coverage, files, num_devices, label)
+            _record_coverage(coverage, files, num_devices, label, constraint)
 
 
-def find_ci_coverage() -> dict[str, Coverage]:
-    coverage: dict[str, Coverage] = {}
+def find_ci_coverage() -> dict[str, list[CoveringStep]]:
+    coverage: dict[str, list[CoveringStep]] = {}
 
     for yaml_path in sorted(TEST_AREAS_DIR.glob("*.yaml")):
         doc = yaml.safe_load(yaml_path.read_text())
@@ -263,6 +331,17 @@ def find_ci_coverage() -> dict[str, Coverage]:
     return coverage
 
 
+def _covers(step: CoveringStep, needed: int) -> bool:
+    """True if `step` actually selects and satisfies a test that declares
+    `num_gpus=needed` -- both the `-m` expression's exact-match constraint
+    (if any) and the provisioned device count have to agree."""
+    if not step.constraint.covers_any:
+        return False
+    if step.constraint.exact_n is not None and step.constraint.exact_n != needed:
+        return False
+    return step.num_devices >= needed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -274,27 +353,51 @@ def main() -> int:
     coverage = find_ci_coverage()
 
     gaps = []
-    for rel_path, needed in sorted(requirements.items()):
-        c = coverage.get(rel_path)
-        have = c.max_num_devices if c else 0
-        if have < needed:
-            gaps.append((rel_path, needed, have, c.jobs if c else []))
-        elif args.verbose:
-            print(f"OK    {rel_path}: needs {needed}, covered at {have} ({c.jobs})")
+    for rel_path, needed_values in sorted(requirements.items()):
+        steps = coverage.get(rel_path, [])
+        for needed in sorted(needed_values):
+            covering = [s for s in steps if _covers(s, needed)]
+            if covering:
+                if args.verbose:
+                    best = max(s.num_devices for s in covering)
+                    jobs = sorted({s.label for s in covering if s.num_devices == best})
+                    print(
+                        f"OK    {rel_path} (num_gpus={needed}): covered at "
+                        f"{best} ({jobs})"
+                    )
+                continue
+
+            candidates = [s for s in steps if s.constraint.covers_any]
+            selecting = [
+                s
+                for s in candidates
+                if s.constraint.exact_n is None or s.constraint.exact_n == needed
+            ]
+            if not steps:
+                reason = "not run by any CI job"
+            elif not candidates:
+                reason = "only covering job(s) exclude distributed tests entirely (`-m 'not distributed'`)"
+            elif not selecting:
+                other_n = sorted(
+                    {s.constraint.exact_n for s in candidates if s.constraint.exact_n}
+                )
+                reason = (
+                    f"covering job(s) select `-m 'distributed(num_gpus=N)'` "
+                    f"for N={other_n}, never num_gpus={needed}"
+                )
+            else:
+                have = max(s.num_devices for s in selecting)
+                jobs = sorted({s.label for s in selecting if s.num_devices == have})
+                reason = f"best covering job(s) {jobs} only provision {have}"
+            gaps.append((rel_path, needed, reason))
 
     if not gaps:
         print("No world_size/num_devices gaps found.")
         return 0
 
-    print(f"Found {len(gaps)} file(s) with unsatisfied GPU requirements:\n")
-    for rel_path, needed, have, jobs in gaps:
-        if have == 0:
-            print(f"  {rel_path}: needs {needed} GPU(s), not run by any CI job")
-        else:
-            print(
-                f"  {rel_path}: needs {needed} GPU(s), best covering job(s) "
-                f"{jobs} only provide {have}"
-            )
+    print(f"Found {len(gaps)} unsatisfied GPU requirement(s):\n")
+    for rel_path, needed, reason in gaps:
+        print(f"  {rel_path} (num_gpus={needed}): {reason}")
     return 1
 
 
