@@ -282,12 +282,26 @@ def test_register_separate_kv_head_groups(monkeypatch):
     }
 
 
+def test_sync_num_cpu_blocks_across_workers_noop_when_dist_uninitialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: False,
+    )
+    assert sync_num_offload_blocks_across_workers(42) == 42
+
+
 def test_sync_num_cpu_blocks_across_workers_noop_when_world_size_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeGroup:
         world_size = 1
 
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_world_group",
         lambda: FakeGroup(),
@@ -306,6 +320,10 @@ def test_sync_num_cpu_blocks_across_workers_all_reduce_min(
         assert op is dist.ReduceOp.MIN
         tensor.fill_(5)
 
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_world_group",
         lambda: FakeGroup(),

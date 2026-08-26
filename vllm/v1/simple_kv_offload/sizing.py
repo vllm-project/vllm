@@ -24,6 +24,9 @@ def local_num_offload_blocks(capacity_bytes: int, total_bytes_per_block: int) ->
 
 def sync_num_offload_blocks_across_workers(num_offload_blocks: int) -> int:
     """All-reduce MIN so every rank allocates the same offload pool size."""
+    if not dist.is_initialized():
+        return num_offload_blocks
+
     from vllm.distributed.parallel_state import get_world_group
 
     world_group = get_world_group()
