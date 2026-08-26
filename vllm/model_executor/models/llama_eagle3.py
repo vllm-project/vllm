@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import LlamaConfig
+from transformers import LlamaConfig, PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -32,6 +32,22 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _configure_draft_attention_window(
+    config: PretrainedConfig, draft_attention_window: int | None
+) -> bool:
+    if draft_attention_window is None:
+        return False
+    config.sliding_window = draft_attention_window
+    config.layer_types = ["sliding_attention"] * config.num_hidden_layers
+    logger.info(
+        "Using a %d-token sliding attention window with full KV retention "
+        "for all %d EAGLE3 draft layers.",
+        draft_attention_window,
+        config.num_hidden_layers,
+    )
+    return True
+
+
 class LlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(
         self,
@@ -39,8 +55,10 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
         layer_idx: int = 0,
+        retain_full_kv_cache: bool = False,
     ) -> None:
         super().__init__(vllm_config, prefix=prefix, config=config)
+        self.self_attn.attn.retain_full_kv_cache = retain_full_kv_cache
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
@@ -137,6 +155,10 @@ class LlamaModel(nn.Module):
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        retain_full_kv_cache = _configure_draft_attention_window(
+            self.config,
+            vllm_config.speculative_config.draft_attention_window,
+        )
         self.vocab_size = self.config.vocab_size
 
         # Get drafter's quantization config
@@ -168,6 +190,7 @@ class LlamaModel(nn.Module):
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                     config=self.config,
                     layer_idx=layer_idx,
+                    retain_full_kv_cache=retain_full_kv_cache,
                 )
                 for layer_idx in range(self.config.num_hidden_layers)
             ]

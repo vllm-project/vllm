@@ -86,6 +86,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
+| `draft_attention_window` | `integer >= 1` | `None` | Limit EAGLE3 draft attention to recent tokens while retaining the full draft KV cache. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, or `block`. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |

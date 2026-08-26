@@ -56,6 +56,29 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+### Bounded EAGLE3 draft attention
+
+EAGLE3 drafters can limit attention computation to recent tokens without
+evicting older draft KV blocks. Retaining the full draft cache preserves
+prefix-cache reuse when long-running sessions resume, while the attention
+backend still applies the configured window. For example:
+
+```python
+llm = LLM(
+    model="amd/MiniMax-M3-MXFP4",
+    speculative_config={
+        "model": "Inferact/MiniMax-M3-EAGLE3-GQA",
+        "num_speculative_tokens": 2,
+        "method": "eagle3",
+        "draft_attention_window": 32768,
+    },
+)
+```
+
+This option reduces draft attention work, not KV-cache memory. Its performance
+benefit depends on the attention backend and workload, so benchmark it against
+full-context draft attention for the intended traffic pattern.
+
 ## Pre-Trained Eagle Draft Models
 
 A variety of EAGLE draft models are available on the Hugging Face hub:
