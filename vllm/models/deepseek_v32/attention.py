@@ -42,7 +42,7 @@ from vllm.v1.attention.ops.pcp import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-    from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseIndexGroupBuilder
+    from vllm.v1.hisparse.runtime import HiSparseIndexGroupBuilder
 
 
 class DeepseekV32Indexer(nn.Module):

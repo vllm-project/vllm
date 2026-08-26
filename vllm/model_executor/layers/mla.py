@@ -13,7 +13,7 @@ from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+    from vllm.v1.hisparse.runtime import (
         HiSparseIndexGroupBuilder,
     )
 

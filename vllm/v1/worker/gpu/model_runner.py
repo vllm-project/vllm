@@ -705,7 +705,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches: list[torch.Tensor] = []
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():
-            kv_caches_dict, kv_cache_runtime = init_kv_cache(
+            kv_caches_dict = init_kv_cache(
                 self.kv_caches,
                 self.compilation_config.static_forward_context,
                 self.kv_cache_config,
@@ -721,9 +721,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
-            self.kv_connector = get_kv_connector(
-                self.vllm_config, kv_caches_dict, kv_cache_runtime
-            )
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""

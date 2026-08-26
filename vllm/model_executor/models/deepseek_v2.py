@@ -106,8 +106,8 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
+from vllm.v1.hisparse.runtime import HiSparseIndexGroupBuilder
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
-from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseIndexGroupBuilder
 
 from .interfaces import (
     MixtureOfExperts,

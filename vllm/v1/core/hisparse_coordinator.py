@@ -14,14 +14,14 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseResidentManager,
     SingleTypeKVCacheManager,
 )
+from vllm.v1.hisparse.types import (
+    SparseKVOffloadCommand,
+    SparseKVPageTransfer,
+)
 from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
-)
-from vllm.v1.kv_offload.sparse.base import (
-    SparseKVOffloadCommand,
-    SparseKVPageTransfer,
 )
 from vllm.v1.request import Request
 
