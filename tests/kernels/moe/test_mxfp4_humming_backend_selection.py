@@ -170,9 +170,74 @@ def test_probe_ignores_symbols_the_humming_path_never_uses():
     with (
         patch.object(fi, "has_flashinfer_moe", return_value=True),
         patch.object(fi, "_get_submodule", return_value=humming_only),
+        patch.object(fi, "_has_per_local_expert_residual", return_value=True),
     ):
         assert fi.has_flashinfer_humming_moe() is True
     fi.has_flashinfer_humming_moe.cache_clear()
+
+
+def test_probe_rejects_a_build_that_predates_the_per_local_expert_residual():
+    """FlashInfer #3738 shipped the humming kernel with per-routed-token
+    residuals and #4431 changed them to per-local-expert. Every symbol and
+    keyword this probe used to look at is present in both, so a #3738-only
+    build would be selected and then handed the wrong contract -- silently
+    wrong whenever `num_tokens * top_k` equals the local expert count."""
+    from types import SimpleNamespace
+
+    from vllm.utils import flashinfer as fi
+
+    def cutlass_fused_moe(*, use_wfp4afp8_humming=False): ...
+
+    pre_4431 = SimpleNamespace(
+        cutlass_fused_moe=cutlass_fused_moe,
+        preprocess_moe_weights_for_sm90_mixed_gemm_humming=lambda *a, **k: None,
+        interleave_moe_weights_for_sm90_mixed_gemm=lambda *a, **k: None,
+        interleave_moe_scales_for_sm90_mixed_gemm=lambda *a, **k: None,
+    )
+    fi.has_flashinfer_humming_moe.cache_clear()
+    with (
+        patch.object(fi, "has_flashinfer_moe", return_value=True),
+        patch.object(fi, "_get_submodule", return_value=pre_4431),
+        patch.object(fi, "_has_per_local_expert_residual", return_value=False),
+    ):
+        assert fi.has_flashinfer_humming_moe() is False
+    fi.has_flashinfer_humming_moe.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "shape_check,expected",
+    [
+        ("fc1 residual scale must have one element per local expert", True),
+        ("fc1 token scale must have one element per routed token", False),
+    ],
+)
+def test_residual_contract_is_read_off_the_shipped_jit_source(shape_check, expected):
+    """The two builds differ only in C++, so the probe reads the kernel-side
+    shape check that FlashInfer ships as JIT source next to the package."""
+    from vllm.utils import flashinfer as fi
+
+    class _FakeSource:
+        def __truediv__(self, _part):
+            return self
+
+        def read_bytes(self):
+            return shape_check.encode()
+
+    fi._has_per_local_expert_residual.cache_clear()
+    with patch.object(fi.importlib.resources, "files", return_value=_FakeSource()):
+        assert fi._has_per_local_expert_residual() is expected
+    fi._has_per_local_expert_residual.cache_clear()
+
+
+def test_residual_contract_probe_survives_a_missing_source_tree():
+    """Some redistributions strip the JIT sources. Failing closed costs the
+    user this backend; failing open would hand the kernel a wrong contract."""
+    from vllm.utils import flashinfer as fi
+
+    fi._has_per_local_expert_residual.cache_clear()
+    with patch.object(fi.importlib.resources, "files", side_effect=FileNotFoundError):
+        assert fi._has_per_local_expert_residual() is False
+    fi._has_per_local_expert_residual.cache_clear()
 
 
 def _dummy_mxfp4_weights(num_experts=2, intermediate_size=128, hidden_size=128):

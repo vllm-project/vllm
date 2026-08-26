@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import importlib.resources
 import importlib.util
 import inspect
 import os
@@ -305,7 +306,8 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 @functools.cache
 def has_flashinfer_humming_moe() -> bool:
     """Return `True` if the FlashInfer CUTLASS SM90 "humming" MXFP4-weight x
-    FP8-activation fused MoE path is available (FlashInfer >= 0.6.16)."""
+    FP8-activation fused MoE path is available and speaks the per-local-expert
+    residual contract this backend targets (FlashInfer >= 0.6.18)."""
     # Deliberately not chained on has_flashinfer_cutlass_fused_moe(): that also
     # requires nvfp4/TRT-LLM symbols which the humming path never touches, and
     # which are absent from builds where humming works fine.
@@ -333,7 +335,46 @@ def has_flashinfer_humming_moe() -> bool:
         params = inspect.signature(fused_moe.cutlass_fused_moe).parameters
     except (TypeError, ValueError):
         return False
-    return "use_wfp4afp8_humming" in params
+    if "use_wfp4afp8_humming" not in params:
+        return False
+
+    return _has_per_local_expert_residual()
+
+
+# The residual slots of the humming quant_scales list. FlashInfer #4431 changed
+# them from one value per routed token to one per local expert -- the contract
+# this backend is written against -- and did so without touching any Python
+# signature, so neither a symbol nor a keyword tells the two apart. What does
+# is the kernel-side shape check that enforces the contract, which ships as JIT
+# source inside the wheel.
+_FI_MOE_BINDING = (
+    "data",
+    "csrc",
+    "fused_moe",
+    "cutlass_backend",
+    "flashinfer_cutlass_fused_moe_binding.cu",
+)
+_FI_PER_LOCAL_EXPERT_RESIDUAL = b"one element per local expert"
+
+
+@functools.cache
+def _has_per_local_expert_residual() -> bool:
+    """Return `True` if FlashInfer expects per-local-expert humming residuals.
+
+    A build that predates FlashInfer #4431 wants one residual per routed token
+    instead. Passing the wrong one usually raises a shape error, but when
+    `num_tokens * top_k` happens to equal the local expert count it passes the
+    check and silently computes the wrong result, so this is checked up front
+    rather than left to the kernel.
+    """
+    try:
+        binding = importlib.resources.files("flashinfer")
+        for part in _FI_MOE_BINDING:
+            binding = binding / part
+        source = binding.read_bytes()
+    except (ImportError, OSError):
+        return False
+    return _FI_PER_LOCAL_EXPERT_RESIDUAL in source
 
 
 @functools.cache
