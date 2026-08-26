@@ -6,7 +6,7 @@ Each QSA layer keeps a fixed circular buffer of raw index keys (the
 compressor state) and one compressed key. MRoPE models pack exact three-axis
 positions beside the raw keys; text models derive group positions from
 logical positions. The compressor state uses one block per request, while
-the compressed owner uses ``MLAAttentionSpec.compress_ratio`` so its block
+    the compressed owner uses ``MLAAttentionSpec.tokens_per_state`` so its block
 table follows the main KV-cache lifecycle. Their physical tensor storage is
 shared by the generic cache-layout planner.
 """
@@ -578,10 +578,14 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.is_circular_buffer = isinstance(kv_cache_spec, CircularBufferSpec)
         if isinstance(kv_cache_spec, MLAAttentionSpec):
-            self.compress_ratio = kv_cache_spec.compress_ratio
+            compress_ratio = kv_cache_spec.tokens_per_state
+            assert isinstance(compress_ratio, int), (
+                "QSA compression requires an integer tokens_per_state"
+            )
+            self.compress_ratio = compress_ratio
         else:
             self.compress_ratio = 1
-        self.storage_block_size = kv_cache_spec.storage_block_size
+        self.storage_block_size = kv_cache_spec.num_states
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_buffer = torch.empty(
             max_tokens, dtype=torch.int32, device=device
@@ -801,7 +805,7 @@ class QSACompressedKeyCache(_QSAStateCache):
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
-            compress_ratio=self.compress_ratio,
+            tokens_per_state=self.compress_ratio,
         )
 
 
