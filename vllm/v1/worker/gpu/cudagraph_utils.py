@@ -77,6 +77,10 @@ class CreateForwardFn(Protocol):
     ) -> Callable[[CUDAGraphMode], None]: ...
 
 
+class PCPDummySlotMappingProvider(Protocol):
+    def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor: ...
+
+
 def _is_compatible(
     desc: BatchExecutionDescriptor,
     num_reqs: int,
@@ -491,6 +495,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        pcp_manager: PCPDummySlotMappingProvider | None = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -540,6 +545,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len,
+                pcp_manager=pcp_manager,
             )
 
             # Capture with dummy rows marked as padding.
@@ -632,12 +638,17 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
+    pcp_manager: PCPDummySlotMappingProvider | None = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
+    slot_mappings = (
+        pcp_manager.get_dummy_slot_mappings(num_tokens)
+        if pcp_manager is not None and not full_cudagraph
+        else block_tables.get_dummy_slot_mappings(num_tokens)
+    )
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
