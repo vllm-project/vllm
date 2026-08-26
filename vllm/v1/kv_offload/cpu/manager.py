@@ -83,6 +83,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
         self._cache_generation = 0
+        self.evictions_in_current_batch: int = 0
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -326,6 +327,7 @@ class CPUOffloadingManager(OffloadingManager):
             for key, chunk in evicted:
                 self._free_chunk(chunk)
                 to_evict.append(key)
+            self.evictions_in_current_batch += len(evicted)
 
         if to_evict and self.events is not None:
             self.events.append(
@@ -473,5 +475,12 @@ class CPUOffloadingManager(OffloadingManager):
                 self.stores_skipped_in_current_batch,
             )
             self.stores_skipped_in_current_batch = 0
+
+        if self.evictions_in_current_batch > 0:
+            stats.increase_counter(
+                CPUOffloadingMetrics.EVICTIONS_TOTAL,
+                self.evictions_in_current_batch,
+            )
+            self.evictions_in_current_batch = 0
 
         return stats

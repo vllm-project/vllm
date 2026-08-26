@@ -78,6 +78,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
             ),
+            CPUOffloadingMetrics.EVICTIONS_TOTAL: OffloadingCounterMetadata(
+                documentation=(
+                    "Total number of KV cache chunks removed from the CPU "
+                    "offload cache to free space for incoming GPU-to-CPU stores."
+                ),
+            ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:
