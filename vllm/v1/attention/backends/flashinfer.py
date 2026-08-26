@@ -1000,6 +1000,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
             self.use_trtllm_decode_attention = False
             self.flashinfer_trtllm_api_decode_kernel = None
+        if (
+            self.use_fa2_nvfp4_kv
+            and self.flashinfer_trtllm_api_decode_kernel is not None
+        ):
+            # NVFP4 KV on consumer Blackwell is served by the FlashInfer FA2
+            # paged reader; neither the dedicated-XQA nor the trtllm-gen decode
+            # API accepts the packed fp4 cache (FlashInferImpl.forward asserts
+            # on it). Upstream selects dedicated XQA on sm12x regardless of KV
+            # dtype, so without this the engine cannot boot with
+            # --kv-cache-dtype nvfp4. The fa2 route is also what every sm12x
+            # measurement on this PR was taken on, and XQA benchmarked 0.7-1.2%
+            # slower at equal cudagraph mode (#49818), so nothing is lost.
+            logger.info_once(
+                "NVFP4 KV cache on consumer Blackwell uses the FlashInfer FA2 "
+                "paged decode path; disabling the %s decode API.",
+                self.flashinfer_trtllm_api_decode_kernel.value,
+            )
+            self.use_trtllm_decode_attention = False
+            self.flashinfer_trtllm_api_decode_kernel = None
         self.use_dedicated_xqa = (
             current_platform.is_device_capability_family(120)
             and self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
@@ -1212,6 +1231,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         is_sm12x = current_platform.is_device_capability_family(120)
         # XQA does not return LSE and therefore does not support DCP.
         if is_sm12x and vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+        # NVFP4 KV on sm12x decodes through the FI-native FA2 path (the
+        # dedicated-XQA API rejects the packed fp4 cache), and that path is not
+        # wired for uniform multi-token capture. Advertise single-token only
+        # rather than promising UNIFORM_BATCH the decode route cannot honour.
+        cache_config = vllm_config.cache_config
+        if (
+            is_sm12x
+            and cache_config is not None
+            and cache_config.cache_dtype.startswith("nvfp4")
+        ):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
