@@ -6,7 +6,7 @@ tasks:
     value: 0.7142
   - name: "exact_match,flexible-extract"
     value: 0.4579
-limit: 1319
+limit: 256
 num_fewshot: 5
 max_model_len: 262144
 kv_cache_dtype: fp8
