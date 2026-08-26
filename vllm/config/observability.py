@@ -48,7 +48,7 @@ class ObservabilityConfig:
     token_level_profiling: bool = False
     """Enable token-level profiling to collect detailed timing information for
     each token to trace."""
-    
+
     per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = "none"
     """Include per-request speculative-decoding acceptance metrics in the
     response under `metrics.speculative_decoding`. `none` disables; `summary` adds mean

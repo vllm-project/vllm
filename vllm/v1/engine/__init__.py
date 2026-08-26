@@ -268,11 +268,12 @@ class EngineCoreOutput(
 
     new_sampling_mask: SamplingMaskLists | None = None
 
-    iter_stats: IterStats | None = None
-    
     # Per-request spec-decode acceptance; attached only on the final output.
-    # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
+    # Appended after all existing fields so `array_like` positional
+    # serialization stays backward compatible.
+    iter_stats: IterStats | None = None
 
     @property
     def finished(self) -> bool:
