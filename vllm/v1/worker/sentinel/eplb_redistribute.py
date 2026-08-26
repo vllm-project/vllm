@@ -30,13 +30,16 @@ logger = init_logger(__name__)
 def compute_dead_ep_ranks(
     dead_dp_ranks: set[int] | list[int],
     tp_size: int,
+    pcp_size: int = 1,
 ) -> set[int]:
-    """Expand dead DP ranks to the corresponding dead EP ranks."""
-    dead_ep: set[int] = set()
-    for dp_rank in dead_dp_ranks:
-        for tp_offset in range(tp_size):
-            dead_ep.add(dp_rank * tp_size + tp_offset)
-    return dead_ep
+    """Expand dead DP ranks to the corresponding dead EP ranks.
+
+    Each DP rank owns a contiguous block of tp_size * pcp_size EP ranks
+    """
+    block = tp_size * pcp_size
+    return {
+        dp_rank * block + offset for dp_rank in dead_dp_ranks for offset in range(block)
+    }
 
 
 def mark_dead_expert_slots_inplace(
@@ -50,9 +53,12 @@ def mark_dead_expert_slots_inplace(
     rank owns num_local_experts consecutive physical slots starting at
     rank * num_local_experts. Shape stays constant (no topology change).
     """
-    for ep_rank in dead_ep_ranks:
-        start = ep_rank * num_local_experts
-        physical_to_logical_map[:, start : start + num_local_experts] = -1
+    if not dead_ep_ranks:
+        return
+    slots_by_rank = physical_to_logical_map.view(
+        physical_to_logical_map.shape[0], -1, num_local_experts
+    )
+    slots_by_rank[:, sorted(dead_ep_ranks)] = -1
 
 
 def check_redundancy_sufficient(

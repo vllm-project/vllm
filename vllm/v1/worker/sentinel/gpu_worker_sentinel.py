@@ -65,6 +65,8 @@ class WorkerSentinel:
                 f"Fault tolerance requires an FT-capable all2all backend "
                 f"(one of {sorted(FT_BACKEND_SET)}), but got '{all2all_backend}'."
             )
+        if worker.parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError("Fault tolerance does not support PCP yet.")
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
@@ -92,7 +94,10 @@ class WorkerSentinel:
 
             # clean_buffers wiped the mask; replay masks for the cumulative dead set.
             tp_size = self.worker.parallel_config.tensor_parallel_size
-            for ep_rank in compute_dead_ep_ranks(params["dead_dp_ranks"], tp_size):
+            pcp_size = self.worker.parallel_config.prefill_context_parallel_size
+            for ep_rank in compute_dead_ep_ranks(
+                params["dead_dp_ranks"], tp_size, pcp_size
+            ):
                 get_ep_all2all_manager().update_mask(ep_rank, masked=True)
 
             if (
@@ -121,8 +126,9 @@ class WorkerSentinel:
                 "to re-host the dead rank's experts."
             )
         tp_size = self.worker.parallel_config.tensor_parallel_size
+        pcp_size = self.worker.parallel_config.prefill_context_parallel_size
         dead_dp_ranks = ft_request.params["dead_dp_ranks"]
-        dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size)
+        dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size, pcp_size)
         eplb_model_state = self._eplb_model_state()
         ep_world_size = get_ep_group().world_size
 

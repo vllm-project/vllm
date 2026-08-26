@@ -36,6 +36,10 @@ logger = init_logger(__name__)
 
 FT_UTILITY_METHOD = "handle_fault_tolerance"
 
+# Instructions the engine accepts from the utility channel. The API router
+# validates too; this guards the engine against any other utility caller.
+_ALLOWED_INSTRUCTIONS = frozenset({"retry", "scale_down"})
+
 
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
@@ -56,16 +60,28 @@ class EngineCoreSentinel:
         self._dead_dp_ranks: set[int] = set()
 
     @property
-    def coordinator_lost(self) -> bool:
-        """True once rank 0 has been removed. The DP coordinator is pinned
-        to rank 0's API server, so the wave wake-up path is dead from then
-        on and the engine must never idle-pause."""
-        return 0 in self._dead_dp_ranks
+    def coordinator_disabled(self) -> bool:
+        """True once any scale_down has committed dead ranks. The DP wave
+        wake-up path depends on the DP coordinator, which has no failover;
+        after a scale_down the engine never idle-pauses and keeps stepping
+        dummy batches instead."""
+        return bool(self._dead_dp_ranks)
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
-        if self.status_type != EngineStatusType.UNHEALTHY:
+        if ft_request.instruction not in _ALLOWED_INSTRUCTIONS:
+            reason = (
+                f"[FT] Rejecting unknown instruction "
+                f"'{ft_request.instruction}' on engine {self.engine_index}"
+            )
+            logger.warning(reason)
+            result = FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason=reason,
+            )
+        elif self.status_type != EngineStatusType.UNHEALTHY:
             reason = (
                 f"[FT] Rejecting {ft_request.instruction} on engine "
                 f"{self.engine_index}: status is {self.status_type.name}"
@@ -179,16 +195,19 @@ class EngineCoreSentinel:
 
         new_dead = self._dead_dp_ranks | newly_dead
         ft_request.params["dead_dp_ranks"] = sorted(new_dead)
+        alive_before = sorted(set(range(self._initial_dp_size)) - self._dead_dp_ranks)
         new_alive = sorted(set(range(self._initial_dp_size)) - new_dead)
 
         master_ip = self.parallel_config.data_parallel_master_ip
-        # Rank 0 hosts the TCPStore master; rebuild if it was just removed.
-        if 0 in newly_dead:
+        # The lowest alive rank hosts the TCPStore master; rebuild the store
+        # if that rank was just removed.
+        if alive_before[0] in newly_dead:
             dp_store_port = ft_request.params.get("dp_store_port")
             new_master_ip = ft_request.params.get("dp_master_ip")
             if dp_store_port is None or new_master_ip is None:
                 raise ValueError(
-                    "dp_store_port and dp_master_ip required when rank 0 is removed"
+                    "dp_store_port and dp_master_ip required when the store "
+                    f"master (rank {alive_before[0]}) is removed"
                 )
             master_ip = new_master_ip
             self._rebuild_dp_store(
@@ -200,7 +219,8 @@ class EngineCoreSentinel:
 
         self._reinit_groups(ft_request, master_ip=master_ip, dead_ranks=new_dead)
         result = self._dispatch_command(ft_request)
-        # Commit the dead set only after the reinit succeeded.
+        # Commit the dead set only after the full recovery (engine group
+        # reinit + worker dispatch) succeeded.
         self._dead_dp_ranks = new_dead
         logger.info(
             "[FT] Engine %d scale_down complete: removed %s, "
@@ -218,7 +238,7 @@ class EngineCoreSentinel:
         is_master: bool,
         num_clients: int,
     ) -> None:
-        """Rebuild dp_store when the old master (rank 0) was removed."""
+        """Rebuild dp_store when the old store master was removed."""
         timeout = get_cpu_distributed_timeout_or_none()
         if timeout is None:
             timeout = timedelta(seconds=self.engine_recovery_timeout_sec)
