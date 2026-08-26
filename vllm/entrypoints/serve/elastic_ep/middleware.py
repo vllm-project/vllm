@@ -6,8 +6,11 @@ from collections.abc import Awaitable
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-# Global variable to track scaling state
+# Process-local states used to pause serving during scaling and after this rank
+# has been removed from the external-LB topology. A retired API process remains
+# available for health and scaling-status queries until its orchestrator exits it.
 _scaling_elastic_ep = False
+_elastic_ep_rank_retired = False
 _SCALING_OBSERVABILITY_PATHS = frozenset({"/health", "/is_scaling_elastic_ep"})
 
 
@@ -20,13 +23,22 @@ def set_scaling_elastic_ep(value):
     _scaling_elastic_ep = value
 
 
+def get_elastic_ep_rank_retired():
+    return _elastic_ep_rank_retired
+
+
+def set_elastic_ep_rank_retired(value):
+    global _elastic_ep_rank_retired
+    _elastic_ep_rank_retired = value
+
+
 class ScalingMiddleware:
     """
-    Middleware that checks if the model is currently scaling and
-    returns a 503 Service Unavailable response if it is.
+    Middleware that pauses serving while the model is scaling or after the
+    local external-LB rank has been retired.
 
-    This middleware applies to all HTTP requests and prevents
-    processing when the model is in a scaling state.
+    Health and scaling-status requests remain available so an external
+    orchestrator can observe the operation and remove a retired process.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -36,16 +48,20 @@ class ScalingMiddleware:
         if scope["type"] != "http":
             return self.app(scope, receive, send)
 
-        # Check global scaling state
+        # Keep observability available while serving is paused or this rank is
+        # waiting for the external orchestrator to remove its process.
+        rank_retired = get_elastic_ep_rank_retired()
         if (
-            get_scaling_elastic_ep()
+            (get_scaling_elastic_ep() or rank_retired)
             and scope["path"] not in _SCALING_OBSERVABILITY_PATHS
         ):
-            # Return 503 Service Unavailable response
+            error = (
+                "This data-parallel rank has been retired and is awaiting shutdown."
+                if rank_retired
+                else "The model is currently scaling. Please try again later."
+            )
             response = JSONResponse(
-                content={
-                    "error": "The model is currently scaling. Please try again later."
-                },
+                content={"error": error},
                 status_code=503,
             )
             return response(scope, receive, send)
