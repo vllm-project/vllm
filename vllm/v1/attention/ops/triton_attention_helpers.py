@@ -139,6 +139,42 @@ def init_softmax_M(
 
 
 @triton.jit
+def compute_window_segment_layout(
+    seq_len,
+    context_len,
+    TILE_SIZE: tl.constexpr,
+    NUM_SEGMENTS: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+):
+    """Per-sequence 3D segment layout scoped to the sliding-window range.
+
+    The default 3D layout splits ``[0, seq_len)`` into ``NUM_SEGMENTS``
+    equal tile slices. Under sliding-window attention only the last
+    ``SLIDING_WINDOW`` keys (plus the query span) are visible, so that
+    layout lights up just one or two segments and serializes the KV read.
+    This layout re-bases the split on the window range instead: tiles
+    ``[seg_tile_base, num_tiles)`` where ``seg_tile_base`` is derived from
+    the window lower bound of the sequence's FIRST query token, which
+    lower-bounds the allowed keys of every query row (causal or not).
+
+    Must be computed identically by ``kernel_unified_attention`` (which
+    decides the tile range each segment covers) and ``reduce_segments``
+    (which masks the segments it combines), so it is shared here.
+
+    Returns ``(seg_tile_base, tiles_per_segment, segment_span)`` where
+    ``segment_span = num_tiles - seg_tile_base`` and segment ``s`` covers
+    tiles ``[seg_tile_base + s * tiles_per_segment, seg_tile_base +
+    (s + 1) * tiles_per_segment)``.
+    """
+    num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+    first_allowed_key = tl.maximum(context_len - SLIDING_WINDOW + 1, 0)
+    seg_tile_base = first_allowed_key // TILE_SIZE
+    segment_span = num_tiles - seg_tile_base
+    tiles_per_segment = cdiv_fn(segment_span, NUM_SEGMENTS)
+    return seg_tile_base, tiles_per_segment, segment_span
+
+
+@triton.jit
 def compute_tile_loop_bounds(
     context_len,
     seq_len,
@@ -157,6 +193,7 @@ def compute_tile_loop_bounds(
     USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    seg_tile_base_or_0=0,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -171,8 +208,11 @@ def compute_tile_loop_bounds(
        only tiles that can contain an allowed key under SWA.
        For non-causal sequences, the window extends in both directions.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
-       segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+       segment's slice via ``(seg_tile_base + segm_idx * tiles_per_segment,
+       seg_tile_base + (segm_idx + 1) * tiles_per_segment)``.
+       ``seg_tile_base_or_0`` is non-zero only for the sliding-window
+       segment layout (``compute_window_segment_layout``); the default 0
+       keeps the original full-sequence layout.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -229,8 +269,9 @@ def compute_tile_loop_bounds(
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        segm_tile_lo = seg_tile_base_or_0 + segm_idx_or_0 * tiles_per_segment_or_0
+        loop_lo = max(segm_tile_lo, tile_start)
+        loop_hi = min(segm_tile_lo + tiles_per_segment_or_0, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end

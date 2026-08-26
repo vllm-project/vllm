@@ -8,7 +8,11 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops import triton_unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    _should_use_3d,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -42,6 +46,7 @@ def ref_paged_attn(
     scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -81,7 +86,14 @@ def ref_paged_attn(
         if soft_cap is not None and soft_cap > 0:
             attn = soft_cap * torch.tanh(attn / soft_cap)
         attn.masked_fill_(mask, float("-inf"))
-        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        if sinks is not None:
+            # A per-head sink is a virtual logit that joins the softmax
+            # denominator but contributes no value.
+            sink_col = sinks.float().view(-1, 1, 1).expand(attn.shape[0], query_len, 1)
+            attn = torch.cat([attn, sink_col], dim=-1)
+            attn = torch.softmax(attn, dim=-1)[..., :-1].to(v.dtype)
+        else:
+            attn = torch.softmax(attn, dim=-1).to(v.dtype)
         out = torch.einsum("hqk,khd->qhd", attn, v)
 
         outputs.append(out)
@@ -645,3 +657,300 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+# Small uniform query lengths (spec-decode verify/draft shapes) admitted to
+# the 3D split-KV kernel. Mixes cover: the DSpark drafter geometry
+# (32 query / 2 KV heads, sliding_window=1024, sinks), non-pow2
+# num_queries_per_kv (5, 1) whose q-blocks overlap by construction, KV
+# lengths that straddle the sliding-window boundary, and non-divisible
+# segment tails.
+SEQ_LENS_SMALL_Q_3D = [
+    [(4, 8192)],
+    [(3, 1328), (4, 1025), (2, 35), (1, 523)],
+    [(4, 1024), (4, 16)],
+]
+
+
+def _run_unified_attention_3d_case(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    use_sinks: bool,
+    seq_threshold_3D: int,
+    max_query_len_3d: int,
+    block_size: int = 16,
+    num_blocks: int = 2048,
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run ``unified_attention`` once and return (output, ref, segm_max).
+
+    ``segm_max`` is NaN-poisoned before the launch so callers can assert
+    which kernel path (2D vs 3D) actually executed.
+    """
+    set_random_seed(0)
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+    sinks = torch.randn(num_query_heads, dtype=torch.float32) if use_sinks else None
+
+    output = torch.empty_like(query)
+
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    # Sized per query TOKEN: the contract that admits q_len > 1 to 3D.
+    segm_buffer_tokens = seq_threshold_3D * max_query_len_3d
+    softmax_segm_output = torch.empty(
+        (
+            segm_buffer_tokens,
+            num_query_heads,
+            num_par_softmax_segments,
+            head_size_padded,
+        ),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.full(
+        (segm_buffer_tokens, num_query_heads, num_par_softmax_segments),
+        float("nan"),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (segm_buffer_tokens, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_tensor,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+        max_query_len_3d=max_query_len_3d,
+        sinks=sinks,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+        sinks=sinks,
+    )
+    return output, ref_output, softmax_segm_max
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS_SMALL_Q_3D)
+@pytest.mark.parametrize("num_heads", [(32, 2), (5, 1)])
+@pytest.mark.parametrize("sliding_window", [None, 1024])
+@pytest.mark.parametrize("use_sinks", [False, True])
+@torch.inference_mode()
+def test_triton_unified_attn_3d_small_q(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    sliding_window: int | None,
+    use_sinks: bool,
+) -> None:
+    """3D split-KV for small uniform spec-decode query lengths.
+
+    Guards the extension of the 3D kernel to ``max_seqlen_q <= 4`` and the
+    sliding-window segment layout: the 3D output must match both the
+    reference and the 2D kernel on identical inputs (the two paths are
+    numerically equivalent but not bitwise identical).
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    head_size = 128
+
+    output_3d, ref_output, segm_max = _run_unified_attention_3d_case(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        use_sinks=use_sinks,
+        seq_threshold_3D=8,
+        max_query_len_3d=4,
+    )
+    # The 3D path (not a silent 2D fallback) must actually have run:
+    # token 0 / head 0 / segment 0 is written whenever it does.
+    assert torch.isfinite(segm_max[0, 0, 0]).item()
+
+    output_2d, _, segm_max_2d = _run_unified_attention_3d_case(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        use_sinks=use_sinks,
+        seq_threshold_3D=0,
+        max_query_len_3d=4,
+    )
+    assert not torch.isfinite(segm_max_2d[:1, :1, :1]).any().item()
+
+    torch.testing.assert_close(output_3d, ref_output, atol=1.5e-2, rtol=1e-2)
+    torch.testing.assert_close(output_3d, output_2d, atol=1.5e-2, rtol=1e-2)
+
+
+def test_should_use_3d_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 2D/3D dispatch: q_len > 1 shapes are admitted only when the
+    caller raised ``max_query_len_3d`` AND every query token fits in the
+    per-segment buffers; everything else preserves the previous
+    single-token-decode-only behavior."""
+    monkeypatch.setattr(triton_unified_attention, "is_batch_invariant", False)
+    common = dict(
+        seq_threshold_3D=8,
+        num_par_softmax_segments=16,
+        segm_buffers_allocated=True,
+    )
+    # Previous behavior: single-token decode within the threshold.
+    assert _should_use_3d(
+        num_tokens=4,
+        num_seqs=4,
+        max_seqlen_q=1,
+        max_query_len_3d=1,
+        segm_buffer_tokens=8,
+        **common,
+    )
+    # q_len > 1 needs the caller opt-in...
+    assert not _should_use_3d(
+        num_tokens=8,
+        num_seqs=2,
+        max_seqlen_q=4,
+        max_query_len_3d=1,
+        segm_buffer_tokens=32,
+        **common,
+    )
+    # ... and token-capacity buffers.
+    assert _should_use_3d(
+        num_tokens=8,
+        num_seqs=2,
+        max_seqlen_q=4,
+        max_query_len_3d=4,
+        segm_buffer_tokens=32,
+        **common,
+    )
+    assert not _should_use_3d(
+        num_tokens=32,
+        num_seqs=8,
+        max_seqlen_q=4,
+        max_query_len_3d=4,
+        segm_buffer_tokens=8,
+        **common,
+    )
+    # Sequence-count threshold and prefill shapes still route to 2D.
+    assert not _should_use_3d(
+        num_tokens=9,
+        num_seqs=9,
+        max_seqlen_q=1,
+        max_query_len_3d=4,
+        segm_buffer_tokens=32,
+        **common,
+    )
+    assert not _should_use_3d(
+        num_tokens=129,
+        num_seqs=1,
+        max_seqlen_q=129,
+        max_query_len_3d=4,
+        segm_buffer_tokens=32,
+        **common,
+    )
+    # Missing buffers fail closed.
+    assert not _should_use_3d(
+        num_tokens=4,
+        num_seqs=4,
+        max_seqlen_q=1,
+        max_query_len_3d=1,
+        seq_threshold_3D=8,
+        num_par_softmax_segments=16,
+        segm_buffers_allocated=False,
+        segm_buffer_tokens=8,
+    )
+    # Batch invariance disables 3D regardless of shape.
+    monkeypatch.setattr(triton_unified_attention, "is_batch_invariant", True)
+    assert not _should_use_3d(
+        num_tokens=4,
+        num_seqs=4,
+        max_seqlen_q=1,
+        max_query_len_3d=1,
+        segm_buffer_tokens=8,
+        **common,
+    )
+
+
+def test_spec_decode_3d_method_gate() -> None:
+    """Only dflash/dspark raise the small-q 3D admission; eagle/eagle3/mtp
+    and unknown speculative methods fail closed to the single-token-decode
+    behavior (their verify passes stay byte-identical on the 2D kernel)."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.triton_attn import (
+        MAX_QUERY_LEN_3D,
+        spec_decode_max_query_len_3d,
+    )
+
+    class _Spec:
+        def __init__(self, method: str):
+            self.method = method
+
+        def use_dflash(self) -> bool:
+            return self.method == "dflash"
+
+        def use_dspark(self) -> bool:
+            return self.method == "dspark"
+
+    def cfg(method: str | None, num_spec: int = 3) -> SimpleNamespace:
+        return SimpleNamespace(
+            speculative_config=None if method is None else _Spec(method),
+            num_speculative_tokens=num_spec,
+        )
+
+    # No speculative decoding: unchanged single-token behavior.
+    assert spec_decode_max_query_len_3d(cfg(None)) == 1
+    # Fail-closed for eagle-family and anything unaudited.
+    for method in ("eagle", "eagle3", "mtp", "draft_model", "future_method"):
+        assert spec_decode_max_query_len_3d(cfg(method)) == 1
+    # Opt-in methods size for 1 bonus + N draft tokens...
+    assert spec_decode_max_query_len_3d(cfg("dflash")) == 4
+    assert spec_decode_max_query_len_3d(cfg("dspark")) == 4
+    assert spec_decode_max_query_len_3d(cfg("dspark", num_spec=2)) == 3
+    # ... capped at the kernel admission limit.
+    assert spec_decode_max_query_len_3d(cfg("dspark", num_spec=16)) == MAX_QUERY_LEN_3D

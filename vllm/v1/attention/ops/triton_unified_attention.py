@@ -21,6 +21,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
+    compute_window_segment_layout,
     find_seq_idx,
     init_softmax_M,
     load_qq_bias_tile,
@@ -289,6 +290,10 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # 3D only: re-base the segment layout on the sliding-window tile range
+    # (see compute_window_segment_layout). Set by the wrapper only when a
+    # sliding window is active without mm_prefix / R-SWA / chunked masking.
+    USE_SW_SEGMENTATION: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -319,11 +324,28 @@ def kernel_unified_attention(
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
 
+    context_len = seq_len - cur_batch_query_len
+
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
-            return
+        if USE_SW_SEGMENTATION:
+            seg_tile_base, tiles_per_segment, segment_span = (
+                compute_window_segment_layout(
+                    seq_len,
+                    context_len,
+                    TILE_SIZE,
+                    NUM_SEGMENTS_PER_SEQ,
+                    SLIDING_WINDOW,
+                )
+            )
+            if segm_idx * tiles_per_segment >= segment_span:
+                return
+        else:
+            seg_tile_base = 0
+            tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
+            if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+                return
     else:
+        seg_tile_base = 0
         tiles_per_segment = 0
 
     # Number of valid query rows in this block (used by TD descriptor
@@ -386,8 +408,6 @@ def kernel_unified_attention(
         score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
         value_scale = tl.load(v_scale)
 
-    context_len = seq_len - cur_batch_query_len
-
     if USE_ALIBI_SLOPES:
         alibi_slope = tl.load(
             alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
@@ -414,6 +434,7 @@ def kernel_unified_attention(
         USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        seg_tile_base_or_0=seg_tile_base,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -704,6 +725,11 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # Must mirror the segment layout used by kernel_unified_attention:
+    # the wrapper passes the same SLIDING_WINDOW / USE_SW_SEGMENTATION pair
+    # to both kernels.
+    SLIDING_WINDOW: tl.constexpr = 0,
+    USE_SW_SEGMENTATION: tl.constexpr = False,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -715,12 +741,22 @@ def reduce_segments(
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
-    # number of segments for this particular sequence
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
-
-    # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
+    # number of segments actually populated for this particular sequence
+    if USE_SW_SEGMENTATION:
+        cur_batch_query_len = tl.load(query_start_len_ptr + seq_idx + 1) - tl.load(
+            query_start_len_ptr + seq_idx
+        )
+        _, tiles_per_segment, segment_span = compute_window_segment_layout(
+            seq_len,
+            seq_len - cur_batch_query_len,
+            TILE_SIZE,
+            NUM_SEGMENTS_PER_SEQ,
+            SLIDING_WINDOW,
+        )
+        act_num_segments = cdiv_fn(segment_span, tiles_per_segment)
+    else:
+        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
+        act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
@@ -781,6 +817,52 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+# Largest max_seqlen_q admitted to the 3D (split-KV) kernel. Spec-decode
+# verify/draft batches run small uniform query lengths (1 bonus + N draft
+# tokens) that leave the 2D grid latency-bound exactly like plain decode;
+# larger (prefill-shaped) queries keep the 2D kernel.
+MAX_QUERY_LEN_3D = 4
+
+
+def _should_use_3d(
+    *,
+    num_tokens: int,
+    num_seqs: int,
+    max_seqlen_q: int,
+    max_query_len_3d: int,
+    seq_threshold_3D: int | None,
+    num_par_softmax_segments: int | None,
+    segm_buffers_allocated: bool,
+    segm_buffer_tokens: int,
+) -> bool:
+    """Decide between the 2D and 3D (split-KV) kernel launch.
+
+    Launch the 2D kernel if any of the following holds:
+
+    1. No intermediate tiled softmax buffers for the 3D kernel have been
+       allocated, or
+    2. ``max_seqlen_q`` exceeds the caller-admitted 3D query length
+       (1 unless the caller opts small uniform spec-decode shapes in via
+       ``max_query_len_3d``), or
+    3. the per-segment buffers cannot hold one row per query token
+       (callers sized for single-token decode admit only q_len == 1), or
+    4. the number of sequences exceeds the configured threshold, or
+    5. batch invariance is enabled.
+    """
+    if (
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or not segm_buffers_allocated
+        or is_batch_invariant
+    ):
+        return False
+    if max_seqlen_q > max(max_query_len_3d, 1):
+        return False
+    if max_seqlen_q > 1 and num_tokens > segm_buffer_tokens:
+        return False
+    return num_seqs <= seq_threshold_3D
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
@@ -821,6 +903,11 @@ def unified_attention(
     softmax_segm_output=None,
     softmax_segm_max=None,
     softmax_segm_expsum=None,
+    # Largest query length admitted to the 3D kernel. Callers that size the
+    # softmax_segm_* buffers per query TOKEN (not per sequence) may raise
+    # this to small uniform spec-decode shapes; ``None`` keeps the previous
+    # single-token-decode-only behavior.
+    max_query_len_3d: int | None = None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -929,6 +1016,23 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
+    use_3d = _should_use_3d(
+        num_tokens=q.shape[0],
+        num_seqs=num_seqs,
+        max_seqlen_q=max_seqlen_q,
+        max_query_len_3d=max_query_len_3d if max_query_len_3d is not None else 1,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        segm_buffers_allocated=(
+            softmax_segm_output is not None
+            and softmax_segm_max is not None
+            and softmax_segm_expsum is not None
+        ),
+        segm_buffer_tokens=(
+            softmax_segm_max.shape[0] if softmax_segm_max is not None else 0
+        ),
+    )
+
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
@@ -945,6 +1049,7 @@ def unified_attention(
     tuned_large_head = (
         head_size == 256
         and max_seqlen_q > 1
+        and not use_3d
         and num_queries_per_kv <= 16
         and current_platform.is_device_capability_family(100)
     )
@@ -1033,20 +1138,23 @@ def unified_attention(
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
 
-    # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
-    # 4. Batch invariance is enabled
-    use_3d = not (
-        seq_threshold_3D is None
-        or num_par_softmax_segments is None
-        or softmax_segm_output is None
-        or softmax_segm_max is None
-        or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
-        or is_batch_invariant
+    # Under sliding-window attention the default full-sequence 3D segment
+    # layout leaves most segments empty (only the window range has visible
+    # keys), so re-base the segments on the window tile range. Gated on the
+    # caller's ``max_query_len_3d`` opt-in (> 1) so that every non-opted
+    # launch (all pre-existing q = 1 decode) keeps the exact previous
+    # full-sequence layout. Excluded whenever another masking mode can
+    # widen the visible range past the window lower bound (mm_prefix
+    # bidirectional ranges, R-SWA global prefixes) or redefine it (chunked
+    # attention).
+    use_sw_segmentation = (
+        use_3d
+        and max_query_len_3d is not None
+        and max_query_len_3d > 1
+        and sliding_window_val > 0
+        and not use_mm_prefix
+        and not use_rswa
+        and chunk_lookback == -1
     )
 
     # The kernel signature is the same for 2D and 3D — only the launch
@@ -1163,6 +1271,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        USE_SW_SEGMENTATION=use_sw_segmentation,
         **launch_kwargs,
     )
 
@@ -1186,4 +1295,6 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            SLIDING_WINDOW=sliding_window_val,
+            USE_SW_SEGMENTATION=use_sw_segmentation,
         )
