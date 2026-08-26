@@ -41,7 +41,6 @@ class _HiSparseRequestState:
     pending_pages: dict[int, int] = field(default_factory=dict)
     transition_target_pages: int | None = None
     publication: _PendingPublication | None = None
-    indexer_ready: bool = False
 
 
 @dataclass
@@ -174,13 +173,13 @@ class HiSparseCoordinator:
         self,
         request_id: str,
         new_computed_blocks: Sequence[Sequence[KVCacheBlock]],
-        num_local_computed_tokens: int,
     ) -> None:
         has_cpu_history = self.needs_hot(new_computed_blocks)
         if self.resident_managers and has_cpu_history:
             state = self._get_request_state(request_id)
-            block_size = self.resident_managers[0].block_size
-            num_pages = num_local_computed_tokens // block_size
+            assert self.host_group_id is not None and self.host_manager is not None
+            num_host_blocks = len(new_computed_blocks[self.host_group_id])
+            num_pages = num_host_blocks * self.pages_per_host_block
             state.valid_pages.update(range(num_pages))
             state.ready_prefix_pages = max(num_pages, state.ready_prefix_pages)
         if not self.resident_managers or has_cpu_history:
@@ -446,11 +445,6 @@ class HiSparseCoordinator:
         state.ready_prefix_pages = num_pages
         self._publish_host_blocks_if_ready(request_id)
 
-    def complete_device_import(self, request_id: str) -> None:
-        """Record that NIXL populated this request's GPU indexer directly."""
-        if self.resident_managers:
-            self._get_request_state(request_id).indexer_ready = True
-
     def _plan_spill(
         self,
         request_id: str,
@@ -511,25 +505,11 @@ class HiSparseCoordinator:
         self.block_table_updates.clear()
         return updates
 
-    def build_offload_command(
-        self,
-        request_ids: Sequence[str],
-    ) -> SparseKVOffloadCommand | None:
+    def build_offload_command(self) -> SparseKVOffloadCommand | None:
         """Package residency decisions for the worker connector."""
         if not self.resident_managers:
             return None
-        indexer_ready_req_ids = tuple(
-            request_id
-            for request_id in sorted(request_ids)
-            if (state := self.request_states.get(request_id)) is not None
-            and state.indexer_ready
-        )
-        for request_id in indexer_ready_req_ids:
-            self.request_states[request_id].indexer_ready = False
-        command = SparseKVOffloadCommand(
-            page_transfers=self.spills_to_send,
-            indexer_ready_req_ids=indexer_ready_req_ids,
-        )
+        command = SparseKVOffloadCommand(page_transfers=self.spills_to_send)
         self.spills_to_send = []
         return command
 

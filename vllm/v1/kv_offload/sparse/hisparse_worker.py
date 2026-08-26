@@ -5,26 +5,21 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import (
     HISPARSE_HOT_SUFFIX,
-    HISPARSE_INDEXER_SOURCE_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
     get_unique_kv_cache_group_id,
 )
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.sparse.base import (
     SparseKVOffloadCommand,
@@ -41,16 +36,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
-def _expand_source_block_ids(
-    source_blocks: list[int], blocks_per_kv_block: int, count: int
-) -> np.ndarray:
-    """Expand logical host block IDs into kernel-page IDs."""
-    num_source_blocks = cdiv(count, blocks_per_kv_block)
-    logical_ids = np.asarray(source_blocks[:num_source_blocks], dtype=np.int32)
-    offsets = np.arange(blocks_per_kv_block, dtype=np.int32)
-    return (logical_ids[:, None] * blocks_per_kv_block + offsets).reshape(-1)[:count]
-
-
 def _get_hisparse_cache(
     forward_context: dict[str, Any], layer_name: str
 ) -> HiSparseCacheHandle:
@@ -65,35 +50,24 @@ class HiSparseWorker:
 
     def __init__(
         self,
-        cache_pairs: list[tuple[torch.Tensor, torch.Tensor]],
         cache_handles: list[HiSparseCacheHandle],
         hot_backing: torch.Tensor,
         max_num_reqs: int,
         max_model_len: int,
         max_concurrent_batches: int,
-        blocks_per_kv_block: int,
+        pages_per_host_block: int,
         host_num_blocks: int,
         source_group_id: int,
-        indexer_group_id: int,
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
-        indexer_source_layers: list[Any],
     ) -> None:
-        self.cache_pairs = cache_pairs
-        kernel_block_size = cache_pairs[0][0].shape[1]
-        self.kernel_block_size = kernel_block_size
-        self.blocks_per_kv_block = blocks_per_kv_block
+        resident = cache_handles[0].view
+        assert resident is not None
+        self.kernel_block_size = resident.block_size
+        self.pages_per_host_block = pages_per_host_block
         self.host_num_blocks = host_num_blocks
         self.source_group_id = source_group_id
-        self.indexer_group_id = indexer_group_id
         self.pinned_host_pools = pinned_host_pools
-        self.indexer_source_layers = indexer_source_layers
-        capacity = max_num_reqs * cdiv(max_model_len, kernel_block_size)
-        self.src_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
-        self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
-        self.src_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
-        self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
-        self._restore_staging_event: torch.Event | None = None
         self.cache_handles = cache_handles
         self.leader_runtimes = [
             cache.runtime for cache in cache_handles if cache.runtime.is_group_leader
@@ -136,7 +110,7 @@ class HiSparseWorker:
     ) -> None:
         entries = [cache.runtime.backup_caches() for cache in self.cache_handles]
         hot_caches, host_caches = zip(*entries)
-        self.host_caches = (*host_caches, *(source for source, _ in self.cache_pairs))
+        self.host_caches = host_caches
 
         layouts = []
         for hot_cache, host_cache in zip(hot_caches, host_caches):
@@ -242,8 +216,6 @@ class HiSparseWorker:
                 block_ids.extend(new_block_ids[self.source_group_id])
 
         self._pending_invalid_block_ids.extend(block_ids)
-        indexer_ready_req_ids = command.indexer_ready_req_ids if command else ()
-        self.restore_prefix(scheduler_output, indexer_ready_req_ids)
 
     def invalidate_blocks(
         self, block_ids: list[int], request_state_indices: torch.Tensor
@@ -303,7 +275,7 @@ class HiSparseWorker:
                         block_id * self.kernel_block_size + offsets
                     )
                 host_page = (
-                    transfer.destination_block_id * self.blocks_per_kv_block
+                    transfer.destination_block_id * self.pages_per_host_block
                     + transfer.destination_page_offset
                 )
                 dst[start:end] = host_page * self.kernel_block_size + offsets
@@ -357,75 +329,8 @@ class HiSparseWorker:
         return enqueued, completed
 
     def shutdown(self) -> None:
-        for layer in self.indexer_source_layers:
-            layer.hisparse_indexer_source = None
-        self.indexer_source_layers.clear()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
-        )
-
-    def restore_prefix(
-        self,
-        scheduler_output: SchedulerOutput,
-        indexer_ready_req_ids: Collection[str],
-    ) -> None:
-        if self._restore_staging_event is not None:
-            self._restore_staging_event.synchronize()
-        src = self.src_cpu.numpy()
-        dst = self.dst_cpu.numpy()
-        num_pairs = 0
-
-        def append_pairs(block_ids: tuple[list[int], ...], num_tokens: int) -> None:
-            nonlocal num_pairs
-            if num_tokens <= 0:
-                return
-            source_blocks = block_ids[self.source_group_id]
-            indexer_blocks = block_ids[self.indexer_group_id]
-            # The host manager returns logical scheduler blocks; the GPU
-            # indexer manager returns already-split kernel-page blocks.
-            count = min(
-                cdiv(num_tokens, self.kernel_block_size),
-                len(source_blocks) * self.blocks_per_kv_block,
-                len(indexer_blocks),
-            )
-            end = num_pairs + count
-            if end > src.size:
-                raise RuntimeError(
-                    "HiSparse prefix restore exceeded its preallocated block-ID "
-                    f"capacity ({end} > {src.size})."
-                )
-            src[num_pairs:end] = _expand_source_block_ids(
-                source_blocks, self.blocks_per_kv_block, count
-            )
-            dst[num_pairs:end] = indexer_blocks[:count]
-            num_pairs = end
-
-        for request in scheduler_output.scheduled_new_reqs:
-            if request.req_id not in indexer_ready_req_ids:
-                append_pairs(request.block_ids, request.num_computed_tokens)
-        cached = scheduler_output.scheduled_cached_reqs
-        for req_id, block_ids, num_tokens in zip(
-            cached.req_ids, cached.new_block_ids, cached.num_computed_tokens
-        ):
-            if req_id in cached.resumed_req_ids and req_id not in indexer_ready_req_ids:
-                assert block_ids is not None
-                append_pairs(block_ids, num_tokens)
-
-        if num_pairs == 0:
-            return
-        self.src_gpu[:num_pairs].copy_(self.src_cpu[:num_pairs], non_blocking=True)
-        self.dst_gpu[:num_pairs].copy_(self.dst_cpu[:num_pairs], non_blocking=True)
-        for source_cache, indexer_cache in self.cache_pairs:
-            torch.ops._C_cache_ops.hisparse_copy_blocks(
-                source_cache,
-                indexer_cache,
-                self.src_gpu[:num_pairs],
-                self.dst_gpu[:num_pairs],
-            )
-        if self._restore_staging_event is None:
-            self._restore_staging_event = torch.Event()
-        self._restore_staging_event.record(
-            torch.accelerator.current_stream(self.src_gpu.device)
         )
 
 
@@ -451,56 +356,10 @@ def init_hisparse_worker(
     source_group_id = get_unique_kv_cache_group_id(
         kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
     )
-    indexer_group_id = get_unique_kv_cache_group_id(
-        kv_cache_config, KVCacheGroupRole.HISPARSE_INDEXER
-    )
     source_group = groups[source_group_id]
-    indexer_group = groups[indexer_group_id]
-    source_specs = cast(UniformTypeKVCacheSpecs, source_group.kv_cache_spec)
-    indexer_specs = cast(UniformTypeKVCacheSpecs, indexer_group.kv_cache_spec)
     num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
     host_num_blocks = kv_cache_config.hisparse_host_num_blocks
     assert host_num_blocks is not None
-
-    cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
-    indexer_source_layers: list[Any] = []
-    for layer_name in indexer_group.layer_names:
-        cache_name = f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"
-        tensor_config = tensor_configs[cache_name]
-        source_spec = source_specs.kv_cache_specs[cache_name]
-        gpu_indexer_spec = indexer_specs.kv_cache_specs[layer_name]
-        assert isinstance(source_spec, AttentionSpec)
-        kernel_block_size = gpu_indexer_spec.num_states
-        source_block_size = source_spec.num_states
-        assert source_block_size % kernel_block_size == 0
-        blocks_per_kv_block = source_block_size // kernel_block_size
-        kernel_page_stride = (
-            gpu_indexer_spec.page_size_bytes // source_spec.dtype.itemsize
-        )
-        assert source_spec.page_size_bytes == (
-            blocks_per_kv_block * gpu_indexer_spec.page_size_bytes
-        )
-        source_cache = torch.as_strided(
-            raw_tensors[cache_name].view(source_spec.dtype),
-            size=(
-                host_num_blocks * blocks_per_kv_block,
-                kernel_block_size,
-                source_spec.head_size,
-            ),
-            stride=(
-                kernel_page_stride,
-                source_spec.head_size,
-                1,
-            ),
-        )
-        indexer_source_layer = forward_context[layer_name]
-        indexer_source_layer.hisparse_indexer_source = (
-            source_cache,
-            block_tables.slot_mappings[source_group_id],
-        )
-        indexer_source_layers.append(indexer_source_layer)
-        kv_caches[cache_name] = source_cache
-        cache_pairs.append((source_cache, kv_caches[layer_name]))
 
     resident_source_index = 0
     for group_id, group in enumerate(groups):
@@ -567,22 +426,21 @@ def init_hisparse_worker(
             cache_handles.append(cache_handle)
 
     block_size = source_group.kv_cache_spec.block_size
-    indexer_block_size = indexer_group.kv_cache_spec.block_size
-    assert block_size % indexer_block_size == 0
     if not cache_handles or hot_backing is None:
         raise RuntimeError("HiSparse worker found no hot-cache handles.")
+    resident = cache_handles[0].view
+    assert resident is not None
+    resident_block_size = resident.block_size
+    assert block_size % resident_block_size == 0
     return HiSparseWorker(
-        cache_pairs,
         cache_handles,
         hot_backing,
         max_num_reqs,
         max_model_len,
         max_concurrent_batches,
-        block_size // indexer_block_size,
+        block_size // resident_block_size,
         host_num_blocks,
         source_group_id,
-        indexer_group_id,
         device,
         pinned_host_pools,
-        indexer_source_layers,
     )
