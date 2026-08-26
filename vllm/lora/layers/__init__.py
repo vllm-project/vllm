@@ -20,7 +20,7 @@ from vllm.lora.layers.row_parallel_linear import (
     RowParallelLinearWithShardedLoRA,
 )
 from vllm.lora.layers.utils import LoRAMapping, LoRAMappingType
-from vllm.lora.layers.vocal_parallel_embedding import VocabParallelEmbeddingWithLoRA
+from vllm.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWithLoRA
 
 __all__ = [
     "BaseLayerWithLoRA",
