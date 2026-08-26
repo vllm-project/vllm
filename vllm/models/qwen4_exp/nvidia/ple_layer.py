@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -17,6 +18,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
+)
+from vllm.model_executor.layers.ple_offload_layer import (
+    PleOffloadLayer,
+    is_offload_process,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -205,7 +210,7 @@ def _get_ple_embedding_quant_method(
     return Qwen4ExpPLEFp8EmbeddingMethod()
 
 
-class Qwen4ExpNGramEmbedding(nn.Module):
+class Qwen4ExpNGramEmbedding(PleOffloadLayer):
     def __init__(
         self,
         config: Qwen4ExpTextConfig,
@@ -334,12 +339,15 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
         return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
-    def forward(
+    def forward_impl(  # type: ignore[override]
         self,
+        hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        del hidden_states
         input_ids = input_ids.reshape(-1).long()
         query_start_loc = query_start_loc.long()
         num_reqs = query_start_loc.numel() - 1
@@ -355,15 +363,35 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 f"at most {self.padded_buffer.shape[0]}"
             )
 
+        # The CPU-offload subprocess is never captured by a CUDA Graph, so its
+        # pack workspace can narrow to the actual maximum sequence length. The
+        # regular GPU path retains the static maximum-width buffer for capture.
+        if is_offload_process():
+            if num_reqs <= 0:
+                raise ValueError("PLE CPU offload requires at least one request")
+            max_seq_len = max(
+                1,
+                int((query_start_loc[1:] - query_start_loc[:-1]).max().item()),
+            )
+            # The model runner sends the CUDA-graph padded token count together
+            # with an unpadded query_start_loc. Stale padding must not enter the
+            # scatter: its clamped indices would overwrite the last real token.
+            num_valid_tokens = min(int(query_start_loc[-1].item()), num_tokens)
+        else:
+            max_seq_len = self.padded_buffer.shape[1]
+            num_valid_tokens = num_tokens
+
         positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs]
+        packed = self.padded_buffer[:num_reqs, :max_seq_len]
         packed.fill_(self.eos_token_id)
         request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
         request_indices.clamp_(max=num_reqs - 1)
         columns = (positions - query_start_loc[request_indices]).clamp(
             0, packed.shape[1] - 1
         )
-        packed[request_indices, columns] = input_ids
+        packed[request_indices[:num_valid_tokens], columns[:num_valid_tokens]] = (
+            input_ids[:num_valid_tokens]
+        )
         ngram_context = ngram_context[:num_reqs].to(
             device=input_ids.device, dtype=torch.long
         )
@@ -398,10 +426,44 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
             id_blocks.append(ids[request_indices, adjusted_columns])
         ngram_ids = torch.cat(id_blocks, dim=-1)
+        if output_buffer is not None:
+            output = output_buffer[:num_tokens, : self.embedding_dim]
+            torch.index_select(
+                self.ngram_embedding.weight,
+                0,
+                ngram_ids.reshape(-1),
+                out=output.reshape(-1, self.head_dim),
+            )
+            return output
         return self.ngram_embedding(ngram_ids).flatten(-2)
+
+    def get_offload_output_dtype(self, default_dtype: torch.dtype) -> torch.dtype:
+        """Keep quantized lookup results in their embedding storage dtype."""
+        embedding = getattr(self, "ngram_embedding", None)
+        weight = getattr(embedding, "weight", None)
+        if weight is not None:
+            return weight.dtype
+        if hasattr(self, "_offload_weight_scale"):
+            return torch.float8_e4m3fn
+        return default_dtype
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
+
+        # GPU workers retain only the global FP8 scale. The CPU process owns the
+        # embedding weight and returns its quantized lookup output unchanged.
+        if envs.VLLM_PLE_CPU_OFFLOAD and not is_offload_process():
+            retained: set[str] = set()
+            for name, loaded_weight in weights:
+                if name != "ngram_embedding.weight_scale":
+                    continue
+                self.register_buffer(
+                    "_offload_weight_scale",
+                    loaded_weight.to(device=torch.accelerator.current_accelerator()),
+                    persistent=False,
+                )
+                retained.add(name)
+            return retained
 
         persistent_buffers = {
             "layer_multipliers": self.layer_multipliers,
@@ -499,16 +561,20 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
-        self.ple_embedding: nn.Module = Qwen4ExpNGramEmbedding(
-            config,
-            int(config.ple_embed_dim),
-            self.ple_dense_layer_id,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.scheduler_config.max_num_seqs,
-            f"{prefix}.ple_embedding",
-            quant_config=quant_config,
-            params_dtype=model_config.dtype,
-        )
+        # The offload process builds the surrounding model on meta while
+        # this subtree must own real CPU storage. GPU workers skip the
+        # subclass constructor and retain only an empty IPC placeholder.
+        with torch.device(PleOffloadLayer.get_target_device()):
+            self.ple_embedding: nn.Module = Qwen4ExpNGramEmbedding(
+                config,
+                int(config.ple_embed_dim),
+                self.ple_dense_layer_id,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.scheduler_config.max_num_seqs,
+                f"{prefix}.ple_embedding",
+                quant_config=quant_config,
+                params_dtype=model_config.dtype,
+            )
         self.key_proj = ReplicatedLinear(
             int(config.ple_embed_dim),
             self.hc_hidden_size,
@@ -552,7 +618,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
     def _get_embedding_weight_scale(self) -> torch.Tensor | None:
         embedding = getattr(self.ple_embedding, "ngram_embedding", None)
-        return getattr(embedding, "weight_scale", None)
+        weight_scale = getattr(embedding, "weight_scale", None)
+        if weight_scale is not None:
+            return weight_scale
+        return getattr(self.ple_embedding, "_offload_weight_scale", None)
 
     def _dequantize_embeddings(
         self,
@@ -1115,7 +1184,12 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 f"token length, got {input_ids.shape[0]} and "
                 f"{hidden_states.shape[0]}"
             )
-        embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
+        embeddings = self.ple_embedding(
+            hidden_states,
+            input_ids,
+            query_start_loc,
+            ngram_context,
+        )
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
         key, _ = self.key_proj(embeddings)
         value, _ = self.value_proj(embeddings)

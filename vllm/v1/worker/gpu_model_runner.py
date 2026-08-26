@@ -190,6 +190,7 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+from vllm.v1.ple_offload.connector import PleOffloadConnector
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
@@ -1049,6 +1050,9 @@ class GPUModelRunner(
                 self.max_num_reqs, dtype=torch.int32
             )
         self.layerwise_nvtx_hooks_registered = False
+
+        # PLE Offload
+        self._ple_offload_connector: PleOffloadConnector | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -3774,6 +3778,23 @@ class GPUModelRunner(
                 num_reqs_padded,
             )
 
+    def _setup_ple_offload(self, ipc_addr: str) -> None:
+        """Initialize the runner-independent PLE offload connector."""
+        self._ple_offload_connector = PleOffloadConnector(
+            self.vllm_config,
+            self.get_model(),
+            self.device,
+            ipc_addr,
+            input_ids_source=self.input_ids.cpu,
+            query_start_loc_source=self.query_start_loc.cpu,
+            ngram_context_source=self.ngram_context.cpu,
+        )
+
+    def _release_ple_offload_outputs(self) -> None:
+        """Reset output flags after model forward consumes offloaded buffers."""
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.release_outputs()
+
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4754,6 +4775,15 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
+            # Queue PLE staging before the GPU reaches the PLE layer so CPU
+            # lookup and the preceding GPU layers can overlap.
+            if self._ple_offload_connector is not None:
+                with record_function_or_nullcontext("launch_ple_offload"):
+                    self._ple_offload_connector.prepare_forward(
+                        num_reqs,
+                        num_tokens_padded,
+                        dummy_run=False,
+                    )
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4761,6 +4791,7 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            self._release_ple_offload_outputs()
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -6393,6 +6424,12 @@ class GPUModelRunner(
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
+            if self._ple_offload_connector is not None:
+                self._ple_offload_connector.prepare_forward(
+                    num_reqs,
+                    num_tokens_padded,
+                    dummy_run=True,
+                )
             model_kwargs = self._init_model_kwargs()
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
@@ -6472,6 +6509,7 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                self._release_ple_offload_outputs()
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -6889,6 +6927,10 @@ class GPUModelRunner(
         memory is reclaimable when running in the same process."""
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
+
+        if self._ple_offload_connector is not None:
+            self._ple_offload_connector.close()
+            self._ple_offload_connector = None
 
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
