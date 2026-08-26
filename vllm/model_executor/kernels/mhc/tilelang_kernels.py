@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import math
 from functools import cache
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,13 @@ if TYPE_CHECKING or current_platform.is_cuda_alike():
             "tilelang is required for mhc but is not installed. Install it with "
             "`pip install tilelang`."
         )
+    # Preload flashinfer.comm so its CudaRTLibrary binds the real libcudart
+    # (via find_loaded_library) before tilelang imports libcudart_stub.so,
+    # which otherwise maps at a lower address and shadows the real libcudart,
+    # breaking flashinfer all-reduce on sm100. Import order is load-bearing;
+    # this must run before `import tilelang`.
+    with contextlib.suppress(Exception):
+        import flashinfer.comm  # noqa: F401
     import tilelang
     import tilelang.language as T
 else:
@@ -186,9 +194,6 @@ def mhc_pre_big_fuse_tilelang(
 
         if ENABLE_PDL:
             T.pdl_trigger()
-
-
-# Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
 @tilelang.jit(

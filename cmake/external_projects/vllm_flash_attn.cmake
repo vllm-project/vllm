@@ -38,8 +38,12 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG f3e1a4f74c99145c0717709860bf765de1703779
+          # PR #172 (rope dim / qk_rope=0) head lives on the JaredforReal fork's
+          # rope_dim branch; unreachable from a plain clone of
+          # vllm-project/flash-attention (only via refs/pull/*), so point at fork.
+          # https://github.com/vllm-project/flash-attention/pull/172
+          GIT_REPOSITORY https://github.com/JaredforReal/flash-attention.git
+          GIT_TAG 2b84100f50e1d2a8726a86c86d14c2f9c9e5a67c
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

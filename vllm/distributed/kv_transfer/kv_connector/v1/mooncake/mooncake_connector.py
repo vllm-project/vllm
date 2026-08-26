@@ -54,6 +54,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -1675,8 +1676,12 @@ class MooncakeConnectorWorker:
                 )
                 continue
             if isinstance(layer_spec, MambaSpec):
-                conv, _ = cache_or_caches
-                cache_list = [conv]
+                # Mamba conv+ssm state is packed into a single page-view
+                # tensor [num_blocks, 1, 1, page_size_bytes] (conv at offset 0,
+                # recurrent state after). Register the whole page so the full
+                # state transfers per block; the decode side recomputes the
+                # last token on top of it.
+                cache_list = [cache_or_caches]
             else:
                 # K and V are packed into one blocks-first tensor per layer,
                 # so each layer registers as a single region.
@@ -1694,7 +1699,12 @@ class MooncakeConnectorWorker:
                 block_len = cache.stride(0) * cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+                if isinstance(layer_spec, KpoolTailSpec):
+                    # The tail is a strided view of the padded indexer tensor,
+                    # so block addresses retain the physical stride. Only the
+                    # transferred K/score half uses the unpadded page length.
+                    kv_block_len = layer_spec.unpadded_page_size_bytes // 2
+                elif isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
                     kv_block_len = layer_spec.page_size_bytes
                 elif self.transfer_topo.virtually_split_kv_in_blocks and not isinstance(
                     layer_spec, MambaSpec

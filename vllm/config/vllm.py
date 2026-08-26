@@ -74,6 +74,8 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "Glm5NextForCausalLM",
+        "Glm5NextForConditionalGeneration",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
@@ -1306,6 +1308,9 @@ class VllmConfig:
                     "KimiLinearForCausalLM",
                     "MiniMaxM3SparseForCausalLM",
                     "MiniMaxM3SparseForConditionalGeneration",
+                    "Glm5NextForCausalLM",
+                    "Glm5NextForConditionalGeneration",
+                    "Glm5NextMTPModel",
                 )
                 for a in self.model_config.architectures
             )

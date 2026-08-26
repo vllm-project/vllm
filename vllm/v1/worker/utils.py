@@ -17,6 +17,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -51,7 +52,22 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
 
 
-@triton.jit
+def compressed_kernel_block_size(spec: AttentionSpec) -> int:
+    """Kernel page of a compressed cache (storage_block_size != block_size),
+    in storage entries.
+
+    Storage blocks up to DeepGEMM paged-MQA's largest supported page are used
+    natively; larger blocks are virtually split into the largest supported page
+    that tiles them.
+    """
+    storage = spec.storage_block_size
+    max_page, min_page = max(PAGED_MQA_PAGE_SIZES), min(PAGED_MQA_PAGE_SIZES)
+    if storage <= max_page:
+        return storage
+    return max_page if storage % max_page == 0 else min_page
+
+
+@triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_block_strides_ptr,
@@ -112,6 +128,7 @@ class KVBlockZeroer:
         kernel_block_sizes: list[int],
         cache_dtype: str,
         static_forward_context: dict[str, Any],
+        num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
@@ -146,7 +163,6 @@ class KVBlockZeroer:
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             assert spec.block_size % kernel_bs == 0
-            ratio = spec.block_size // kernel_bs
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_bs,
                 spec.num_kv_heads,
@@ -165,10 +181,18 @@ class KVBlockZeroer:
                     continue
                 seen_ptrs.add(dp)
 
+                # Derive kernel pages per logical block from each allocation;
+                # layers in one group can use different page counts.
+                num_kernel_blocks = kv.shape[block_dim]
+                assert num_kernel_blocks % num_blocks == 0, (
+                    f"{layer_name}: {num_kernel_blocks} kernel blocks is not a "
+                    f"multiple of {num_blocks} logical blocks"
+                )
+                ratio = num_kernel_blocks // num_blocks
+
                 el = kv.element_size()
                 block_stride_bytes = kv.stride(block_dim) * el
                 assert block_stride_bytes % 4 == 0
-                assert kv.shape[block_dim] % ratio == 0
                 outer_dims = [
                     d
                     for d in range(block_dim)
@@ -257,11 +281,25 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
-        kv_cache_spec_builder = (
-            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-            if kernel_block_size is not None
-            else self.kv_cache_spec
-        )
+        # Compressed MLA is addressed at pool-page granularity. Rescale to the
+        # pool page so block tables, slot mappings, and paged-MQA metadata stay
+        # aligned with storage.
+        if kernel_block_size is None:
+            kv_cache_spec_builder = self.kv_cache_spec
+        elif (
+            isinstance(self.kv_cache_spec, AttentionSpec)
+            and self.kv_cache_spec.storage_block_size != self.kv_cache_spec.block_size
+        ):
+            compress_ratio = self.kv_cache_spec.block_size // (
+                self.kv_cache_spec.storage_block_size
+            )
+            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
+                compressed_kernel_block_size(self.kv_cache_spec) * compress_ratio
+            )
+        else:
+            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
+                kernel_block_size
+            )
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
@@ -281,6 +319,15 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        # Expose the kernel block size to builders that need to translate the
+        # shared (kernel-granularity) block_table into their own addressing
+        # (e.g. the kpool indexer, which shares the MLA's 64-token table but is
+        # addressed at storage_block_size pool-page granularity).
+        if kernel_block_size is not None:
+            for _b in self.metadata_builders:
+                # Dynamic attribute: the kpool indexer builder reads it via
+                # getattr to translate the shared block_table.
+                _b.kernel_block_size = kernel_block_size  # type: ignore[attr-defined]
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id

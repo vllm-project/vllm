@@ -128,6 +128,21 @@ class KVCacheSpec:
     block_size: int
 
     @property
+    def participates_in_prefix_caching(self) -> bool:
+        """Whether this spec's group participates in prefix caching.
+
+        Co-owned / transient groups that are not real block allocators (e.g.
+        GLM-5.3-Flash kpool tail, a 1-block/req circular scratch buffer whose
+        content is per-request and overwritten in place) opt out by returning
+        ``False``. The structural prefix-caching machinery (the global
+        ``cache_config.block_size`` min, the hybrid divisibility assert, and the
+        ``attention_groups`` hit-lookup) then ignores them, so a non-shareable
+        group can neither drag the block size down nor cap the hybrid hit at 0.
+        Their manager still allocates/frees blocks normally.
+        """
+        return True
+
+    @property
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
@@ -720,6 +735,57 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class KpoolTailSpec(SlidingWindowSpec):
+    """GLM-5.3-Flash kpool indexer tail cache: a paged circular buffer holding the
+    in-progress (incomplete) kpool's raw K + gate score.
+
+    One block of ``block_size`` (== ``index_kpool``) slots per request,
+    overwritten circularly by ``pos % kpool`` as decode/spec-decode advances.
+    Prefill writes the trailing incomplete pool's raw K+gate here (instead of
+    discarding it) so the boundary pool can be compressed correctly on the
+    decode side, including across PD disaggregation. Raw K is packed as the "K"
+    half of each block and the gate score as the "V" half
+    (``head_size_v == head_size``).
+
+    The SW base is reused only for its ``real_page_size_bytes`` formula and the
+    admission-cap wiring; the manager is swapped to ``KpoolTailManager`` via the
+    registry, because ``SlidingWindowManager``'s mid-pool eviction would destroy
+    the in-progress pool. Admission is fixed at 1 block/req regardless of
+    ``sliding_window``/``max_in_flight_tokens``: the in-progress pool is always
+    <= kpool tokens (completed pools are flushed), so MTP > kpool still fits in
+    one circularly-reused block.
+    """
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        # The in-progress pool is <= kpool tokens == 1 block, circularly reused.
+        # No growth, no window sliding -> exactly one block per request, even
+        # under spec-decode (MTP > kpool): completed pools flush mid-step.
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # One block per request for the request's whole lifetime; caps the
+        # per-request block_table buffer the runner sizes via this method.
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
+
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        # The tail is a per-request circular scratch buffer (1 block/req,
+        # overwritten by ``pos % kpool``), not a real block allocator: its
+        # contents are transient and never shareable across requests. Exclude
+        # it from the structural prefix-caching machinery so it neither drags
+        # the global block size down to ``kpool`` nor caps the hybrid hit at 0.
+        # ``KpoolTailManager`` already no-ops the manager-level cache hooks.
+        return False
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
@@ -730,15 +796,18 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
 
     @property
-    def page_size_bytes(self) -> int:
-        page_size = sum(
+    def real_page_size_bytes(self) -> int:
+        return sum(
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
+
+    @property
+    def page_size_bytes(self) -> int:
         if self.page_size_padded is not None:
-            assert self.page_size_padded >= page_size
+            assert self.page_size_padded >= self.real_page_size_bytes
             return self.page_size_padded
-        return page_size
+        return self.real_page_size_bytes
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
@@ -857,6 +926,15 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
 
     kv_cache_specs: dict[str, KVCacheSpec]
+
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        # A uniform group shares one block allocator; if any member is a
+        # non-shareable scratch spec (e.g. KpoolTailSpec), the group's blocks
+        # can't be reused across requests, so the whole group opts out.
+        return all(
+            s.participates_in_prefix_caching for s in self.kv_cache_specs.values()
+        )
 
     @property
     def page_size_bytes(self) -> int:

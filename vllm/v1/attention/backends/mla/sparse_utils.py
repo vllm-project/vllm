@@ -215,7 +215,14 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    # When return_valid_counts, the kernel scatters valid entries to a
+    # contiguous prefix [0, valid_count) and leaves the tail unwritten, so
+    # pre-fill -1 there. flash_mla_sparse_fwd then bounds attention to
+    # [:topk_length] == exactly the valid set (no dropped tokens).
+    if return_valid_counts:
+        out = torch.full_like(token_indices_c, -1)
+    else:
+        out = torch.empty_like(token_indices_c)
 
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
@@ -253,7 +260,7 @@ def triton_convert_req_index_to_global_index(
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
         single_tile,
-        False,  # COMPACT_TO_FRONT: keep input column == output column
+        return_valid_counts,  # COMPACT_TO_FRONT: scatter valid to [0,count)
         # DCP disabled (no-op de-interleave)
         1,
         0,
