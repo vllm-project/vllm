@@ -205,16 +205,6 @@ class SimpleCPUOffloadScheduler:
         self._store_event_pending_counts: dict[int, int] = {}
 
     @staticmethod
-    def compute_num_cpu_blocks(
-        kv_cache_configs: list["KVCacheConfig"],
-        cpu_capacity_bytes: int,
-    ) -> int:
-        """Return the offload block count aligned across worker configs."""
-        return compute_num_offload_blocks_from_configs(
-            kv_cache_configs, cpu_capacity_bytes
-        )
-
-    @staticmethod
     def _derive_cpu_config(
         gpu_config: "KVCacheConfig",
         cpu_capacity_bytes: int,

@@ -17,60 +17,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def repr_kv_cache_tensor(value: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-    assert isinstance(value, torch.Tensor | list)
-    return value if isinstance(value, torch.Tensor) else value[0]
-
-
-def build_unique_gpu_block_views(
-    kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
-    num_blocks: int,
-    device: torch.device,
-) -> dict[str, torch.Tensor]:
-    """Build [num_blocks, block_bytes] views used for offload copy sizing."""
-    unique_gpu_caches: dict[str, torch.Tensor] = {}
-    seen: set[tuple[torch.device, int]] = set()
-    for name, value in kv_caches.items():
-        tensor = repr_kv_cache_tensor(value)
-        storage = tensor.untyped_storage()
-        key = (tensor.device, storage.data_ptr())
-        if key in seen:
-            continue
-        seen.add(key)
-
-        physical_per_block, remainder = divmod(tensor.shape[0], num_blocks)
-        assert remainder == 0, (
-            f"KV cache {name!r} has {tensor.shape[0]} physical blocks, which "
-            f"is not divisible by {num_blocks} scheduler blocks"
-        )
-        block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
-        raw = torch.empty(0, dtype=torch.int8, device=device).set_(storage)
-        regions = raw.view(-1, num_blocks, block_bytes)
-        for idx, region in enumerate(regions):
-            key_name = name if len(regions) == 1 else f"{name}.{idx}"
-            unique_gpu_caches[key_name] = region
-    return unique_gpu_caches
-
-
-def total_bytes_per_block_from_views(
-    unique_gpu_caches: dict[str, torch.Tensor],
-) -> int:
-    per_tensor_bpb = [
-        t.stride(0) * t.element_size() for t in unique_gpu_caches.values()
-    ]
-    return sum(per_tensor_bpb)
-
-
-def compute_total_bytes_per_block_from_kv_caches(
-    kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
-    num_blocks: int,
-    device: torch.device,
-) -> int:
-    """Compute per-block offload bytes from live GPU KV tensors."""
-    unique_gpu_caches = build_unique_gpu_block_views(kv_caches, num_blocks, device)
-    return total_bytes_per_block_from_views(unique_gpu_caches)
-
-
 def local_num_offload_blocks(capacity_bytes: int, total_bytes_per_block: int) -> int:
     assert total_bytes_per_block > 0
     return max(1, capacity_bytes // total_bytes_per_block)

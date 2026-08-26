@@ -44,6 +44,9 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.simple_kv_offload.sizing import (
+    compute_num_offload_blocks_from_configs,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1849,11 +1852,9 @@ def test_compute_num_cpu_blocks_uses_heaviest_worker() -> None:
     light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
     heavy = _make_kv_cache_config(num_gpu_blocks, num_groups=2)
 
-    heavy_only = SimpleCPUOffloadScheduler.compute_num_cpu_blocks([heavy], cpu_capacity)
-    aligned = SimpleCPUOffloadScheduler.compute_num_cpu_blocks(
-        [light, heavy], cpu_capacity
-    )
-    light_only = SimpleCPUOffloadScheduler.compute_num_cpu_blocks([light], cpu_capacity)
+    heavy_only = compute_num_offload_blocks_from_configs([heavy], cpu_capacity)
+    aligned = compute_num_offload_blocks_from_configs([light, heavy], cpu_capacity)
+    light_only = compute_num_offload_blocks_from_configs([light], cpu_capacity)
 
     assert aligned == heavy_only
     assert aligned < light_only
@@ -1875,9 +1876,7 @@ def test_scheduler_uses_worker_kv_cache_configs() -> None:
         worker_kv_cache_configs=[light, heavy],
     )
 
-    expected = SimpleCPUOffloadScheduler.compute_num_cpu_blocks(
-        [light, heavy], cpu_capacity
-    )
+    expected = compute_num_offload_blocks_from_configs([light, heavy], cpu_capacity)
     assert sched.num_cpu_blocks == expected
     assert sched.num_cpu_blocks == 2
 
