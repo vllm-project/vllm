@@ -1645,20 +1645,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-                if self.supports_mm_inputs and self.lora_config is not None:
-                    set_active_mm_loras(
-                        model=self.model,
-                        lora_manager=self.lora_manager,
-                        encoder_cache=self.encoder_cache,
-                        req_id_to_index=self.req_states.req_id_to_index,
-                        lora_state=self.lora_state,
-                        scheduled_encoder_inputs=scheduled_encoder_inputs,
-                    )
                 with self.ec_connector.maybe_get_output(
                     scheduler_output
                 ) as ec_connector_output:
+                    mm_lora_activation = None
+                    if self.supports_mm_inputs and self.lora_config is not None:
+                        mm_lora_activation = set_active_mm_loras(
+                            model=self.model,
+                            lora_manager=self.lora_manager,
+                            encoder_cache=self.encoder_cache,
+                            req_id_to_index=self.req_states.req_id_to_index,
+                            lora_state=self.lora_state,
+                            scheduled_encoder_inputs=scheduled_encoder_inputs,
+                        )
                     inputs_embeds = self.model_state.prepare_inputs_embeds(
-                        scheduled_encoder_inputs, input_batch, self.req_states
+                        scheduled_encoder_inputs,
+                        input_batch,
+                        self.req_states,
+                        mm_lora_activation=mm_lora_activation,
                     )
             if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None

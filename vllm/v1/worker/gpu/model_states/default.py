@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,9 @@ from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.mm.lora import MMEncoderLoraActivation
 
 
 class DefaultModelState(ModelState):
@@ -99,13 +102,16 @@ class DefaultModelState(ModelState):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
+        mm_lora_activation: "MMEncoderLoraActivation | None" = None,
     ) -> torch.Tensor:
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
 
         if self.supports_mm_inputs:
-            self.execute_mm_encoder(scheduled_encoder_inputs)
+            self.execute_mm_encoder(
+                scheduled_encoder_inputs, mm_lora_activation=mm_lora_activation
+            )
 
             mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
             if self.mm_pruner is not None and mm_embeds:

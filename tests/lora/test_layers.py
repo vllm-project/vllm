@@ -673,6 +673,72 @@ def test_linear_replicated(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_linear_replicated_supports_independent_mapping_lengths(
+    default_vllm_config,
+    dist_init,
+    device,
+) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    set_random_seed(0)
+    max_loras = 2
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=8,
+        lora_dtype=torch.float16,
+    )
+    id_to_index = [1, None]
+
+    for num_tokens in (5, 8):
+        punica_wrapper = get_punica_wrapper(
+            num_tokens,
+            1,
+            device,
+            lora_config=lora_config,
+        )
+        linear = ReplicatedLinear(
+            32,
+            32,
+            bias=False,
+            params_dtype=torch.float16,
+            prefix=f"layer_{num_tokens}",
+        )
+        linear.weight.data = torch.rand_like(linear.weight.data)
+        lora_linear = ReplicatedLinearWithLoRA(linear)
+        lora_linear.create_lora_weights(max_loras, lora_config)
+        lora_linear.set_mapping(punica_wrapper)
+        lora_dict, _ = populate_loras(
+            id_to_index,
+            layer=lora_linear,
+            layer_weights=linear.weight,
+        )
+
+        inputs = torch.rand(num_tokens, 32, dtype=torch.float16, device=device)
+        mapping = LoRAMapping(
+            (1,) * num_tokens,
+            (1,),
+            is_prefill=True,
+        )
+        punica_wrapper.update_metadata(
+            mapping,
+            id_to_index,
+            max_loras,
+            512,
+        )
+
+        result = lora_linear(inputs)[0]
+        lora = lora_dict[1]
+        expected = linear(inputs)[0]
+        expected += inputs @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
+
+        rtol, atol = TOLERANCES[result.dtype]
+        torch.testing.assert_close(result, expected, rtol=rtol, atol=atol)
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("orientation", ["row", "column"])
 @pytest.mark.parametrize("fully_shard", [True, False])

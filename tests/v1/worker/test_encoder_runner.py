@@ -9,13 +9,14 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import numpy as np
 import pytest
 import torch
 
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
@@ -224,16 +225,24 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
     cache = EncoderCache()
     state = _model_state(cache)
     embedding = torch.ones(2, HIDDEN)
+    mm_item = MagicMock()
     # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
     state.encoder_runner.prepare_mm_inputs.return_value = (
         ["hash0"],
-        [("image", MagicMock())],
+        [("image", mm_item)],
     )
     state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+    mm_lora_activation = MagicMock()
 
-    ModelState.execute_mm_encoder(state, {"req0": [0]})
+    ModelState.execute_mm_encoder(
+        state, {"req0": [0]}, mm_lora_activation=mm_lora_activation
+    )
 
     assert cache.encoder_outputs == {"hash0": embedding}
+    state.encoder_runner.execute_mm_encoder.assert_called_once_with(
+        [("image", mm_item)],
+        mm_lora_activation=mm_lora_activation,
+    )
     state.encoder_runner.gather_mm_embeddings.assert_not_called()
 
 
@@ -309,6 +318,62 @@ def test_execute_mm_encoder_skips_encoder_for_prompt_embeds_only():
 
     state.encoder_runner.execute_mm_encoder.assert_not_called()
     assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_execute_mm_encoder_updates_lora_mapping_per_item():
+    model = MagicMock()
+    model.embed_multimodal.side_effect = lambda input_features: [input_features[0]]
+    runner = EncoderRunner(
+        model=model,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=EncoderCache(),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    field = MultiModalBatchedField()
+    mm_kwargs = [
+        (
+            "audio",
+            MultiModalKwargsItem(
+                {
+                    "input_features": MultiModalFieldElem(
+                        data=torch.full((length, HIDDEN), value), field=field
+                    )
+                }
+            ),
+        )
+        for length, value in ((2, 1.0), (3, 2.0))
+    ]
+    mm_lora_activation = MagicMock()
+    mm_lora_activation.requires_per_item = True
+    mm_lora_activation.num_items = 2
+
+    outputs = runner.execute_mm_encoder(
+        mm_kwargs, mm_lora_activation=mm_lora_activation
+    )
+
+    assert model.embed_multimodal.call_count == 2
+    assert [output.shape[0] for output in outputs] == [2, 3]
+    assert mm_lora_activation.activate.call_args_list == [
+        call((0,)),
+        call((1,)),
+    ]
+
+
+def test_execute_mm_encoder_rejects_misaligned_per_item_lora_mapping():
+    runner = _make_runner([], [])
+    mm_lora_activation = MagicMock()
+    mm_lora_activation.requires_per_item = True
+    mm_lora_activation.num_items = 0
+
+    with pytest.raises(ValueError, match="must match the multimodal encoder inputs"):
+        runner.execute_mm_encoder(
+            [("image", MultiModalKwargsItem.dummy())],
+            mm_lora_activation=mm_lora_activation,
+        )
+
+    mm_lora_activation.activate.assert_not_called()
 
 
 def test_encoder_timing_stats_registry():

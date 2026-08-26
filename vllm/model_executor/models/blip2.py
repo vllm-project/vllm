@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Literal, TypeAlias, cast
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -76,6 +77,30 @@ Blip2ImageInputs: TypeAlias = Blip2ImagePixelInputs | Blip2ImageEmbeddingInputs
 """Alias for supported BLIP-2 image input types."""
 
 
+def _make_qformer_linear(
+    input_size: int,
+    output_size: int,
+    *,
+    bias: bool = True,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+    use_vllm_linear: bool,
+) -> nn.Linear:
+    if use_vllm_linear:
+        return cast(
+            nn.Linear,
+            ReplicatedLinear(
+                input_size,
+                output_size,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=prefix,
+                return_bias=False,
+            ),
+        )
+    return nn.Linear(input_size, output_size, bias=bias)
+
+
 class Blip2QFormerMultiHeadAttention(nn.Module):
     def __init__(
         self,
@@ -85,6 +110,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         cache_config: CacheConfig | None,
         is_cross_attention: bool = False,
         prefix: str = "",
+        use_vllm_linear: bool = False,
     ) -> None:
         super().__init__()
 
@@ -101,13 +127,31 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.scaling = self.attention_head_size**-0.5
 
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.query = _make_qformer_linear(
+            config.hidden_size,
+            self.all_head_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.query",
+            use_vllm_linear=use_vllm_linear,
+        )
         if is_cross_attention:
             kv_hidden_size = config.encoder_hidden_size
         else:
             kv_hidden_size = config.hidden_size
-        self.key = nn.Linear(kv_hidden_size, self.all_head_size)
-        self.value = nn.Linear(kv_hidden_size, self.all_head_size)
+        self.key = _make_qformer_linear(
+            kv_hidden_size,
+            self.all_head_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.key",
+            use_vllm_linear=use_vllm_linear,
+        )
+        self.value = _make_qformer_linear(
+            kv_hidden_size,
+            self.all_head_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.value",
+            use_vllm_linear=use_vllm_linear,
+        )
 
         self.position_embedding_type = getattr(
             config, "position_embedding_type", "absolute"
@@ -159,10 +203,23 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 
 
 class Blip2QFormerSelfOutput(nn.Module):
-    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: Blip2QFormerConfig,
+        *,
+        quant_config: QuantizationConfig | None,
+        prefix: str = "",
+        use_vllm_linear: bool = False,
+    ) -> None:
         super().__init__()
 
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dense = _make_qformer_linear(
+            config.hidden_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense",
+            use_vllm_linear=use_vllm_linear,
+        )
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
@@ -186,6 +243,7 @@ class Blip2QFormerAttention(nn.Module):
         cache_config: CacheConfig | None,
         is_cross_attention: bool = False,
         prefix: str = "",
+        use_vllm_linear: bool = False,
     ) -> None:
         super().__init__()
 
@@ -195,9 +253,15 @@ class Blip2QFormerAttention(nn.Module):
             cache_config=cache_config,
             is_cross_attention=is_cross_attention,
             prefix=f"{prefix}.attention",
+            use_vllm_linear=use_vllm_linear,
         )
 
-        self.output = Blip2QFormerSelfOutput(config, prefix=f"{prefix}.output")
+        self.output = Blip2QFormerSelfOutput(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output",
+            use_vllm_linear=use_vllm_linear,
+        )
 
     def forward(
         self,
@@ -214,10 +278,23 @@ class Blip2QFormerAttention(nn.Module):
 
 
 class Blip2QFormerIntermediate(nn.Module):
-    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: Blip2QFormerConfig,
+        *,
+        quant_config: QuantizationConfig | None,
+        prefix: str = "",
+        use_vllm_linear: bool = False,
+    ) -> None:
         super().__init__()
 
-        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.dense = _make_qformer_linear(
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense",
+            use_vllm_linear=use_vllm_linear,
+        )
         self.intermediate_act_fn = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -227,10 +304,23 @@ class Blip2QFormerIntermediate(nn.Module):
 
 
 class Blip2QFormerOutput(nn.Module):
-    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: Blip2QFormerConfig,
+        *,
+        quant_config: QuantizationConfig | None,
+        prefix: str = "",
+        use_vllm_linear: bool = False,
+    ) -> None:
         super().__init__()
 
-        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.dense = _make_qformer_linear(
+            config.intermediate_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense",
+            use_vllm_linear=use_vllm_linear,
+        )
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
@@ -254,6 +344,7 @@ class Blip2QFormerLayer(nn.Module):
         cache_config: CacheConfig | None,
         layer_idx: int,
         prefix: str = "",
+        use_vllm_linear: bool = False,
     ) -> None:
         super().__init__()
 
@@ -264,6 +355,7 @@ class Blip2QFormerLayer(nn.Module):
             quant_config=quant_config,
             cache_config=cache_config,
             prefix=f"{prefix}.attention",
+            use_vllm_linear=use_vllm_linear,
         )
 
         self.layer_idx = layer_idx
@@ -275,15 +367,24 @@ class Blip2QFormerLayer(nn.Module):
                 cache_config=cache_config,
                 is_cross_attention=True,
                 prefix=f"{prefix}.crossattention",
+                use_vllm_linear=use_vllm_linear,
             )
             self.has_cross_attention = True
         else:
             self.has_cross_attention = False
 
         self.intermediate_query = Blip2QFormerIntermediate(
-            config, prefix=f"{prefix}.intermediate_query"
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.intermediate_query",
+            use_vllm_linear=use_vllm_linear,
         )
-        self.output_query = Blip2QFormerOutput(config, prefix=f"{prefix}.output_query")
+        self.output_query = Blip2QFormerOutput(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output_query",
+            use_vllm_linear=use_vllm_linear,
+        )
 
     def forward(
         self,
@@ -346,6 +447,7 @@ class Blip2QFormerEncoder(nn.Module):
         quant_config: QuantizationConfig | None,
         cache_config: CacheConfig | None,
         prefix: str = "",
+        use_vllm_linear: bool = False,
     ) -> None:
         super().__init__()
 
@@ -359,6 +461,7 @@ class Blip2QFormerEncoder(nn.Module):
                     cache_config=cache_config,
                     layer_idx=layer_idx,
                     prefix=f"{prefix}.layer.{layer_idx}",
+                    use_vllm_linear=use_vllm_linear,
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
@@ -391,6 +494,7 @@ class Blip2QFormerModel(nn.Module):
         quant_config: QuantizationConfig | None,
         cache_config: CacheConfig | None,
         prefix: str = "",
+        use_vllm_linear: bool = False,
     ) -> None:
         super().__init__()
 
@@ -404,6 +508,7 @@ class Blip2QFormerModel(nn.Module):
             quant_config=quant_config,
             cache_config=cache_config,
             prefix=f"{prefix}.encoder",
+            use_vllm_linear=use_vllm_linear,
         )
 
     def forward(

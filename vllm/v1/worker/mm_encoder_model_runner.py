@@ -120,20 +120,23 @@ class MMEncoderModelRunner(GPUModelRunner):
             self.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
 
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        if self.lora_config is not None:
-            set_active_mm_loras(
-                model=self.model,
-                lora_manager=self.lora_manager,
-                encoder_cache=self.encoder_cache,
-                req_id_to_index=self.req_states.req_id_to_index,
-                lora_state=self.lora_state,
-                scheduled_encoder_inputs=scheduled_encoder_inputs,
-            )
-
         with self.ec_connector.maybe_get_output(
             scheduler_output
         ) as ec_connector_output:
-            self.model_state.execute_mm_encoder(scheduled_encoder_inputs)
+            mm_lora_activation = None
+            if self.lora_config is not None:
+                mm_lora_activation = set_active_mm_loras(
+                    model=self.model,
+                    lora_manager=self.lora_manager,
+                    encoder_cache=self.encoder_cache,
+                    req_id_to_index=self.req_states.req_id_to_index,
+                    lora_state=self.lora_state,
+                    scheduled_encoder_inputs=scheduled_encoder_inputs,
+                )
+            self.model_state.execute_mm_encoder(
+                scheduled_encoder_inputs,
+                mm_lora_activation=mm_lora_activation,
+            )
 
         return ModelRunnerOutput.with_ec_conn_output(
             make_empty_encoder_model_runner_output(scheduler_output),
