@@ -23,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    attach_hisparse_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -53,9 +56,6 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.hisparse.connector import (
-    attach_hisparse_connector,
-)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (

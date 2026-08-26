@@ -92,7 +92,7 @@ def ensure_kv_transfer_initialized(
         )
 
     if kv_cache_config.hisparse_host_num_blocks is not None:
-        from vllm.v1.hisparse.connector import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
             attach_hisparse_connector,
         )
 

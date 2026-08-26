@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 import torch
 
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.types import SparseKVPageTransfer
-from vllm.v1.hisparse.worker import (
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.types import SparseKVPageTransfer
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
