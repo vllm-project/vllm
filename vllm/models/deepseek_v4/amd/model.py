@@ -40,6 +40,9 @@ from vllm.model_executor.layers.mhc import (
     MHCPostOp,
     MHCPreOp,
 )
+from vllm.models.deepseek_v4.amd.fp8_to_mxfp4_shared import (
+    convert_shared_fp8_to_mxfp4,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -809,14 +812,33 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 f"n_shared_experts == 1, got {self.config.n_shared_experts}"
             )
 
+        shared_expert_buf: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
+
         for name, loaded_weight in weights:
-            # Shared-expert fusion: redirect ``.ffn.shared_experts.w{1,2,3}``
-            # into appended routed-expert slot ``.ffn.experts.{n_routed}``
-            # so the MXFP4-quantized shared expert loads through the routed
-            # expert loader (grouped GEMM). Single shared expert only.
-            if ".ffn.shared_experts.w" in name and fuse_by_layer.get(
-                extract_layer_index(name), False
+            layer_idx = extract_layer_index(name)
+            fuse_layer = fuse_by_layer.get(layer_idx, False)
+            # FP8 shared experts: re-quantize to MXFP4 and load into appended slot.
+            if fuse_layer and ".shared_experts." in name and (
+                name.endswith(".weight_scale_inv")
+                or (
+                    name.endswith(".weight")
+                    and loaded_weight.dtype
+                    in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+                )
             ):
+                self._load_fused_shared_expert(
+                    name,
+                    loaded_weight,
+                    shared_expert_buf,
+                    params_dict,
+                    expert_mapping,
+                    loaded_params,
+                )
+                continue
+
+            # MXFP4 shared-expert fusion: redirect checkpoint names into the
+            # appended routed-expert slot for grouped GEMM.
+            if ".ffn.shared_experts.w" in name and fuse_layer:
                 name = name.replace(
                     ".ffn.shared_experts.w",
                     f".ffn.experts.{n_routed}.w",
@@ -897,6 +919,69 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     continue
 
         return loaded_params
+
+    _SHARED_PROJ_TO_SHARD = {"w1": "w1", "w3": "w3", "down_proj": "w2"}
+
+    def _load_fused_shared_expert(
+        self,
+        name: str,
+        loaded_weight: torch.Tensor,
+        buf: dict[tuple[str, str], dict[str, torch.Tensor]],
+        params_dict: dict[str, torch.nn.Parameter],
+        expert_mapping: list[tuple[str, str, int, str]],
+        loaded_params: set[str],
+    ) -> None:
+        """Fold FP8 shared-expert tensors into MXFP4 appended routed slots."""
+        proj = next(
+            (p for p in self._SHARED_PROJ_TO_SHARD if f".shared_experts.{p}." in name),
+            None,
+        )
+        if proj is None:
+            return
+        if name.endswith(".weight_scale_inv"):
+            half = "scale"
+        elif name.endswith(".weight"):
+            half = "weight"
+        else:
+            return
+
+        prefix = name.split(".shared_experts.")[0]
+        key = (prefix, proj)
+        slot = buf.setdefault(key, {})
+        slot[half] = loaded_weight
+        if "weight" not in slot or "scale" not in slot:
+            return
+
+        packed, scale = convert_shared_fp8_to_mxfp4(slot["weight"], slot["scale"])
+        del buf[key]
+
+        shard_id = self._SHARED_PROJ_TO_SHARD[proj]
+        expert_id = self.config.n_routed_experts
+        base = f"{prefix}.experts.{expert_id}.{shard_id}"
+
+        for tensor, suffix in ((packed, "weight"), (scale, "weight_scale")):
+            synth = f"{base}.{suffix}"
+            for param_name, weight_name, mapped_expert_id, mapped_shard_id in (
+                expert_mapping
+            ):
+                if weight_name not in synth or mapped_expert_id != expert_id:
+                    continue
+                name_mapped = synth.replace(weight_name, param_name)
+                if is_pp_missing_parameter(name_mapped, self):
+                    break
+                param = params_dict[name_mapped]
+                weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+                success = weight_loader(
+                    param,
+                    tensor,
+                    name_mapped,
+                    shard_id=mapped_shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+                if success:
+                    loaded_params.add(name_mapped)
+                break
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales

@@ -91,11 +91,17 @@ def is_shared_expert_quant_fse_compatible(
         shared_weight_config = (
             layer_config or quantization_config.get("global_quant_config") or {}
         ).get("weight") or {}
-        if shared_weight_config.get("dtype") == "fp4":
+        shared_dtype = shared_weight_config.get("dtype")
+        if shared_dtype in ("fp4", "fp4x2"):
+            return True, None
+        # DSv4-Flash ships FP8 shared experts with MXFP4 routed experts.
+        # Load-time requant enables FSE without a heterogeneous MoE kernel.
+        if shared_dtype in ("fp8", "fp8_e4m3", "float8"):
             return True, None
         return (
             False,
-            f"DeepSeek-V4 shared experts at {shared_expert_prefix} are not MXFP4",
+            f"DeepSeek-V4 shared experts at {shared_expert_prefix} are not MXFP4 "
+            f"or FP8 (got {shared_dtype!r})",
         )
 
     if isinstance(quant_config, QuarkConfig):
