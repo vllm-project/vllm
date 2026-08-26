@@ -65,9 +65,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
-
         if (
             params is not None
             and params.get("do_remote_decode")
@@ -277,4 +274,5 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            transfer_mode=self._TRANSFER_MODE,
         )

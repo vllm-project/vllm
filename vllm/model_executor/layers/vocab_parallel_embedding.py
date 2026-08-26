@@ -16,7 +16,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.batch_invariant import (
+from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
 from vllm.model_executor.layers.quantization.base_config import (
@@ -290,7 +290,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
         # layer type like ParallelLMHead, this is not important.
-        is_embedding_layer = type(self) is VocabParallelEmbedding
+        is_embedding_layer = not isinstance(self, ParallelLMHead)
         quant_method_implements_embedding = method_has_implemented_embedding(
             type(quant_method)
         )

@@ -33,6 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -892,6 +893,135 @@ class _CombinedDelegating(DelegatingParser):
     tool_parser_cls = _CombinedToolAdapter
 
 
+def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, DelegatingParser)
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is not None
+    assert parser.reasoning_parser._parser_engine_cls is _CombinedTestEngine
+    assert parser.tool_parser._parser_engine_cls is _CombinedTestEngine
+    request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+    reasoning, content, _ = parser.parse(
+        "ab</think>c",
+        request,
+        model_output_token_ids=token_ids,
+    )
+    assert reasoning == "ab"
+    assert content == "c"
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
+def test_parser_manager_preserves_shared_engine_reasoning_wiring():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_xml",
+        reasoning_parser_name="qwen3",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(
+        make_mock_tokenizer(_VOCAB),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert parser.reasoning_parser is not None
+    assert parser.reasoning_parser._parser_engine.thinking_enabled is False
+
+
+def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: None),
+    )
+
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="combined")
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is None
+    reasoning, content, _ = parser.parse(
+        'ab</think><tool_call>{"name":"h","arguments":{}}</tool_call>',
+        _make_delegating_request(),
+        model_output_token_ids=[ord("a"), ord("b"), 201],
+    )
+    assert reasoning == "ab"
+    assert content == '<tool_call>{"name":"h","arguments":{}}</tool_call>'
+    assert parser.count_reasoning_tokens([ord("a"), ord("b"), 201]) == 2
+
+
+def test_parser_manager_preserves_tool_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: None),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined", enable_auto_tools=True
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is None
+    assert parser.tool_parser is not None
+    reasoning, content, tool_calls = parser.parse(
+        "<think>ab</think>c",
+        _make_delegating_request(),
+        model_output_token_ids=[200, ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning is None
+    assert content == "<think>ab</think>c"
+    assert tool_calls == []
+
+
+def test_reasoning_adapter_counts_after_final_non_streaming_parse():
+    parser = _CombinedReasoningAdapter(make_mock_tokenizer(_VOCAB))
+    request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+
+    parser.extract_reasoning_streaming(
+        "",
+        "ab</think>c",
+        "ab</think>c",
+        [],
+        token_ids,
+        token_ids,
+    )
+    parser.extract_reasoning("ab</think>c", request)
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
 def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
@@ -1073,6 +1203,91 @@ class TestReasoningOnlyEndTokenLeak:
         )
         assert "</think>" not in d2.content
         assert "Hi!" in d2.content
+
+
+class TestSkipToolSpanForwarding:
+    """Reasoning (skip_tool_parsing) pass: tool syntax is forwarded verbatim
+    for the tool pass, and the lexical passthrough flag never goes stale.
+
+    ``_combined_config`` defines ``</tool_call>`` only from ``TOOL_ARGS``; the
+    skip pass stays in ``CONTENT``, so the closer arrives with no current-state
+    transition. It must still be forwarded and must clear the span — otherwise
+    ``_in_skipped_tool_span`` stays True for the rest of the request. This is the
+    shape of every current engine grammar whose wrapper closer has no CONTENT
+    transition (qwen3, deepseek, glm47_moe, nemotron_v3).
+    """
+
+    _TOOL_VOCAB = {**_VOCAB, '{"a":1}': 300}
+    _TOOL_CALL = '<tool_call>{"a":1}</tool_call>'
+    _TOOL_IDS = [202, 300, 203]
+
+    def _skip_engine(self):
+        engine = _make_engine(
+            vocab=self._TOOL_VOCAB,
+            special_tokens=list(_VOCAB.keys()),
+        )
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        return engine
+
+    def test_tool_syntax_forwarded_and_span_cleared(self):
+        engine = self._skip_engine()
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_span_not_stale_across_two_tool_calls(self):
+        engine = self._skip_engine()
+        engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        assert engine._engine._in_skipped_tool_span is False
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_content_after_transitionless_closer_observable(self):
+        """Observable lifecycle contract (not just the private flag): after a
+        tool closer with no CONTENT transition, a later *shared* block-ender
+        that also closes text blocks must be consumed, not leaked as content.
+
+        The config combines the two real patterns — a qwen3-style tool-only
+        closer with no CONTENT transition (``</a>``) and an inkling-style token
+        that closes both tool and text blocks (``</b>``). A stale span would
+        route the trailing ``</b>`` down the forward path and leak it.
+        """
+        ts, close_a, close_b = "<tc>", "</a>", "</b>"
+        cfg = ParserEngineConfig(
+            name="shared_closer_test",
+            terminals={"TOOL_START": ts, "CLOSE_A": close_a, "CLOSE_B": close_b},
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS, (EventType.TOOL_CALL_START,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_A"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_B"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.CONTENT, "CLOSE_B"): Transition(ParserState.CONTENT, ()),
+            },
+            initial_state=ParserState.CONTENT,
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+                ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            },
+        )
+        engine = _make_engine(config=cfg, vocab={ts: 210, close_a: 211, close_b: 212})
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+
+        events = engine._engine.feed(f"{ts}args{close_a}text{close_b}", [])
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+
+        assert content == f"{ts}args{close_a}text"
+        assert close_b not in content
+        assert engine._engine._in_skipped_tool_span is False
 
 
 # ── TestToolAdapterForwardsKwargs ──────────────────────────────────

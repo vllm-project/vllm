@@ -11,6 +11,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -204,7 +208,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             gemm1_weights=w1,
             gemm2_weights=w2,
             num_experts=global_num_experts,
-            top_k=self.topk,
+            top_k=topk_ids.size(1),
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
@@ -266,16 +270,21 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
+        num_tokens = hidden_states.shape[0]
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
-        out = flashinfer.fused_moe.trtllm_bf16_moe(
+        flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -293,8 +302,13 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             activation_type=activation_to_flashinfer_int(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
+            do_finalize=not defer,
         )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=num_tokens,
+            top_k=self.topk,
         )
-        return out
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        return routed_output
