@@ -159,7 +159,7 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
             input_batch,
             {},  # requests
             {},  # forward_context
-            (),  # mamba_state_copy_funcs
+            {},  # mamba_state_copy_funcs
             copy_bufs,
         )
 
