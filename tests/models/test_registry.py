@@ -38,7 +38,7 @@ def test_registry_imports(model_arch):
         check_version_reason="vllm",
     )
 
-    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+    if model_arch == "Terratorch":
         import importlib.util
 
         if importlib.util.find_spec("terratorch") is None:
