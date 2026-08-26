@@ -6,6 +6,8 @@ The Mooncake client is replaced by an in-memory stand-in that implements the
 handful of methods the backend uses, so these run without a cluster.
 """
 
+import threading
+
 import pytest
 import torch
 
@@ -40,7 +42,11 @@ class FakeMooncakeStore:
     def __init__(self):
         self.data: dict[str, bytes] = {}
 
+        self.exist_calls = 0
+        self.put_parts_calls = 0
+
     def batch_is_exist(self, keys: list[str]) -> list[int]:
+        self.exist_calls += 1
         return [1 if key in self.data else 0 for key in keys]
 
     def get_batch(self, keys: list[str]) -> list[bytes]:
@@ -56,6 +62,7 @@ class FakeMooncakeStore:
         return 0
 
     def put_parts(self, key: str, *parts) -> int:
+        self.put_parts_calls += 1
         self.data.setdefault(key, b"".join(bytes(part) for part in parts))
         return 0
 
@@ -72,6 +79,25 @@ class FakeMooncakeStore:
 
     def close(self) -> None:
         pass
+
+
+class GatedMooncakeStore(FakeMooncakeStore):
+    """Holds writes until released, to exercise the in-flight window."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+        self.reached = threading.Event()
+        self.put_parts_result = 0
+
+    def put_parts(self, key: str, *parts) -> int:
+        self.put_parts_calls += 1
+        self.reached.set()
+        assert self.gate.wait(timeout=10)
+        if self.put_parts_result != 0:
+            return self.put_parts_result
+        self.data.setdefault(key, b"".join(bytes(part) for part in parts))
+        return 0
 
 
 class _ModelConfigStub:
@@ -108,8 +134,8 @@ def _updates(seq: list[int]) -> list[ResolvedPromptUpdate]:
     ]
 
 
-def _make_store(shadow_ttl_s: float = 30.0):
-    backend = FakeMooncakeStore()
+def _make_store(shadow_ttl_s: float = 30.0, backend=None):
+    backend = backend if backend is not None else FakeMooncakeStore()
     store = MooncakeProcessorStore(
         store=backend,
         options=MooncakeProcessorCacheOptions(shadow_ttl_s=shadow_ttl_s),
@@ -404,3 +430,73 @@ def test_probe_tolerates_a_repeated_hash():
 
     # And the sender reports every occurrence as cached.
     assert _sender(store).is_cached(["h", "h"]) == [True, True]
+
+
+def test_sender_does_not_promise_an_item_whose_write_is_in_flight():
+    """The regression guard for the publish race.
+
+    Publishing runs on a writer thread. Until it lands, a second request for
+    the same hash must keep shipping the data, because telling P1 to read an
+    object whose write is still queued fails the request outright.
+    """
+    backend, store = _make_store(backend=GatedMooncakeStore())
+    sender = _sender(store)
+    item = _item({"a": 8})
+    updates = _updates([1, 2, 3])
+
+    assert sender.is_cached(["h"]) == [False]
+    assert sender.get_and_update_item((item, updates), "h")[0] is item
+    assert backend.reached.wait(timeout=10)
+
+    exist_calls = backend.exist_calls
+    assert sender.is_cached(["h"]) == [False]
+    # Probing an in-flight hash would miss and drop the record of the write.
+    assert backend.exist_calls == exist_calls
+    assert sender.get_and_update_item((item, updates), "h")[0] is item
+
+    backend.gate.set()
+    store.flush()
+
+    assert sender.is_cached(["h"]) == [True]
+    assert sender.get_and_update_item(None, "h")[0] is None
+
+
+def test_sender_does_not_resubmit_an_in_flight_write():
+    backend, store = _make_store(backend=GatedMooncakeStore())
+    sender = _sender(store)
+    item = _item({"a": 8})
+    updates = _updates([1, 2, 3])
+
+    sender.get_and_update_item((item, updates), "h")
+    assert backend.reached.wait(timeout=10)
+    sender.get_and_update_item((item, updates), "h")
+
+    backend.gate.set()
+    store.flush()
+
+    # The second request took the cold path but must not have queued another
+    # copy of the same megabyte-sized write.
+    assert backend.put_parts_calls == 1
+
+
+def test_sender_republishes_after_a_failed_write():
+    backend, store = _make_store(backend=GatedMooncakeStore())
+    sender = _sender(store)
+    item = _item({"a": 8})
+    updates = _updates([1, 2, 3])
+
+    backend.put_parts_result = -1
+    backend.gate.set()
+    sender.get_and_update_item((item, updates), "h")
+    store.flush()
+
+    # A failed write must leave nothing usable behind, and must not block the
+    # next attempt the way an in-flight entry does.
+    assert sender.is_cached(["h"]) == [False]
+
+    backend.put_parts_result = 0
+    sender.get_and_update_item((item, updates), "h")
+    store.flush()
+
+    assert sender.is_cached(["h"]) == [True]
+    assert sender.get_and_update_item(None, "h")[0] is None

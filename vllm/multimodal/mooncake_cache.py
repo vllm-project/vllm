@@ -27,18 +27,24 @@ Shadow entries are re-verified against the store every `shadow_ttl_s` seconds.
 Without that, an entry the store evicted long ago would keep reporting a local
 hit until a request actually failed in P1.
 
+A shadow entry therefore only ever means "the store can serve this". An item
+P0 has just published is not that yet -- its write is still in flight on the
+writer thread -- so entries carry a publish state and only satisfy a lookup
+once the write is confirmed.
+
 Prompt updates are encoded through an explicit schema rather than `pickle`,
 both because vLLM forbids `pickle` and because this data crosses a network. An
 update whose `is_embed` or target is an opaque callable cannot be expressed in
 that schema, so such items are kept local instead of being published.
 """
 
+import enum
 import json
 import os
 import struct
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -240,6 +246,9 @@ class MooncakeProcessorStore:
             max_workers=1,
             thread_name_prefix="mm-mooncake-put",
         )
+        # Cleared for good if this model's prompt updates turn out not to be
+        # expressible on the wire.
+        self._shareable = True
 
     def _connect(self, role: str) -> Any:
         try:
@@ -412,15 +421,26 @@ class MooncakeProcessorStore:
         item: MultiModalKwargsItem,
         prompt_updates: Sequence["ResolvedPromptUpdate"],
         item_size: int,
+        on_done: Callable[[bool], None] | None = None,
     ) -> None:
         """Publish an item to the store, off the caller's thread.
 
         Best effort: a dropped write only costs a later miss, so failures are
-        logged rather than raised.
+        logged rather than raised. `on_done` is called on the writer thread
+        with whether the item can now be read back, so that callers can hold
+        off on promising it to P1 until then.
         """
-        self._writer.submit(
-            self._put_blocking, mm_hash, item, prompt_updates, item_size
-        )
+        if not self._shareable:
+            if on_done is not None:
+                on_done(False)
+            return
+
+        def publish() -> None:
+            ok = self._put_blocking(mm_hash, item, prompt_updates, item_size)
+            if on_done is not None:
+                on_done(ok)
+
+        self._writer.submit(publish)
 
     def _put_blocking(
         self,
@@ -428,7 +448,8 @@ class MooncakeProcessorStore:
         item: MultiModalKwargsItem,
         prompt_updates: Sequence["ResolvedPromptUpdate"],
         item_size: int,
-    ) -> None:
+    ) -> bool:
+        """Write both objects, returning whether the item is now readable."""
         try:
             meta = msgpack.encode(
                 (_META_VERSION, item_size, _encode_prompt_updates(prompt_updates))
@@ -443,13 +464,15 @@ class MooncakeProcessorStore:
                 "in-process.",
                 e,
             )
-            return
+            # A property of the model, not of this item: stop trying.
+            self._shareable = False
+            return False
         except Exception:
             logger.warning_once(
                 "Failed to encode multi-modal prompt updates; processed items "
                 "will only be cached in-process.",
             )
-            return
+            return False
 
         try:
             bufs = self._encoder.encode(item)
@@ -470,7 +493,7 @@ class MooncakeProcessorStore:
                 logger.debug(
                     "Mooncake put_parts returned %d for mm_hash %s.", ret, mm_hash
                 )
-                return
+                return False
 
             ret = self._write_store.put(self._meta_key(mm_hash), meta)
             if ret != 0:
@@ -479,12 +502,16 @@ class MooncakeProcessorStore:
                     ret,
                     mm_hash,
                 )
+                return False
         except Exception:
             logger.debug(
                 "Failed to publish mm_hash %s to Mooncake.",
                 mm_hash,
                 exc_info=True,
             )
+            return False
+
+        return True
 
     def get_kwargs(self, mm_hash: str) -> MultiModalKwargsItem | None:
         """Read back a processed item, or `None` if it is not retrievable."""
@@ -538,11 +565,27 @@ class MooncakeProcessorStore:
                 logger.debug("Error closing a Mooncake client.", exc_info=True)
 
 
+class _PublishState(enum.Enum):
+    """Whether the store can serve the item this shadow entry describes."""
+
+    IN_FLIGHT = enum.auto()
+    """P0 submitted the write but it has not been confirmed."""
+
+    FAILED = enum.auto()
+    """The write failed. Equivalent to having no entry at all; it lingers only
+    because the writer thread cannot safely remove one, and the owning thread
+    reaps it on the next lookup."""
+
+    STORED = enum.auto()
+    """Confirmed readable, either by `probe` or by a completed write."""
+
+
 @dataclass
 class _ShadowEntry:
     item_size: int
     prompt_updates: Sequence["ResolvedPromptUpdate"]
     verified_at: float
+    state: _PublishState = _PublishState.STORED
 
 
 class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
@@ -551,8 +594,8 @@ class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
 
     How to update each item:
 
-    - If it is shadowed locally and was verified recently, clear the input to
-      avoid unnecessary IPC.
+    - If it is shadowed locally as stored and was verified recently, clear the
+      input to avoid unnecessary IPC.
 
     - If it is in the store, shadow its metadata and clear the input.
 
@@ -564,6 +607,12 @@ class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
     [`MultiModalProcessorSenderCache`][vllm.multimodal.cache.MultiModalProcessorSenderCache],
     but the shadow can also go stale against the store, so entries carry the
     time they were last verified.
+
+    Publishing is asynchronous, so an entry does not become usable the moment
+    it is added: until the write is confirmed, further requests for the same
+    hash take the cold path (see `_PublishState`). Clearing the input any
+    earlier would tell P1 to read an object whose write is still queued, and
+    P1 cannot recover from that except by failing the request.
     """
 
     def __init__(
@@ -594,11 +643,23 @@ class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
         now = time.monotonic()
         ttl = self._store.shadow_ttl_s
 
-        unverified = [
-            mm_hash
-            for mm_hash in mm_hashes
-            if (entry := self._peek(mm_hash)) is None or now - entry.verified_at > ttl
-        ]
+        unverified = []
+        for mm_hash in mm_hashes:
+            entry = self._peek(mm_hash)
+            if entry is None:
+                unverified.append(mm_hash)
+            elif entry.state is _PublishState.IN_FLIGHT:
+                # Probing now would miss and drop the entry, losing the record
+                # that a write for this hash is already on its way.
+                continue
+            elif entry.state is _PublishState.FAILED:
+                # Stands in for a removal the writer thread could not do. This
+                # is the owning thread, so reap it and treat it as absent: the
+                # store may hold a copy published by another process.
+                self._shadow.pop(mm_hash, None)
+                unverified.append(mm_hash)
+            elif now - entry.verified_at > ttl:
+                unverified.append(mm_hash)
 
         if unverified:
             found = self._store.probe(unverified)
@@ -617,7 +678,30 @@ class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
                     _ShadowEntry(item_size, prompt_updates, now),
                 )
 
-        return [mm_hash in self._shadow for mm_hash in mm_hashes]
+        return [self._is_usable(self._peek(mm_hash)) for mm_hash in mm_hashes]
+
+    @staticmethod
+    def _is_usable(entry: _ShadowEntry | None) -> bool:
+        """Whether P1 can be told to read this item from the store."""
+        return entry is not None and entry.state is _PublishState.STORED
+
+    def _publish_done(self, mm_hash: str, ok: bool) -> None:
+        """Record the outcome of a publish. Runs on the writer thread.
+
+        Only ever assigns to fields of an entry that is already in the shadow.
+        Inserting or removing would race the eviction order with the thread
+        that owns it; a single field write cannot, and a stale read there costs
+        at most one extra cold path or probe.
+        """
+        entry = self._peek(mm_hash)
+        if entry is None or entry.state is not _PublishState.IN_FLIGHT:
+            return
+
+        if ok:
+            entry.verified_at = time.monotonic()
+            entry.state = _PublishState.STORED
+        else:
+            entry.state = _PublishState.FAILED
 
     @override
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -631,19 +715,38 @@ class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
     ) -> MultiModalProcessorCacheOutItem:
         self._total += 1
 
-        if (entry := self._shadow.get(mm_hash)) is not None:
+        entry = self._peek(mm_hash)
+        if self._is_usable(entry):
+            assert entry is not None
             self._hits += 1
+            self._shadow.touch(mm_hash)
             return None, entry.prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
         item, prompt_updates = mm_item
 
-        item_size = MultiModalCache.get_item_size(item)
-        self._shadow.put_if_fits(
-            mm_hash,
-            _ShadowEntry(item_size, prompt_updates, time.monotonic()),
-        )
-        self._store.put(mm_hash, item, prompt_updates, item_size)
+        if entry is None or entry.state is _PublishState.FAILED:
+            item_size = MultiModalCache.get_item_size(item)
+            # Shadowed as in-flight, not as stored: until the write lands,
+            # another request for this hash must keep taking the cold path
+            # rather than promise P1 an object that is not there yet. The entry
+            # still goes in, so that request does not resubmit the same write.
+            self._shadow.put_if_fits(
+                mm_hash,
+                _ShadowEntry(
+                    item_size,
+                    prompt_updates,
+                    time.monotonic(),
+                    _PublishState.IN_FLIGHT,
+                ),
+            )
+            self._store.put(
+                mm_hash,
+                item,
+                prompt_updates,
+                item_size,
+                on_done=lambda ok: self._publish_done(mm_hash, ok),
+            )
 
         return mm_item
 
