@@ -264,6 +264,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+        # Set by create_worker when canonical_layout is enabled: True when
+        # every layer's canonical bytes are parallelism-agnostic (portable),
+        # False when some layers use the opaque fallback (exact-topology only)
+        self.all_layers_portable: bool | None = None
+
         # engine_id is unique per DP replica (suffixed with _dp{rank} in both
         # the Ray and multiprocessing paths), so it names a per-replica offload
         # region.
@@ -394,12 +399,53 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         try:
+            if self.config.canonical_layout:
+                self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_blocks=self.num_blocks,
                 mmap_region=worker_mmap,
+                canonical_layout=self.config.canonical_layout,
             )
         except Exception:
             worker_mmap.cleanup()
             raise
+
+    def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
+        """Require a mapping on every ref and record layer portability.
+
+        Fails loudly rather than persist direct-layout bytes under a
+        canonical format identity."""
+        all_refs = [
+            ref for group_refs in kv_caches.group_data_refs for ref in group_refs
+        ]
+        if any(ref.mapping is None for ref in all_refs):
+            raise RuntimeError(
+                "canonical_layout was requested but the KV cache layout "
+                "could not be certified for canonical offload (offload "
+                "workers must be exactly the TP group, and packed / "
+                "cross-layer KV layouts are not supported). Remove "
+                "canonical_layout from kv_connector_extra_config."
+            )
+        self.all_layers_portable = all(
+            ref.mapping is not None and ref.mapping.parallelism_agnostic
+            for ref in all_refs
+        )
+        if self.config.parallel.is_parallelism_agnostic and not (
+            self.all_layers_portable
+        ):
+            # The scheduler-side storage namespace was already collapsed on
+            # the static portability claim; opaque per-topology bytes must
+            # not land in it.
+            raise RuntimeError(
+                "canonical_layout could not certify every layer as "
+                "parallelism-agnostic, but the storage namespace is shared "
+                "across topologies. Remove canonical_layout from "
+                "kv_connector_extra_config or disable parallel-agnostic "
+                "secondary tiers."
+            )
+        logger.info(
+            "Canonical KV layout enabled (all_layers_portable=%s)",
+            self.all_layers_portable,
+        )

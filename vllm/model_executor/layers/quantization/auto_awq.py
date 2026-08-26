@@ -292,7 +292,7 @@ class AutoAWQConfig(QuantizationConfig):
                 prefix,
                 self.modules_to_not_convert,
                 self.packed_modules_mapping,
-                skip_with_substr=True,
+                match_mode="substring",
             ):
                 return UnquantizedLinearMethod()
 
@@ -335,7 +335,7 @@ class AutoAWQConfig(QuantizationConfig):
             if is_layer_skipped(
                 prefix,
                 getattr(self, "modules_to_not_convert", []),
-                skip_with_substr=True,
+                match_mode="substring",
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
@@ -357,31 +357,6 @@ class AutoAWQConfig(QuantizationConfig):
             return AutoAWQMoEMethod(self, layer.moe_config)
 
         return None
-
-    @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
-        # Extract data from quant config.
-        quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits")
-        group_size = quant_config.get("group_size")
-        zero_point = quant_config.get("zero_point")
-
-        if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
-            return False
-
-        if quant_method != "awq":
-            return False
-
-        # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or zero_point is None:
-            return False
-
-        if num_bits not in cls.TYPE_MAP:
-            return False
-
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
-        )
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_to_not_convert:

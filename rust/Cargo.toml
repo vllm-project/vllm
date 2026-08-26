@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/bench",
+    "src/build-info",
     "src/chat",
     "src/cmd",
     "src/engine-core-client",
@@ -61,19 +62,21 @@ itertools = "0.14.0"
 libc = "0.2.177"
 llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "15adba5e025d8636ba4a334fb379b1371f6196a1", default-features = false, features = ["native-tls"] }
 mimalloc = "0.1.52"
-minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
-minijinja-contrib = { version = "2.0", features = ["pycompat"] }
+minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
+minijinja-contrib = { version = "2.24", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.17", features = ["serde"] }
 openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
 openai-protocol = "1.6.0"
 openssl = "0.10"
 parking_lot = "0.12.5"
+parquet = { version = "59.2.0", default-features = false, features = ["json", "snap", "zstd", "flate2", "flate2-rust_backend", "lz4", "brotli"] }
 paste = "1.0.15"
 prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
+protox = "0.9.1"
 pyo3 = "0.28.3"
 pythonize = "0.28.0"
 rand = "0.9.2"
@@ -135,6 +138,7 @@ url = "2.5.7"
 uuid = { version = "1.22.0", features = ["v4"] }
 validator = { version = "0.20.0", features = ["derive"] }
 vllm-bench = { path = "src/bench" }
+vllm-build-info = { path = "src/build-info" }
 vllm-chat = { path = "src/chat" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
