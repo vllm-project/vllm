@@ -21,6 +21,7 @@ from vllm.model_executor.layers.hpc.hpc_module import HpcModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.hpc_attn import HpcAttnMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 logger = init_logger(__name__)
 
@@ -280,6 +281,111 @@ class HpcRopeNorm(CustomOp, HpcModule):
         torch.ops.vllm.hpc_rope_norm_forward(qkv, output, layer_name)
         return output
 
+    def _kv_write_scratch(self, cache: torch.Tensor) -> torch.Tensor:
+        """Throwaway dense K/V pages for the stride-aware fallback path.
+
+        ``hpc.rope_norm_store_kv[_fp8]`` always writes the paged cache itself
+        (rotated K/V *and* zero padding for the tail of every request's last
+        block), addressing it densely. When the real pages are not dense those
+        writes would land on unrelated blocks, so they are redirected here by
+        pairing this scratch cache with an all-zero block table; the real data
+        is taken out through ``out_k``/``out_v`` instead.
+
+        Returns a (2, 1, block_size, num_kv_heads, head_dim) tensor: index 0 is
+        the key scratch page, index 1 the value scratch page.
+        """
+        block_size = cache.shape[1]
+        key = (cache.dtype, block_size, cache.device)
+        if getattr(self, "_kv_scratch_key", None) != key:
+            self._kv_scratch = torch.zeros(
+                2,
+                1,
+                block_size,
+                self.num_kv_heads,
+                self.head_dim,
+                dtype=cache.dtype,
+                device=cache.device,
+            )
+            self._kv_scratch_key = key
+        return self._kv_scratch
+
+    @staticmethod
+    def _zero_pad_last_blocks(
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+    ) -> None:
+        """Zero the unused tail slots of each request's last block.
+
+        The HPC attention kernels read whole blocks, so the slots past
+        ``seq_len`` must be zero. The fused op normally does this itself; on the
+        fallback path its (densely addressed) padding writes are discarded, so
+        the padding is reapplied here through the real, strided cache views.
+
+        Shapes are static and no value is inspected on the host, so this stays
+        CUDA-graph capturable. It is also self-contained: each request's last
+        block is read, masked and written back, so slots that must be preserved
+        (and requests padded in for graph capture, whose ``seq_len`` is 0) keep
+        their previous contents instead of being redirected somewhere.
+        """
+        block_size = key_cache.shape[1]
+        seq_lens = seq_lens.long()
+        # seq_len == 0 only happens for graph-capture padding; clamping keeps
+        # the gather in bounds and the all-False mask below makes the write a
+        # no-op for those rows.
+        last_block_idx = (seq_lens - 1).clamp_min(0) // block_size
+        last_block_idx = last_block_idx.clamp_max(block_table.shape[1] - 1)
+        last_block = block_table.gather(1, last_block_idx.unsqueeze(1)).squeeze(1)
+        last_block = last_block.long()
+
+        remainder = seq_lens % block_size
+        # A block that ends exactly on the boundary has no tail to clear.
+        remainder = torch.where(remainder == 0, block_size, remainder)
+
+        offsets = torch.arange(block_size, device=key_cache.device)
+        is_tail = (offsets.unsqueeze(0) >= remainder.unsqueeze(1)) & (
+            seq_lens > 0
+        ).unsqueeze(1)
+        is_tail = is_tail[..., None, None]
+
+        for cache in (key_cache, value_cache):
+            view = cache
+            if view.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                view = view.view(torch.uint8)
+            blocks = view.index_select(0, last_block)
+            blocks = torch.where(is_tail, blocks.new_zeros(()), blocks)
+            view.index_copy_(0, last_block, blocks)
+
+    @staticmethod
+    def _scatter_kv_cache(
+        cache: torch.Tensor,
+        src: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Write dense per-token K (or V) into a paged cache view.
+
+        Used on the stride-aware fallback path (see ``_forward_impl``).
+        ``cache`` is a (num_blocks, block_size, num_kv_heads, head_dim) view
+        with arbitrary block/token/head strides; ``src`` is the dense
+        (num_tokens, num_kv_heads, head_dim) buffer produced by the fused HPC
+        kernel. FP8 payloads are moved as raw bytes because ``index_copy_``
+        has no FP8 kernel.
+
+        Padded tokens carry ``PAD_SLOT_ID`` (-1); clamping sends them to the
+        reserved null block instead of tripping ``index_copy_``'s bounds check.
+        This keeps the op CUDA-graph safe (static shape, no host sync), unlike
+        masking the padded rows out.
+        """
+        # (num_blocks, block_size, ...) -> (num_slots, num_kv_heads, head_dim).
+        # Valid as a view for any layout whose block stride is a whole number
+        # of token strides, which holds for every layout the backend accepts.
+        flat = cache.flatten(0, 1)
+        if flat.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            flat = flat.view(torch.uint8)
+            src = src.view(torch.uint8)
+        flat.index_copy_(0, slot_mapping.clamp_min(NULL_BLOCK_ID), src)
+
     def _forward_impl(
         self,
         qkv: torch.Tensor,
@@ -295,8 +401,31 @@ class HpcRopeNorm(CustomOp, HpcModule):
         """
         import hpc
 
+        # KV cache for the FP8 path is stored as uint8; view it as fp8 so the
+        # rope_norm_store_kv_fp8 kernel can write quantized K/V in-place.
+        # Must happen *before* deriving the K/V views, so that they (and any
+        # buffer whose dtype is taken from them) carry the FP8 dtype.
+        if self.use_fp8:
+            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+
         # (B, H, N, 2*hs) -> two (B, N, H, hs) K/V views, as in HpcAttentionImpl.
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_dim, dim=-1)
+
+        # hpc.rope_norm_store_kv[_fp8] addresses its K/V caches as *dense*
+        # NHD tensors and ignores their strides, so it can only write the cache
+        # in place when both views are contiguous. Packed layouts (the backend's
+        # LBNHC pages interleave K and V inside the state-content dim, so each
+        # split view has a token stride of 2 * head_dim) must instead take the
+        # rotated K/V out through out_k/out_v and be scattered separately.
+        fused_kv_write = key_cache.is_contiguous() and value_cache.is_contiguous()
+        if not fused_kv_write:
+            logger.warning_once(
+                "HpcRopeNorm: KV cache pages interleave K and V, which "
+                "hpc.rope_norm_store_kv[_fp8] cannot address, so K/V are "
+                "written by a separate scatter. Update hpc-ops to a build with "
+                "strided KV cache support to re-enable the fully fused write."
+            )
+            slot_mapping = attn_metadata.slot_mapping
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_prefill_reqs = attn_metadata.num_prefills
@@ -306,11 +435,6 @@ class HpcRopeNorm(CustomOp, HpcModule):
         qkv = qkv[:num_actual_tokens]
 
         num_prefill_tokens = num_actual_tokens - num_decode_tokens
-
-        # KV cache for the FP8 path is stored as uint8; view it as fp8 so the
-        # rope_norm_store_kv_fp8 kernel can write quantized K/V in-place.
-        if self.use_fp8:
-            kv_cache = kv_cache.view(torch.float8_e4m3fn)
 
         # Per-tensor K/V scales (shape [1]) used by the FP8 kernel.
         k_scale = attn_layer._k_scale.reshape(1)
@@ -334,15 +458,35 @@ class HpcRopeNorm(CustomOp, HpcModule):
                 num_decode_tokens : num_decode_tokens + num_prefill_tokens
             ]
 
+            kv_dtype = key_cache.dtype
+            if fused_kv_write:
+                out_k = out_v = None
+                kcache_arg, vcache_arg = key_cache, value_cache
+                kv_indices_arg = block_table_prefill
+            else:
+                out_k = torch.empty(
+                    num_prefill_tokens,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    dtype=kv_dtype,
+                    device=qkv.device,
+                )
+                out_v = torch.empty_like(out_k)
+                # Send the kernel's own cache writes to scratch (all block ids
+                # remapped to the single scratch page).
+                scratch = self._kv_write_scratch(key_cache)
+                kcache_arg, vcache_arg = scratch[0], scratch[1]
+                kv_indices_arg = torch.zeros_like(block_table_prefill)
+
             if self.use_fp8:
                 _, q_scale, split_k_flag = hpc.rope_norm_store_kv_fp8(
-                    key_cache=key_cache,
-                    value_cache=value_cache,
+                    key_cache=kcache_arg,
+                    value_cache=vcache_arg,
                     qkv=qkv_prefill,
                     cos_sin=self.cos_sin_cache,
                     num_seqlen_per_req=seq_lens_prefill,
                     q_index=cu_seqlens_prefill,
-                    kvcache_indices=block_table_prefill,
+                    kvcache_indices=kv_indices_arg,
                     is_prefill=True,
                     k_scale=k_scale,
                     v_scale=v_scale,
@@ -352,23 +496,35 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     k_norm_weight=k_norm_weight,
                     qk_norm_policy=self.qk_norm_policy,
                     out_q=out_q_prefill,
+                    out_k=out_k,
+                    out_v=out_v,
                 )
                 attn_metadata.hpc_prefill_q_scale = q_scale
             else:
                 hpc.rope_norm_store_kv(
-                    key_cache,
-                    value_cache,
+                    kcache_arg,
+                    vcache_arg,
                     qkv_prefill,
                     self.cos_sin_cache,
                     seq_lens_prefill,
                     cu_seqlens_prefill,
-                    block_table_prefill,
+                    kv_indices_arg,
                     True,  # is_prefill
                     q_norm_weight=q_norm_weight,
                     k_norm_weight=k_norm_weight,
                     out_q=out_q_prefill,
+                    out_k=out_k,
+                    out_v=out_v,
                     qk_norm_policy=self.qk_norm_policy,
                 )
+
+            if out_k is not None:
+                self._zero_pad_last_blocks(
+                    key_cache, value_cache, seq_lens_prefill, block_table_prefill
+                )
+                prefill_slots = slot_mapping[num_decode_tokens:num_actual_tokens]
+                self._scatter_kv_cache(key_cache, out_k, prefill_slots)
+                self._scatter_kv_cache(value_cache, out_v, prefill_slots)
 
         # --- Decode ---
         if num_decode_reqs > 0:
@@ -380,15 +536,32 @@ class HpcRopeNorm(CustomOp, HpcModule):
             decode_query_len = attn_metadata.decode_query_len
             out_q_decode = output[:num_decode_tokens]
 
+            if fused_kv_write:
+                out_k = out_v = None
+                kcache_arg, vcache_arg = key_cache, value_cache
+                kv_indices_arg = block_table_decode
+            else:
+                out_k = torch.empty(
+                    num_decode_tokens,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    dtype=key_cache.dtype,
+                    device=qkv.device,
+                )
+                out_v = torch.empty_like(out_k)
+                scratch = self._kv_write_scratch(key_cache)
+                kcache_arg, vcache_arg = scratch[0], scratch[1]
+                kv_indices_arg = torch.zeros_like(block_table_decode)
+
             if self.use_fp8:
                 _, q_scale, split_k_flag = hpc.rope_norm_store_kv_fp8(
-                    key_cache=key_cache,
-                    value_cache=value_cache,
+                    key_cache=kcache_arg,
+                    value_cache=vcache_arg,
                     qkv=qkv_decode,
                     cos_sin=self.cos_sin_cache,
                     num_seqlen_per_req=num_seq_kvcache,
                     q_index=attn_metadata.qo_indptr_decode,
-                    kvcache_indices=block_table_decode,
+                    kvcache_indices=kv_indices_arg,
                     is_prefill=False,
                     k_scale=k_scale,
                     v_scale=v_scale,
@@ -398,25 +571,37 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     k_norm_weight=k_norm_weight,
                     qk_norm_policy=self.qk_norm_policy,
                     out_q=out_q_decode,
+                    out_k=out_k,
+                    out_v=out_v,
                 )
                 attn_metadata.hpc_decode_q_scale = q_scale
                 if split_k_flag is not None:
                     attn_metadata.hpc_split_k_flag = split_k_flag
             else:
                 hpc.rope_norm_store_kv(
-                    key_cache,
-                    value_cache,
+                    kcache_arg,
+                    vcache_arg,
                     qkv_decode,
                     self.cos_sin_cache,
                     num_seq_kvcache,
                     attn_metadata.qo_indptr_decode,
-                    block_table_decode,
+                    kv_indices_arg,
                     False,  # is_prefill
                     q_norm_weight=q_norm_weight,
                     k_norm_weight=k_norm_weight,
                     out_q=out_q_decode,
+                    out_k=out_k,
+                    out_v=out_v,
                     qk_norm_policy=self.qk_norm_policy,
                 )
+
+            if out_k is not None:
+                self._zero_pad_last_blocks(
+                    key_cache, value_cache, num_seq_kvcache, block_table_decode
+                )
+                decode_slots = slot_mapping[:num_decode_tokens]
+                self._scatter_kv_cache(key_cache, out_k, decode_slots)
+                self._scatter_kv_cache(value_cache, out_v, decode_slots)
 
         # Signal HpcAttentionImpl that KV cache has already been written by
         # rope_norm_store_kv[_fp8] above, so it should skip its own
