@@ -8,13 +8,16 @@ from vllm.platforms.interface import DeviceCapability
 
 
 @patch("vllm.models.deepseek_v4.nvidia.ops.o_proj.current_platform")
-def test_sm12x_uses_hopper_fp32_recipe(mock_platform):
+def test_sm12x_uses_hopper_granularity_packed_recipe(mock_platform):
     mock_platform.get_device_capability.return_value = DeviceCapability(
         major=12, minor=1
     )
     recipe, tma_aligned = compute_fp8_einsum_recipe()
+    # Hopper K-granularity (1, 128, 128) with INT32-packed UE8M0 activation
+    # scales: the FP32 variant is misread by DeepGEMM's pack path on SM12x for
+    # non-aligned token counts (silent o_proj corruption under graph capture).
     assert recipe == (1, 128, 128)
-    assert tma_aligned is False
+    assert tma_aligned is True
 
 
 @patch("vllm.models.deepseek_v4.nvidia.ops.o_proj.current_platform")

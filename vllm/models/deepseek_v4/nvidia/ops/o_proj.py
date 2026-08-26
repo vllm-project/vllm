@@ -15,16 +15,21 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
 
     SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128.
     SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
+    SM12x (GB10): Hopper K-granularity (1, 128, 128) but with the
+    INT32-packed UE8M0 activation scales (see below).
 
     Returns ``(einsum_recipe, tma_aligned_scales)`` for ``deep_gemm_fp8_o_proj``.
     """
     cap = current_platform.get_device_capability()
     assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-    # Packed INT32 UE8M0 + TMA-aligned scales are SM100. SM12x (GB10) has
-    # no TMA; fused_inv_rope_fp8_quant must emit Hopper FP32 128x128 scales
-    # or the Python fp8_einsum fallback dequants packed ints as floats.
     if cap.major == 12:
-        return (1, 128, 128), False
+        # DeepGEMM's (1, 128, 128) legacy recipe on arch 12 still expects
+        # MN-major TMA-aligned scales (sf.stride(-1) == tma_aligned_size(mn)).
+        # fused_inv_rope_fp8_quant must emit the INT32-packed UE8M0 layout:
+        # the FP32 variant is read by the FP32→UE8M0 pack path with the wrong
+        # strides for non-aligned token counts and silently corrupts the
+        # o_proj output under CUDA graph capture.
+        return (1, 128, 128), True
     einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
     tma_aligned_scales = cap.major >= 10
     return einsum_recipe, tma_aligned_scales
@@ -68,10 +73,19 @@ def deep_gemm_fp8_o_proj(
     weight_scale = (
         wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
     )
+    weight = wo_a.weight
+    # fp8_einsum's "bhr,hdr->bhd" runs get_shape<3> on B and its scale and does
+    # not reshape: both must be 3D (h, d, r) = (n_groups, o_lora_rank, D) and
+    # (n_groups, o_lora_rank // 128, D // 128). Layers loaded outside the
+    # DeepGEMM scaled-mm path (b12x/FlashMLA/FlashInfer backends) keep the flat
+    # checkpoint layout (n_groups*o_lora_rank, D), which trips the shape assert.
+    if weight.ndim == 2:
+        weight = weight.view(n_groups, o_lora_rank, -1)
+        weight_scale = weight_scale.view(n_groups, o_lora_rank // 128, -1)
     fp8_einsum(
         "bhr,hdr->bhd",
         (o_fp8, o_scale),
-        (wo_a.weight, weight_scale),
+        (weight, weight_scale),
         z,
         recipe=einsum_recipe,
     )
