@@ -226,7 +226,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         if tensor.host_resident
         for name in tensor.layers
     }
-    assert host_layers == {c4_main, f"{c4_indexer}.hisparse_source"}
+    assert host_layers == {c4_main}
     transferable_device_layers = {
         name
         for group in cache_config.transfer_groups
