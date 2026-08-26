@@ -964,14 +964,34 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
-                        num_new_tokens = 1 + self.num_spec_tokens
+                        padded_num_new_tokens = 1 + self.num_spec_tokens
+                        # Reserve room for the token(s) this step will sample.
+                        # The running-request path above already subtracts
+                        # ``num_sampled_tokens_per_step``; without the same
+                        # reservation here, a resumed decode request within
+                        # ``num_spec_tokens`` of ``max_model_len`` is padded into
+                        # a step that samples past the cap, and
+                        # ``_bookkeeping_sync``'s ``end_idx <= max_model_len``
+                        # assertion takes down the engine.
+                        # Fall back to an un-padded step rather than breaking:
+                        # unlike the token-budget case this condition does not
+                        # clear on a later step (``num_computed_tokens`` cannot
+                        # advance while the request is unscheduled), so breaking
+                        # would starve the request instead of letting it emit its
+                        # final token and stop on length.
                         if (
-                            num_new_tokens > request_token_budget
-                            or num_computed_tokens + num_new_tokens > self.max_model_len
+                            num_computed_tokens
+                            + padded_num_new_tokens
+                            + self.num_sampled_tokens_per_step
+                            > self.max_model_len
                         ):
+                            pass
+                        elif padded_num_new_tokens > request_token_budget:
                             # Prefer to not schedule than schedule un-padded here.
                             break
-                        pad_spec_decode = True
+                        else:
+                            num_new_tokens = padded_num_new_tokens
+                            pad_spec_decode = True
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:

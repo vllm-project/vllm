@@ -6134,3 +6134,66 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+@pytest.mark.parametrize("num_spec_tokens", [1, 3])
+def test_resumed_decode_padded_to_spec_width_respects_max_model_len(num_spec_tokens):
+    """A resumed decode request must not be padded past ``max_model_len``.
+
+    The waiting path pads a resumed decode request out to ``1 + num_spec_tokens``
+    input positions to preserve a full cudagraph. Its guard allowed
+    ``num_computed_tokens + num_new_tokens == max_model_len``, but the step then
+    samples up to ``1 + num_spec_tokens`` tokens, so ``_bookkeeping_sync``'s
+    ``end_idx <= max_model_len`` assertion fails by one. The running path already
+    reserves ``num_sampled_tokens_per_step``; this checks the two agree.
+    """
+    max_num_seqs = 16
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec_tokens,
+        speculative_method="ngram",
+        enable_prefix_caching=False,
+        block_size=16,
+        num_blocks=4096,
+        max_num_batched_tokens=8192,
+        max_num_seqs=max_num_seqs,
+    )
+    # The cap this path consults comes from model_config, not scheduler_config.
+    max_model_len = scheduler.max_model_len
+
+    # A request in decode, so the waiting loop sees scheduled_running_reqs
+    # non-empty and prefill_scheduled False -- the padding preconditions.
+    (running,) = create_requests(1, num_tokens=8, max_tokens=10000, req_ids=["running"])
+    scheduler.add_request(running)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["running"],
+            req_id_to_index={"running": 0},
+            sampled_token_ids=[[100]],
+        ),
+    )
+
+    # A resumed request with a single uncomputed token, at the one value of
+    # num_computed_tokens where padding overruns: the guard admits
+    # C + (1 + K) <= max_model_len while the runner needs C + 2 + K <=
+    # max_model_len, so they differ at C == max_model_len - 1 - K. Reached in
+    # practice when a preempted request is resumed with its prefix recovered
+    # from the prefix cache or an offload tier.
+    num_computed = max_model_len - 1 - num_spec_tokens
+    (resumed,) = create_requests(
+        1, num_tokens=num_computed + 1, max_tokens=10000, req_ids=["resumed"]
+    )
+    scheduler.add_request(resumed)
+    resumed.status = RequestStatus.PREEMPTED
+    resumed.num_computed_tokens = num_computed
+
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens.get("resumed", 0)
+    num_spec = len(output.scheduled_spec_decode_tokens.get("resumed", ()))
+
+    # The runner writes token_ids_cpu[start:start + num_sampled_ids] with
+    # start == num_tokens_no_spec and num_sampled_ids up to 1 + num_spec.
+    assert resumed.num_tokens + 1 + num_spec <= max_model_len
+    # ...and the request must still make progress rather than be starved.
+    assert num_scheduled >= 1
