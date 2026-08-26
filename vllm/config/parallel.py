@@ -192,7 +192,7 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = "allgather_reducescatter"
+    all2all_backend: All2AllBackend = "flashinfer_nvlink_one_sided"
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
@@ -201,8 +201,8 @@ class ParallelConfig:
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
