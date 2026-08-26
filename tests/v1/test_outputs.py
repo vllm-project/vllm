@@ -6,7 +6,13 @@ import numpy as np
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    ECConnectorOutput,
+    LogprobsLists,
+    LogprobsTensors,
+    ModelRunnerOutput,
+)
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
@@ -34,6 +40,25 @@ def test_logprobs_tensors_cat():
     assert result.selected_token_ranks.tolist() == [1, 2]
     assert result.cu_num_generated_tokens == [0, 1, 2]
     assert LogprobsTensors.cat([first]) is first
+
+
+def test_logprobs_tensors_tolists_with_tensor_boundaries():
+    """Adaptive verification hands over the request boundaries as a tensor
+    (they only exist on device); tolists() must materialize it as a plain
+    list so slice_request splits requests correctly."""
+    tensors = LogprobsTensors(
+        torch.tensor([[1, 2], [3, 4], [5, 6]]),
+        torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]),
+        torch.tensor([1, 2, 3]),
+        cu_num_generated_tokens_tensor=torch.tensor([0, 2, 3], dtype=torch.int32),
+    )
+
+    lists = tensors.to_cpu_nonblocking().tolists()
+
+    assert lists.cu_num_generated_tokens == [0, 2, 3]
+    sliced = lists.slice_request(1, 1)
+    assert sliced.logprob_token_ids.tolist() == [[5, 6]]
+    assert sliced.sampled_token_ranks.tolist() == [3]
 
 
 def test_sampling_mask_tensors_tolist():
@@ -200,3 +225,14 @@ class TestLogprobsLists(TestCase):
         assert len(sliced.logprob_token_ids) == 9  # All tokens
         assert sliced.logprob_token_ids == self.logprobsLists.logprob_token_ids
         assert sliced.cu_num_generated_tokens is None
+
+
+def test_with_ec_conn_output_copies_shared_empty_output():
+    """The shared empty output is copied, never written to."""
+    ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
+
+    result = ModelRunnerOutput.with_ec_conn_output(EMPTY_MODEL_RUNNER_OUTPUT, ec_output)
+
+    assert result is not EMPTY_MODEL_RUNNER_OUTPUT
+    assert result.ec_connector_output is ec_output
+    assert EMPTY_MODEL_RUNNER_OUTPUT.ec_connector_output is None
