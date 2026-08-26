@@ -14,6 +14,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
