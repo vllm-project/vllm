@@ -34,9 +34,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.moe_loading_utils import (  # noqa: E501
-    load_per_expert_moe_weight,
-)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
@@ -1165,13 +1162,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if self._try_load_streamed_expert(name, weight, params_dict, loaded_params):
                 continue
 
-            # compressed-tensors keeps experts separate; route those keys into
-            # the stacked w13_*/w2_* params.
-            if load_per_expert_moe_weight(
-                name, weight, params_dict, loaded_params, tp_rank=tp_rank
-            ):
-                continue
-
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -1406,13 +1396,6 @@ class GptOssForCausalLM(
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
             ".down_proj.input_scale": ".w2_input_scale",
-            # For compressed-tensors format
-            ".gate_proj.weight": ".w1_weight",
-            ".gate_proj.weight_scale": ".w1_weight_scale",
-            ".gate_proj.bias": ".w1_bias",
-            ".up_proj.weight": ".w3_weight",
-            ".up_proj.weight_scale": ".w3_weight_scale",
-            ".up_proj.bias": ".w3_bias",
         },
     )
 
