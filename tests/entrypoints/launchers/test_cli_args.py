@@ -201,6 +201,14 @@ def test_chat_template_validation_for_happy_paths(serve_parser):
     validate_parsed_serve_args(args)
 
 
+def test_engine_snapshot_requires_dev_mode(serve_parser, monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SERVER_DEV_MODE", False)
+    args = serve_parser.parse_args(args=["--enable-engine-snapshot"])
+
+    with pytest.raises(ValueError, match="VLLM_SERVER_DEV_MODE=1"):
+        validate_parsed_serve_args(args)
+
+
 def test_chat_template_validation_for_sad_paths(serve_parser):
     """Ensure validation fails if the chat template doesn't exist"""
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
@@ -329,6 +337,50 @@ def test_default_chat_template_kwargs_default_none(serve_parser):
     """Ensure default_chat_template_kwargs defaults to None"""
     args = serve_parser.parse_args(args=[])
     assert args.default_chat_template_kwargs is None
+
+
+def test_engine_snapshot_resource_policy(serve_parser):
+    args = serve_parser.parse_args(args=[])
+    assert args.engine_snapshot_provider == "criu_cuda"
+    assert args.engine_snapshot_resource_policy == "full"
+
+    args = serve_parser.parse_args(
+        args=["--engine-snapshot-resource-policy", "minimized"]
+    )
+    assert args.engine_snapshot_resource_policy == "minimized"
+
+    for unsupported in ("discard_kv", "host_backup", "reload_weights"):
+        with pytest.raises(SystemExit):
+            serve_parser.parse_args(
+                args=["--engine-snapshot-resource-policy", unsupported]
+            )
+
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(
+            args=["--engine-snapshot-resource-policy", "unsupported"]
+        )
+
+
+def test_engine_snapshot_persistence(serve_parser):
+    args = serve_parser.parse_args(args=[])
+    assert args.engine_snapshot_persistence == "durable"
+
+    args = serve_parser.parse_args(args=["--engine-snapshot-persistence", "page_cache"])
+    assert args.engine_snapshot_persistence == "page_cache"
+
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(args=["--engine-snapshot-persistence", "unsupported"])
+
+
+def test_engine_snapshot_integrity(serve_parser):
+    args = serve_parser.parse_args(args=[])
+    assert args.engine_snapshot_integrity == "optimistic"
+
+    args = serve_parser.parse_args(args=["--engine-snapshot-integrity", "strict"])
+    assert args.engine_snapshot_integrity == "strict"
+
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(args=["--engine-snapshot-integrity", "unsupported"])
 
 
 def test_default_chat_template_kwargs_invalid_json(serve_parser):
