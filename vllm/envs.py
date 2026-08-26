@@ -1254,10 +1254,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
-    # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
-    # interleaved flydsl kernels instead of the default a16w4 separated path.
-    # This is the only flag users need: vLLM picks the kernels by passing
-    # gate_mode to AITER and sets the AITER-side workaround env at init.
+    # Route K3 SiTU MXFP4 MoE through the FlyDSL SiTUv2 path (a4w4 fp4
+    # activations, separated gate/up layout) instead of default a16w4. vLLM
+    # sets AITER_SITUV2_A4W4 at init when this flag is on. The env name
+    # retains the historical A8W4 suffix for recipe compatibility.
     "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
     ),

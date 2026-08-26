@@ -1604,6 +1604,25 @@ def _rocm_aiter_fp8_attn_fake(
 _OPS_REGISTERED = False
 
 
+def _sync_aiter_situv2_moe_env() -> None:
+    """Mirror the SiTUv2 MoE toggle into AITER's a4w4 dispatch env.
+
+    AITER selects afp8 vs afp4 activation kernels via AITER_SITUV2_A8W4 /
+    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first).
+    When VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 is enabled we route to a4w4
+    (afp4_wfp4_fp4 kernels) and clear any legacy AITER_SITUV2_A8W4 override.
+    """
+    import os
+
+    import vllm.envs as envs
+
+    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4:
+        os.environ["AITER_SITUV2_A4W4"] = "1"
+        os.environ.pop("AITER_SITUV2_A8W4", None)
+    else:
+        os.environ.pop("AITER_SITUV2_A4W4", None)
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -1627,7 +1646,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls a8w4 SiTU fused MoE variant.
+        VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls SiTUv2 FlyDSL MoE (a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1727,6 +1746,7 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
@@ -3563,3 +3583,4 @@ class rocm_aiter_ops:
 
 
 rocm_aiter_ops.register_ops_once()
+_sync_aiter_situv2_moe_env()

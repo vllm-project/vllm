@@ -373,14 +373,10 @@ def rocm_aiter_fused_experts(
 
         gate_mode = ""
         if activation == MoEActivation.SITU:
-            # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
-            # interleaved (_gui_) fp8 flydsl kernels; default a16w4 SiTU stays
-            # separated.
-            gate_mode = (
-                GateMode.INTERLEAVE.value
-                if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
-                else GateMode.SEPARATED.value
-            )
+            # SiTUv2 flydsl (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses a4w4
+            # fp4 activations with separated gate/up weights; default a16w4
+            # SiTU also stays separated.
+            gate_mode = GateMode.SEPARATED.value
         elif quant_config.use_mxfp4_w4a16:
             gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:

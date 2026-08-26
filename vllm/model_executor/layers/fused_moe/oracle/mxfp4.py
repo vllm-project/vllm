@@ -1527,9 +1527,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            # a8w4 uses gate/up-interleaved flydsl kernels;
-            # default a16w4 keeps the separated layout.
-            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+            # SiTUv2 flydsl uses separated gate/up layout (a4w4).
+            guinterleave = False
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
