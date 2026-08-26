@@ -238,6 +238,24 @@ def all_gather_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def fixed_order_all_reduce_(tensor: torch.Tensor, group_name: str) -> None:
+    """Gather every rank, then overwrite tensor with the rank-ordered sum."""
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+
+    gathered = group._all_gather_out_place(tensor.contiguous().unsqueeze(0), 0)
+    parts = gathered.unbind(0)
+    tensor.copy_(parts[0])
+    for rank in range(1, group.world_size):
+        tensor.add_(parts[rank])
+
+
+def fixed_order_all_reduce_fake_(tensor: torch.Tensor, group_name: str) -> None:
+    return
+
+
 def patched_fused_scaled_matmul_reduce_scatter_fake(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -406,6 +424,13 @@ direct_register_custom_op(
     op_name="all_gather",
     op_func=all_gather,
     fake_impl=all_gather_fake,
+)
+
+direct_register_custom_op(
+    op_name="fixed_order_all_reduce_",
+    op_func=fixed_order_all_reduce_,
+    mutates_args=["tensor"],
+    fake_impl=fixed_order_all_reduce_fake_,
 )
 
 # TODO: Remove this once the pytorch fix
