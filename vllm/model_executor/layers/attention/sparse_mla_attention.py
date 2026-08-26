@@ -3,6 +3,7 @@
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
@@ -143,12 +144,17 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
+    decode_max_query_len: int = 0
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
 
 
 T = TypeVar("T", bound=SparseMLACommonMetadata)
+HiSparseMQAStep = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    tuple[torch.Tensor, torch.Tensor | None],
+]
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -232,6 +238,16 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )
+
+    def get_max_profile_tokens(
+        self,
+        max_num_tokens: int,
+        max_num_reqs: int,
+        max_query_len: int,
+    ) -> int:
+        if self.vllm_config.attention_config.hisparse_config is None:
+            return max_num_tokens
+        return min(max_num_tokens, max_num_reqs * max_query_len)
 
     def _init_reorder_batch_threshold(
         self,
@@ -339,6 +355,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_query_len,
             prefill_query_lens_cpu,
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
+        decode_max_query_len = 0
+        if num_decodes:
+            if common_attn_metadata.max_logits_per_req is not None:
+                decode_max_query_len = common_attn_metadata.max_logits_per_req
+            elif num_prefills == 0:
+                decode_max_query_len = common_attn_metadata.max_query_len
+            else:
+                decode_query_lens_cpu = torch.diff(
+                    common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
+                )
+                decode_max_query_len = int(decode_query_lens_cpu.max().item())
 
         prefill_max_seq_len = 0
         prefill: SparseMLAPrefillMetadata | None = None
@@ -399,6 +426,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             num_decodes=num_decodes,
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
+            decode_max_query_len=decode_max_query_len,
             prefill_max_seq_len=prefill_max_seq_len,
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
@@ -667,6 +695,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     def prepare_for_batch(self, attn_metadata: Any | None) -> None:
         self._hisparse_dummy_batch = attn_metadata is None
         if self.hisparse_cache is not None:
+            self.hisparse_cache.num_decode_tokens = (
+                attn_metadata.num_decode_tokens if attn_metadata is not None else 0
+            )
+            self.hisparse_cache.req_id_per_token = (
+                attn_metadata.req_id_per_token if attn_metadata is not None else None
+            )
             self.hisparse_cache.decode_batch = (
                 attn_metadata is not None
                 and attn_metadata.max_query_len == 1
@@ -700,32 +734,161 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             prefetch_followers=prefetch_followers,
         )
 
-    def _hisparse_decode_step(
+    def _run_hisparse_decode(
         self,
+        q: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: Any,
-        step: int,
+        run_step: HiSparseMQAStep,
         *,
-        return_valid_counts: bool = False,
-    ):
+        uniform: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert num_decodes > 0 and num_decode_tokens % num_decodes == 0
-        query_len = num_decode_tokens // num_decodes
-        topk_by_request = topk_indices[:num_decode_tokens].view(
-            num_decodes, query_len, -1
+        assert num_decodes > 0 and num_decode_tokens > 0
+
+        if uniform:
+            assert num_decode_tokens % num_decodes == 0
+            max_query_len = num_decode_tokens // num_decodes
+            q_by_request = q.view(num_decodes, max_query_len, *q.shape[1:])
+            topk_by_request = topk_indices[:num_decode_tokens].view(
+                num_decodes, max_query_len, -1
+            )
+            req_ids_by_request = attn_metadata.req_id_per_token[
+                :num_decode_tokens
+            ].view(num_decodes, max_query_len)
+        else:
+            max_query_len = attn_metadata.decode_max_query_len
+            query_start_loc = attn_metadata.query_start_loc[: num_decodes + 1]
+            request_ids = torch.arange(
+                num_decodes,
+                dtype=torch.int32,
+                device=q.device,
+            )
+
+        outputs = []
+        lses = []
+        output_indices = []
+        for step in range(max_query_len):
+            if uniform:
+                step_q = q_by_request[:, step]
+                step_topk = topk_by_request[:, step].contiguous()
+                step_req_ids = req_ids_by_request[:, step].contiguous()
+                active = None
+            else:
+                token_indices = query_start_loc[:-1] + step
+                active = (token_indices < query_start_loc[1:]) & (
+                    token_indices < num_decode_tokens
+                )
+                output_indices.append(
+                    torch.where(
+                        active,
+                        token_indices,
+                        torch.full_like(token_indices, num_decode_tokens),
+                    ).long()
+                )
+                token_indices = token_indices.clamp(
+                    min=0, max=num_decode_tokens - 1
+                ).long()
+                step_q = q.index_select(0, token_indices)
+                step_topk = topk_indices.index_select(0, token_indices).masked_fill(
+                    ~active.unsqueeze(1), -1
+                )
+                step_req_ids = request_ids
+
+            hot_cache, physical_indices, seq_lens = self._hisparse_swap_in(
+                step_topk,
+                attn_metadata,
+                return_valid_counts=True,
+                req_id_per_token=step_req_ids,
+                plan_row_offset=step * num_decodes,
+                prefetch_followers=max_query_len == 1,
+            )
+            step_out, step_lse = run_step(
+                step_q,
+                hot_cache,
+                physical_indices,
+                seq_lens,
+            )
+            if active is not None:
+                step_out.masked_fill_(~active.view(-1, 1, 1), 0)
+                if step_lse is not None:
+                    step_lse.masked_fill_(~active.view(-1, 1), float("-inf"))
+            outputs.append(step_out)
+            if step_lse is not None:
+                lses.append(step_lse)
+
+        stacked_outputs = torch.stack(outputs, dim=1).flatten(0, 1)
+        stacked_lses = torch.stack(lses, dim=1).flatten(0, 1) if lses else None
+        if uniform:
+            return stacked_outputs, stacked_lses
+
+        packed_indices = torch.stack(output_indices, dim=1).flatten()
+        output = stacked_outputs.new_empty(
+            (num_decode_tokens + 1, *stacked_outputs.shape[1:])
         )
-        req_ids = attn_metadata.req_id_per_token[:num_decode_tokens].view(
-            num_decodes, query_len
-        )
-        return self._hisparse_swap_in(
-            topk_by_request[:, step].contiguous(),
+        output.index_copy_(0, packed_indices, stacked_outputs)
+        if stacked_lses is None:
+            return output[:num_decode_tokens], None
+        lse = stacked_lses.new_empty((num_decode_tokens + 1, *stacked_lses.shape[1:]))
+        lse.index_copy_(0, packed_indices, stacked_lses)
+        return output[:num_decode_tokens], lse[:num_decode_tokens]
+
+    def _forward_hisparse_mqa(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: Any,
+        run_step: HiSparseMQAStep,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert self.hisparse_cache is not None
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        if 0 < num_decode_tokens < q.shape[0]:
+            decode_out, decode_lse = self._run_hisparse_decode(
+                q[:num_decode_tokens],
+                topk_indices[:num_decode_tokens],
+                attn_metadata,
+                run_step,
+            )
+            prefill_cache, prefill_block_table, prefill_req_ids = (
+                self._hisparse_stage_prefill_rows(kv_cache, attn_metadata)
+            )
+            prefill_indices, prefill_lens = triton_convert_req_index_to_global_index(
+                prefill_req_ids,
+                prefill_block_table,
+                topk_indices[num_decode_tokens:],
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+            prefill_out, prefill_lse = run_step(
+                q[num_decode_tokens:],
+                prefill_cache,
+                prefill_indices,
+                prefill_lens,
+            )
+            out = torch.cat((decode_out, prefill_out))
+            if decode_lse is None:
+                return out, None
+            assert prefill_lse is not None
+            return out, torch.cat((decode_lse, prefill_lse))
+
+        if attn_metadata.decode_max_query_len > 1:
+            return self._run_hisparse_decode(
+                q,
+                topk_indices,
+                attn_metadata,
+                run_step,
+            )
+
+        kv_cache, physical_indices, seq_lens = self._hisparse_decode_cache(
+            kv_cache,
+            topk_indices,
             attn_metadata,
-            return_valid_counts=return_valid_counts,
-            req_id_per_token=req_ids[:, step].contiguous(),
-            plan_row_offset=step * num_decodes,
-            prefetch_followers=query_len == 1,
+            return_valid_counts=True,
         )
+        return run_step(q, kv_cache, physical_indices, seq_lens)
 
     def _hisparse_decode_cache(
         self,
@@ -757,7 +920,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             topk_indices.shape[0] != attn_metadata.num_decode_tokens
         ):
             raise NotImplementedError(
-                "HiSparse MQA prefill is not implemented by this sparse MLA backend."
+                "HiSparse MQA prefill is not implemented by this sparse MLA backend: "
+                f"topk_rows={topk_indices.shape[0]}, "
+                f"num_decode_tokens={attn_metadata.num_decode_tokens}, "
+                f"num_actual_tokens={attn_metadata.num_actual_tokens}."
             )
         resolved = self._hisparse_swap_in(
             topk_indices,
