@@ -369,7 +369,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.p
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.xpu /docker/Dockerfile.xpu
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm_base /docker/Dockerfile.rocm_base
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/ci-rocm.hcl /docker/ci-rocm.hcl
