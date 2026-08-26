@@ -752,10 +752,25 @@ steps:
   - tests/distributed
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_comm_ops.py -m 'not distributed(num_gpus=4)'
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+
+- label: ":amd: (MI300) Distributed Comm Ops (Multi-GPU)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed
+  - tests/distributed/test_comm_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s distributed/test_comm_ops.py -m 'distributed(num_gpus=4)'
 
 - label: ":amd: (MI300) EPLB Algorithm" # TBD
   timeout_in_minutes: 180
@@ -919,6 +934,21 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+
+- label: ":amd: (MI300) Distributed Kimi Linear Context Parallel" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed
+  - tests/distributed/test_kimi_linear_context_parallel.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s distributed/test_kimi_linear_context_parallel.py
 
 - label: ":amd: (MI300) Distributed Torchrun + Shutdown" # TBD
   timeout_in_minutes: 180
@@ -1637,7 +1667,23 @@ steps:
   - vllm/model_executor/layers/mamba/ops
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/mamba
+  - pytest -v -s kernels/mamba --ignore=kernels/mamba/test_mamba_mixer2.py
+
+- label: ":amd: (MI300) Mamba Kernels (Multi-GPU)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba/test_mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/ops
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/mamba/test_mamba_mixer2.py
 
 - label: ":amd: (MI300) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 180
@@ -1723,7 +1769,7 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py --ignore=lora/test_minicpmv_tp.py --ignore=lora/test_transformers_model.py --ignore=lora/test_fused_moe_lora_kernel.py
 
 - label: ":amd: (MI300) LoRA TP (Distributed)" # TBD
   timeout_in_minutes: 180
@@ -1745,6 +1791,11 @@ steps:
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
   - pytest -v -s -x lora/test_gemma4_tp.py
+  - pytest -v -s -x lora/test_deepseekv2_tp.py
+  - pytest -v -s -x lora/test_qwen3moe_tp.py
+  - pytest -v -s -x lora/test_minicpmv_tp.py
+  - pytest -v -s -x lora/test_transformers_model.py
+  - pytest -v -s -x lora/test_fused_moe_lora_kernel.py
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
@@ -2085,7 +2136,21 @@ steps:
   - vllm/
   - tests/models/multimodal/generation
   commands:
-  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model and not distributed(num_gpus=4)'
+
+- label: ":amd: (MI300) Multimodal Models (Extended Generation 3 - Multi-GPU)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation/test_common.py
+  commands:
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'distributed(num_gpus=4)'
 
 - label: ":amd: (MI300) Multimodal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
@@ -2320,7 +2385,8 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi300_1
+  agent_pool: mi300_2
+  num_gpus: 2
   optional: true
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
@@ -2586,6 +2652,21 @@ steps:
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+
+- label: ":amd: (MI300) V1 E2E ReplaySSM Decode (Multi-GPU)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/test_replayssm_decode.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/test_replayssm_decode.py
 
 - label: ":amd: (MI300) Spec Decode Draft Model" # TBD
   timeout_in_minutes: 180
