@@ -401,3 +401,52 @@ def test_gather_actual_addresses_child_crash_before_report():
         manager.shutdown()
         time.sleep(0.2)
         sock.close()
+
+
+def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
+    """The Rust frontend command carries every non-default arg as JSON.
+    Credentials must not reach the log line."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    hf_token = "hf_TESTTOKEN123"
+    api_key = "sk-TESTKEY456"
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--hf-token", hf_token, "--api-key", api_key]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+        with caplog.at_level("INFO", logger="vllm.v1.utils"):
+            RustFrontendProcessManager(
+                binary_path="/nonexistent/vllm-rs",
+                sock=sock,
+                args=args,
+                input_address="ipc:///tmp/in",
+                output_address="ipc:///tmp/out",
+                engine_start_index=0,
+                engine_count=1,
+                data_parallel_size=1,
+            )
+    finally:
+        sock.close()
+
+    message = caplog.text
+    assert "Launching Rust frontend:" in message
+    assert hf_token not in message
+    assert api_key not in message
+    assert '"hf_token": "***"' in message
