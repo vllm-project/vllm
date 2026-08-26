@@ -37,6 +37,13 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # GDN state planning and decode kernels use the device-side
+        # query_start_loc. CPU query lengths are only used for batch
+        # classification and fixed-size bookkeeping.
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:
@@ -81,7 +88,7 @@ class GDNAttentionMetadata:
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     kv_cache_spec: MambaSpec
-    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support = AttentionCGSupport.VARLEN_DECODE
 
     reorder_batch_threshold: int = 1
 

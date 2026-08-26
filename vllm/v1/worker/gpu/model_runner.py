@@ -1557,6 +1557,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            has_prefill=(
+                batch_req_state.has_prefill if batch_req_state is not None else False
+            ),
         )
 
         if batch_desc.num_tokens == 0:

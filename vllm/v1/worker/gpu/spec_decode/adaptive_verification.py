@@ -478,10 +478,14 @@ def maybe_create_adaptive_verification_manager(
             target_attn_cg_support = target_attn_cg_support.narrow(
                 *additional_attn_cg_support
             )
-    if target_attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
+    if target_attn_cg_support.min_cg_support not in (
+        AttentionCGSupport.VARLEN_DECODE,
+        AttentionCGSupport.ALWAYS,
+    ):
         raise ValueError(
             "Adaptive verification captures varlen decode cudagraphs, so every"
-            " target attention builder must report AttentionCGSupport.ALWAYS, but "
+            " target attention builder must report "
+            "AttentionCGSupport.VARLEN_DECODE or AttentionCGSupport.ALWAYS, but "
             f"{target_attn_cg_support.min_cg_attn_backend} reports "
             f"{target_attn_cg_support.min_cg_support}. Pass "
             "enable_adaptive_verification=false in the speculative config, or "

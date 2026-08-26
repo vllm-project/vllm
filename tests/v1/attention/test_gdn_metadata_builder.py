@@ -17,7 +17,9 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
@@ -167,6 +169,14 @@ def _build(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
         )
     return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
+
+
+def test_gdn_advertises_varlen_decode_cudagraph_support():
+    assert GDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
+    assert (
+        GDNAttentionMetadataBuilder.get_cudagraph_support(None, None)
+        == AttentionCGSupport.VARLEN_DECODE
+    )
 
 
 @pytest.mark.parametrize(

@@ -10,12 +10,9 @@ import torch
 
 from tests.utils import large_gpu_mark
 from vllm import SamplingParams
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.attention.backends.gdn_attn import (
-    GDNAttentionBackend,
-    GDNAttentionMetadataBuilder,
-)
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
 )
@@ -34,43 +31,53 @@ pytestmark = [
 
 
 @large_gpu_mark(min_gb=16)
+@pytest.mark.parametrize("gdn_decode_kernel", ["cuda", "triton"])
 def test_adaptive_dspark_replays_ragged_gdn_decode(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner,
+    gdn_decode_kernel: str,
 ) -> None:
-    """Ragged device query lengths must produce valid target outputs.
-
-    The capability overrides let this test audit the execution path before GDN
-    advertises adaptive-verification support globally. Remove them when the
-    production capability gates are enabled.
-    """
+    """Ragged device query lengths must produce valid target outputs."""
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
     monkeypatch.setenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "64")
-
-    def supports_device_query_lens(_cls) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        GDNAttentionBackend,
-        "supports_device_cpu_query_lens_mismatch",
-        classmethod(supports_device_query_lens),
-    )
-    monkeypatch.setattr(
-        GDNAttentionMetadataBuilder,
-        "_cudagraph_support",
-        AttentionCGSupport.ALWAYS,
-    )
+    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", gdn_decode_kernel)
 
     trace_step = {"value": 0}
     pending_layouts: dict[int, tuple[tuple[str, ...], tuple[int, ...], int]] = {}
     observed_layouts: list[
         tuple[tuple[str, ...], tuple[int, ...], torch.Tensor, int]
     ] = []
+    observed_dispatches: list[tuple[int | None, bool, CUDAGraphMode, bool]] = []
 
     original_get_num_tokens = AdaptiveVerificationManager.get_num_tokens
     original_reallocate_drafts = AdaptiveVerificationManager.reallocate_drafts
+    original_dispatch = CudaGraphManager.dispatch
+
+    def record_dispatch(
+        manager: CudaGraphManager,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        num_active_loras: int,
+        max_query_len: int | None = None,
+        has_prefill: bool = False,
+    ):
+        desc = original_dispatch(
+            manager,
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            num_active_loras,
+            max_query_len=max_query_len,
+            has_prefill=has_prefill,
+        )
+        if manager.varlen_decode:
+            observed_dispatches.append(
+                (uniform_token_count, has_prefill, desc.cg_mode, desc.decode_only)
+            )
+        return desc
 
     def controlled_get_num_tokens(
         manager: AdaptiveVerificationManager,
@@ -160,6 +167,7 @@ def test_adaptive_dspark_replays_ragged_gdn_decode(
         "reallocate_drafts",
         record_reallocated_drafts,
     )
+    monkeypatch.setattr(CudaGraphManager, "dispatch", record_dispatch)
 
     runner_config = {
         "language_model_only": True,
@@ -205,7 +213,7 @@ def test_adaptive_dspark_replays_ragged_gdn_decode(
     with vllm_runner(TARGET_MODEL, **runner_config) as runner:
         llm = runner.get_llm()
         cudagraph_mode = llm.llm_engine.vllm_config.compilation_config.cudagraph_mode
-        assert cudagraph_mode.has_full_cudagraphs()
+        assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
         outputs = llm.generate(prompts, sampling_params)
         torch.accelerator.synchronize()
@@ -246,10 +254,30 @@ def test_adaptive_dspark_replays_ragged_gdn_decode(
         assert len({device for _, device, _ in ragged_layouts}) >= 2, (
             f"device query lengths did not change across decode steps: {ragged_layouts}"
         )
+        assert any(
+            uniform_token_count is None
+            and not has_prefill
+            and cg_mode == CUDAGraphMode.FULL
+            and decode_only
+            for (
+                uniform_token_count,
+                has_prefill,
+                cg_mode,
+                decode_only,
+            ) in observed_dispatches
+        ), "ragged decode never used a decode-only FULL graph"
+        assert not any(
+            has_prefill and decode_only
+            for _, has_prefill, _, decode_only in observed_dispatches
+        ), "a prefill batch used a decode-only FULL graph"
         for cpu_query_lens, device_query_lens, draft_budget in ragged_layouts:
             expected_total = len(device_query_lens) + draft_budget
             assert sum(cpu_query_lens) == expected_total
             assert sum(device_query_lens) == expected_total
+            assert all(
+                1 <= query_len <= NUM_SPECULATIVE_TOKENS + 1
+                for query_len in device_query_lens
+            )
             assert tuple(accumulate(device_query_lens, initial=0)) != tuple(
                 accumulate(cpu_query_lens, initial=0)
             )
