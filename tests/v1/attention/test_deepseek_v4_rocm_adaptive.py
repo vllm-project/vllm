@@ -13,13 +13,15 @@ from vllm.models.deepseek_v4.amd.rocm import (
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadataBuilder,
     DeepseekV4IndexerBackend,
-    DeepseekV4IndexerMetadataBuilder,
 )
 
 
 def _make_indexer_builder(*, adaptive: bool, capacity: int = 12):
-    builder = DeepseekV4IndexerMetadataBuilder.__new__(DeepseekV4IndexerMetadataBuilder)
+    builder = DeepseekV32IndexerMetadataBuilder.__new__(
+        DeepseekV32IndexerMetadataBuilder
+    )
     builder.vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive)
     )
@@ -57,18 +59,33 @@ def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
 @pytest.mark.cpu_test
 def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
-    vllm_config = SimpleNamespace(
-        num_speculative_tokens=7,
+    adaptive_config = SimpleNamespace(
+        num_speculative_tokens=1,
         speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+    )
+    fixed_config = SimpleNamespace(
+        num_speculative_tokens=1,
+        speculative_config=SimpleNamespace(enable_adaptive_verification=False),
     )
 
     assert DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch()
-    assert DeepseekV4IndexerMetadataBuilder._use_flattening(vllm_config)
     assert (
-        DeepseekV4IndexerMetadataBuilder.get_cudagraph_support(
-            vllm_config, SimpleNamespace()
+        DeepseekV4IndexerBackend.get_builder_cls()
+        is DeepseekV32IndexerMetadataBuilder
+    )
+    assert indexer._use_flattening(adaptive_config)
+    assert (
+        DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
+            adaptive_config, SimpleNamespace()
         )
         == AttentionCGSupport.ALWAYS
+    )
+    assert not indexer._use_flattening(fixed_config)
+    assert (
+        DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
+            fixed_config, SimpleNamespace()
+        )
+        == AttentionCGSupport.UNIFORM_BATCH
     )
 
 
