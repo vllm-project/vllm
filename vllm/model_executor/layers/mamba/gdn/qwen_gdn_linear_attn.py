@@ -1492,32 +1492,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
             if envs.VLLM_BATCH_INVARIANT:
-                assert non_spec_query_start_loc is not None
                 assert non_spec_state_indices_tensor is not None
-                cu_sd = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
-                sd_state_indices = non_spec_state_indices_tensor
                 device_sd = query_decode.device
                 sd_outputs: list[torch.Tensor] = []
-                for i in range(attn_metadata.num_decodes):
-                    ss = cu_sd[i].item()
-                    se = cu_sd[i + 1].item()
-                    si_sd = sd_state_indices[i].item()
+                # Each decode sequence has 1 token; index _i == token position _i.
+                # Use tensor-index (no .item()) for CUDA-graph-capture compatibility.
+                for _i in range(attn_metadata.num_decodes):
+                    _si_sd = non_spec_state_indices_tensor[_i : _i + 1]
                     o_sd, _ = fused_sigmoid_gating_delta_rule_update(
                         A_log=self.A_log,
-                        a=a[ss:se],
-                        b=b[ss:se],
+                        a=a[_i : _i + 1],
+                        b=b[_i : _i + 1],
                         dt_bias=self.dt_bias,
-                        q=query_decode[:, ss:se],
-                        k=key_decode[:, ss:se],
-                        v=value_decode[:, ss:se],
-                        initial_state=ssm_state[si_sd : si_sd + 1],
+                        q=query_decode[:, _i : _i + 1],
+                        k=key_decode[:, _i : _i + 1],
+                        v=value_decode[:, _i : _i + 1],
+                        initial_state=ssm_state,
                         inplace_final_state=True,
                         cu_seqlens=torch.tensor(
-                            [0, se - ss], dtype=torch.int32, device=device_sd
+                            [0, 1], dtype=torch.int32, device=device_sd
                         ),
-                        ssm_state_indices=torch.zeros(
-                            1, dtype=torch.int32, device=device_sd
-                        ),
+                        ssm_state_indices=_si_sd,
                         use_qk_l2norm_in_kernel=True,
                     )
                     sd_outputs.append(o_sd)
@@ -1614,32 +1609,27 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             if envs.VLLM_BATCH_INVARIANT:
-                assert non_spec_query_start_loc is not None
                 assert non_spec_state_indices_tensor is not None
-                cu_dec = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
-                dec_state_indices = non_spec_state_indices_tensor
                 device = query_non_spec.device
                 dec_outputs: list[torch.Tensor] = []
-                for i in range(attn_metadata.num_decodes):
-                    s = cu_dec[i].item()
-                    e = cu_dec[i + 1].item()
-                    si = dec_state_indices[i].item()
+                # Each decode sequence has 1 token; index _i == token position _i.
+                # Use tensor-index (no .item()) for CUDA-graph-capture compatibility.
+                for _i in range(attn_metadata.num_decodes):
+                    _si_dec = non_spec_state_indices_tensor[_i : _i + 1]
                     out_i, _ = fused_sigmoid_gating_delta_rule_update(
                         A_log=self.A_log,
-                        a=a[s:e],
-                        b=b[s:e],
+                        a=a[_i : _i + 1],
+                        b=b[_i : _i + 1],
                         dt_bias=self.dt_bias,
-                        q=query_non_spec[:, s:e],
-                        k=key_non_spec[:, s:e],
-                        v=value_non_spec[:, s:e],
-                        initial_state=ssm_state[si : si + 1],
+                        q=query_non_spec[:, _i : _i + 1],
+                        k=key_non_spec[:, _i : _i + 1],
+                        v=value_non_spec[:, _i : _i + 1],
+                        initial_state=ssm_state,
                         inplace_final_state=True,
                         cu_seqlens=torch.tensor(
-                            [0, e - s], dtype=torch.int32, device=device
+                            [0, 1], dtype=torch.int32, device=device
                         ),
-                        ssm_state_indices=torch.zeros(
-                            1, dtype=torch.int32, device=device
-                        ),
+                        ssm_state_indices=_si_dec,
                         use_qk_l2norm_in_kernel=True,
                     )
                     dec_outputs.append(out_i)
