@@ -50,6 +50,8 @@ pub type Glm45ReasoningParser = Qwen3ReasoningParser;
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
 pub type KimiK2ReasoningParser = Qwen3ReasoningParser;
+/// Ling3 shares the standard `<think>...</think>` parser.
+pub type Ling3ReasoningParser = Qwen3ReasoningParser;
 /// MiniMax M2 currently shares the standard `<think>...</think>` parser.
 pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
 /// Nemotron V3 currently shares the standard `<think>...</think>` parser.

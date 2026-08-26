@@ -8,9 +8,9 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Internlm2ToolParser, KimiK2ToolParser, Ling3ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -34,6 +34,7 @@ pub mod names {
     pub const INTERNLM: &str = "internlm";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const KIMI_K3: &str = "kimi_k3";
+    pub const LING3: &str = "ling3";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -80,6 +81,7 @@ impl ToolParserFactory {
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_unified_dummy(names::KIMI_K3)
+            .register_parser::<Ling3ToolParser>(names::LING3)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
@@ -106,6 +108,8 @@ impl ToolParserFactory {
             // vllm/model_executor/models/registry.py:146), or `Intern-S1` /
             // `Intern-S1-Pro` (separate intern-s1 parser, see PR #40115).
             .register_pattern("internlm2", names::INTERNLM)
+            .register_pattern("ling-3", names::LING3)
+            .register_pattern("ling3", names::LING3)
             .register_pattern("llama-4", names::LLAMA4_JSON)
             .register_pattern("llama-3.2", names::LLAMA3_JSON)
             .register_pattern("llama-3.1", names::LLAMA3_JSON)

@@ -8,9 +8,9 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
-    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    Ling3ReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -29,6 +29,7 @@ pub mod names {
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const KIMI_K3: &str = "kimi_k3";
+    pub const LING3: &str = "ling3";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
@@ -72,6 +73,7 @@ impl ReasoningParserFactory {
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
             .register_unified_dummy(names::KIMI_K3)
+            .register_parser::<Ling3ReasoningParser>(names::LING3)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
@@ -96,6 +98,8 @@ impl ReasoningParserFactory {
             .register_pattern("hy3", names::HY_V3)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
+            .register_pattern("ling-3", names::LING3)
+            .register_pattern("ling3", names::LING3)
             // step3p5 patterns must precede `step3`: substring matching would
             // otherwise route step3p5 IDs to step3.
             .register_pattern("step-3p5", names::STEP3P5)

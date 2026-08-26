@@ -204,6 +204,23 @@ fn factory_new_resolves_default_patterns() {
         Some(names::SEED_OSS)
     );
 
+    assert_eq!(
+        factory.resolve_name_for_model("inclusionAI/Ling-3.0-flash"),
+        Some(names::LING3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("inclusionAI/Ling-3.0-tiny"),
+        Some(names::LING3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("inclusionAI/Ling-3.0-flash-base"),
+        Some(names::LING3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ling-3.0"),
+        Some(names::LING3)
+    );
+
     // InternLM2 positive: both dashed and underscored versioned names route.
     assert_eq!(
         factory.resolve_name_for_model("internlm/internlm2-chat-7b"),
@@ -243,4 +260,12 @@ fn factory_new_registers_phi4_mini_json_by_name() {
 
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
+}
+
+#[test]
+fn factory_new_registers_ling3_by_name() {
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::LING3));
+    factory.create(names::LING3, &[]).unwrap();
 }
