@@ -2343,6 +2343,31 @@ class EngineArgs:
         assert model_config.max_model_len is not None, (
             "max_model_len must be set by this point"
         )
+        # Parallel drafting (DFlash/DSpark) issues (1 + num_speculative_tokens)
+        # tokens per request in a single decode step, and that step cannot be
+        # chunked. The scheduler's max_num_batched_tokens therefore has a hard
+        # lower bound of max_num_seqs * (num_speculative_tokens + 1); below it
+        # the drafter's index arithmetic and the compiled forward ranges both
+        # overflow. Raise the default to that bound rather than letting users
+        # discover the failure as a CUDA out-of-bounds assert.
+        if (
+            speculative_config is not None
+            and speculative_config.parallel_drafting
+            and self.max_num_seqs is not None
+        ):
+            min_batched_tokens = self.max_num_seqs * (
+                speculative_config.num_speculative_tokens + 1
+            )
+            if self.max_num_batched_tokens < min_batched_tokens:
+                logger.info(
+                    "Raising max_num_batched_tokens from %s to %s to cover the "
+                    "parallel-drafting decode step (%s seqs x %s tokens/request).",
+                    self.max_num_batched_tokens,
+                    min_batched_tokens,
+                    self.max_num_seqs,
+                    speculative_config.num_speculative_tokens + 1,
+                )
+                self.max_num_batched_tokens = min_batched_tokens
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
