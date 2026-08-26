@@ -81,7 +81,6 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
-        self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
         self.synthetic_conditional_rates: torch.Tensor | None = None
@@ -123,20 +122,11 @@ class RejectionSampler:
             num_warps=1,
         )
         expanded_logits = num_logits != num_reqs
-        cu_num_generated_tokens: list[int] | torch.Tensor | None = None
-        if expanded_logits:
-            if self.enable_adaptive_verification:
-                # Adaptive verification keeps the true per-request boundaries
-                # on device only; cu_num_logits_np holds the pre-compacted
-                # layout.
-                cu_num_generated_tokens = cu_num_logits.clone()
-            else:
-                cu_num_generated_tokens = cu_num_logits_np.tolist()
         return compute_topk_scores(
             logits,
             max_num_logprobs,
             flat_sampled,
-            cu_num_generated_tokens,
+            cu_num_logits_np.tolist() if expanded_logits else None,
             logits_mode=self.sampler.logprobs_mode
             in ("raw_logits", "processed_logits"),
         )
@@ -201,7 +191,6 @@ class RejectionSampler:
             # guarantees the compacted batch always lands here.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
         else:
-            assert not self.enable_adaptive_verification
             request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
 
         sampled_chunks: list[torch.Tensor] = []
