@@ -1058,6 +1058,7 @@ class AsyncLLM(EngineClient):
             await self.wait_for_requests_to_drain(drain_timeout)
         except BaseException:
             set_scaling_elastic_ep(False)
+            await self.engine_core.abort_elastic_ep()
             raise
 
     async def scale_elastic_ep(
@@ -1079,7 +1080,11 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        try:
+            await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        except BaseException:
+            await self.engine_core.abort_elastic_ep()
+            raise
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1124,6 +1129,8 @@ class AsyncLLM(EngineClient):
         finally:
             if rank_will_retire and not commit_succeeded:
                 set_elastic_ep_rank_retired(False)
+            if not commit_succeeded:
+                await self.engine_core.abort_elastic_ep()
             set_scaling_elastic_ep(False)
 
     async def get_external_elastic_ep_phase(self) -> str | None:

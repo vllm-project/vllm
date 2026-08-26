@@ -266,6 +266,13 @@ class ElasticEPScalingState:
             assert self.state == ScaleDownRemovingEngineState.COMPLETE
             return True
 
+    def abort(self) -> None:
+        if self.commit_requested:
+            raise RuntimeError("Elastic EP reconfiguration is already committing")
+        self._collective_rpc("elastic_ep_execute", args=("abort_reconfiguration",))
+        if self.worker_type != "new" and self.new_dp_group is not None:
+            stateless_destroy_torch_distributed_process_group(self.new_dp_group)
+
     def is_ready_for_switch(self) -> bool:
         return self.worker_type == "existing" and (
             self.state is ScaleUpExistingEngineState.COMMIT_SCALE_UP

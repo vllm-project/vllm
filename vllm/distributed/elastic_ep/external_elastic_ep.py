@@ -721,6 +721,22 @@ class ExternalElasticEPScaleCoordinator:
             self._stop_handshake_server(handshake_server, suppress_errors=True)
             raise
 
+    async def abort(self) -> None:
+        prepared = self.prepared_scale
+        self.prepared_scale = None
+        try:
+            await self.client.call_utility_async("abort_prepared_elastic_ep")
+        except Exception:
+            logger.exception("[Elastic EP] Failed to release the prepared scale")
+        if prepared is None:
+            return
+        self._stop_handshake_server(prepared.handshake_server, suppress_errors=True)
+        for store in (prepared.control_store, prepared.reconfig_store):
+            with contextlib.suppress(Exception):
+                self._set_phase(
+                    store, prepared.epoch, ExternalElasticEPScalePhase.FAILED
+                )
+
     async def commit(self) -> None:
         prepared = self.prepared_scale
         if prepared is None:

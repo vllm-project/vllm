@@ -2360,6 +2360,14 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         return state.ready_key
 
+    def abort_prepared_elastic_ep(self) -> None:
+        state = self.eep_scaling_state
+        if state is None:
+            return
+        state.abort()
+        self.eep_scaling_state = None
+        self.process_input_queue_block = False
+
     def commit_prepared_elastic_ep(self) -> None:
         state = self.eep_scaling_state
         if state is None or state.commit_requested or not state.is_ready_for_switch():

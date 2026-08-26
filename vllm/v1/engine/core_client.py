@@ -231,6 +231,9 @@ class EngineCoreClient(ABC):
     async def commit_elastic_ep(self) -> None:
         raise NotImplementedError
 
+    async def abort_elastic_ep(self) -> None:
+        raise NotImplementedError
+
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
@@ -1529,6 +1532,11 @@ class DPAsyncMPClient(AsyncMPClient):
     async def commit_elastic_ep(self) -> None:
         await self._get_external_eep_coordinator().commit()
 
+    async def abort_elastic_ep(self) -> None:
+        coordinator = self.external_eep_coordinator
+        if coordinator is not None:
+            await coordinator.abort()
+
     async def get_external_elastic_ep_phase(self) -> str | None:
         coordinator = self.external_eep_coordinator
         return None if coordinator is None else coordinator.get_phase()
@@ -1728,6 +1736,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             num_redundant_experts
         )
         self._prepared_elastic_ep = None
+
+    async def abort_elastic_ep(self) -> None:
+        self._prepared_elastic_ep = None
+        await asyncio.gather(
+            *[
+                self._call_utility_async("abort_prepared_elastic_ep", engine=engine)
+                for engine in self.core_engines
+            ]
+        )
 
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Prepare elastic EP scaling without routing requests to new engines."""
