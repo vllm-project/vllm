@@ -1595,3 +1595,14 @@ def test_glm46v_duration_estimation_from_fps():
     assert len(indices) > 0
     assert len(indices) % 2 == 0
     assert all(0 <= idx < 90 for idx in indices)
+
+
+@pytest.mark.parametrize("backend", [Qwen2VLVideoBackend, Qwen3VLVideoBackend])
+def test_qwen_vl_video_zero_original_fps_raises(backend):
+    """A clip with unknown/variable fps (``original_fps == 0``) must raise a
+    clear ValueError instead of a ZeroDivisionError."""
+    source = VideoSourceMetadata(total_frames_num=120, original_fps=0.0, duration=0.0)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+
+    with pytest.raises(ValueError, match="known source fps"):
+        backend.compute_frames_index_to_sample(source, target)
