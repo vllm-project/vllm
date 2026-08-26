@@ -4,8 +4,10 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
+from importlib.metadata import PackageNotFoundError, version
 
 import torch
+from packaging.version import InvalidVersion, Version
 from torch._ops import OpOverload
 
 import vllm.envs as envs
@@ -52,6 +54,28 @@ def is_aiter_found() -> bool:
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
+_MIN_AITER_MROPE_STRIDED_0_1_20_VERSION = Version("0.1.20.dev1")
+_MIN_AITER_MROPE_STRIDED_KV_CACHE_VERSION = Version("0.1.21.dev0")
+
+
+def is_aiter_mrope_strided_kv_cache_supported() -> bool:
+    """Whether AITER contains the full-stride MRoPE cache fix from #4531."""
+    if not IS_AITER_FOUND:
+        return False
+    try:
+        installed = Version(version("amd_aiter"))
+    except (PackageNotFoundError, InvalidVersion):
+        return False
+
+    # v0.1.20.dev1 is the first tag containing ROCm/aiter#4531. The stable
+    # v0.1.20 and v0.1.20.post1 tags were cut earlier, so they must not pass
+    # a simple >= v0.1.20.dev1 comparison under PEP 440.
+    if installed.release == (0, 1, 20):
+        return (
+            installed.dev is not None
+            and installed >= _MIN_AITER_MROPE_STRIDED_0_1_20_VERSION
+        )
+    return installed >= _MIN_AITER_MROPE_STRIDED_KV_CACHE_VERSION
 
 
 class _DlInfo(ctypes.Structure):
@@ -2954,6 +2978,7 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         block_size: int,
         x: int,
+        rotary_dim: int = 0,
     ) -> None:
         from aiter.ops.fused_qk_norm_mrope_cache_quant import (
             fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
@@ -2986,6 +3011,7 @@ class rocm_aiter_ops:
             False,
             block_size,
             x,
+            rotary_dim,
         )
 
     @staticmethod
@@ -3009,6 +3035,7 @@ class rocm_aiter_ops:
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         kv_cache_dtype: str,
+        rotary_dim: int = 0,
     ) -> None:
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
@@ -3035,6 +3062,7 @@ class rocm_aiter_ops:
             v_scale=v_scale,
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
+            rotary_dim=rotary_dim,
         )
 
     @staticmethod

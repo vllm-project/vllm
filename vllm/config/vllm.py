@@ -224,7 +224,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_enabled():

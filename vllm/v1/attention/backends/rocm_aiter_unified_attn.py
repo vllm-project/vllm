@@ -7,7 +7,10 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import (
+    is_aiter_mrope_strided_kv_cache_supported,
+    rocm_aiter_ops,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -320,6 +323,18 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_qk_norm_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
 
+    def fused_qk_norm_mrope_kvcache_supported(self):
+        if not rocm_aiter_ops.is_enabled() or self.attn_type != AttentionType.DECODER:
+            return False
+        if not is_aiter_mrope_strided_kv_cache_supported():
+            logger.warning_once(
+                "QK-Norm+MRoPE+KV-cache fusion requires an AITER "
+                "v0.1.20.dev1+ development build or v0.1.21.dev0+ containing "
+                "ROCm/aiter#4531."
+            )
+            return False
+        return True
+
     def do_qk_norm_rope_kvcache_update(
         self,
         layer: AttentionLayer,
@@ -356,6 +371,47 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=False,
+        )
+
+    def do_qk_norm_mrope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        mrope_section: tuple[int, int, int],
+        is_interleaved: bool,
+        rotary_dim: int,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        rocm_aiter_ops.do_qk_norm_mrope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            mrope_section=list(mrope_section),
+            is_interleaved=is_interleaved,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            rotary_dim=rotary_dim,
         )
 
     def do_rope_and_kv_cache_update(
