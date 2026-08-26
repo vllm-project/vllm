@@ -242,6 +242,28 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=(TIER_LABEL,),
         )
+        metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of per-job promotion latency from secondary tiers"
+                    " to the primary tier, labeled by tier, in seconds."
+                ),
+                labelnames=(TIER_LABEL,),
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                    5,
+                    10,
+                ),
+            )
+        )
 
         for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
