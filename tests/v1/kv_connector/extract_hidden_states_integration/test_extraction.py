@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
-from vllm import LLM, ModelRegistry, SamplingParams
+from vllm import LLM, ModelRegistry, SamplingParams, TokensPrompt
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
@@ -294,6 +294,135 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
             len(output.prompt_token_ids),
             len(layer_ids),
             hidden_size,
+        )
+
+
+@pytest.fixture
+def tiny_nemotron_h_config_path(tmp_path_factory):
+    """A tiny NemotronH config exercising all four layer types.
+
+    NemotronH builds its layer stack from ``hybrid_override_pattern`` rather
+    than from a uniform decoder block, so a layer index is not necessarily an
+    attention or Mamba layer. This pattern interleaves all four types --
+    ``M`` (Mamba2), ``*`` (full attention), ``-`` (MLP) and ``E`` (MoE) -- so
+    that the aux hidden state layer ids below land on different kinds of layer.
+    """
+    from transformers import AutoTokenizer
+
+    from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+
+    config_dir = tmp_path_factory.mktemp("tiny_nemotron_h")
+
+    # M - M * M - M E * E - M E  (13 layers, all four types represented)
+    hybrid_override_pattern = "M-M*M-ME*E-ME"
+
+    config = NemotronHConfig(
+        vocab_size=1000,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=len(hybrid_override_pattern),
+        hybrid_override_pattern=hybrid_override_pattern,
+        num_attention_heads=4,
+        head_dim=64,
+        num_key_value_heads=2,
+        max_position_embeddings=1024,
+        # Mamba2 state dims kept small but valid: mamba_num_heads *
+        # mamba_head_dim must be divisible by 8 * n_groups for the conv split.
+        ssm_state_size=16,
+        mamba_num_heads=8,
+        mamba_head_dim=32,
+        mamba_n_groups=2,
+        mamba_chunk_size=32,
+        # MoE layers ("E") -- small expert count keeps the dummy load cheap.
+        n_routed_experts=4,
+        n_shared_experts=1,
+        moe_intermediate_size=256,
+        moe_shared_expert_intermediate_size=256,
+        num_experts_per_tok=2,
+        architectures=["NemotronHForCausalLM"],
+    )
+    config.save_pretrained(config_dir)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        cache_dir=os.path.expanduser("~/.cache/huggingface"),
+    )
+    tokenizer.save_pretrained(config_dir)
+
+    return str(config_dir)
+
+
+@create_new_process_for_each_test()
+def test_extract_hidden_states_nemotron_h_hybrid_smoke(
+    tiny_nemotron_h_config_path, tmp_path
+):
+    """Hidden state extraction on NemotronH (Mamba2 + attention + MLP + MoE).
+
+    NemotronH is a three-way hybrid: unlike the Qwen3.5 case covered above, its
+    stack mixes Mamba2, full-attention, MLP and MoE layers, and its Mamba SSM
+    state cache is forced to float32 by ``NemotronHForCausalLMConfig``. That
+    makes the Mamba page size -- and therefore the page the hidden state cache
+    must align to -- differ from every model this path is currently tested on.
+
+    The aux layer ids capture the outputs of an attention layer, an MoE layer
+    and a Mamba2 layer respectively (aux id ``k`` is the output of layer
+    ``k-1``; see the fixture's pattern).
+
+    Note on what this can and cannot assert: with ``load_format="dummy"`` the
+    weights are drawn from U(-1e-3, 1e-3), and NemotronH's MLP activation is
+    relu^2, so every block contributes ~1e-10 of the residual and all three
+    captured layers read back as (a bfloat16 rounding of) the embeddings. Per
+    layer *values* are therefore not meaningful here -- that is what the
+    predictable-model test above exists to check -- so this test asserts the
+    plumbing: shapes, token alignment and non-zero states across a Mamba2 +
+    attention + MoE stack.
+    """
+    layer_ids = [4, 8, 12]
+    hidden_size = 256  # matches the tiny config above
+    vocab_size = 1000  # matches the tiny config above
+
+    llm = LLM(
+        model=tiny_nemotron_h_config_path,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        max_model_len=256,
+        enforce_eager=True,
+        gpu_memory_utilization=0.4,
+        trust_remote_code=True,
+        load_format="dummy",
+    )
+
+    # Feed token ids directly rather than text: the tiny config declares
+    # vocab_size=1000 while the borrowed tokenizer emits ids far above that,
+    # which would index past the embedding table (a device-side assert).
+    token_prompts = [
+        TokensPrompt(prompt_token_ids=[10 + i for i in range(n)]) for n in (4, 9)
+    ]
+    assert all(max(p["prompt_token_ids"]) < vocab_size for p in token_prompts), (
+        "prompt token ids must stay inside the tiny config's vocabulary"
+    )
+
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    outputs = llm.generate(token_prompts, sampling_params)
+
+    assert len(outputs) == len(token_prompts)
+    for output in outputs:
+        # get_and_check_output also asserts the states are not all zeros, which
+        # is the failure mode hybrid verifiers regressed into previously: the
+        # shapes stay correct while every value silently reads back as zero.
+        get_and_check_output(
+            output,
+            (len(output.prompt_token_ids), len(layer_ids), hidden_size),
         )
 
 
