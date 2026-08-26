@@ -15,21 +15,22 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
 
     SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128.
     SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
-    SM12x (GB10): Hopper K-granularity (1, 128, 128) but with the
-    INT32-packed UE8M0 activation scales (see below).
+    SM12x (GB10): Hopper K-granularity (1, 128, 128) with FP32 activation
+    scales (see below).
 
     Returns ``(einsum_recipe, tma_aligned_scales)`` for ``deep_gemm_fp8_o_proj``.
     """
     cap = current_platform.get_device_capability()
     assert cap is not None, "DeepseekV4 attention requires a CUDA device"
     if cap.major == 12:
-        # DeepGEMM's (1, 128, 128) legacy recipe on arch 12 still expects
-        # MN-major TMA-aligned scales (sf.stride(-1) == tma_aligned_size(mn)).
-        # fused_inv_rope_fp8_quant must emit the INT32-packed UE8M0 layout:
-        # the FP32 variant is read by the FP32→UE8M0 pack path with the wrong
-        # strides for non-aligned token counts and silently corrupts the
-        # o_proj output under CUDA graph capture.
-        return (1, 128, 128), True
+        # Hopper K-granularity (1, 128, 128) with FP32 activation scales.
+        # The INT32-packed UE8M0 variant (tma_aligned_scales=True) is
+        # numerically WRONG on SM12x: DeepGEMM's einsum misreads the packed
+        # lanes (~2^32 error, measured on GB10 vs an fp32 reference). The FP32
+        # producer output is TMA-aligned (stride(-1) == tma_aligned_size(T,4))
+        # on this codebase, so the FP32→UE8M0 pack path in DeepGEMM consumes
+        # it correctly for both aligned and non-aligned token counts.
+        return (1, 128, 128), False
     einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
     tma_aligned_scales = cap.major >= 10
     return einsum_recipe, tma_aligned_scales
