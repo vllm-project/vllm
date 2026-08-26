@@ -962,13 +962,7 @@ class EngineArgs:
             "--model-loader-extra-config", **load_kwargs["model_loader_extra_config"]
         )
         load_group.add_argument(
-            "--verify-weights",
-            action="store_true",
-            default=False,
-            help="Verify weight tensors for NaN/Inf/all-zero after loading. "
-            "Useful for detecting corrupted checkpoint files. "
-            "Note: cannot detect all corruption types; use sha256 for full "
-            "integrity verification.",
+            "--verify-weights", **load_kwargs["verify_weights"]
         )
         load_group.add_argument("--ignore-patterns", **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
