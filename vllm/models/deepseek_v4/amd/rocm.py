@@ -11,6 +11,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -35,6 +36,8 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
+
+logger = init_logger(__name__)
 
 
 def _trust_dsv4_extra_cache_nan_free(
@@ -486,6 +489,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._fused_compressor_weight: torch.Tensor | None
+        self.register_buffer("_fused_compressor_weight", None, persistent=False)
+        self._fused_compressor_split_sizes: tuple[int, int] | None = None
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -524,6 +530,46 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
 
+    def prepare_compressor_gemm_fusion(self) -> bool:
+        if self._fused_compressor_weight is not None:
+            return False
+
+        from vllm.model_executor.offloader import NoopOffloader, get_offloader
+
+        if not isinstance(get_offloader(), NoopOffloader):
+            logger.warning_once(
+                "DeepSeek V4 compressor GEMM fusion is incompatible with "
+                "weight offloading and will remain disabled."
+            )
+            return False
+
+        compressor = self.compressor
+        indexer = self.indexer
+        if compressor is None or indexer is None:
+            return False
+
+        main_weight = compressor.fused_wkv_wgate.weight
+        indexer_weight = indexer.compressor.fused_wkv_wgate.weight
+        if main_weight.ndim != 2 or indexer_weight.ndim != 2:
+            raise ValueError("DeepSeek V4 compressor weights must be matrices")
+        if main_weight.shape[1] != indexer_weight.shape[1]:
+            raise ValueError("DeepSeek V4 compressor weights must share K")
+        if main_weight.dtype != indexer_weight.dtype:
+            raise ValueError("DeepSeek V4 compressor weights must share dtype")
+        if main_weight.device != indexer_weight.device:
+            raise ValueError("DeepSeek V4 compressor weights must share device")
+
+        main_size = main_weight.shape[0]
+        indexer_size = indexer_weight.shape[0]
+        fused_weight = torch.cat((main_weight, indexer_weight), dim=0)
+        with torch.no_grad():
+            main_weight.set_(fused_weight[:main_size])
+            indexer_weight.set_(fused_weight[main_size:])
+
+        self._fused_compressor_weight = fused_weight
+        self._fused_compressor_split_sizes = (main_size, indexer_size)
+        return True
+
     def _bpre_attn_gemm(
         self,
         weight: torch.Tensor,
@@ -547,6 +593,33 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
             )
         return super()._fused_wqa_wkv_gemm(hidden_states)
+
+    def _run_parallel_input_projections(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        fused_weight = self._fused_compressor_weight
+        split_sizes = self._fused_compressor_split_sizes
+        if fused_weight is None or split_sizes is None:
+            return super()._run_parallel_input_projections(hidden_states)
+
+        indexer = self.indexer
+        if indexer is None:
+            raise RuntimeError("Fused compressor weight requires a C4 indexer")
+
+        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+        fused_scores = torch.mm(
+            hidden_states,
+            fused_weight.T,
+            out_dtype=torch.float32,
+        )
+        kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
+        indexer_weights, _ = indexer.weights_proj(hidden_states)
+        return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
