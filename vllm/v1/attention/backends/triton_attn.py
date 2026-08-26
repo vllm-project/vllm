@@ -194,7 +194,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # Larger buffers for multi-query decode, sized to the 2D-grid-under-fill
         # bound under which the 3D path still wins. Allocated lazily (build()) so
         # models that only ever do 1-query decode never pay for them.
-        sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+        # Platform-agnostic: TRITON_ATTN is also selected on XPU and ROCm, so
+        # this must not reach into torch.cuda. Platforms that do not implement
+        # num_compute_units report 0, which leaves the multi-query 3D gate below
+        # permanently closed and the behaviour identical to before this change.
+        try:
+            sm_count = current_platform.num_compute_units(
+                device.index if device.index is not None else 0
+            )
+        except NotImplementedError:
+            sm_count = 0
         self._mq_segm_rows = max(
             self.seq_threshold_3D,
             (sm_count // self.num_heads_kv + 1) * 32,

@@ -53,11 +53,15 @@ _DEVICE_SM_COUNT: dict[int, int] = {}
 
 
 def _device_sm_count(device: torch.device) -> int:
-    idx = device.index if device.index is not None else torch.cuda.current_device()
+    idx = device.index if device.index is not None else 0
     if idx not in _DEVICE_SM_COUNT:
-        _DEVICE_SM_COUNT[idx] = torch.cuda.get_device_properties(
-            idx
-        ).multi_processor_count
+        # num_compute_units is not itself cached, and this sits on the per-call
+        # attention path, so keep the memo. A platform that does not implement
+        # it reports 0, which keeps the multi-query 3D gate closed.
+        try:
+            _DEVICE_SM_COUNT[idx] = current_platform.num_compute_units(idx)
+        except NotImplementedError:
+            _DEVICE_SM_COUNT[idx] = 0
     return _DEVICE_SM_COUNT[idx]
 
 
