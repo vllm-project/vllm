@@ -140,7 +140,9 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             if coordinator is not None:
                 raise ValueError("HiSparse worker cannot receive a coordinator.")
-            self.connector_worker = HiSparseConnectorWorker()
+            self.connector_worker = HiSparseConnectorWorker(
+                vllm_config, kv_cache_config
+            )
         else:
             raise ValueError(f"Unsupported KV connector role: {role}")
 
@@ -151,6 +153,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def finish_forward(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.finish_forward()
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.register_kv_caches(kv_caches)
 
     def reset_capture_state(self) -> None:
         assert self.connector_worker is not None
@@ -248,17 +254,3 @@ def attach_hisparse_connector(
     return _HiSparseMultiConnector.from_connectors(
         vllm_config, role, kv_cache_config, [connector, hisparse_connector]
     )
-
-
-def get_hisparse_worker(
-    connector: KVConnectorBase_V1,
-) -> HiSparseConnectorWorker:
-    if isinstance(connector, HiSparseConnector):
-        assert connector.connector_worker is not None
-        return connector.connector_worker
-    if isinstance(connector, MultiConnector):
-        for child in connector._connectors:
-            if isinstance(child, HiSparseConnector):
-                assert child.connector_worker is not None
-                return child.connector_worker
-    raise RuntimeError("HiSparse connector worker is not initialized.")

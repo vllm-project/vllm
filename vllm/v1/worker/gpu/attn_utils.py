@@ -8,17 +8,6 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer import (
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
-    get_hisparse_worker,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
-    HiSparseConnectorWorker,
-    init_hisparse_worker,
-)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -26,7 +15,9 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.core.kv_cache_utils import HISPARSE_HOT_SUFFIX, HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
     allocate_pinned_host_pool,
     check_hisparse_host_memory,
 )
@@ -234,7 +225,7 @@ def _allocate_hisparse_kv_cache(
     device: torch.device,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], list[torch.Tensor]]:
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[int, torch.Tensor]]:
     host_bytes = sum(
         tensor.size
         for tensor in kv_cache_config.kv_cache_tensors
@@ -246,12 +237,12 @@ def _allocate_hisparse_kv_cache(
     device_backings: dict[int, torch.Tensor] = {}
     raw_tensors: dict[str, torch.Tensor] = {}
     kv_caches: dict[str, torch.Tensor] = {}
-    pinned_host_pools: list[torch.Tensor] = []
+    pinned_host_pools: dict[int, torch.Tensor] = {}
 
     for tensor in kv_cache_config.kv_cache_tensors:
         if tensor.host_resident:
             backing, registered_pool = allocate_pinned_host_pool(tensor.size)
-            pinned_host_pools.append(registered_pool)
+            pinned_host_pools[backing.data_ptr()] = registered_pool
             num_blocks = kv_cache_config.hisparse_host_num_blocks
             assert num_blocks is not None
         else:
@@ -294,6 +285,107 @@ def _allocate_hisparse_kv_cache(
     return kv_caches, raw_tensors, pinned_host_pools
 
 
+def _get_hisparse_cache(
+    forward_context: dict[str, Any], layer_name: str
+) -> HiSparseCacheHandle:
+    attention_layer = forward_context[layer_name]
+    hisparse_cache = attention_layer.hisparse_cache
+    assert hisparse_cache is not None
+    return hisparse_cache
+
+
+def _bind_hisparse_kv_caches(
+    *,
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    raw_tensors: dict[str, torch.Tensor],
+    kv_caches: dict[str, torch.Tensor],
+    block_tables: "BlockTables",
+    pinned_host_pools: dict[int, torch.Tensor],
+    max_num_reqs: int,
+) -> None:
+    tensor_configs = {
+        name: tensor_config
+        for tensor_config in kv_cache_config.kv_cache_tensors
+        for name in tensor_config.layers
+    }
+    num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+
+    resident_source_index = 0
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
+            continue
+        for cache_name in group.layer_names:
+            assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
+            layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+            tensor_config = tensor_configs[cache_name]
+            assert tensor_config.block_pool_id is not None
+            cache_handle = _get_hisparse_cache(forward_context, layer_name)
+            cache_handle.bind_cache(
+                raw_tensors[cache_name],
+                byte_offset=tensor_config.offset,
+                block_stride=tensor_config.block_stride,
+                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                block_size=group.kv_cache_spec.block_size,
+                block_table=block_tables.input_block_tables[group_id],
+                slot_mapping=block_tables.slot_mappings[group_id],
+            )
+            assert cache_handle.view is not None
+            kv_caches[cache_name] = cache_handle.view.cache
+            cache_handle.runtime.resident_source_index = resident_source_index
+        resident_source_index += 1
+
+    hot_backing: torch.Tensor | None = None
+    cache_handles: list[HiSparseCacheHandle] = []
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
+            continue
+        for cache_name in group.layer_names:
+            assert cache_name.endswith(HISPARSE_HOT_SUFFIX)
+            raw_tensor = raw_tensors[cache_name]
+            if hot_backing is None:
+                hot_backing = raw_tensor
+            elif hot_backing.untyped_storage().data_ptr() != (
+                raw_tensor.untyped_storage().data_ptr()
+            ):
+                raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
+            layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
+            cache_handle = _get_hisparse_cache(forward_context, layer_name)
+            tensor_config = tensor_configs[cache_name]
+            assert tensor_config.block_pool_id is not None
+            cache_handle.runtime.bind_hot_cache(
+                raw_tensor,
+                byte_offset=tensor_config.offset,
+                block_stride=tensor_config.block_stride,
+                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                block_size=group.kv_cache_spec.block_size,
+                block_table=block_tables.input_block_tables[group_id],
+            )
+            resident = cache_handle.view
+            hot = cache_handle.runtime.hot
+            assert resident is not None
+            if (
+                resident.cache.untyped_storage().data_ptr()
+                != hot.cache.untyped_storage().data_ptr()
+                or resident.cache.stride() != hot.cache.stride()
+            ):
+                raise RuntimeError("HiSparse resident and hot layouts must match.")
+            source_tensor = raw_tensors[layer_name]
+            cache_handle.runtime.bind_source_cache(
+                kv_caches[layer_name],
+                registered_host_pool=pinned_host_pools[source_tensor.data_ptr()],
+            )
+            cache_handles.append(cache_handle)
+
+    if hot_backing is None or not cache_handles:
+        raise RuntimeError("HiSparse found no hot-cache handles.")
+    request_state_indices = torch.full(
+        (max_num_reqs,), -1, dtype=torch.int32, device=hot_backing.device
+    )
+    for cache_handle in cache_handles:
+        cache_handle.runtime.request_state_indices = request_state_indices
+
+
 def init_kv_cache(
     runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
@@ -310,13 +402,7 @@ def init_kv_cache(
             kv_caches, raw_tensors, pinned_host_pools = _allocate_hisparse_kv_cache(
                 kv_cache_config, device, kernel_block_sizes, vllm_config
             )
-            worker = (
-                get_hisparse_worker(get_kv_transfer_group())
-                if has_kv_transfer_group()
-                else HiSparseConnectorWorker()
-            )
-            init_hisparse_worker(
-                worker=worker,
+            _bind_hisparse_kv_caches(
                 forward_context=forward_context,
                 kv_cache_config=kv_cache_config,
                 raw_tensors=raw_tensors,
@@ -324,9 +410,6 @@ def init_kv_cache(
                 block_tables=block_tables,
                 pinned_host_pools=pinned_host_pools,
                 max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-                max_model_len=vllm_config.model_config.max_model_len,
-                max_concurrent_batches=vllm_config.max_concurrent_batches,
-                device=device,
             )
         else:
             kv_caches = allocate_kv_cache(
