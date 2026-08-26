@@ -17,7 +17,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     kernel_launcher,
     triton_scalar_specialization_rep,
 )
-from vllm.models.deepseek_v4.sparse_mla import dsv4_supported_kernel_block_sizes
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -295,6 +294,14 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Imported lazily: vllm.models.deepseek_v4 transitively imports
+        # vllm._aiter_ops (via fused_moe), which would deadlock cold start
+        # with an import cycle when vllm._aiter_ops pulls in this module
+        # first (see vllm/v1/attention/ops/rocm_aiter_mla_sparse.py).
+        from vllm.models.deepseek_v4.sparse_mla import (
+            dsv4_supported_kernel_block_sizes,
+        )
+
         return dsv4_supported_kernel_block_sizes()
 
 
