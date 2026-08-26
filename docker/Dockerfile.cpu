@@ -129,7 +129,7 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the wheel build
 # stage doesn't need the rust toolchain. This stage runs in parallel
 # with the main vllm-build stage.
-FROM base AS rust-build
+FROM base AS rust-build-cache
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
@@ -163,24 +163,26 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Only Rust inputs are present, so suppress the artificial dirty state caused
-# by other tracked files being absent from this build stage.
-ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
-
-# Build the release artifacts. Cache cargo registry/git, but not target/,
-# because stale target metadata can outlive source updates across BuildKit
-# cache reuse.
+# Build with a stable version so this target snapshot is keyed only by Rust
+# inputs. The child stage below relinks the crates that embed the exact version.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         export RUSTC_WRAPPER=sccache; \
         if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
         sccache --show-stats; \
     fi && \
-    bash build_rust.sh && \
+    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+
+# Relink with the exact Git-derived package version.
+FROM rust-build-cache AS rust-build
+
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash build_rust.sh
 
 ######################### SOURCE PREP IMAGE #########################
 # Shared prep (source, rust artifacts, build deps) for both vllm-build and
