@@ -297,7 +297,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     def request_finished_all_groups(
         self,
         request: "Request",
-        block_ids: tuple[list[int], ...],
+        block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -1053,15 +1053,11 @@ class MoRIIOConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        block_ids: tuple[list[int], ...],
+        block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
-
-        ``block_ids`` is per KV cache group (one list per group; length 1 for
-        non-hybrid models). Sliding-window groups are clipped to their in-window
-        tail before being advertised to the decode leg.
         """
 
         request_id = request.request_id
