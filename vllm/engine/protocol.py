@@ -59,6 +59,10 @@ class EngineClient(ABC):
     def errored(self) -> bool: ...
 
     @property
+    def should_keep_api_server_alive(self) -> bool:
+        return False
+
+    @property
     @abstractmethod
     def dead_error(self) -> BaseException: ...
 
