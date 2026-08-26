@@ -222,6 +222,7 @@ impl WireLogprobs {
                 data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
+            cu_num_generated_tokens_tensor: None,
         })
     }
 
@@ -236,6 +237,15 @@ impl WireLogprobs {
             bail_ext_value_decode!(
                 "{field_prefix}.cu_num_generated_tokens: \
                  expected None for per-request engine-core logprobs payload, got {indices:?}"
+            );
+        }
+
+        // Unlike the sibling check above, don't Debug-print the payload:
+        // an opaque non-None value here may embed a full tensor blob.
+        if self.cu_num_generated_tokens_tensor.is_some() {
+            bail_ext_value_decode!(
+                "{field_prefix}.cu_num_generated_tokens_tensor: \
+                 expected None for per-request engine-core logprobs payload"
             );
         }
 
