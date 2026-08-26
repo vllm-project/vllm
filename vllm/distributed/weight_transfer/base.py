@@ -27,6 +27,7 @@ from vllm.config.weight_transfer import WeightTransferConfig
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
 TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
+WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
 
 # A trainer supplies its parameters as a `WeightSource` (defined below): a
 # re-iterable stream of materialized `(name, tensor)` pairs plus a `metadata()`
@@ -324,7 +325,7 @@ class WeightTransferInitRequest:
 class WeightTransferUpdateRequest:
     """API-level weight update request."""
 
-    update_info: dict[str, Any] = field(default_factory=dict)
+    update_info: WeightTransferUpdatePayload = field(default_factory=dict)
 
 
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
@@ -545,7 +546,7 @@ class VLLMWeightSyncClient(Protocol):
 
     def start_weight_update(self) -> None: ...
 
-    def update_weights(self, update_info: dict[str, Any]) -> None: ...
+    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None: ...
 
     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
 

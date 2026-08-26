@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
+    WeightTransferUpdatePayload,
     WeightTransferUpdateRequest,
 )
 
@@ -46,6 +47,14 @@ def _json_safe_update_info(update_info: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _json_safe_update_payload(
+    update_info: WeightTransferUpdatePayload,
+) -> WeightTransferUpdatePayload:
+    if isinstance(update_info, list):
+        return [_json_safe_update_info(info) for info in update_info]
+    return _json_safe_update_info(update_info)
+
+
 class HTTPVLLMWeightSyncClient:
     """Talks to a vLLM server over the RLHF HTTP routes.
 
@@ -72,9 +81,9 @@ class HTTPVLLMWeightSyncClient:
     def start_weight_update(self) -> None:
         self._post("start_weight_update")
 
-    def update_weights(self, update_info: dict[str, Any]) -> None:
+    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         self._post(
-            "update_weights", {"update_info": _json_safe_update_info(update_info)}
+            "update_weights", {"update_info": _json_safe_update_payload(update_info)}
         )
 
     def finish_weight_update(self, weight_version: str | None = None) -> None:
@@ -105,7 +114,7 @@ class RayVLLMWeightSyncClient:
 
         ray.get([h.start_weight_update.remote() for h in self.handles])
 
-    def update_weights(self, update_info: dict[str, Any]) -> None:
+    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         import ray
 
         request = WeightTransferUpdateRequest(update_info=update_info)
