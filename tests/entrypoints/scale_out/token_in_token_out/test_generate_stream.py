@@ -230,6 +230,39 @@ async def test_serve_tokens_threads_session_id_header_to_engine():
 
 
 @pytest.mark.asyncio
+async def test_serve_tokens_threads_transfer_params_to_engine():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(
+            max_tokens=1, extra_args={"existing_param": "value"}
+        ),
+        model=MODEL_NAME,
+        stream=False,
+        kv_transfer_params={"kv_param": "value"},
+        ec_transfer_params={"ec_param": "value"},
+    )
+
+    await serving.serve_tokens(request)
+
+    sampling_params = engine.generate.call_args.args[1]
+    assert sampling_params.extra_args == {
+        "existing_param": "value",
+        "kv_transfer_params": {"kv_param": "value"},
+        "ec_transfer_params": {"ec_param": "value"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_stream_basic():
     """Streaming returns SSE chunks with correct token_ids and ends with [DONE]."""
     engine = _mock_engine()
