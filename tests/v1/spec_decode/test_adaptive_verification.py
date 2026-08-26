@@ -127,17 +127,16 @@ def test_profiled_batches_seed_cost_curves_via_consumer():
             # Only the captured sizes replay a graph; the tail sizes run eager.
             full_cudagraph=batch["num_tokens"] <= 1024,
         )
-        for batch in manager.batches_to_profile([8, 1024])
+        for batch in manager.batches_to_profile([8, 1024], max_decode_tokens=2048)
     ]
     manager.set_initial_cost_curves(timings)
 
-    # Tail beyond the last capture size: 1.5x then doubling to the max.
+    # Tail beyond the last capture size, bounded by the valid decode envelope.
     assert curves["verify"] == [
         (8, 8.0),
         (1024, 1024.0),
         (1536, 1536.0),
         (2048, 2048.0),
-        (4096, 4096.0),
     ]
     # Eager batches must not contribute to the draft curve: keyed by request
     # count they would land inside the captured range and, once made monotonic,

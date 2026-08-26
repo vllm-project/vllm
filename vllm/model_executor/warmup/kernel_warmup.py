@@ -262,14 +262,24 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
 
 
 def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+    max_attention_tokens = runner.get_max_attention_profile_tokens()
     for num_tokens in _flashinfer_autotune_token_counts(runner):
-        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
+        attention_tokens = min(num_tokens, max_attention_tokens)
+        logger.info("Running FlashInfer autotune with %d tokens.", attention_tokens)
         runner._dummy_run(
-            num_tokens=num_tokens,
+            num_tokens=attention_tokens,
             skip_eplb=True,
             is_profile=True,
             randomize_inputs=True,
         )
+        if attention_tokens < num_tokens:
+            runner._dummy_run(
+                num_tokens=num_tokens,
+                skip_attn=True,
+                skip_eplb=True,
+                is_profile=True,
+                randomize_inputs=True,
+            )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:

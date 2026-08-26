@@ -26,6 +26,26 @@ HiSparseTopKResult = (
 )
 
 
+@triton.jit
+def _invalidate_written_slots_kernel(
+    device_global_indices,
+    request_state_indices,
+    req_id_per_token,
+    written_slots,
+    region_stride: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    req_idx = tl.load(req_id_per_token + token_idx)
+    state_idx = tl.load(request_state_indices + req_idx)
+    written_slot = tl.load(written_slots + token_idx)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    valid = (state_idx >= 0) & (written_slot >= 0) & (offsets < region_stride)
+    indices = device_global_indices + state_idx * region_stride + offsets
+    cached_slots = tl.load(indices, mask=valid, other=-1)
+    tl.store(indices, -1, mask=valid & (cached_slots == written_slot))
+
+
 @dataclass(frozen=True)
 class PagedCacheView:
     cache: torch.Tensor
@@ -491,6 +511,24 @@ class HiSparseRuntime:
         active_indices.masked_fill_(torch.isin(active_indices, slots), -1)
         device_global_indices.index_copy_(0, state_indices, active_indices)
 
+    def invalidate_written_slots(
+        self,
+        written_slots: torch.Tensor,
+        req_id_per_token: torch.Tensor,
+    ) -> None:
+        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
+        if num_tokens == 0:
+            return
+        assert self.request_state_indices is not None
+        _invalidate_written_slots_kernel[(num_tokens,)](
+            self.index_group.device_global_indices,
+            self.request_state_indices,
+            req_id_per_token,
+            written_slots,
+            region_stride=self.region_stride,
+            BLOCK_SIZE=triton.next_power_of_2(self.region_stride),
+        )
+
     def backup_rows(
         self,
         src_cache: torch.Tensor,
@@ -653,6 +691,8 @@ class HiSparseCacheHandle:
         self.slot_mapping: torch.Tensor | None = None
         self.runtime = runtime
         self.decode_batch = False
+        self.num_decode_tokens = 0
+        self.req_id_per_token: torch.Tensor | None = None
 
     def bind_cache(
         self,
@@ -704,13 +744,23 @@ class HiSparseCacheHandle:
             scale=k_scale,
         )
         if mirror_to_host or self.runtime.eager_host_mirror:
+            mirrored_slots = (
+                host_slots[:num_rows]
+                .to(device=self.runtime.device, dtype=torch.int64)
+                .contiguous()
+            )
             self.runtime.backup_rows(
                 self.view.cache,
                 resident_slots,
-                host_slots[:num_rows]
-                .to(device=self.runtime.device, dtype=torch.int64)
-                .contiguous(),
+                mirrored_slots,
             )
+            if self.runtime.is_group_leader and self.num_decode_tokens:
+                assert self.req_id_per_token is not None
+                num_decode_tokens = min(self.num_decode_tokens, num_rows)
+                self.runtime.invalidate_written_slots(
+                    mirrored_slots[:num_decode_tokens],
+                    self.req_id_per_token[:num_decode_tokens],
+                )
 
     def resolve_topk(
         self,

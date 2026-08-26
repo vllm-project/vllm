@@ -2085,6 +2085,31 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
     return 1
 
 
+def _get_hisparse_kv_cache_groups(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> list[KVCacheGroupSpec] | None:
+    if vllm_config.attention_config.hisparse_config is None:
+        return None
+
+    mla_specs: dict[str, KVCacheSpec] = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if isinstance(spec, MLAAttentionSpec)
+    }
+    other_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if not isinstance(spec, MLAAttentionSpec)
+    }
+    if not mla_specs or not other_specs:
+        return None
+
+    mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
+    assert mla_group_spec is not None
+    mla_group = KVCacheGroupSpec(list(mla_specs), mla_group_spec)
+    return [mla_group, *get_kv_cache_groups(vllm_config, other_specs)]
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
@@ -2105,6 +2130,9 @@ def get_kv_cache_groups(
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
         return []
+
+    if hisparse_groups := _get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec):
+        return hisparse_groups
 
     if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for

@@ -654,6 +654,15 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    def get_max_profile_tokens(
+        self,
+        max_num_tokens: int,
+        max_num_reqs: int,
+        max_query_len: int,
+    ) -> int:
+        """Limit a decode-shaped attention profiling batch."""
+        return max_num_tokens
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,

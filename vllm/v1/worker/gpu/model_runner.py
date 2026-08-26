@@ -826,6 +826,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
+    def get_max_attention_profile_tokens(self) -> int:
+        max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        max_profile_tokens = max_num_tokens
+        for groups in self.attn_groups:
+            for group in groups:
+                backend_limit = group.get_metadata_builder().get_max_profile_tokens(
+                    max_num_tokens,
+                    self.max_num_reqs,
+                    self.decode_query_len,
+                )
+                max_profile_tokens = min(max_profile_tokens, backend_limit)
+        return max_profile_tokens
+
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
@@ -946,10 +959,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.adaptive_verification is not None:
                     with self.step_timing.collect() as timings:
                         for batch in self.adaptive_verification.batches_to_profile(
-                            self.cudagraph_manager.captured_token_counts()
+                            self.cudagraph_manager.captured_token_counts(),
+                            self.max_num_reqs * self.decode_query_len,
                         ):
                             self._dummy_run(**batch)
                     self.adaptive_verification.set_initial_cost_curves(timings)
+                    self.kv_connector.reset_capture_state()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]

@@ -24,6 +24,7 @@ from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_conf
 from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
+    SparseMLACommonImpl,
     SparseMLAPrefillMetadata,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
@@ -2296,20 +2297,30 @@ def test_hisparse_fp8_decode_resolves_each_speculative_step():
     steps = []
     kernel_shapes = []
 
-    def resolve_step(self, indices, metadata, step, **kwargs):  # noqa: ARG001
-        steps.append(step)
-        return torch.empty(1, device=DEVICE_TYPE), indices[:num_decodes]
+    def swap_in(self, indices, metadata, **kwargs):  # noqa: ARG001
+        steps.append(kwargs["plan_row_offset"] // num_decodes)
+        return (
+            torch.empty(1, device=DEVICE_TYPE),
+            indices[:num_decodes],
+            torch.full((num_decodes,), 4, dtype=torch.int32, device=DEVICE_TYPE),
+        )
 
     def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
         return q[..., :1], None
 
     impl = SimpleNamespace(kv_lora_rank=1)
-    impl._hisparse_decode_step = MethodType(resolve_step, impl)
+    impl._run_hisparse_decode = MethodType(
+        SparseMLACommonImpl._run_hisparse_decode, impl
+    )
+    impl._hisparse_swap_in = MethodType(swap_in, impl)
     impl._fp8_flash_mla_kernel = MethodType(run_kernel, impl)
     metadata = SimpleNamespace(
         num_decodes=num_decodes,
         num_decode_tokens=num_tokens,
+        req_id_per_token=torch.arange(
+            num_tokens, dtype=torch.int32, device=DEVICE_TYPE
+        ),
     )
 
     output = FlashMLASparseImpl._hisparse_fp8_decode(
@@ -2345,6 +2356,37 @@ def test_hisparse_shared_sparse_builder_routes_multi_token_chunks_to_prefill():
     )
 
     assert builder.reorder_batch_threshold == 1
+
+
+def test_hisparse_varlen_capture_uses_sequential_decode_path():
+    """A single-token capture shape must support multi-token varlen replay."""
+    num_tokens = 8
+    expected = torch.empty(0, device=DEVICE_TYPE)
+
+    def run_decode(self, q, topk_indices, metadata, run_step):  # noqa: ARG001
+        return expected, None
+
+    impl = SimpleNamespace(
+        hisparse_cache=object(),
+    )
+    impl._run_hisparse_decode = MethodType(run_decode, impl)
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_tokens,
+        num_decodes=num_tokens,
+        decode_max_query_len=8,
+    )
+
+    output, lse = SparseMLACommonImpl._forward_hisparse_mqa(
+        impl,
+        torch.empty(num_tokens, 1, 4, device=DEVICE_TYPE),
+        torch.empty(1, device=DEVICE_TYPE),
+        torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE),
+        metadata,
+        lambda *args: (expected, None),
+    )
+
+    assert output is expected
+    assert lse is None
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():

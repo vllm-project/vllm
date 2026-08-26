@@ -649,11 +649,20 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                decode_out = self._hisparse_bf16_decode(
+                decode_out, _ = self._run_hisparse_decode(
                     q[:num_decode_tokens],
                     topk_indices,
                     attn_metadata,
-                    actual_num_heads,
+                    lambda step_q, hot_cache, step_topk, step_lengths: (
+                        self._bf16_flash_mla_kernel(
+                            step_q,
+                            hot_cache,
+                            step_topk,
+                            step_lengths,
+                            actual_num_heads,
+                        )
+                    ),
+                    uniform=True,
                 )
                 if num_decode_tokens == q.shape[0]:
                     return decode_out, None
@@ -1014,32 +1023,30 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         *,
         flatten_requests: bool = False,
     ) -> torch.Tensor:
-        num_decodes = attn_metadata.num_decodes
-        q_by_request = reshape_query_for_spec_decode(q, num_decodes)
-        step_outputs = []
-        for step in range(q_by_request.shape[1]):
-            hot_cache, step_topk = self._hisparse_decode_step(
-                topk_indices,
-                attn_metadata,
-                step,
-            )
-            step_q = q_by_request[:, step : step + 1]
-            step_topk = step_topk.unsqueeze(1)
-            if flatten_requests:
-                step_q = step_q.transpose(0, 1)
-                step_topk = step_topk.transpose(0, 1)
+        sequence_dim = 0 if flatten_requests else 1
+
+        def run_fp8_step(
+            step_q: torch.Tensor,
+            hot_cache: torch.Tensor,
+            step_topk: torch.Tensor,
+            _seq_lens: torch.Tensor,
+        ) -> tuple[torch.Tensor, None]:
             step_output, _ = self._fp8_flash_mla_kernel(
-                q=step_q,
+                q=step_q.unsqueeze(sequence_dim),
                 kv_c_and_k_pe_cache=hot_cache,
-                topk_indices=step_topk,
+                topk_indices=step_topk.unsqueeze(sequence_dim),
                 kernel_metadata=kernel_metadata,
             )
-            if flatten_requests:
-                step_output = step_output.transpose(0, 1)
-            step_outputs.append(step_output[:, 0])
-        if len(step_outputs) == 1:
-            return step_outputs[0]
-        return reshape_attn_output_for_spec_decode(torch.stack(step_outputs, dim=1))
+            return step_output.squeeze(sequence_dim), None
+
+        output, _ = self._run_hisparse_decode(
+            q,
+            topk_indices,
+            attn_metadata,
+            run_fp8_step,
+            uniform=True,
+        )
+        return output
 
     def _bf16_flash_mla_kernel(
         self,
@@ -1085,35 +1092,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         output = output[:, :actual_num_heads, :]
         lse = lse[:, :actual_num_heads]
         return output, lse
-
-    def _hisparse_bf16_decode(
-        self,
-        q: torch.Tensor,
-        topk_indices: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
-        actual_num_heads: int,
-    ) -> torch.Tensor:
-        num_decodes = attn_metadata.num_decodes
-        q_by_request = reshape_query_for_spec_decode(q, num_decodes)
-        step_outputs = []
-        for step in range(q_by_request.shape[1]):
-            hot_cache, step_topk, step_lengths = self._hisparse_decode_step(
-                topk_indices,
-                attn_metadata,
-                step,
-                return_valid_counts=True,
-            )
-            step_output, _ = self._bf16_flash_mla_kernel(
-                q_by_request[:, step],
-                hot_cache,
-                step_topk,
-                step_lengths,
-                actual_num_heads,
-            )
-            step_outputs.append(step_output)
-        if len(step_outputs) == 1:
-            return step_outputs[0]
-        return reshape_attn_output_for_spec_decode(torch.stack(step_outputs, dim=1))
 
     def forward_mqa(
         self,

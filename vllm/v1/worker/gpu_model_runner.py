@@ -5873,6 +5873,9 @@ class GPUModelRunner(
             )
         )
 
+    def get_max_attention_profile_tokens(self) -> int:
+        return self.scheduler_config.max_num_batched_tokens
+
     @torch.inference_mode()
     def _dummy_run(
         self,

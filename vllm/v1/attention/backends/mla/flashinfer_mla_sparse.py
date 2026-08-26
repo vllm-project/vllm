@@ -245,6 +245,7 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    hisparse_supports_multi_token_decode: ClassVar[bool] = True
 
     def _build_req_id_per_token(
         self,
@@ -352,15 +353,28 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        hisparse_resolution = self._hisparse_decode_cache(
-            kv_c_and_k_pe_cache,
-            topk_indices,
-            attn_metadata,
-            return_valid_counts=True,
-        )
-        if hisparse_resolution is not None:
-            kv_c_and_k_pe_cache, topk_indices_physical, seq_lens = hisparse_resolution
-        elif self.dcp_world_size > 1:
+        if self._workspace_buffer is None:
+            self._workspace_buffer = _get_workspace_buffer(q.device)
+
+        if self.bmm1_scale is None:
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+        if self.bmm2_scale is None:
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._k_scale_float
+
+        if self.hisparse_cache is not None:
+            return self._forward_hisparse_mqa(
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                attn_metadata,
+                self._run_mqa_kernel,
+            )
+
+        if self.dcp_world_size > 1:
             topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],
                 attn_metadata.block_table,
@@ -382,19 +396,28 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 return_valid_counts=True,
             )
 
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q.device)
+        return self._run_mqa_kernel(
+            q,
+            kv_c_and_k_pe_cache,
+            topk_indices_physical,
+            seq_lens,
+        )
 
-        if self.bmm1_scale is None:
-            self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-        if self.bmm2_scale is None:
-            self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm2_scale *= layer._k_scale_float
+    def _run_mqa_kernel(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert self._workspace_buffer is not None
+        assert self.bmm1_scale is not None
+        assert self.bmm2_scale is not None
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+        kv_cache = kv_cache.view(q.dtype)
+        topk_tokens = topk_indices.shape[1]
 
         # Single-token sparse decode. trtllm-gen requires the q_len_per_request
         # dim, but the sparse attention mask is fully per-token (each query token
@@ -402,22 +425,21 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # correct. The MTP/multi-token q_len grouping is a perf-only layout and is
         # deferred until MTP is validated end-to-end for this backend.
         query = q.unsqueeze(1)
-        block_tables = topk_indices_physical.unsqueeze(1)
-        seq_lens_arg = seq_lens
+        block_tables = topk_indices.unsqueeze(1)
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            kv_cache=kv_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=block_tables,
-            seq_lens=seq_lens_arg,
-            max_seq_len=attn_metadata.topk_tokens,
+            seq_lens=seq_lens,
+            max_seq_len=topk_tokens,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
+            sparse_mla_top_k=topk_tokens,
             return_lse=self.need_to_return_lse_for_decode,
         )
         if self.need_to_return_lse_for_decode:
@@ -431,7 +453,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
             lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
-            empty_rows = (topk_indices_physical == -1).all(dim=-1)
+            empty_rows = (topk_indices == -1).all(dim=-1)
             out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
             lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
