@@ -169,7 +169,11 @@ def _cases(negative: bool) -> list:
     for name in HARNESSES:
         for dim in DIMENSIONS:
             marks = []
-            if name == "ExampleConnector" and (negative or dim.name == "prompt_embeds"):
+            if negative and dim.negative_bug:
+                marks.append(pytest.mark.xfail(strict=True, reason=dim.negative_bug))
+            elif name == "ExampleConnector" and (
+                negative or dim.name == "prompt_embeds"
+            ):
                 marks.append(
                     pytest.mark.xfail(
                         strict=True,

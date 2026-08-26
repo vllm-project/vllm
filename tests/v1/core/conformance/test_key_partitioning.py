@@ -24,6 +24,7 @@ from .dimensions import (
     Dimension,
     make_kv_cache_manager,
     make_request,
+    negative_params,
 )
 
 FULL_PREFIX = NUM_FULL_BLOCKS * BLOCK_SIZE
@@ -61,7 +62,7 @@ def test_same_value_reuses_blocks(dim: Dimension):
     assert lookup(manager, second) == FULL_PREFIX
 
 
-@pytest.mark.parametrize("dim", DIMENSIONS, ids=lambda d: d.name)
+@pytest.mark.parametrize("dim", negative_params())
 def test_different_value_never_reuses_blocks(dim: Dimension):
     manager = make_kv_cache_manager()
     first = make_request("first", **dim.build("x"))

@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
 import torch
 
 from vllm.lora.request import LoRARequest
@@ -50,6 +51,10 @@ class Dimension:
 
     name: str
     build: Callable[[str], dict[str, Any]]
+    #: Set when the *negative* arm is a known open bug, so the suite records
+    #: it as a strict xfail instead of a failure. Strict, so whichever fix
+    #: lands turns it into a loud XPASS rather than quiet dead weight.
+    negative_bug: str | None = None
 
 
 def _cache_salt(variant: str) -> dict[str, Any]:
@@ -60,6 +65,20 @@ def _lora_name(variant: str) -> dict[str, Any]:
     return {
         "lora_request": LoRARequest(
             lora_name=f"lora-{variant}", lora_int_id=7, lora_path="/nonexistent"
+        )
+    }
+
+
+def _lora_version(variant: str) -> dict[str, Any]:
+    """Same adapter name and id, different adapter content.
+
+    ``load_inplace`` replaces an adapter's weights while keeping its name and
+    reusing its ``lora_int_id`` (``entrypoints/openai/models/serving.py``), so
+    the name alone does not identify what the blocks were computed with.
+    """
+    return {
+        "lora_request": LoRARequest(
+            lora_name="pinned", lora_int_id=7, lora_path=f"/adapters/{variant}"
         )
     }
 
@@ -75,6 +94,17 @@ def _prompt_embeds(variant: str) -> dict[str, Any]:
 DIMENSIONS: list[Dimension] = [
     Dimension("cache_salt", _cache_salt),
     Dimension("lora_name", _lora_name),
+    Dimension(
+        "lora_version",
+        _lora_version,
+        negative_bug=(
+            "#42125: the LoRA extra key is the adapter *name* "
+            "(kv_cache_utils.py:_gen_lora_extra_hash_keys), so an in-place "
+            "reload keeps the key while replacing the weights and the blocks "
+            "the old adapter computed are served for the new one. Fixed by "
+            "#48352."
+        ),
+    ),
     Dimension("prompt_embeds", _prompt_embeds),
 ]
 
@@ -116,3 +146,16 @@ def make_kv_cache_manager(num_blocks: int = 64) -> KVCacheManager:
         scheduler_block_size=BLOCK_SIZE,
         log_stats=True,
     )
+
+
+def negative_params() -> list:
+    """``DIMENSIONS`` as pytest params, with known open bugs marked xfail."""
+    out = []
+    for dim in DIMENSIONS:
+        marks = (
+            [pytest.mark.xfail(strict=True, reason=dim.negative_bug)]
+            if dim.negative_bug
+            else []
+        )
+        out.append(pytest.param(dim, id=dim.name, marks=marks))
+    return out
