@@ -31,6 +31,70 @@ logger = init_logger(__name__)
 _TEMPORAL_TILES = 16
 
 
+@triton.jit(do_not_specialize=["num_requests"])
+def get_aligned_state_indices_multi_group_kernel(
+    block_table_ptrs_ptr,
+    seq_lens_ptr,
+    state_indices_ptr,
+    block_table_stride_req: tl.int64,
+    seq_lens_stride: tl.constexpr,
+    state_indices_stride_0: tl.constexpr,
+    state_indices_stride_1: tl.constexpr,
+    state_indices_stride_2: tl.constexpr,
+    num_requests,
+    CACHE_BLOCK_SIZE: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
+    BLOCK_GROUPS: tl.constexpr,
+    NUM_STATE_SLOTS: tl.constexpr,
+    BLOCK_STATE_SLOTS: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    valid_row = rows < num_requests
+
+    seq_lens = tl.load(
+        seq_lens_ptr + rows * seq_lens_stride,
+        mask=valid_row,
+        other=1,
+    )
+    first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
+
+    # load multiple block table for each group
+    groups = tl.arange(0, BLOCK_GROUPS)
+    valid_group = groups < NUM_GROUPS
+    group_base_addrs = tl.load(
+        block_table_ptrs_ptr + groups,
+        mask=valid_group,
+        other=0,
+    )
+    block_tables = group_base_addrs.to(tl.pointer_type(tl.int32))
+    state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
+    valid_state_slot = state_slots < NUM_STATE_SLOTS
+    state_indices = tl.load(
+        block_tables[:, None, None]
+        + rows[None, :, None] * block_table_stride_req
+        + first_state_slot[None, :, None]
+        + state_slots[None, None, :],
+        mask=(
+            valid_group[:, None, None]
+            & valid_row[None, :, None]
+            & valid_state_slot[None, None, :]
+        ),
+    )
+    tl.store(
+        state_indices_ptr
+        + groups[:, None, None] * state_indices_stride_0
+        + rows[None, :, None] * state_indices_stride_1
+        + state_slots[None, None, :] * state_indices_stride_2,
+        state_indices,
+        mask=(
+            valid_group[:, None, None]
+            & valid_row[None, :, None]
+            & valid_state_slot[None, None, :]
+        ),
+    )
+
+
 @triton.jit
 def _memcpy_u64_tiled(
     src_addr,
@@ -689,6 +753,10 @@ class MambaSpecDecodeGPUContext:
     block_table_ptrs: torch.Tensor
     block_table_stride_req: int = 0
 
+    # persistent output for the once-per-step, all-group aligned-index launch.
+    # shape: [num_groups, max_num_reqs, 1 + num_speculative_blocks].
+    aligned_state_indices: torch.Tensor | None = None
+
     # Per-request staging buffers (CPU+GPU mirrors). The runner stages
     # values into the CPU view in ``_prepare_inputs`` and the fused kernel
     # reads the GPU side. These only exist when the postprocess kernel is
@@ -757,6 +825,15 @@ class MambaSpecDecodeGPUContext:
             ),
             block_table_ptrs=torch.zeros(
                 len(mamba_group_ids), dtype=torch.int64, device=device
+            ),
+            aligned_state_indices=torch.empty(
+                (
+                    len(mamba_group_ids),
+                    max_num_reqs,
+                    1 + mamba_spec.num_speculative_blocks,
+                ),
+                dtype=torch.int32,
+                device=device,
             ),
             mamba_state_idx_buf=make_buffer(max_num_reqs, dtype=torch.int32),
             num_scheduled_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
@@ -933,6 +1010,43 @@ class MambaSpecDecodeGPUContext:
             self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
 
         self.is_initialized = True
+
+    def compute_aligned_state_indices(
+        self,
+        seq_lens: torch.Tensor,
+        num_reqs: int,
+    ) -> torch.Tensor:
+        """compute every Mamba group's aligned physical state IDs in one launch."""
+        assert self.is_initialized
+        assert seq_lens.is_cuda
+        assert 0 <= num_reqs <= seq_lens.shape[0]
+        assert self.aligned_state_indices is not None
+        assert num_reqs <= self.aligned_state_indices.shape[1]
+        if num_reqs == 0:
+            return self.aligned_state_indices[:, :0]
+
+        num_state_slots = self.aligned_state_indices.shape[2]
+        block_rows = 32
+        grid = (triton.cdiv(num_reqs, block_rows),)
+        get_aligned_state_indices_multi_group_kernel[grid](
+            self.block_table_ptrs,
+            seq_lens,
+            self.aligned_state_indices,
+            self.block_table_stride_req,
+            seq_lens.stride(0),
+            self.aligned_state_indices.stride(0),
+            self.aligned_state_indices.stride(1),
+            self.aligned_state_indices.stride(2),
+            num_reqs,
+            CACHE_BLOCK_SIZE=self.block_size,
+            NUM_GROUPS=self.num_groups,
+            BLOCK_GROUPS=triton.next_power_of_2(self.num_groups),
+            NUM_STATE_SLOTS=num_state_slots,
+            BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
+            BLOCK_ROWS=block_rows,
+            num_warps=1,
+        )
+        return self.aligned_state_indices[:, :num_reqs]
 
     def run_fused_postprocess(
         self,
