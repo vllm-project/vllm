@@ -99,6 +99,7 @@ def check_logprobs_close(
     name_0: str,
     name_1: str,
     num_outputs_0_skip_tokens: int = 0,
+    skip_last_tokens_0: int = 0,
     warn_on_mismatch: bool = True,
     always_check_logprobs: bool = False,
 ) -> None:
@@ -128,6 +129,7 @@ def check_logprobs_close(
                                  of sequence #1 will be compared to
                                  sequence #0 beginning at index
                                  num_outputs_0_skip_tokens
+      skip_last_tokens_0: number of trailing tokens to skip, e.g. 5
       warn_on_mismatch: Issue a warning if there is token-wise or text-wise
                         mismatch between the two sequences
       always_check_logprobs: If true, check logprobs even when tokens match
@@ -216,6 +218,14 @@ def check_logprobs_close(
             raise ValueError("num_outputs_0_skip_tokens must be non-negative")
         output_ids_0 = output_ids_0[num_outputs_0_skip_tokens:]
         logprobs_0 = logprobs_0[num_outputs_0_skip_tokens:]
+
+        if skip_last_tokens_0 < 0 or skip_last_tokens_0 >= len(output_ids_0):
+            raise ValueError(
+                f"skip_last_tokens_0={skip_last_tokens_0} must be in the range [0, {len(output_ids_0) - 1}]"
+            )
+        if skip_last_tokens_0 > 0:
+            output_ids_0 = output_ids_0[:-skip_last_tokens_0]
+            logprobs_0 = logprobs_0[:-skip_last_tokens_0]
 
         # Loop through generated tokens.
         for idx, (output_id_0, output_id_1) in enumerate(

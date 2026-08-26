@@ -7,6 +7,7 @@ from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
@@ -29,6 +30,13 @@ AITER_MODEL_LIST = [
     "TitanML/tiny-mixtral",
     "Qwen/Qwen3-8B",
 ]
+
+# On MI355 with The Rock 7.14, overlaps stop at token 27.
+# Issues arises due to hipblaslt kernel selections differences between ROCm
+# versions.
+SKIP_LAST_TOKENS_LOOKUP = {
+    ("TitanML/tiny-mixtral", "AMD_Instinct_MI355X"): 5,
+}
 
 
 # @maybe_test_rocm_aiter
@@ -218,11 +226,19 @@ def test_models(
                 prompt_embeds, max_tokens, num_logprobs
             )
 
+    model_device = (model, get_device_name_as_file_name())
+    skip_last_tokens_0 = (
+        SKIP_LAST_TOKENS_LOOKUP[model_device]
+        if model_device in SKIP_LAST_TOKENS_LOOKUP
+        else 0
+    )
+
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+        skip_last_tokens_0=skip_last_tokens_0,
     )
     if prompt_embeds is not None:
         check_logprobs_close(
