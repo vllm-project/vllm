@@ -814,6 +814,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_time_to_first_token, per_engine_labelvalues
         )
 
+        # OTel GenAI semantic convention mirror of
+        # vllm:time_to_first_token_seconds.
+        histogram_gen_ai_time_to_first_token = self._histogram_cls(
+            name="gen_ai_server_time_to_first_token_seconds",
+            documentation="Histogram of time to first token in seconds.",
+            buckets=time_to_first_token_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_gen_ai_time_to_first_token = create_metric_per_engine(
+            histogram_gen_ai_time_to_first_token, per_engine_labelvalues
+        )
+
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
@@ -834,6 +846,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_request_time_per_output_token, per_engine_labelvalues
         )
 
+        # OTel GenAI semantic convention mirror of
+        # vllm:request_time_per_output_token_seconds.
+        histogram_gen_ai_time_per_output_token = self._histogram_cls(
+            name="gen_ai_server_time_per_output_token_seconds",
+            documentation="Histogram of time_per_output_token_seconds per request.",
+            buckets=inter_token_latency_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_gen_ai_time_per_output_token = create_metric_per_engine(
+            histogram_gen_ai_time_per_output_token, per_engine_labelvalues
+        )
+
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
@@ -842,6 +866,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.histogram_e2e_time_request = create_metric_per_engine(
             histogram_e2e_time_request, per_engine_labelvalues
+        )
+
+        # OTel GenAI semantic convention mirror of
+        # vllm:e2e_request_latency_seconds.
+        histogram_gen_ai_request_duration = self._histogram_cls(
+            name="gen_ai_server_request_duration_seconds",
+            documentation="Histogram of e2e request latency in seconds.",
+            buckets=request_latency_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_gen_ai_request_duration = create_metric_per_engine(
+            histogram_gen_ai_request_duration, per_engine_labelvalues
         )
 
         histogram_queue_time_request = self._histogram_cls(
@@ -1128,6 +1164,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_n_request[engine_idx].observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
+            self.histogram_gen_ai_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
@@ -1136,6 +1173,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 engine_idx
             ].inc()
             self.histogram_e2e_time_request[engine_idx].observe(
+                finished_request.e2e_latency
+            )
+            self.histogram_gen_ai_request_duration[engine_idx].observe(
                 finished_request.e2e_latency
             )
             self.histogram_queue_time_request[engine_idx].observe(
@@ -1167,6 +1207,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 finished_request.num_generation_tokens
             )
             self.histogram_request_time_per_output_token[engine_idx].observe(
+                finished_request.mean_time_per_output_token
+            )
+            self.histogram_gen_ai_time_per_output_token[engine_idx].observe(
                 finished_request.mean_time_per_output_token
             )
             if finished_request.max_tokens_param:
