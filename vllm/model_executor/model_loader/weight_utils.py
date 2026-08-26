@@ -236,6 +236,34 @@ def convert_bin_to_safetensor_file(
             raise RuntimeError(f"The output tensors do not match for key {k}")
 
 
+def resolve_hf_overrides_for_quant(
+    hf_overrides: Any,
+    hf_config: Any = None,
+) -> dict[str, Any]:
+    """Materialize ModelConfig.hf_overrides for get_quant_config.
+
+    Speculative draft configs may store a callable (compose_draft_hf_overrides)
+    instead of a dict. Invoke it; keep raising for other non-dict types.
+    """
+    if callable(hf_overrides):
+        try:
+            hf_overrides = hf_overrides(hf_config)
+        except TypeError:
+            try:
+                hf_overrides = hf_overrides()
+            except TypeError:
+                hf_overrides = {}
+    if hf_overrides is None:
+        return {}
+    if not isinstance(hf_overrides, dict):
+        raise ValueError(
+            "hf_overrides must be a dict (or callable returning a dict) "
+            "for get_quant_config to get the quantization config from it; "
+            f"got {type(hf_overrides).__name__}"
+        )
+    return hf_overrides
+
+
 # TODO(woosuk): Move this to other place.
 def get_quant_config(
     model_config: ModelConfig, load_config: LoadConfig
@@ -288,12 +316,10 @@ def get_quant_config(
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
-    hf_overrides = model_config.hf_overrides
-    if not isinstance(hf_overrides, dict):
-        raise ValueError(
-            "hf_overrides must be a dict for get_quant_config "
-            "to get the quantization config from it."
-        )
+    hf_overrides = resolve_hf_overrides_for_quant(
+        model_config.hf_overrides,
+        getattr(model_config, "hf_config", None),
+    )
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
