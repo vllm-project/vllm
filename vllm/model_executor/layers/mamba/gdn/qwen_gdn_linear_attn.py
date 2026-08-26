@@ -1490,6 +1490,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
             if envs.VLLM_BATCH_INVARIANT:
+                assert non_spec_query_start_loc is not None
+                assert non_spec_state_indices_tensor is not None
                 cu_sd = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
                 sd_state_indices = non_spec_state_indices_tensor
                 device_sd = query_decode.device
@@ -1551,6 +1553,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
             if envs.VLLM_BATCH_INVARIANT:
+                assert attn_metadata.prefill_query_start_loc is not None
                 cu_seqlens_list = attn_metadata.prefill_query_start_loc.tolist()
                 device = query_non_spec.device
                 outputs: list[torch.Tensor] = []
@@ -1609,6 +1612,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             if envs.VLLM_BATCH_INVARIANT:
+                assert non_spec_query_start_loc is not None
+                assert non_spec_state_indices_tensor is not None
                 cu_dec = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
                 dec_state_indices = non_spec_state_indices_tensor
                 device = query_non_spec.device
