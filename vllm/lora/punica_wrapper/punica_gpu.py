@@ -336,7 +336,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
     ) -> torch.Tensor | None:
-        self._full_linear_indices(y)
         adapter_y = torch.empty(
             (x.size(0), weight_stacked.size(-2)),
             dtype=torch.float32,

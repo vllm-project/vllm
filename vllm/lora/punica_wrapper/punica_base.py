@@ -234,6 +234,19 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.token_nums = token_nums
         self.no_lora = no_lora
 
+    def _select_full_linear_output(
+        self,
+        y: torch.Tensor,
+        adapter_y: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor:
+        indices = self.sampler_indices
+        safe_indices = indices.clamp_min(0)
+        use_full = (indices >= 0) & module_enabled[safe_indices]
+        adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
+        return torch.where(use_full.unsqueeze(-1), adapter_y, y)
+
     @property
     def prefill_metadata(
         self,
@@ -292,28 +305,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         embeddings_indices_len = self.indices_len[3]
         return self._embeddings_indices[:, :embeddings_indices_len]
-
-    def _full_linear_indices(self, y: torch.Tensor) -> torch.Tensor:
-        indices = self.sampler_indices
-        if y.size(0) != indices.size(0):
-            raise RuntimeError(
-                "Full classification heads require request-level mapping: "
-                f"rows={y.size(0)}, prompt_mapping={indices.size(0)}."
-            )
-        return indices
-
-    def _select_full_linear_output(
-        self,
-        y: torch.Tensor,
-        adapter_y: torch.Tensor,
-        bias_stacked: torch.Tensor,
-        module_enabled: torch.Tensor,
-    ) -> torch.Tensor:
-        indices = self._full_linear_indices(y)
-        safe_indices = indices.clamp_min(0)
-        use_full = (indices >= 0) & module_enabled[safe_indices]
-        adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
-        return torch.where(use_full.unsqueeze(-1), adapter_y, y)
 
     def update_metadata(
         self,
