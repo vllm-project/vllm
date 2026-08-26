@@ -52,6 +52,13 @@ def is_shared_expert_quant_fse_compatible(
             return False, "DeepSeek-V4 has no quantization configuration"
 
         if not quant_config._is_quark_mxfp4_ocp(quantization_config):
+            # Native DeepSeek FP8 checkpoints (DSv4-Flash): routed experts
+            # are MXFP4 via expert_dtype=fp4; shared experts are FP8
+            # block-scale. The Quark MXFP4-OCP gate only covers AMD-Quark
+            # exports, which this checkpoint is not (quant_method=fp8, no
+            # layer_quant_config). Allow FSE so load-time requant can run.
+            if quantization_config.get("quant_method") in ("fp8", "deepseek_v4_fp8"):
+                return True, None
             return False, "DeepSeek-v4 FSE is only implemented/tested with Quark MXFP4"
 
         layer_idx = extract_layer_index(shared_expert_prefix)

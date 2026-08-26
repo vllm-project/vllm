@@ -815,8 +815,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         shared_expert_buf: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
-            layer_idx = extract_layer_index(name)
-            fuse_layer = fuse_by_layer.get(layer_idx, False)
+            # extract_layer_index asserts exactly one integer. embeddings /
+            # lm_head / norms have none (embed_tokens.weight crashed here).
+            fuse_layer = False
+            if ".shared_experts." in name:
+                fuse_layer = fuse_by_layer.get(extract_layer_index(name), False)
             # FP8 shared experts: re-quantize to MXFP4 and load into appended slot.
             if fuse_layer and ".shared_experts." in name and (
                 name.endswith(".weight_scale_inv")
@@ -920,7 +923,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         return loaded_params
 
-    _SHARED_PROJ_TO_SHARD = {"w1": "w1", "w3": "w3", "down_proj": "w2"}
+    # Nightly's fuse_shared mapper leaves checkpoint `w2` unmapped
+    # (does not rename to down_proj). Accept both names.
+    _SHARED_PROJ_TO_SHARD = {"w1": "w1", "w3": "w3", "down_proj": "w2", "w2": "w2"}
 
     def _load_fused_shared_expert(
         self,
