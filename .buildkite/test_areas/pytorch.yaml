@@ -34,7 +34,6 @@ steps:
     - vllm/v1/
     - tests/compile
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # Run unit tests defined directly under compile/,
   # not including subdirectories, which are usually heavier
   # tests covered elsewhere.
@@ -87,7 +86,6 @@ steps:
     - vllm/v1/
     - tests/compile/h100/
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
@@ -121,7 +119,6 @@ steps:
     - vllm/v1/
     - tests/compile/passes
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: ":nvidia: (H200) PyTorch Fullgraph"
@@ -156,7 +153,6 @@ steps:
   - vllm/v1/
   - tests/compile
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
@@ -197,7 +193,6 @@ steps:
   - vllm/v1/
   - tests/compile
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v compile/fullgraph/test_full_cudagraph.py
 
 - label: ":nvidia: (H200) PyTorch Nightly Dependency Override Check"
