@@ -71,6 +71,9 @@ class BaseSpeculator(ABC):
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Under PCP the drafter runs replicated over the global batch on
+        # every rank, so its attention groups, forward context, and
+        # cudagraphs must not see PCP.
         target_parallel_config = vllm_config.parallel_config
         self.replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
         if self.replicated_pcp:
@@ -249,8 +252,6 @@ class DraftModelSpeculator(BaseSpeculator):
         causal: bool | Mapping[int, bool] = True,
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
-        query_start_loc_gpu: torch.Tensor | None = None,
-        seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
@@ -285,18 +286,16 @@ class DraftModelSpeculator(BaseSpeculator):
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
-        if query_start_loc_gpu is None:
-            query_start_loc_gpu = self.input_buffers.query_start_loc
-        if seq_lens is None:
-            seq_lens = self.input_buffers.seq_lens
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
             num_tokens=num_tokens_padded,
-            query_start_loc_gpu=query_start_loc_gpu[: num_reqs_padded + 1],
+            query_start_loc_gpu=self.input_buffers.query_start_loc[
+                : num_reqs_padded + 1
+            ],
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
-            seq_lens=seq_lens[:num_reqs_padded],
+            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
             dcp_local_seq_lens=(
                 None
                 if dcp_local_seq_lens is None

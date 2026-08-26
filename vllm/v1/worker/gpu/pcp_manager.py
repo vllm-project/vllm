@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -11,7 +10,6 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -20,9 +18,6 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBuffers,
 )
 from vllm.v1.worker.gpu.states import RequestState
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 logger = init_logger(__name__)
 
@@ -146,13 +141,15 @@ class PCPManager:
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method != "mtp":
+            if speculative_config.method not in ("mtp", "dspark"):
                 raise NotImplementedError(
-                    "MRV2 PCP speculative decoding currently supports MTP only."
+                    "MRV2 PCP speculative decoding currently supports MTP "
+                    "and DSpark only."
                 )
-            if is_sparse_mla:
+            if is_sparse_mla and speculative_config.method == "mtp":
                 raise NotImplementedError(
-                    "MRV2 PCP speculative decoding currently supports dense MLA only."
+                    "MRV2 PCP MTP speculative decoding currently supports "
+                    "dense MLA only."
                 )
             if parallel_config.decode_context_parallel_size != 1:
                 raise NotImplementedError(
@@ -381,6 +378,7 @@ class PCPManager:
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
+
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
             num_computed_tokens,
@@ -683,6 +681,9 @@ class PCPManager:
         return padded
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Restore a persistent max-token-sized buffer (e.g. the target's
+        pre-hc_head residual) by slicing it to the rank-local padded token
+        count before the all-gather."""
         assert self._padded_gather_idx is not None
         local_num_tokens_padded = (
             self._padded_gather_idx.shape[0] // self.pcp_world_size
@@ -695,49 +696,6 @@ class PCPManager:
     ) -> tuple[torch.Tensor, InputBatch]:
         assert self._global_batch is not None
         return self.restore_hidden_states(hidden_states), self._global_batch
-
-
-def _maybe_prepare_replicated_pcp_attn(
-    manager: PCPManager | None,
-    speculator: "BaseSpeculator",
-    input_batch: InputBatch,
-    attn_metadata: dict[str, Any] | None,
-    slot_mappings: dict[str, torch.Tensor] | None,
-    *,
-    skip_attn: bool = False,
-) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor] | None]:
-    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-
-    if manager is None or not isinstance(speculator, DraftModelSpeculator) or skip_attn:
-        return attn_metadata, slot_mappings
-
-    num_reqs = input_batch.num_reqs
-    num_reqs_padded = input_batch.num_reqs_after_padding
-    num_tokens_padded = input_batch.num_tokens_after_padding
-    speculator.block_tables.gather_block_tables(
-        input_batch.idx_mapping,
-        num_reqs_padded=num_reqs_padded,
-    )
-    slot_mappings_tensor = speculator.block_tables.compute_slot_mappings(
-        input_batch.idx_mapping,
-        input_batch.query_start_loc,
-        input_batch.positions,
-        num_tokens_padded=num_tokens_padded,
-    )
-    slot_mappings = build_slot_mappings_by_layer(
-        slot_mappings_tensor, speculator.kv_cache_config
-    )
-    attn_metadata = speculator._build_draft_attn_metadata(
-        num_reqs=num_reqs,
-        num_reqs_padded=num_reqs_padded,
-        num_tokens_padded=num_tokens_padded,
-        seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-        step=0,
-        query_start_loc_np=input_batch.query_start_loc_np,
-        query_start_loc_gpu=input_batch.query_start_loc,
-        seq_lens=input_batch.seq_lens,
-    )
-    return attn_metadata, slot_mappings
 
 
 def maybe_partition_pcp_batch(
@@ -774,28 +732,6 @@ def maybe_restore_pcp_for_sampling(
     return manager.restore_for_sampling(hidden_states)
 
 
-def maybe_restore_pcp_hidden_state_buffer(
-    manager: PCPManager | None,
-    hidden_states: torch.Tensor | None,
-) -> torch.Tensor:
-    assert hidden_states is not None
-    if manager is None:
-        return hidden_states
-    return manager.restore_hidden_state_buffer(hidden_states)
-
-
-def maybe_restore_pcp_for_speculator(
-    manager: PCPManager | None,
-    aux_hidden_states: list[torch.Tensor] | None,
-) -> list[torch.Tensor] | None:
-    if manager is None or aux_hidden_states is None:
-        return aux_hidden_states
-    return [
-        manager.restore_hidden_states(aux_hidden_state)
-        for aux_hidden_state in aux_hidden_states
-    ]
-
-
 def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
@@ -814,6 +750,7 @@ def maybe_build_pcp_manager(
     pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
+
     return cls(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
