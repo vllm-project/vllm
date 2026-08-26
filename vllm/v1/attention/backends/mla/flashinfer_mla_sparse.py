@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -82,6 +83,10 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
         return FlashInferMLASparseImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashInferMLASparseTRTLLMMetadataBuilder"]:
+        return FlashInferMLASparseTRTLLMMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -259,6 +264,18 @@ class FlashInferMLASparseMetadataBuilder(
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
+
+
+class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
+    """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+    def _build_req_id_per_token(
+        self,
+        common_attn_metadata: "CommonAttentionMetadata",
+    ) -> torch.Tensor:
+        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
 
 
 # Global workspace buffer (lazily initialized)
