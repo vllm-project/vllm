@@ -358,6 +358,39 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
     ] == [1, 3]
 
 
+def test_dcp_scales_uniform_type_attention_group_blocks():
+    # A single UniformTypeKVCacheSpecs group of attention-only layers (e.g.
+    # GLM-5.2 / DeepSeek-V3.2 MLA + sparse-indexer layers) is DCP-sharded
+    # like a bare attention group, so its logical block must scale by DCP
+    # to stay divisible by the DCP-scaled hash block size.
+    config = _make_vllm_config(tensor_parallel_size=2, decode_context_parallel_size=2)
+    config.speculative_config = None
+    layer_specs = {
+        "mla_layer": _mla_spec(head_size=512),
+        "indexer_layer": _mla_spec(head_size=128),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
+    num_blocks = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * num_blocks,
+                layers=[name],
+                layer_stride=spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+            )
+            for name, spec in layer_specs.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(list(layer_specs), uniform_spec)],
+    )
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (32,)
+    assert offloading_config.cache.tokens_per_hash == 32
+
+
 def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
