@@ -76,10 +76,10 @@ DEVICE_TYPE = current_platform.device_type
         (1, 9216, False),
         (2, 20480, True),
         (2, 24576, False),
-        (4, 49152, True),
-        (4, 57344, False),
-        (8, 114688, True),
-        (8, 131072, False),
+        (4, 48 * 1024, True),
+        (4, 56 * 1024, False),
+        (8, 112 * 1024, True),
+        (8, 128 * 1024, False),
     ],
 )
 def test_glm5_masked_mha_pure_prefill_routing(
@@ -132,21 +132,30 @@ def test_glm5_masked_mha_context_routing(
 
 
 @pytest.mark.parametrize(
-    ("query_len", "seq_len", "has_context", "expected"),
+    ("tensor_parallel_size", "query_len", "seq_len", "has_context", "expected"),
     [
-        (64 * 1024, 64 * 1024, False, True),
-        (68 * 1024, 68 * 1024, False, False),
-        (4 * 1024, 20 * 1024, True, True),
-        (48 * 1024, 64 * 1024, True, True),
-        (56 * 1024, 72 * 1024, True, True),
-        (63 * 1024, 79 * 1024, True, False),
+        (4, 36 * 1024, 36 * 1024, False, True),
+        (4, 40 * 1024, 40 * 1024, False, False),
+        (4, 4 * 1024, 12 * 1024, True, True),
+        (4, 4 * 1024, 16 * 1024, True, False),
+        (4, 24 * 1024, 28 * 1024, True, True),
+        (4, 32 * 1024, 36 * 1024, True, False),
+        (8, 64 * 1024, 64 * 1024, False, True),
+        (8, 68 * 1024, 68 * 1024, False, False),
+        (8, 4 * 1024, 20 * 1024, True, True),
+        (8, 16 * 1024, 32 * 1024, True, True),
+        (8, 48 * 1024, 64 * 1024, True, True),
+        (8, 56 * 1024, 72 * 1024, True, True),
+        (8, 63 * 1024, 79 * 1024, True, False),
     ],
 )
-def test_glm5_flashinfer_masked_mha_routing(query_len, seq_len, has_context, expected):
+def test_glm5_flashinfer_masked_mha_routing(
+    tensor_parallel_size, query_len, seq_len, has_context, expected
+):
     assert (
         _use_masked_mha(
             backend_name="FLASHINFER_MLA_SPARSE",
-            tensor_parallel_size=8,
+            tensor_parallel_size=tensor_parallel_size,
             qk_head_dim=256,
             v_head_dim=256,
             query_len=query_len,

@@ -21,6 +21,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     _masked_mha_workspace_fits,
@@ -879,6 +880,35 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
             workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
         )
         is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "tensor_parallel_size", "query_len"),
+    [
+        ("FLASHMLA_SPARSE", 4, 48 * 1024),
+        ("FLASHMLA_SPARSE", 8, 112 * 1024),
+        ("FLASHINFER_MLA_SPARSE", 4, 36 * 1024),
+        ("FLASHINFER_MLA_SPARSE", 8, 64 * 1024),
+    ],
+)
+def test_masked_mha_workspace_guards_long_routing_policy(
+    backend_name, tensor_parallel_size, query_len
+):
+    assert _use_masked_mha(
+        backend_name=backend_name,
+        tensor_parallel_size=tensor_parallel_size,
+        qk_head_dim=256,
+        v_head_dim=256,
+        query_len=query_len,
+        seq_len=query_len,
+        has_context=False,
+    )
+    assert not _masked_mha_workspace_fits(
+        batch_size=1,
+        max_query_len=query_len,
+        max_context_chunk_seq_len=0,
+        workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
     )
 
 
