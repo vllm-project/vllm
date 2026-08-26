@@ -222,8 +222,7 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     fp8_prefill_max_q_len: int | None = None
     fp8_prefill_num_partial_tiles: int | None = None
 
-    # Per-token flat KV indices for each chunked-context chunk, indexed by
-    # ContextChunk.index. Built once per step so every MLA layer reuses them.
+    # Per-token flat KV indices for each chunked-context chunk
     context_chunk_kv_indices: list[torch.Tensor] | None = None
 
 
@@ -660,10 +659,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             block_table_tensor.stride(0),
             paged_kv_indptr,
             seq_lens_for_kernel,
-            paged_kv_indptr,  # start_offsets placeholder, unread
             KERNEL_BLOCK_SIZE=self.kernel_block_size,
             BLOCK_SIZE=1024,
-            HAS_START_OFFSETS=False,
         )
         paged_kv_indices = self.paged_kv_indices
 
@@ -810,10 +807,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 block_table.stride(0),
                 cu_seq_lens,
                 cu_seq_lens[1:] - cu_seq_lens[:-1],
-                chunk.starts,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
                 BLOCK_SIZE=1024,
                 HAS_START_OFFSETS=True,
+                start_offsets=chunk.starts,
             )
             indices.append(kv_indices)
         return indices
@@ -856,10 +853,10 @@ def _expand_page_indices_kernel(
     block_table_stride,
     cu_num_tokens,
     seq_lens,
-    start_offsets,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    HAS_START_OFFSETS: tl.constexpr,
+    HAS_START_OFFSETS: tl.constexpr = False,
+    start_offsets=None,
 ):
     """Expand block table entries into per-token flat page indices.
 
@@ -874,10 +871,9 @@ def _expand_page_indices_kernel(
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
 
-    With HAS_START_OFFSETS the request's rows begin ``start_offsets[req]`` tokens
+    With HAS_START_OFFSETS the request's rows begin start_offsets[req] tokens
     into its sequence rather than at 0, which is what a chunked-context prefill
-    needs; the output position is unaffected. ``start_offsets`` is unread
-    otherwise, but Triton still needs a real pointer for it.
+    needs.
     """
     req_idx = tl.program_id(0)
     row_ptr = block_table + req_idx * block_table_stride
