@@ -3,12 +3,13 @@
 
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import torch
 
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+from vllm.v1.worker.gpu_worker import Worker
 
 
 class _AllocationScope(AbstractContextManager):
@@ -89,3 +90,46 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
 
     assert result is kv_caches
     assert not scope.active
+
+
+def test_kv_wake_does_not_run_model_runner_recovery() -> None:
+    model = torch.nn.Module()
+    model.register_buffer("_k_scale", torch.tensor(0.5))
+    model.register_buffer("_v_scale", torch.tensor(0.25))
+
+    class Runner:
+        def __init__(self) -> None:
+            self.model = model
+            self.layout_tensors = tuple(torch.tensor([i]) for i in range(5))
+            self.recovery_calls = 0
+
+        def post_kv_cache_wake_up(self) -> None:
+            self.recovery_calls += 1
+            self.model.get_buffer("_k_scale").fill_(1.0)
+            self.model.get_buffer("_v_scale").fill_(1.0)
+            self.layout_tensors = tuple(torch.tensor([i]) for i in range(5))
+
+    runner = Runner()
+    worker = cast(
+        Worker,
+        SimpleNamespace(
+            _get_sleep_mode_backend=lambda: SimpleNamespace(resume=lambda tags: None),
+            _sleep_saved_buffers={},
+            _sleep_saved_draft_buffers={},
+            model_runner=runner,
+            synchronize_device=lambda: None,
+        ),
+    )
+    layout_tensors = runner.layout_tensors
+    layout_ptrs = tuple(t.data_ptr() for t in layout_tensors)
+
+    Worker.wake_up(worker, tags=["kv_cache"])
+
+    assert runner.recovery_calls == 0
+    assert model.get_buffer("_k_scale").item() == 0.5
+    assert model.get_buffer("_v_scale").item() == 0.25
+    assert all(
+        actual is expected
+        for actual, expected in zip(runner.layout_tensors, layout_tensors, strict=True)
+    )
+    assert tuple(t.data_ptr() for t in runner.layout_tensors) == layout_ptrs

@@ -5,7 +5,6 @@ import asyncio
 
 import pytest
 import torch
-from torch import nn
 
 import vllm.device_allocator.cumem as cumem
 import vllm.envs as envs
@@ -17,22 +16,6 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
-
-
-def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
-    """Wake discarded allocations with deterministic nonzero contents."""
-    original_create_and_map = cumem.create_and_map
-
-    def create_and_map_with_poison(handle) -> None:
-        original_create_and_map(handle)
-        _, size, ptr, _ = handle
-        cumem.libcudart.cudaMemset(ptr, byte_value, size)
-
-    cumem.create_and_map = create_and_map_with_poison
-    try:
-        allocator.wake_up()
-    finally:
-        cumem.create_and_map = original_create_and_map
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -125,82 +108,6 @@ def test_discard_tags():
     allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
-
-
-@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
-def test_tagged_ordinary_tensor_is_discarded_with_kv_cache():
-    """Reproduce allocation-tag contamination with an ordinary torch tensor.
-
-    The allocator tags allocations, not semantic tensor owners. This test is a
-    contract-level reproducer: production code must keep persistent metadata
-    outside the discardable KV-cache scope.
-    """
-    allocator = get_mem_allocator_instance()
-
-    with allocator.use_memory_pool("weights"):
-        weight = torch.full((4096,), 0x11, dtype=torch.uint8, device=DEVICE_TYPE)
-    with allocator.use_memory_pool("kv_cache"):
-        fake_kv = torch.full((4096,), 0x22, dtype=torch.uint8, device=DEVICE_TYPE)
-        ordinary_tensor = torch.full(
-            (4096,), 0x33, dtype=torch.uint8, device=DEVICE_TYPE
-        )
-
-    pointers = tuple(t.data_ptr() for t in (weight, fake_kv, ordinary_tensor))
-    allocator.sleep(offload_tags=("weights",))
-    _wake_up_with_poisoned_mappings(allocator)
-    torch.accelerator.synchronize()
-
-    assert tuple(t.data_ptr() for t in (weight, fake_kv, ordinary_tensor)) == pointers
-    assert torch.all(weight == 0x11)
-    assert torch.all(fake_kv == 0xA5)
-    assert torch.all(ordinary_tensor == 0xA5)
-
-
-@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses CUDA graph and CuMem")
-def test_cudagraph_replays_with_corrupted_tagged_constant():
-    """Reproduce silent model corruption despite a stable captured pointer."""
-
-    class TinyScaleModel(nn.Module):
-        """One-operation model with persistent runtime metadata.
-
-        ``scale`` deliberately remains a plain tensor attribute. Constructing
-        this model in the KV-cache pool reproduces a persistent model value
-        accidentally inheriting the cache's discard-on-sleep policy.
-        """
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.scale = torch.tensor([3.0], device=DEVICE_TYPE)
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return x * self.scale
-
-    allocator = get_mem_allocator_instance()
-    x = torch.tensor([2.0], device=DEVICE_TYPE)
-    with allocator.use_memory_pool("kv_cache"):
-        model = TinyScaleModel()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = model(x)
-    scale_ptr = model.scale.data_ptr()
-
-    allocator.sleep(offload_tags=())
-    _wake_up_with_poisoned_mappings(allocator)
-    graph.replay()
-    torch.accelerator.synchronize()
-
-    assert model.scale.data_ptr() == scale_ptr
-    assert not torch.equal(output, torch.tensor([6.0], device=DEVICE_TYPE))
-
-    # Owners that cannot move storage out of a discardable scope must recover
-    # values in place so captured pointers remain valid.
-    model.scale.fill_(3.0)
-    graph.replay()
-    torch.accelerator.synchronize()
-    assert torch.equal(output, torch.tensor([6.0], device=DEVICE_TYPE))
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -508,3 +415,40 @@ def test_deep_sleep_fp8_kvcache_mrv1(monkeypatch: pytest.MonkeyPatch):
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@requires_fp8
+def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    llm = LLM(
+        "Qwen/Qwen2-0.5B",
+        enable_sleep_mode=True,
+        kv_cache_dtype="fp8",
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+
+    original_create_and_map = cumem.create_and_map
+
+    def create_and_map_with_poison(handle) -> None:
+        original_create_and_map(handle)
+        _, size, ptr, _ = handle
+        cumem.libcudart.cudaMemset(ptr, 0xA5, size)
+
+    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
+
+    # New requests must overwrite undefined remapped KV bytes before reading them.
+    llm.wake_up(tags=["kv_cache"])
+    actual = llm.generate(prompt, sampling_params)
+
+    assert expected[0].outputs[0].text == actual[0].outputs[0].text
