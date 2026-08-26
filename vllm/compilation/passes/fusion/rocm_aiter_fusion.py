@@ -622,9 +622,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
-            # Transposed-scale variants: layers whose GEMM runs the CK
-            # b-preshuffle blockscale kernel quantize with transpose_scale=True
-            # (column-major scale bytes); keep the rms_norm(+add) fusion for them.
+            # Layers whose GEMM runs the CK b-preshuffle blockscale kernel
+            # quantize with transpose_scale=True
             AiterRMSFp8GroupQuantPattern(
                 epsilon,
                 FP8_DTYPE,

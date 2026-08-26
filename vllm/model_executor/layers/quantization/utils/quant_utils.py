@@ -521,11 +521,8 @@ def get_and_maybe_dequant_weights(
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
-    # A ROCm AITER b-preshuffle blockscale kernel may have permuted the weight
-    # into the CK (16,16) tile layout at load time (shape unchanged, bytes
-    # permuted). Dequantizing that layout directly would silently produce
-    # garbage (observed as corrupt MLA W_UK/W_UV for kv_b_proj), so undo the
-    # shuffle first when the layer's kernel reports it.
+    # A ROCm AITER b-preshuffle blockscale kernel may have permuted the weight;
+    # need to unshuffle before dequantizing
     kernel = getattr(getattr(layer, "quant_method", None), "fp8_linear", None)
     if getattr(kernel, "bpre_shuffled", False):
         from vllm._aiter_ops import rocm_aiter_ops
