@@ -79,6 +79,20 @@ class CreateForwardFn(Protocol):
     ) -> Callable[[CUDAGraphMode], None]: ...
 
 
+class PCPGraphCaptureManager(Protocol):
+    @property
+    def input_buffers(self) -> InputBuffers: ...
+
+    def prepare_inputs_to_capture(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int | None = None,
+    ) -> tuple[InputBatch, tuple[torch.Tensor, ...], torch.Tensor]: ...
+
+    def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor: ...
+
+
 def _is_compatible(
     desc: BatchExecutionDescriptor,
     num_reqs: int,
@@ -495,7 +509,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        pcp_manager: "PCPManager | None" = None,
+        pcp_manager: PCPGraphCaptureManager | None = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -638,31 +652,41 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
-    pcp_manager: "PCPManager | None" = None,
+    pcp_manager: PCPGraphCaptureManager | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(
-        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
-    )
-    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-    slot_mapping_provider: BlockTables | PCPManager = block_tables
-    if pcp_manager is not None:
-        slot_mapping_provider = pcp_manager
-    slot_mappings = slot_mapping_provider.get_dummy_slot_mappings(num_tokens)
+    if full_cudagraph and pcp_manager is not None:
+        input_batch, input_block_tables, slot_mappings = (
+            pcp_manager.prepare_inputs_to_capture(
+                num_reqs,
+                num_tokens,
+                max_query_len=max_query_len,
+            )
+        )
+        input_buffers = pcp_manager.input_buffers
+    else:
+        input_batch = InputBatch.make_dummy(
+            num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+        )
+        input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+        slot_mapping_provider: BlockTables | PCPGraphCaptureManager = block_tables
+        if pcp_manager is not None:
+            slot_mapping_provider = pcp_manager
+        slot_mappings = slot_mapping_provider.get_dummy_slot_mappings(num_tokens)
+
+        # HACK(woosuk): Special handling for DCP.
+        if block_tables.cp_size > 1:
+            prepare_dcp_local_seq_lens(
+                input_buffers.dcp_local_seq_lens,
+                input_batch.seq_lens,
+                num_reqs,
+                block_tables.cp_size,
+                block_tables.cp_rank,
+                block_tables.cp_interleave,
+            )
+            input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
-
-    # HACK(woosuk): Special handling for DCP.
-    if block_tables.cp_size > 1:
-        prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
-        )
-        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
