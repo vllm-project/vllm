@@ -306,10 +306,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             if gemm_rs_ar.can_run(self.o_proj):
                 self.gemm_rs_ar = gemm_rs_ar
             else:
-                logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
-                    prefix,
-                )
+                gemm_rs_ar.warn_incompatible_projection()
 
         # ---- Attention backend / impl / KV cache ----
         self.quant_config = quant_config
