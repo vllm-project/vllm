@@ -25,6 +25,7 @@ P pulls KV from D when remote_block_ids is not None and
 external tokens > 0.
 """
 
+import contextlib
 import copy
 import time
 from unittest.mock import patch
@@ -57,6 +58,20 @@ pytestmark = pytest.mark.cpu_test
 
 # Common extra config for all bi-directional KV transfer tests.
 BIDIR_KV_EXTRA_CONFIG = {"bidirectional_kv_xfer": True, "kv_recompute_threshold": 0}
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_fake_workers():
+    """Stop reader threads started by FakeNixlConnectorWorker after each test.
+
+    These tests build the worker directly (no register_kv_caches / shutdown),
+    so drain the shared registry to avoid leaking ``nixl-pull-reader`` threads.
+    """
+    yield
+    while FakeNixlConnectorWorker._instances:
+        worker = FakeNixlConnectorWorker._instances.pop()
+        with contextlib.suppress(Exception):
+            worker.shutdown()
 
 
 # Helpers
@@ -135,6 +150,22 @@ def _do_load_kv(connector, metadata):
     connector.bind_connector_metadata(metadata)
     ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     connector.start_load_kv(ctx)
+
+
+def _wait_for_done_recving(connector, request_id, timeout=2.0):
+    """Poll get_finished until *request_id* finishes recving.
+
+    READ submission now runs on the worker's reader thread, so completion is
+    observed asynchronously across subsequent get_finished calls rather than
+    synchronously within start_load_kv.
+    """
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+        if request_id in done_recving:
+            return done_recving
+        time.sleep(0.01)
+    return set()
 
 
 # 1. P-node scheduler lifecycle tests
@@ -445,7 +476,7 @@ def test_p_node_pull_kv_from_d(dist_init):
     meta = _make_p_node_recv_metadata("req-p1", [10, 11, 12], [20, 21, 22])
     _do_load_kv(connector, meta)
     assert "req-p1" in worker._recving_metadata
-    _, done_recving = connector.get_finished(finished_req_ids=set())
+    done_recving = _wait_for_done_recving(connector, "req-p1")
     assert "req-p1" in done_recving
 
 
@@ -459,7 +490,7 @@ def test_p_node_pull_then_send_kv(dist_init):
     connector, worker = _make_connector_with_fake_worker()
     meta = _make_p_node_recv_metadata("req-p2", [10, 11], [20, 21])
     _do_load_kv(connector, meta)
-    _, done_recving = connector.get_finished(finished_req_ids=set())
+    done_recving = _wait_for_done_recving(connector, "req-p2")
     assert "req-p2" in done_recving
     worker._reqs_to_send["req-p2"] = time.perf_counter() + 60
     worker._reqs_to_process.add("req-p2")
