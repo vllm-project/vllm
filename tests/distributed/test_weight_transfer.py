@@ -1361,6 +1361,13 @@ class TestTrainerClients:
             {"gpu": ("args",)}
         ]
 
+        client.update_weights([{"ipc_handles": {"gpu": ("args",)}}, {"names": []}])
+        sent = captured["json"]["update_info"]
+        assert sent[1] == {"names": []}
+        assert pickle.loads(base64.b64decode(sent[0]["ipc_handles_pickled"])) == {
+            "gpu": ("args",)
+        }
+
     def test_http_client_passes_through_nccl_update_info(self, monkeypatch):
         """NCCL update_info has only JSON-native fields and passes unchanged."""
         captured = {}
