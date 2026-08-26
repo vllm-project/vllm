@@ -3,7 +3,8 @@
 // humming INDEXED / CUDA-graph decode path. recv values are LOCAL expert ids;
 // the kernel bins by local id while storing back the global id, sized by local
 // experts. Hybrid launch: one non-cooperative block for small decode, else a
-// cooperative multi-SM grid. Barriers: zero+sentinel -> shared histogram
+// cooperative multi-SM grid (launched via cudaLaunchKernelEx so grid.sync() is
+// CUDA-graph capturable). Barriers: zero+sentinel -> shared histogram
 // (distributed reduce) -> block-0 prefix + expert_ids fill -> scatter+globalize.
 
 #include <cooperative_groups.h>
@@ -180,11 +181,23 @@ static void fgas_launch(long* p_topk, const int* p_psum, int* p_sorted,
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &bps, (const void*)fused_gas_kernel<true>, FGAS_THREADS, smem);
   int blocks = fgas_cooperative_blocks(bps, work);
-  void* args[] = {&p_topk, &p_psum, &p_sorted,  &p_expert, &p_num,
-                  &p_counts, &P,    &reo,       &gne,      &numel,
-                  &mntp,   &mnmb,   &local_e,   &topk,     &block_size};
-  cudaLaunchCooperativeKernel((void*)fused_gas_kernel<true>, dim3(blocks),
-                              dim3(FGAS_THREADS), args, smem, stream);
+
+  // Cooperative launch via cudaLaunchKernelEx + the cooperative launch
+  // attribute: unlike the legacy cudaLaunchCooperativeKernel, this form IS
+  // stream-capturable, so grid.sync() works inside a captured CUDA graph.
+  cudaLaunchConfig_t config = {};
+  config.gridDim = dim3(blocks);
+  config.blockDim = dim3(FGAS_THREADS);
+  config.dynamicSmemBytes = smem;
+  config.stream = stream;
+  cudaLaunchAttribute attr = {};
+  attr.id = cudaLaunchAttributeCooperative;
+  attr.val.cooperative = 1;
+  config.attrs = &attr;
+  config.numAttrs = 1;
+  cudaLaunchKernelEx(&config, fused_gas_kernel<true>, p_topk, p_psum, p_sorted,
+                     p_expert, p_num, p_counts, P, reo, gne, numel, mntp, mnmb,
+                     local_e, topk, block_size);
 }
 
 }  // namespace moe
