@@ -13,7 +13,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 
 
 @dataclass
@@ -591,6 +591,64 @@ def _gather_logprobs_tensors(
     )
 
 
+def _gather_sampling_mask_tensors(
+    local_output: SamplerOutput | None,
+    metadata: BatchShardMetadata,
+    device: torch.device,
+    vocab_size: int,
+    compact_width: int,
+) -> SamplingMaskTensors:
+    """Gather and restore sampling masks from the owner-sharded requests."""
+    packed_width = (vocab_size + 7) // 8
+    token_ids = torch.zeros(
+        metadata.max_num_reqs_per_rank,
+        compact_width,
+        dtype=torch.int32,
+        device=device,
+    )
+    packed_mask = torch.zeros(
+        metadata.max_num_reqs_per_rank,
+        packed_width,
+        dtype=torch.uint8,
+        device=device,
+    )
+    counts = torch.zeros(
+        metadata.max_num_reqs_per_rank,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    if local_output is not None:
+        assert local_output.sampling_mask_tensors is not None
+        local_mask = local_output.sampling_mask_tensors
+        assert local_mask.vocab_size == vocab_size
+        assert local_mask.token_ids.shape == (
+            metadata.num_local_reqs,
+            compact_width,
+        )
+        assert local_mask.packed_mask.shape == (
+            metadata.num_local_reqs,
+            packed_width,
+        )
+        assert local_mask.counts.shape == (metadata.num_local_reqs,)
+        token_ids[: metadata.num_local_reqs].copy_(local_mask.token_ids)
+        packed_mask[: metadata.num_local_reqs].copy_(local_mask.packed_mask)
+        counts[: metadata.num_local_reqs].copy_(local_mask.counts)
+
+    # Every rank must participate even when it owns no requests. The zero-padded
+    # rows are never selected by gathered_src_indices.
+    gathered_token_ids = tensor_model_parallel_all_gather(token_ids, dim=0)
+    gathered_packed_mask = tensor_model_parallel_all_gather(packed_mask, dim=0)
+    gathered_counts = tensor_model_parallel_all_gather(counts, dim=0)
+    src_indices = metadata.gathered_src_indices
+    return SamplingMaskTensors(
+        token_ids=gathered_token_ids[src_indices],
+        packed_mask=gathered_packed_mask[src_indices],
+        counts=gathered_counts[src_indices],
+        vocab_size=vocab_size,
+    )
+
+
 def gather_sampler_output(
     local_output: SamplerOutput | None,
     metadata: BatchShardMetadata,
@@ -599,6 +657,7 @@ def gather_sampler_output(
     local_batch: InputBatch,
     gather_num_nans: bool = False,
     logprobs_dims: tuple[int, int] | None = None,
+    sampling_mask_dims: tuple[int, int] | None = None,
 ) -> SamplerOutput:
     max_num_logits_per_req = metadata.max_num_logits_per_req
     num_packed_cols = max_num_logits_per_req + 2 + (1 if gather_num_nans else 0)
@@ -642,6 +701,17 @@ def gather_sampler_output(
             local_output, metadata, global_batch, local_batch, logprobs_dims, device
         )
 
+    sampling_mask_tensors = None
+    if sampling_mask_dims is not None:
+        vocab_size, compact_width = sampling_mask_dims
+        sampling_mask_tensors = _gather_sampling_mask_tensors(
+            local_output,
+            metadata,
+            device,
+            vocab_size,
+            compact_width,
+        )
+
     # Unpack the gathered tensor into a sampler output object.
     num_reqs = metadata.gathered_src_indices.shape[0]
     sampled_token_ids = torch.empty(
@@ -671,4 +741,5 @@ def gather_sampler_output(
         num_nans=num_nans,
         num_sampled=num_sampled,
         num_rejected=num_rejected,
+        sampling_mask_tensors=sampling_mask_tensors,
     )

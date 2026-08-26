@@ -18,6 +18,62 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+
+def test_batch_sharding_preserves_custom_sampler_call_interface(monkeypatch):
+    """Mask plumbing must not change custom samplers when masks are disabled."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vocab_size = 4
+    runner.model_config = SimpleNamespace(return_sampling_mask=False)
+    runner.rejection_sampler = None
+    runner.speculator = None
+
+    global_batch = SimpleNamespace(idx_mapping_np=[0], num_draft_tokens=0)
+    local_batch = SimpleNamespace(num_reqs=1, num_draft_tokens=0)
+    shard_metadata = object()
+    runner.batch_sharder = SimpleNamespace(
+        shard_sampler_inputs=lambda *_args: (
+            local_batch,
+            torch.tensor([0]),
+            None,
+            shard_metadata,
+        )
+    )
+    runner.model = SimpleNamespace(compute_logits_local=lambda hidden: hidden)
+
+    class CustomSampler:
+        compute_nans = False
+
+        def __init__(self):
+            self.called = False
+
+        def get_logprobs_dims(self, *_args, **_kwargs):
+            return None
+
+        def __call__(self, logits, input_batch):
+            self.called = True
+            one = torch.ones(1, dtype=torch.int32)
+            return SamplerOutput(
+                sampled_token_ids=torch.ones(1, 1, dtype=torch.int64),
+                logprobs_tensors=None,
+                num_nans=None,
+                num_sampled=one,
+                num_rejected=torch.zeros_like(one),
+            )
+
+    runner.sampler = CustomSampler()
+    monkeypatch.setattr(model_runner_module, "all_to_all_logits", lambda x, _: x)
+    monkeypatch.setattr(
+        model_runner_module,
+        "gather_sampler_output",
+        lambda output, *_args, **_kwargs: output,
+    )
+
+    GPUModelRunner.sample(runner, torch.ones(1, runner.vocab_size), global_batch, None)
+
+    assert runner.sampler.called
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):

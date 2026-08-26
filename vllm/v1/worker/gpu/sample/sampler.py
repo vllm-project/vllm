@@ -22,7 +22,11 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import (
+    MAX_COMPACT_SUPPORT,
+    SamplerOutput,
+    SamplingMaskTensors,
+)
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
@@ -119,10 +123,17 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    def get_sampling_mask_width(self, idx_mapping_np: np.ndarray) -> int | None:
+        if not self.return_sampling_mask:
+            return None
+        max_top_k = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
+        return min(max_top_k, self.sampling_states.vocab_size, MAX_COMPACT_SUPPORT)
+
     def __call__(
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
+        sampling_mask_width: int | None = None,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
@@ -186,10 +197,11 @@ class Sampler:
 
         sampling_mask_tensors = None
         if self.return_sampling_mask:
-            # Size by the validated top_k batch max; wider supports use the bitmask.
-            max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
+            if sampling_mask_width is None:
+                sampling_mask_width = self.get_sampling_mask_width(idx_mapping_np)
+            assert sampling_mask_width is not None
             sampling_mask_tensors = SamplingMaskTensors.from_logits(
-                processed_logits, num_sampled, max_num_kept
+                processed_logits, num_sampled, sampling_mask_width
             )
 
         # These are GPU tensors.
