@@ -15,7 +15,7 @@ requires_flashinfer_mla = pytest.mark.skipif(
 
 
 def test_mla_dcp_gathered_query_reserves_backend_head_storage():
-    from vllm.v1.attention.ops.dcp_utils import reserve_query_head_storage
+    from vllm.v1.attention.ops.dcp import reserve_query_head_storage
 
     query = torch.randn(3, 24, 576, dtype=torch.bfloat16)
 
@@ -45,6 +45,7 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
     impl.bmm1_scale = 1.0
     impl.bmm2_scale = 1.0
     impl.need_to_return_lse_for_decode = True
+    impl.dcp_world_size = 2
     impl.num_heads = 6
     impl.qk_nope_head_dim = 128
     impl.kv_lora_rank = 512
