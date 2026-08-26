@@ -140,10 +140,13 @@ def _validate_qwen3_vl_dspark(
             "Qwen3DSparkModel checkpoints do not declare the Qwen3-VL hidden-state "
             "contract."
         )
-    if getattr(draft_hf_config, "model_type", None) != "qwen3":
+    if getattr(draft_hf_config, "model_type", None) not in {
+        "qwen3",
+        "qwen3_vl_dflash",
+    }:
         raise ValueError(
-            "Qwen3-VL DSpark draft checkpoints must use model_type='qwen3' "
-            "because the draft is a text-only Qwen3 decoder."
+            "Qwen3-VL DSpark draft checkpoints must use model_type='qwen3' or "
+            "model_type='qwen3_vl_dflash'."
         )
 
     block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
@@ -215,6 +218,55 @@ def _validate_qwen3_vl_dspark(
         raise ValueError(
             "Qwen3-VL DSpark target_layer_ids must be zero-based text-layer "
             f"indices in [0, {target_num_layers - 1}]; got {target_layer_ids}."
+        )
+
+    configured_target_layers = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "num_target_layers"
+    )
+    if (
+        configured_target_layers is not None
+        and configured_target_layers != target_num_layers
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark dflash_config.num_target_layers must match the "
+            f"target text layer count ({target_num_layers}); got "
+            f"{configured_target_layers}."
+        )
+    configured_feature_layers = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "num_target_feature_layers"
+    )
+    if configured_feature_layers is not None and configured_feature_layers != len(
+        target_layer_ids
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark dflash_config.num_target_feature_layers must match "
+            f"the number of target_layer_ids ({len(target_layer_ids)}); got "
+            f"{configured_feature_layers}."
+        )
+
+    configured_draft_layers = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "num_hidden_layers"
+    )
+    if (
+        configured_draft_layers is not None
+        and configured_draft_layers != draft_hf_config.num_hidden_layers
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark dflash_config.num_hidden_layers must match the "
+            f"normalized draft layer count ({draft_hf_config.num_hidden_layers}); "
+            f"got {configured_draft_layers}."
+        )
+    draft_layer_types = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "layer_types"
+    )
+    if draft_layer_types is not None and (
+        not isinstance(draft_layer_types, (list, tuple))
+        or len(draft_layer_types) != draft_hf_config.num_hidden_layers
+    ):
+        raise ValueError(
+            "Qwen3-VL DSpark dflash_config.layer_types must contain one entry "
+            f"per draft layer ({draft_hf_config.num_hidden_layers}); got "
+            f"{draft_layer_types}."
         )
 
     eagle_aux_layer_ids = getattr(
@@ -309,10 +361,29 @@ def _validate_qwen3_vl_dspark(
         for rope_config in rope_configs
     )
     if has_mrope:
-        raise ValueError(
-            "Qwen3-VL DSpark draft checkpoints must use logical 1-D RoPE and "
-            "must not copy the target model's mrope_section."
-        )
+        mrope_section = getattr(draft_hf_config, "mrope_section", None)
+        if mrope_section is None:
+            mrope_section = next(
+                rope_config["mrope_section"]
+                for rope_config in rope_configs
+                if isinstance(rope_config, Mapping) and "mrope_section" in rope_config
+            )
+        head_dim = draft_hf_config.head_dim
+        if (
+            not isinstance(mrope_section, (list, tuple))
+            or any(
+                not isinstance(section, int)
+                or isinstance(section, bool)
+                or section <= 0
+                for section in mrope_section
+            )
+            or sum(mrope_section) != head_dim // 2
+        ):
+            raise ValueError(
+                "Qwen3-VL DSpark mrope_section must contain positive integer "
+                f"sections summing to head_dim / 2 ({head_dim // 2}); got "
+                f"{mrope_section}."
+            )
 
 
 @config

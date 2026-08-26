@@ -1478,8 +1478,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
     "Qwen3VLDSparkModel": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct",
-        speculative_model="Qwen3-VL-30B-A3B-Instruct-DSpARK-fixture",
+        "Qwen/Qwen3-VL-2B-Instruct",
+        speculative_model="Qwen3-VL-DSpARK-config-fixture",
         is_available_online=False,
         use_original_num_layers=True,
     ),
