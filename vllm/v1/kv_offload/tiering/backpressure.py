@@ -158,7 +158,7 @@ class EMABackpressureDetector(BackpressureDetector):
     NETWORK_HIGH_WATER_S = 0.020
     NETWORK_LOW_WATER_S = 0.005
 
-    _NETWORK_TIER_TYPES = frozenset({"obj", "p2p"})
+    _NETWORK_TIER_TYPES = frozenset({"obj"})
 
     @classmethod
     def default_config(
