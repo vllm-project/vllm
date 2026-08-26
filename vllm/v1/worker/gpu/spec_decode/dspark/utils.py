@@ -1,13 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, replace
+from vllm.config import LoadConfig, ModelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+
+def _draft_safetensors_load_config(vllm_config: VllmConfig) -> LoadConfig:
+    """Use a non-collective loader for the last-stage-only draft model."""
+    load_config = vllm_config.load_config
+    load_format = load_config.load_format
+    if isinstance(load_format, str):
+        safe_format = "safetensors"
+    else:
+        safe_format = type(load_format)("safetensors")
+    return dataclasses.replace(load_config, load_format=safe_format)
 
 
 def _resolve_dspark_attention_backend(
@@ -66,6 +79,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
+        load_config=_draft_safetensors_load_config(vllm_config),
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.

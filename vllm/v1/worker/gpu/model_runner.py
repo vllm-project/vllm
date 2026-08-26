@@ -34,6 +34,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
+    get_world_group,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -889,9 +890,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
                 )
+                draft_over_pp = self.speculative_config is not None and self.use_pp
+                if draft_over_pp:
+                    get_world_group().barrier()
                 if self.speculator is not None:
                     with use_workspace_lane(self._draft_workspace_lane):
                         self.speculator.capture()
+                if draft_over_pp:
+                    get_world_group().barrier()
                 if self.adaptive_verification is not None:
                     with self.step_timing.collect() as timings:
                         for batch in self.adaptive_verification.batches_to_profile(
