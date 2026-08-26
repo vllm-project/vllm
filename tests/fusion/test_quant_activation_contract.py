@@ -9,8 +9,11 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_FP8_KERNELS,
     _POSSIBLE_INT8_KERNELS,
+    _POSSIBLE_MXFP4_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
 )
+from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+from vllm.model_executor.kernels.linear.mxfp4.base import MxFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
@@ -47,6 +50,7 @@ SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    AiterMxfp4LinearKernel,
 }
 
 
@@ -56,6 +60,7 @@ def _all_kernel_classes() -> list[type]:
         _POSSIBLE_FP8_KERNELS,
         _POSSIBLE_FP8_BLOCK_KERNELS,
         _POSSIBLE_INT8_KERNELS,
+        _POSSIBLE_MXFP4_KERNELS,
         _POSSIBLE_NVFP4_KERNELS,
     ):
         for kernels in registry.values():
@@ -70,6 +75,8 @@ def _probe(cls: type):
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
+    elif issubclass(cls, MxFp4LinearKernel):
+        obj.use_asm_gemm = False
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
@@ -116,6 +123,21 @@ def test_bridge_marks_supporting_and_skips_others():
     expose_input_quant_key(layer, unsupported)
     assert not hasattr(layer, "input_quant_key")
     assert not hasattr(layer, "input_quant_layout")
+
+
+def test_bridge_aiter_mxfp4_layout():
+    triton = _probe(AiterMxfp4LinearKernel)
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, triton)
+    assert layer.input_quant_key == kMxfp4Dynamic
+    assert layer.input_quant_layout is None
+
+    asm = _probe(AiterMxfp4LinearKernel)
+    asm.use_asm_gemm = True
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, asm)
+    assert layer.input_quant_key == kMxfp4Dynamic
+    assert layer.input_quant_layout == "shuffled"
 
 
 def test_as_quantized_activation_validates_layout():

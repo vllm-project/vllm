@@ -7,7 +7,12 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kMxfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -46,17 +51,18 @@ if is_aiter_found_and_supported():
         N = weight.shape[0]
         K = weight.shape[1]
         if rocm_use_aiter_fp4_asm_gemm:
-            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
-                if x_scales is None:
-                    # use hip quant kernel for performance
-                    if M >= 32:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                    else:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+            # Fused activations (x_scales is not None) already match gemm_a4w4.
+            # Use small-M Triton preshuffle gemm for unfused BF16.
+            if (
+                x_scales is None
+                and M <= 64
+                and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+            ):
+                if M >= 32:
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
                 else:
-                    x_q = x
-                    x_s = x_scales
-
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+                
                 if M >= 32:
                     x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
                 else:
@@ -132,6 +138,14 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         self.out_dtype = torch.get_default_dtype()
 
+    def input_quant_key(self) -> QuantKey | None:
+        return kMxfp4Dynamic
+
+    def input_quant_layout(self) -> str | None:
+        if self.use_asm_gemm:
+            return "shuffled"
+        return None
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -191,16 +205,32 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        y = torch.ops.vllm.gemm_with_dynamic_quant(
-            x,
-            layer.weight,
-            layer.weight_scale,
-            self.use_asm_gemm,
-            self.out_dtype,
+        qa = as_quantized_activation(
+            x, self.input_quant_key(), self.input_quant_layout()
         )
+        if qa is not None:
+            y = torch.ops.vllm.gemm_with_dynamic_quant(
+                qa.data,
+                layer.weight,
+                layer.weight_scale,
+                self.use_asm_gemm,
+                self.out_dtype,
+                qa.scale,
+            )
+            orig_m = qa.orig_shape[0]
+            if y.shape[0] != orig_m:
+                y = y[:orig_m]
+        else:
+            y = torch.ops.vllm.gemm_with_dynamic_quant(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                self.use_asm_gemm,
+                self.out_dtype,
+            )
         if bias is not None:
             y = y + bias
         return y
