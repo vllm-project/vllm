@@ -603,11 +603,7 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
         #   -cc.custom_ops+ -quant_fp8
         # The same syntax applies to -sc, -dc, and -ac.
         dotted_alias = next(
-            (
-                alias
-                for alias in DICT_SHORT_ALIASES
-                if token.startswith(f"{alias}.")
-            ),
+            (alias for alias in DICT_SHORT_ALIASES if token.startswith(f"{alias}.")),
             None,
         )
         if dotted_alias is not None:
@@ -619,9 +615,7 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
                 raw_key = raw_key[:-1]
 
             if not raw_key:
-                raise ValueError(
-                    f"{token} must contain a key after {dotted_alias}."
-                )
+                raise ValueError(f"{token} must contain a key after {dotted_alias}.")
 
             if not separator:
                 if i + 1 >= len(argv):
@@ -633,13 +627,7 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
             else:
                 i += 1
 
-            value: Any
-            if append:
-                # Match FlexibleArgumentParser's "+" behavior: comma-separated
-                # values are appended as strings.
-                value = raw_value.split(",")
-            else:
-                value = coerce(raw_value)
+            value: Any = raw_value.split(",") if append else coerce(raw_value)
 
             merge_value(
                 config,

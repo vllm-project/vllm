@@ -99,11 +99,11 @@ def _aggregate_candidates(
         output_throughput = _mean(runs, "output_throughput")
         request_throughput = _mean(runs, "request_throughput")
         request_goodput = _mean(runs, "request_goodput")
-        mean_p99_ttft_ms, median_p99_ttft_ms, worst_p99_ttft_ms = (
-            _percentile_summary(runs, "p99_ttft_ms")
+        mean_p99_ttft_ms, median_p99_ttft_ms, worst_p99_ttft_ms = _percentile_summary(
+            runs, "p99_ttft_ms"
         )
-        mean_p99_tpot_ms, median_p99_tpot_ms, worst_p99_tpot_ms = (
-            _percentile_summary(runs, "p99_tpot_ms")
+        mean_p99_tpot_ms, median_p99_tpot_ms, worst_p99_tpot_ms = _percentile_summary(
+            runs, "p99_tpot_ms"
         )
 
         completed_requests = sum(
@@ -370,9 +370,7 @@ def main() -> int:
     if winner is not None:
         recommended_config = dict(initial_config)
         recommended_config["max-num-seqs"] = winner["max_num_seqs"]
-        recommended_config["max-num-batched-tokens"] = winner[
-            "max_num_batched_tokens"
-        ]
+        recommended_config["max-num-batched-tokens"] = winner["max_num_batched_tokens"]
         _write_config(
             output_config,
             source_path=config_path,
@@ -411,9 +409,7 @@ def main() -> int:
 
     recommendation = {
         "status": (
-            "sla_feasible"
-            if winner is not None
-            else "no_sla_feasible_configuration"
+            "sla_feasible" if winner is not None else "no_sla_feasible_configuration"
         ),
         "selection_objective": objective,
         "minimum_compliance_ratio": args.minimum_compliance,
@@ -455,10 +451,7 @@ def main() -> int:
     print(f"Selection objective: {objective}")
     if use_goodput:
         print(f"  mean request goodput:   {winner['mean_request_goodput']:.2f} req/s")
-        print(
-            "  combined compliance:   "
-            f"{winner['combined_compliance_percent']:.2f}%"
-        )
+        print(f"  combined compliance:   {winner['combined_compliance_percent']:.2f}%")
     print(f"  mean output throughput: {winner['mean_output_throughput']:.2f} tok/s")
     if winner["median_p99_ttft_ms"] is not None:
         print(f"  median P99 TTFT:        {winner['median_p99_ttft_ms']:.2f} ms")
