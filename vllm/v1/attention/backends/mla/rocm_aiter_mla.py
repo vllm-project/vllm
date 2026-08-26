@@ -353,8 +353,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         # Keep metadata sizing consistent with the padded tensor shape passed
         # to mla_decode_fwd.
+        # ---ASM-DCP-LSE--- size/schedule the persistent decode metadata for
+        # the DCP-gathered head count. Under DCP the decode query is
+        # all-gathered to num_heads*dcp_world_size heads before forward_mqa,
+        # and the asm persistent decode folds that count down to gqa=16; the
+        # reduce buffers must be sized for the folded (gathered) work count.
+        _dcp_effective_heads = self.num_heads * max(1, self.dcp_world_size)
         self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
-            self.num_heads
+            _dcp_effective_heads
         )
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
@@ -994,6 +1000,7 @@ class AiterMLAHelper:
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
+    can_return_lse_for_decode: bool = True
     def __init__(
         self,
         num_heads: int,
@@ -1350,6 +1357,57 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 min_kv_seq_len=int(row_len.min()),
             )
             return o, None
+
+        if self.dcp_world_size > 1:
+            # ---ASM-DCP-LSE--- mqa_q was all-gathered upstream to
+            # (B, num_heads*dcp_world_size, L+P). That count is a multiple of
+            # 16, so the asm persistent decode runs it directly (folding
+            # gqa->16). get_mla_padded_q must be skipped: it assumes q carries
+            # only self.num_heads. Request LSE so MLADCPManager.combine can do
+            # the exact cross-rank softmax reduction.
+            if type(q) is tuple:
+                q = torch.cat(q, dim=-1)
+            assert isinstance(q, torch.Tensor)
+            B = q.shape[0]
+            gathered_heads = q.shape[1]
+            o = torch.empty(
+                B,
+                gathered_heads,
+                self.kv_lora_rank,
+                dtype=attn_metadata.decode.attn_out_dtype,
+                device=q.device,
+            )
+            if decode.max_qo_len > 1 and not decode.has_persistent_metadata:
+                o.zero_()
+            kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
+            dcp_mla_kwargs = dict(
+                q_scale=layer._q_scale,
+                kv_scale=layer._k_scale,
+            )
+            if attn_metadata.work_meta_data is not None:
+                dcp_mla_kwargs.update(
+                    work_meta_data=attn_metadata.work_meta_data,
+                    work_indptr=attn_metadata.work_indptr,
+                    work_info_set=attn_metadata.work_info_set,
+                    reduce_indptr=attn_metadata.reduce_indptr,
+                    reduce_final_map=attn_metadata.reduce_final_map,
+                    reduce_partial_map=attn_metadata.reduce_partial_map,
+                )
+            from aiter.mla import mla_decode_fwd as _aiter_mla_decode_fwd
+            _, dcp_lse = _aiter_mla_decode_fwd(
+                q,
+                kv_buffer.view(-1, 1, 1, q.shape[-1]),
+                o,
+                decode.qo_indptr,
+                decode.paged_kv_indptr,
+                decode.paged_kv_indices,
+                decode.paged_kv_last_page_len,
+                decode.max_qo_len,
+                sm_scale=self.scale,
+                return_lse=True,
+                **dcp_mla_kwargs,
+            )
+            return o, dcp_lse
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
