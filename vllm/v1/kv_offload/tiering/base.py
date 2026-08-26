@@ -89,6 +89,7 @@ class JobResult:
     # indicated by `success`. Must be a subset of the job's original keys.
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
+    transfer_bytes: int | None = None
 
 
 class ParentManager(ABC):

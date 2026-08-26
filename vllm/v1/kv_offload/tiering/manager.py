@@ -337,7 +337,7 @@ class TieringOffloadingManager(OffloadingManager):
                         transfer_job.keys, transfer_job.req_context
                     )
                     if completed_job.success:
-                        self._update_backpressure(tier, job_metadata)
+                        self._update_backpressure(tier, job_metadata, completed_job)
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
@@ -348,14 +348,21 @@ class TieringOffloadingManager(OffloadingManager):
         return detector.should_store(num_blocks)
 
     def _update_backpressure(
-        self, tier: SecondaryTierManager, job_metadata: JobMetadata
+        self,
+        tier: SecondaryTierManager,
+        job_metadata: JobMetadata,
+        completed_job: JobResult,
     ) -> None:
         detector = tier.bp_detector
         if detector is None:
             return
         was_under_pressure = detector.is_under_pressure()
         tj = job_metadata.transfer_job
-        num_bytes = len(tj.keys) * tier.block_size_bytes
+        num_bytes = (
+            completed_job.transfer_bytes
+            if completed_job.transfer_bytes is not None
+            else len(tj.keys) * tier.block_size_bytes
+        )
         detector.update(tj.submit_time, num_bytes)
         if detector.is_under_pressure() != was_under_pressure:
             tier_idx = self._tier_index[tier]

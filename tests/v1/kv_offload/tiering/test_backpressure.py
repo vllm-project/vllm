@@ -129,10 +129,10 @@ class TestDefaultConfig:
         assert cfg["high_water_s"] == EMABackpressureDetector.NETWORK_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.NETWORK_LOW_WATER_S
 
-    def test_p2p_gets_network_watermarks(self):
+    def test_p2p_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("p2p")
-        assert cfg["high_water_s"] == EMABackpressureDetector.NETWORK_HIGH_WATER_S
-        assert cfg["low_water_s"] == EMABackpressureDetector.NETWORK_LOW_WATER_S
+        assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
+        assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 
     def test_fs_with_remote_locality_gets_network_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs", locality="REMOTE")
@@ -193,7 +193,9 @@ class TestIdleDecay:
             assert bp.is_under_pressure() is True
             assert bp.store_latency_ema == _BP_HIGH_WATER_S * 2
 
-    def test_decay_applied_before_new_sample(self):
+    def test_no_decay_applied_during_new_sample(self):
+        """on_store_completed applies the new sample directly without
+        idle decay — decay only runs in is_under_pressure()."""
         bp = self._make_detector()
         bp._completions = _BP_WARMUP
         bp._ema = _BP_HIGH_WATER_S * 2
@@ -201,13 +203,11 @@ class TestIdleDecay:
         t0 = time.monotonic()
         bp._last_update = t0
 
-        # After 4s (2 half-lives), EMA decays to HIGH*0.5 before new sample.
         block_bytes = 16
-        fast_s_per_mib = 0.0
         with patch("time.monotonic", return_value=t0 + 4.0):
             bp.on_store_completed(0.0, block_bytes)
-            decayed = _BP_HIGH_WATER_S * 2 * 0.25
-            expected = _BP_EMA_ALPHA * fast_s_per_mib + (1 - _BP_EMA_ALPHA) * decayed
+            # No decay in on_store_completed: EMA = alpha*0 + (1-alpha)*2000
+            expected = (1 - _BP_EMA_ALPHA) * _BP_HIGH_WATER_S * 2
             assert bp.store_latency_ema == pytest.approx(expected, rel=0.01)
 
     def test_reset_clears_last_update(self):
