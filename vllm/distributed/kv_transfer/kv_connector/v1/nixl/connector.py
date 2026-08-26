@@ -156,15 +156,8 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
 
     def get_finished_count(self) -> int | None:
-        parallel_config = self._vllm_config.parallel_config
-        if (
-            self.kv_transfer_config.kv_role == "kv_producer"
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
-            return (
-                parallel_config.tensor_parallel_size
-                * parallel_config.pipeline_parallel_size
-            )
+        # Every PCP x TP rank reports (world_size); replicated-KV PCP ranks > 0
+        # report their requests as sent as soon as they are asked to send.
         return None
 
     def get_num_new_matched_tokens(
@@ -246,7 +239,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.kv_transfer_config.kv_role == "kv_producer"
             and self.connector_worker.pcp_rank > 0
         ):
-            done_sending.clear()
+            # Replicated-KV PCP: this rank does not transfer, but every worker
+            # must report so the aggregator (and MultiConnector's per-request
+            # extra-save accounting) sees world_size finishes per request.
+            done_sending = set(self.connector_worker._replicated_pcp_done_sending)
+            self.connector_worker._replicated_pcp_done_sending.clear()
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:

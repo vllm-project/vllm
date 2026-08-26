@@ -488,6 +488,9 @@ class NixlBaseConnectorWorker:
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
+        # Replicated-KV PCP ranks > 0 never transfer; requests they are asked
+        # to send are reported finished immediately (see get_finished).
+        self._replicated_pcp_done_sending: set[ReqId] = set()
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
