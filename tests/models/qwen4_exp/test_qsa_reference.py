@@ -14,8 +14,11 @@ from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
+from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionBackend
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.kv_cache_interface import KVCacheLayout
+from vllm.v1.worker.utils import select_common_block_size
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -357,6 +360,51 @@ def _qsa_key_cache(block_size: int, compress_ratio: int) -> qsa_cache.QSAKeyStat
         ),
         compress_ratio=compress_ratio,
     )
+
+
+def test_qsa_state_backend_requires_block_outermost_layout() -> None:
+    layouts = qsa_cache.QSAStateBackend.supported_kv_cache_layouts()
+    assert layouts == (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
+    assert all(layout.is_block_outermost for layout in layouts)
+
+
+def test_qsa_backend_keeps_packed_manager_blocks_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        Qwen4ExpQSAFlashAttentionBackend,
+        "_get_fa4_hd256_block_size",
+        classmethod(lambda cls: 128),
+    )
+    block_size = select_common_block_size(
+        1024,
+        [Qwen4ExpQSAFlashAttentionBackend, qsa_cache.QSAStateBackend],
+    )
+    assert block_size == 1024
+
+
+def test_qsa_state_caches_adapt_the_unified_logical_layout() -> None:
+    raw_cache = _qsa_key_cache(block_size=32, compress_ratio=4)
+    compressed_cache = qsa_cache.QSACompressedKeyCache(
+        head_size=64,
+        dtype=torch.bfloat16,
+        cache_config=SimpleNamespace(block_size=32),
+        prefix="compressed.bind",
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(static_forward_context={})
+        ),
+        compress_ratio=4,
+    )
+    raw_view = torch.empty(2, 1, 8, 64, dtype=torch.bfloat16)
+    compressed_view = torch.empty(2, 1, 8, 64, dtype=torch.bfloat16)
+
+    raw_cache.bind_kv_cache(raw_view)
+    compressed_cache.bind_kv_cache(compressed_view)
+
+    assert raw_cache.kv_cache.shape == (2, 8, 1, 64)
+    assert compressed_cache.kv_cache.shape == (2, 8, 1, 64)
+    assert raw_cache.kv_cache.data_ptr() == raw_view.data_ptr()
+    assert compressed_cache.kv_cache.data_ptr() == compressed_view.data_ptr()
 
 
 @pytest.mark.parametrize(

@@ -38,6 +38,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
+    KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
 )
@@ -675,30 +676,10 @@ class QSAStateBackend(AttentionBackend):
     def get_builder_cls() -> type[QSAMetadataBuilder]:
         return QSAMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        del cache_dtype_str
-        if num_kv_heads != 1:
-            raise ValueError("QSA side caches require exactly one KV head")
-        return (num_blocks, block_size, num_kv_heads, head_size)
-
     @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        return True
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3, 4)
-        return (0, 1, 2, 3)
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # QSA pages are packed beside the main KV pages within each block.
+        return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
 class _QSAStateCache(nn.Module, AttentionLayerBase):
@@ -737,6 +718,14 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
 
     def forward(self) -> None: ...
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        """Adapt the unified [B, H, N, C] view to QSA's [B, N, H, C]."""
+        if kv_cache.ndim != 4 or kv_cache.shape[1] != 1:
+            raise ValueError("QSA state cache must be [blocks, 1, states, width]")
+        if kv_cache.dtype != torch.bfloat16 or kv_cache.shape[3] != self.head_size:
+            raise ValueError("QSA state cache does not match its packed BF16 spec")
+        super().bind_kv_cache(kv_cache.transpose(1, 2))
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return QSAStateBackend
 
@@ -762,14 +751,11 @@ class QSAKeyStateCache(_QSAStateCache):
         super().__init__(head_size=storage_head_size, **kwargs)
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        if kv_cache.ndim != 4 or kv_cache.shape[2] != 1:
-            raise ValueError("QSA raw cache must be [blocks, block_size, 1, width]")
-        if kv_cache.dtype != torch.bfloat16 or kv_cache.shape[3] != self.head_size:
-            raise ValueError("QSA raw cache does not match its packed BF16 cache spec")
         super().bind_kv_cache(kv_cache)
-        self.key_cache = kv_cache[..., : self.key_head_size]
+        qsa_cache = self.kv_cache
+        self.key_cache = qsa_cache[..., : self.key_head_size]
         if self.cache_rope_positions:
-            position_tail = kv_cache[..., self.rope_position_offset :]
+            position_tail = qsa_cache[..., self.rope_position_offset :]
             self.rope_position_cache = position_tail.view(torch.int64)
         else:
             self.rope_position_cache = None

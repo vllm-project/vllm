@@ -146,15 +146,13 @@ def _make_csa_linear_specs(
             head_size=16,
             head_size_v=16,
             dtype=torch.bfloat16,
-            indexes_kv_by_block_stride=True,
         )
         specs[_compressed_name(layer_index)] = MLAAttentionSpec(
             block_size=16,
             num_kv_heads=1,
             head_size=16,
             dtype=torch.bfloat16,
-            compress_ratio=4,
-            indexes_kv_by_block_stride=True,
+            tokens_per_state=4,
         )
         specs[_compressor_state_name(layer_index)] = CircularBufferSpec(
             block_size=4,
@@ -162,7 +160,6 @@ def _make_csa_linear_specs(
             head_size=8,
             head_size_v=0,
             dtype=torch.bfloat16,
-            indexes_kv_by_block_stride=True,
         )
     return specs
 
