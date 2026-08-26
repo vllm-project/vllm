@@ -633,7 +633,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
         )
-        check_attention_cp_compatibility(self.vllm_config)
+        check_attention_cp_compatibility(
+            self.vllm_config,
+            exclude_layer_names=(
+                self.speculator.draft_attn_layer_names
+                if isinstance(self.speculator, DraftModelSpeculator)
+                else None
+            ),
+        )
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -780,16 +787,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            attn_metadata, slot_mappings_by_layer = (
-                pcp._maybe_prepare_replicated_pcp_attn(
-                    self.pcp_manager,
-                    self.speculator,
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    skip_attn=skip_attn,
-                )
-            )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
                     input_batch=input_batch,
@@ -1847,9 +1844,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
-        aux_hidden_states = pcp.maybe_restore_pcp_for_speculator(
-            self.pcp_manager, aux_hidden_states
-        )
+        # Aux hidden states feed the replicated drafter (e.g. DSpark), so
+        # like the main hidden states they are restored from the rank-local
+        # shard to the global batch layout.
+        if self.pcp_manager is not None and aux_hidden_states is not None:
+            aux_hidden_states = [
+                self.pcp_manager.restore_hidden_states(h) for h in aux_hidden_states
+            ]
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -1928,20 +1929,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pcp.maybe_restore_pcp_hidden_state_buffer(
-                    self.pcp_manager,
-                    pre_hc_hidden_states,
-                )
-                spec_hidden_states = spec_hidden_states[: hidden_states.shape[0]]
-            attn_metadata, slot_mappings_by_layer = (
-                pcp._maybe_prepare_replicated_pcp_attn(
-                    self.pcp_manager,
-                    self.speculator,
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                )
-            )
+                if self.pcp_manager is not None:
+                    pre_hc_hidden_states = self.pcp_manager.restore_hidden_state_buffer(
+                        pre_hc_hidden_states
+                    )
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
