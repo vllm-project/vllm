@@ -16,6 +16,10 @@ class OffloadingGroupConfig:
     layer_names: tuple[str, ...]
     # Original KVCacheConfig group index.
     group_id: int
+    # Whether blocks in this cache holds tokens, which is what makes
+    # tokens_per_block meaningful and a block count convertible to a token
+    # count. False for Mamba, for example.
+    blocks_hold_tokens: bool = True
 
 
 @dataclass(frozen=True)
