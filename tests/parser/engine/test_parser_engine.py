@@ -893,7 +893,7 @@ class _CombinedDelegating(DelegatingParser):
     tool_parser_cls = _CombinedToolAdapter
 
 
-def test_parser_manager_uses_shared_engine_directly(monkeypatch):
+def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
     monkeypatch.setattr(
         ParserManager,
         "get_reasoning_parser",
@@ -912,17 +912,38 @@ def test_parser_manager_uses_shared_engine_directly(monkeypatch):
     )
 
     assert parser_cls is not None
-    assert parser_cls is _CombinedTestEngine
+    assert issubclass(parser_cls, DelegatingParser)
     parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is not None
+    assert parser.reasoning_parser._parser_engine_cls is _CombinedTestEngine
+    assert parser.tool_parser._parser_engine_cls is _CombinedTestEngine
     request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
     reasoning, content, _ = parser.parse(
         "ab</think>c",
         request,
-        model_output_token_ids=[ord("a"), ord("b"), 201, ord("c")],
+        model_output_token_ids=token_ids,
     )
     assert reasoning == "ab"
     assert content == "c"
-    assert parser.count_reasoning_tokens([]) == 2
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
+def test_parser_manager_preserves_shared_engine_reasoning_wiring():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_xml",
+        reasoning_parser_name="qwen3",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(
+        make_mock_tokenizer(_VOCAB),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert parser.reasoning_parser is not None
+    assert parser.reasoning_parser._parser_engine.thinking_enabled is False
 
 
 def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
@@ -981,21 +1002,6 @@ def test_parser_manager_preserves_tool_only_adapter(monkeypatch):
     assert reasoning is None
     assert content == "<think>ab</think>c"
     assert tool_calls == []
-
-
-def test_parser_manager_rejects_non_engine_adapter_metadata():
-    class TraditionalParser:
-        pass
-
-    class InvalidEngineAdapter:
-        _parser_engine_cls = TraditionalParser
-
-    assert ParserManager._get_parser_engine_cls(TraditionalParser) is None
-    assert ParserManager._get_parser_engine_cls(InvalidEngineAdapter) is None
-    assert (
-        ParserManager._get_parser_engine_cls(_CombinedReasoningAdapter)
-        is _CombinedTestEngine
-    )
 
 
 def test_reasoning_adapter_counts_after_final_non_streaming_parse():
