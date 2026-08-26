@@ -39,7 +39,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    MAX_QUERY_LEN_3D,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -52,6 +55,23 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+
+
+def spec_decode_max_query_len_3d(vllm_config: VllmConfig) -> int:
+    """Largest query length the 3D (split-KV) kernel may serve.
+
+    Method-gated fail-closed: only dflash/dspark drafters opt in to
+    ``q > 1`` (their draft/verify passes are the measured target of the
+    small-q 3D path). eagle/eagle3/mtp and any unaudited speculative
+    method return 1, which keeps their verify passes on the exact
+    pre-existing 2D launch byte-identical.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not (
+        spec_config.use_dflash() or spec_config.use_dspark()
+    ):
+        return 1
+    return min(1 + vllm_config.num_speculative_tokens, MAX_QUERY_LEN_3D)
 
 
 @dataclass
@@ -94,6 +114,9 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    # Largest query length the 3D kernel may serve; >1 only when the
+    # softmax_segm_* buffers above are sized per query token (spec decode).
+    max_query_len_3d: int = 1
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -153,9 +176,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
+        # Spec-decode drafts/verifies run small uniform query lengths
+        # (1 bonus + N draft tokens) that are still decode-shaped; admit
+        # them to the 3D kernel by sizing the per-segment buffers per
+        # query TOKEN instead of per sequence. Fail-closed method gate:
+        # only dflash/dspark opt in; eagle/eagle3/mtp and unknown methods
+        # keep the single-token-only 3D admission (byte-identical verify).
+        self.max_query_len_3d = spec_decode_max_query_len_3d(vllm_config)
+        segm_buffer_tokens = self.seq_threshold_3D * self.max_query_len_3d
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                segm_buffer_tokens,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -164,12 +195,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (segm_buffer_tokens, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (segm_buffer_tokens, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
@@ -245,6 +276,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            max_query_len_3d=self.max_query_len_3d,
         )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -673,6 +705,7 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
             softmax_segm_expsum=softmax_segm_expsum,
+            max_query_len_3d=attn_metadata.max_query_len_3d,
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
