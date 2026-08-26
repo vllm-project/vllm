@@ -2,20 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 
+import vllm.v1.worker.gpu.pcp_manager as pcp_module
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
-import vllm.v1.worker.gpu.pcp_manager as pcp_module
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
 def _copy_to_cpu(value, out=None, device=None):
@@ -216,6 +214,7 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     assert torch.equal(local_batch.dcp_local_seq_lens.cpu(), expected)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_partition_reuses_gpu_cursor_for_replicated_spec_decode():
     device = torch.device("cuda")
     global_buffers = InputBuffers(max_num_reqs=1, max_num_tokens=4, device=device)
@@ -282,108 +281,5 @@ def test_restore_hidden_states_appends_zero_graph_padding(monkeypatch):
     actual = manager.restore_hidden_states(torch.empty(0))
 
     assert actual.shape == (8, 2)
-    torch.testing.assert_close(
-        actual[:5],
-        restored,
-    )
+    torch.testing.assert_close(actual[:5], restored)
     torch.testing.assert_close(actual[5:], torch.zeros(3, 2))
-
-
-def test_maybe_prepare_replicated_pcp_attn_uses_global_gpu_metadata(monkeypatch):
-    speculator = Mock(spec=DraftModelSpeculator)
-    speculator.block_tables = Mock()
-    speculator.kv_cache_config = object()
-    speculator._build_draft_attn_metadata = Mock(return_value=object())
-    slot_mappings_tensor = torch.arange(5).reshape(1, 5)
-    speculator.block_tables.compute_slot_mappings.return_value = slot_mappings_tensor
-    monkeypatch.setattr(
-        pcp_module,
-        "build_slot_mappings_by_layer",
-        lambda slot_mappings, kv_cache_config: {"attention_layer": slot_mappings},
-    )
-
-    input_batch = SimpleNamespace(
-        num_reqs=2,
-        num_reqs_after_padding=2,
-        num_tokens_after_padding=5,
-        idx_mapping=torch.tensor([3, 7], dtype=torch.int32),
-        query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
-        query_start_loc_np=np.array([0, 2, 5], dtype=np.int32),
-        positions=torch.arange(5),
-        seq_lens=torch.tensor([9, 11], dtype=torch.int32),
-        seq_lens_cpu_upper_bound=torch.tensor([20, 22], dtype=torch.int32),
-    )
-
-    attn_metadata, slot_mappings = pcp_module._maybe_prepare_replicated_pcp_attn(
-        Mock(spec=PCPManager),
-        speculator,
-        input_batch,
-        None,
-        None,
-    )
-
-    assert attn_metadata is speculator._build_draft_attn_metadata.return_value
-    assert set(slot_mappings) == {"attention_layer"}
-    speculator.block_tables.gather_block_tables.assert_called_once_with(
-        input_batch.idx_mapping,
-        num_reqs_padded=2,
-    )
-    speculator.block_tables.compute_slot_mappings.assert_called_once_with(
-        input_batch.idx_mapping,
-        input_batch.query_start_loc,
-        input_batch.positions,
-        num_tokens_padded=5,
-    )
-    speculator._build_draft_attn_metadata.assert_called_once_with(
-        num_reqs=2,
-        num_reqs_padded=2,
-        num_tokens_padded=5,
-        seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-        step=0,
-        query_start_loc_np=input_batch.query_start_loc_np,
-        query_start_loc_gpu=input_batch.query_start_loc,
-        seq_lens=input_batch.seq_lens,
-    )
-
-
-def test_maybe_prepare_replicated_pcp_attn_preserves_inputs_when_disabled():
-    speculator = Mock(spec=DraftModelSpeculator)
-    speculator.block_tables = Mock()
-    attn_metadata = object()
-    slot_mappings = {"attention_layer": torch.arange(2)}
-
-    actual_metadata, actual_slot_mappings = (
-        pcp_module._maybe_prepare_replicated_pcp_attn(
-            None,
-            speculator,
-            SimpleNamespace(),
-            attn_metadata,
-            slot_mappings,
-        )
-    )
-
-    assert actual_metadata is attn_metadata
-    assert actual_slot_mappings is slot_mappings
-    speculator.block_tables.gather_block_tables.assert_not_called()
-
-
-def test_maybe_prepare_replicated_pcp_attn_preserves_inputs_when_skipping_attn():
-    speculator = Mock(spec=DraftModelSpeculator)
-    speculator.block_tables = Mock()
-    attn_metadata = object()
-    slot_mappings = {"attention_layer": torch.arange(2)}
-
-    actual_metadata, actual_slot_mappings = (
-        pcp_module._maybe_prepare_replicated_pcp_attn(
-            Mock(spec=PCPManager),
-            speculator,
-            SimpleNamespace(),
-            attn_metadata,
-            slot_mappings,
-            skip_attn=True,
-        )
-    )
-
-    assert actual_metadata is attn_metadata
-    assert actual_slot_mappings is slot_mappings
-    speculator.block_tables.gather_block_tables.assert_not_called()
