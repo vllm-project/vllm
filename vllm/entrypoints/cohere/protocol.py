@@ -25,7 +25,7 @@ See https://docs.cohere.com/reference/chat for the upstream spec.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from cohere import types as _sdk
 from cohere.types import (
@@ -45,6 +45,9 @@ from cohere.types import (
     UserChatMessageV2,
 )
 from pydantic import BaseModel, Field, field_validator
+
+import vllm.envs as envs
+from vllm.exceptions import VLLMValidationError
 
 # Re-export the SDK wire-format types alongside our local extensions so
 # ``vllm.entrypoints.cohere.serving`` and friends can import everything
@@ -150,7 +153,9 @@ class CohereChatV2Request(BaseModel):
     response_format: ResponseFormatV2 | None = None
     safety_mode: ChatRequestSafetyMode | None = None
     max_tokens: int | None = None
-    stop_sequences: list[str] | None = None
+    stop_sequences: (
+        Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+    ) = None
 
     # Sampling
     temperature: float | None = None
@@ -186,14 +191,18 @@ class CohereChatV2Request(BaseModel):
     @classmethod
     def _validate_model(cls, v: str) -> str:
         if not v:
-            raise ValueError("model is required")
+            raise VLLMValidationError("model is required", parameter="model")
         return v
 
     @field_validator("max_tokens")
     @classmethod
     def _validate_max_tokens(cls, v: int | None) -> int | None:
         if v is not None and v < 0:
-            raise ValueError("max_tokens must be non-negative")
+            raise VLLMValidationError(
+                "max_tokens must be non-negative",
+                parameter="max_tokens",
+                value=v,
+            )
         return v
 
     @field_validator("messages", mode="before")
@@ -233,7 +242,9 @@ class CohereChatV2Request(BaseModel):
     @classmethod
     def _validate_messages(cls, v: list[ChatMessageV2]) -> list[ChatMessageV2]:
         if not v:
-            raise ValueError("messages must contain at least one message")
+            raise VLLMValidationError(
+                "messages must contain at least one message", parameter="messages"
+            )
         return v
 
 

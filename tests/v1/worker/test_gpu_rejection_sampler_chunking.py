@@ -51,6 +51,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = SimpleNamespace(logprobs_mode=logprobs_mode)
     rejection_sampler.num_speculative_steps = 3
+    rejection_sampler.enable_adaptive_verification = False
 
     def fake_verify(
         self,

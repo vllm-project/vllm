@@ -371,8 +371,17 @@ def _get_kv_b_proj_input_dtype(
         return kv_b_proj.params_dtype
     if weight_dtype == torch.uint8:
         return None
-    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
-        return None
+    if weight_dtype == current_platform.fp8_dtype():
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8PbWoLinearMethod,
+        )
+
+        quant_method = getattr(kv_b_proj, "quant_method", None)
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
+        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+            return quant_method.input_dtype
+        if not use_fp8_prefill:
+            return None
     return weight_dtype
 
 
@@ -640,6 +649,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -811,6 +824,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
+        use_mha = True
 
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill = getattr(attn_metadata, "prefill", None)
@@ -979,16 +993,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
-                seq_lens = (
-                    attn_metadata.decode.seq_lens
-                    if attn_metadata.decode is not None
-                    else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
-                        : attn_metadata.num_decodes
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if not use_mha:
+                    seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
+                    query_start_loc = attn_metadata.query_start_loc
+                else:
+                    seq_lens = (
+                        decode_metadata.seq_lens
+                        if decode_metadata is not None
+                        else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
+                            : attn_metadata.num_decodes
+                        ]
+                    )
+                    query_start_loc = attn_metadata.query_start_loc[
+                        : attn_metadata.num_decodes + 1
                     ]
-                )
-                query_start_loc = attn_metadata.query_start_loc[
-                    : attn_metadata.num_decodes + 1
-                ]
                 attn_out = self.dcp_manager.combine(
                     attn_out,
                     lse,
@@ -1441,27 +1460,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # Default to identity permutation to signal cross-layer allocation
-            # is unsupported. Each MLA backend must opt in to support cross-layer
-            # allocation by overriding this method.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
