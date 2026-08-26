@@ -52,9 +52,23 @@ def _coalesce_runs(
 
     Both callers derive the non-region side of a run from its slot, so that
     side advances in lockstep with the region and only the region has to be
-    split. `EmbeddingCache` hands out ascending ids, which is what makes runs
-    findable at all.
+    split.
+
+    `block_ids` must be ascending and distinct, which `EmbeddingCache.alloc`
+    guarantees by sorting an entry's ids at allocation, and a prefix of such a
+    list keeps. Ascending order is what makes runs findable at all, and it is
+    what lets the whole entry be recognised as one run by comparing its span
+    against its length -- an O(1) test that skips unboxing every id into numpy.
+    That unboxing, not the arithmetic below, is the bulk of the cost here.
     """
+    n = len(block_ids)
+    if n and block_ids[-1] - block_ids[0] == n - 1:
+        return (
+            np.zeros(1, dtype=np.int64),
+            np.array([block_ids[0]], dtype=np.int64),
+            np.array([n], dtype=np.int64),
+        )
+
     ids = np.fromiter(block_ids, dtype=np.int64, count=len(block_ids))
     breaks = np.flatnonzero(np.diff(ids) != 1) + 1
     slots = np.concatenate(([0], breaks))
@@ -230,7 +244,9 @@ class ECCPUWorker:
         bufs = self._save_bufs
         assert self._save_stream is not None
         src.record_stream(self._save_stream)
-        src_base = src.view(-1).view(torch.uint8).data_ptr()
+        # Device addresses are unsigned and can have the high bit set (XPU USM),
+        # so they are added up in uint64; signed arithmetic rejects them.
+        src_base = np.uint64(src.view(-1).view(torch.uint8).data_ptr())
         dst_base = self._region.blocks.data_ptr()
         # Entries are sized by placeholder count, which can exceed the number
         # of embeddings, so blocks the output never reaches get no descriptor.
@@ -242,7 +258,7 @@ class ECCPUWorker:
             run_bytes[-1] = total_bytes - slots[-1] * block_size
             bufs.add_copies(
                 self._save_count,
-                src_base + slots * block_size,
+                src_base + slots.astype(np.uint64) * np.uint64(block_size),
                 dst_base + first_blocks * block_size,
                 run_bytes,
             )
@@ -341,7 +357,8 @@ class ECCPUWorker:
                 total_blocks, block_size, dtype=torch.int8, device=device_type
             )
             dst_buf.record_stream(compute_stream)
-            dst_buf_base = dst_buf.data_ptr()
+            # See save_caches: device addresses are added up in uint64.
+            dst_buf_base = np.uint64(dst_buf.data_ptr())
 
             bufs = self._buf_pool.acquire(total_blocks)
             slots, first_blocks, num_blocks = _coalesce_runs(
@@ -350,7 +367,7 @@ class ECCPUWorker:
             bufs.add_copies(
                 0,
                 src_base + first_blocks * block_size,
-                dst_buf_base + slots * block_size,
+                dst_buf_base + slots.astype(np.uint64) * np.uint64(block_size),
                 num_blocks * block_size,
             )
             op_idx = slots.size
