@@ -932,9 +932,13 @@ class RoutedExperts(PluggableLayer):
                     f"Duplicate fused MoE destination {spec.parameter_name!r}"
                 )
             param = getattr(layer, spec.parameter_name, None)
-            if not isinstance(param, torch.Tensor):
+            if not isinstance(param, torch.nn.Parameter):
                 raise AttributeError(
-                    f"Layer has no tensor destination {spec.parameter_name!r}"
+                    f"Layer has no parameter destination {spec.parameter_name!r}"
+                )
+            if not callable(getattr(param, "weight_loader", None)):
+                raise AttributeError(
+                    f"Parameter {spec.parameter_name!r} has no weight_loader"
                 )
             if tuple(param.shape) != spec.shape or param.dtype != spec.dtype:
                 raise ValueError(
