@@ -4,13 +4,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.mcp.tool_server import MCPToolServer
+from vllm.entrypoints.mcp.tool_server import (
+    MCPToolServer,
+    get_tool_input_schema,
+    post_process_tools_description,
+)
 
 from .conftest import (
     BASE_TEST_ENV,
@@ -95,6 +101,30 @@ class TestMCPToolServerUnit:
 
         # Empty list - returns None
         assert server.get_tool_description("test_server", allowed_tools=[]) is None
+
+    @pytest.mark.parametrize("schema_attribute", ["inputSchema", "input_schema"])
+    def test_post_process_tools_description_supports_mcp_sdk_schema_attributes(
+        self, schema_attribute: str
+    ):
+        schema = {
+            "type": "object",
+            "title": "Arguments",
+            "properties": {"value": {"type": "string", "default": None}},
+        }
+        tool = SimpleNamespace(
+            name="tool",
+            description="test",
+            annotations=None,
+            **{schema_attribute: schema},
+        )
+        result = SimpleNamespace(tools=[tool])
+
+        post_process_tools_description(result)
+
+        assert get_tool_input_schema(result.tools[0]) == {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        }
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""

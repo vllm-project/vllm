@@ -53,12 +53,18 @@ def trim_schema(schema: dict) -> dict:
     return schema
 
 
+def get_tool_input_schema(tool: Any) -> dict:
+    if hasattr(tool, "input_schema"):
+        return tool.input_schema
+    return tool.inputSchema
+
+
 def post_process_tools_description(
     list_tools_result: "ListToolsResult",
 ) -> "ListToolsResult":
     # Adapt the MCP tool result for Harmony
     for tool in list_tools_result.tools:
-        tool.inputSchema = trim_schema(tool.inputSchema)
+        trim_schema(get_tool_input_schema(tool))
 
     # Some tools schema don't need to be part of the prompt (e.g. simple text
     # in text out for Python)
@@ -127,7 +133,7 @@ class MCPToolServer(ToolServer):
                     ToolDescription.new(
                         name=tool.name,
                         description=tool.description,
-                        parameters=tool.inputSchema,
+                        parameters=get_tool_input_schema(tool),
                     )
                     for tool in list_tools_response.tools
                 ],
