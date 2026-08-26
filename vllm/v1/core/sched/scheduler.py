@@ -2936,8 +2936,18 @@ class Scheduler(SchedulerInterface):
             (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
+            current_num_scheduled_tokens = num_scheduled_tokens.get(req_id, 0)
+            assert request.num_in_flight_tokens >= current_num_scheduled_tokens
+            # Async scheduling can have later frames in flight when an earlier
+            # frame reports the load failure. Exclude every active optimistic
+            # frame, but not older output already detached from the computed
+            # count by _mark_inflight_output_stale.
+            active_in_flight_tokens = (
+                request.num_in_flight_tokens - request.num_stale_output_tokens
+            )
+            assert 0 <= active_in_flight_tokens <= request.num_computed_tokens
             req_num_computed_tokens = (
-                request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
+                request.num_computed_tokens - active_in_flight_tokens
             )
 
             req_num_computed_blocks = (
