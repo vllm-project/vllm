@@ -13,8 +13,6 @@ from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMeth
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 
 PROMPT = "On the surface of Mars, we found"
 
@@ -34,12 +32,8 @@ def test_lm_head(
 ) -> None:
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    model_class = (
-        Qwen2ForCausalLM if model_id.startswith("ModelCloud/") else LlamaForCausalLM
-    )
     model, _ = load_model_without_vllm_runner(
         model_id,
-        model_class,
         dtype=torch.float16,
         model_config_kwargs={
             "max_model_len": 2048,

@@ -25,7 +25,6 @@ from tests.quantization.utils import (
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.platforms import current_platform
 
 
@@ -201,7 +200,6 @@ def test_auto_awq_quantization_method(
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     model, vllm_config = load_model_without_vllm_runner(
         model_id,
-        Qwen2ForCausalLM,
         dtype=torch.float16,
         quantization="auto_awq",
         model_config_kwargs={"max_model_len": 2048},

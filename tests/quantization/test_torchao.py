@@ -13,8 +13,6 @@ from vllm.config.load import LoadConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
@@ -53,7 +51,6 @@ def restore_float32_matmul_precision():
 def test_pre_quantized_model(monkeypatch, dist_init, workspace_init):
     model, vllm_config = load_model_without_vllm_runner(
         "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.15.0",
-        OPTForCausalLM,
         quantization="torchao",
         dtype="bfloat16",
     )
@@ -85,7 +82,6 @@ def test_opt_125m_int8wo_model_loading_with_params(
     model_name = "jerryzh168/opt-125m-int8wo-partial-quant"
     model, vllm_config = load_model_without_vllm_runner(
         model_name,
-        OPTForCausalLM,
         quantization="torchao",
         vllm_config_kwargs={
             "load_config": LoadConfig(pt_load_map_location=pt_load_map_location)
@@ -112,7 +108,6 @@ def test_qwenvl_int8wo_model_loading_with_params(
     model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
     model, vllm_config = load_model_without_vllm_runner(
         model_name,
-        Qwen2_5_VLForConditionalGeneration,
         quantization="torchao",
         vllm_config_kwargs={
             "load_config": LoadConfig(pt_load_map_location=f"{DEVICE_TYPE}:0")

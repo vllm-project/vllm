@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQLinearMethod,
     AutoGPTQMoEMethod,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
@@ -45,7 +44,6 @@ def test_auto_gptq_quantization_method(
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     model, vllm_config = load_model_without_vllm_runner(
         model_id,
-        LlamaForCausalLM,
         dtype=torch.float16,
         quantization="auto_gptq",
         model_config_kwargs={"max_model_len": 2048},

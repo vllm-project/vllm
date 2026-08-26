@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMeth
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
 )
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 
 PROMPT = "On the surface of Mars, we found"
 
@@ -38,7 +37,6 @@ def test_gptq_with_dynamic(model_id: str, monkeypatch, dist_init, workspace_init
 
     model, _ = load_model_without_vllm_runner(
         model_id,
-        Qwen2ForCausalLM,
         dtype=torch.float16,
         model_config_kwargs={
             "max_model_len": 2048,

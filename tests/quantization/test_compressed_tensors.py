@@ -56,8 +56,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -114,7 +112,7 @@ def test_compressed_tensors_w8a8_static_setup(model_args, dist_init, workspace_i
     ):
         pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
-    model, _ = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+    model, _ = load_model_without_vllm_runner(model_path)
     layer = model.model.layers[0]
 
     qkv_proj = layer.self_attn.qkv_proj
@@ -255,9 +253,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
         # this will enable VLLM_ROCM_USE_AITER_LINEAR
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    model, _ = load_model_without_vllm_runner(
-        model_path, LlamaForCausalLM, dtype=torch.float16
-    )
+    model, _ = load_model_without_vllm_runner(model_path, dtype=torch.float16)
     qkv_proj = model.model.layers[0].self_attn.qkv_proj
     assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
     assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
@@ -316,7 +312,7 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
 def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
-    model, vllm_config = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+    model, vllm_config = load_model_without_vllm_runner(model_path)
     target_device = torch.device(current_platform.device_type)
 
     layer = model.model.layers[0]
@@ -419,11 +415,11 @@ def test_compressed_tensors_nvfp4(args, dist_init, workspace_init):
             ValueError,
             match="Forced NVFP4 kernel MarlinNvFp4LinearKernel is not supported",
         ):
-            load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+            load_model_without_vllm_runner(model_path)
         return
 
     try:
-        model, _ = load_model_without_vllm_runner(model_path, LlamaForCausalLM)
+        model, _ = load_model_without_vllm_runner(model_path)
     except ValueError as exc:
         pytest.fail(f"Unexpected NVFP4 loading failure: {exc}")
 
@@ -510,7 +506,6 @@ def test_compressed_tensors_fp8_block_enabled(
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
     model, _ = load_model_without_vllm_runner(
         model_path,
-        Qwen3ForCausalLM,
         vllm_config_kwargs={
             "kernel_config": KernelConfig(linear_backend=linear_backend)
         },

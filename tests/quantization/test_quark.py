@@ -41,8 +41,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -209,7 +207,6 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(
     monkeypatch.setattr(LlamaForCausalLM, "load_weights", load_weights)
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        LlamaForCausalLM,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
         vllm_config_kwargs={"cache_config": CacheConfig(cache_dtype=kv_cache_dtype)},
     )
@@ -253,7 +250,6 @@ def test_quark_fp8_w_per_channel_a_per_token(monkeypatch, dist_init, workspace_i
     model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        Qwen2ForCausalLM,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
     )
 
@@ -280,7 +276,6 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        LlamaForCausalLM,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
     )
     with set_current_vllm_config(vllm_config):
@@ -302,7 +297,6 @@ def test_quark_int8_w8a8_moe(monkeypatch, dist_init, workspace_init):
     model_path = "amd/tiny-qwen3-moe-w8a8-int8"
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        Qwen3MoeForCausalLM,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
     )
 
@@ -342,7 +336,6 @@ def test_quark_w4a8_fp8_moe(monkeypatch, dist_init, workspace_init):
     model_path = "amd/tiny-qwen3-moe-w4a8"
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        Qwen3MoeForCausalLM,
     )
     with set_current_vllm_config(vllm_config):
         moe = model.model.layers[0].mlp.experts
@@ -364,7 +357,7 @@ def test_quark_fp8_parity(dist_init, workspace_init):
     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
 
     def load_state_dict(model_id: str) -> dict[str, torch.Tensor]:
-        model, _ = load_model_without_vllm_runner(model_id, LlamaForCausalLM)
+        model, _ = load_model_without_vllm_runner(model_id)
         return {k: v.cpu() for k, v in model.state_dict().items()}
 
     quark_state_dict = load_state_dict(quark_model_id)

@@ -30,7 +30,6 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,  # noqa: E501
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 
 
@@ -134,7 +133,6 @@ def test_custom_quant(model, monkeypatch, dist_init, workspace_init):
     """Test infer with the custom quantization method."""
     vllm_model, vllm_config = load_model_without_vllm_runner(
         model,
-        LlamaForCausalLM,
         quantization="custom_quant",
     )
     layer = vllm_model.model.layers[0]

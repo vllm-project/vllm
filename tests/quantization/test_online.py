@@ -51,7 +51,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.granitemoe import (
-    GraniteMoeForCausalLM,
     GraniteMoeModel,
 )
 from vllm.platforms import current_platform
@@ -209,7 +208,6 @@ def test_online_quantization(
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
     model, vllm_config = load_model_without_vllm_runner(
         model_name,
-        GraniteMoeForCausalLM,
         dtype="bfloat16",
         quantization=quant_scheme,
         model_config_kwargs={

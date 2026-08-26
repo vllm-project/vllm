@@ -43,8 +43,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -98,7 +96,6 @@ def test_model_load_and_run(
     )
     model, vllm_config = load_model_without_vllm_runner(
         model_id,
-        LlamaForCausalLM,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
         vllm_config_kwargs={"kernel_config": kernel_config},
     )
@@ -510,7 +507,6 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
 
     model, _ = load_model_without_vllm_runner(
         "facebook/opt-125m",
-        OPTForCausalLM,
         vllm_config_kwargs={
             "cache_config": CacheConfig(
                 cache_dtype="fp8", kv_cache_dtype_skip_layers=["0", "2"]

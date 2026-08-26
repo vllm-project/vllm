@@ -39,7 +39,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.platforms import current_platform
 
 
@@ -431,7 +430,6 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_i
 
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        Qwen2ForCausalLM,
         quantization="modelopt",
     )
     layer = model.model.layers[0]
@@ -486,7 +484,6 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_i
 
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
-        Qwen2ForCausalLM,
         quantization="modelopt",
     )
     layer = model.model.layers[0]

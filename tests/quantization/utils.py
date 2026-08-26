@@ -15,10 +15,7 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _limit_num_hidden_layers(
@@ -47,7 +44,6 @@ def _limit_num_hidden_layers(
 
 def load_model_without_vllm_runner(
     model_path: str,
-    model_class: type[torch.nn.Module],
     *,
     dtype: str | torch.dtype = "bfloat16",
     quantization: str | None = None,
@@ -65,23 +61,20 @@ def load_model_without_vllm_runner(
     vllm_config_args = dict(vllm_config_kwargs or {})
     vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
     vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
-    target_device = torch.device(current_platform.device_type)
     hf_overrides = (model_config_kwargs or {}).get("hf_overrides") or {}
     num_hidden_layers = hf_overrides.get("num_hidden_layers")
 
     with set_current_vllm_config(vllm_config):
-        with set_default_torch_dtype(model_config.dtype), target_device:
-            model = model_class(vllm_config=vllm_config)
-
-        _limit_num_hidden_layers(model, num_hidden_layers)
         model_loader = model_loader_cls(vllm_config.load_config)
-        model_loader.load_weights(model, model_config)
-        if any(
-            getattr(getattr(module, "quant_method", None), "uses_meta_device", False)
-            for module in model.modules()
-        ):
-            finalize_layerwise_processing(model, model_config)
-        process_weights_after_loading(model, model_config, target_device)
+        if num_hidden_layers is not None:
+            original_load_weights = model_loader.load_weights
+
+            def load_weights(model, model_config):
+                _limit_num_hidden_layers(model, num_hidden_layers)
+                original_load_weights(model, model_config)
+
+            model_loader.load_weights = load_weights
+        model = model_loader.load_model(vllm_config, model_config)
 
     return model, vllm_config
 
