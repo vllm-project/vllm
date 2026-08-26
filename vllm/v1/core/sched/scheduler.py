@@ -2703,7 +2703,10 @@ class Scheduler(SchedulerInterface):
         )
         assert 0 <= num_padding_tokens <= num_physical_draft_tokens
         num_valid_draft_tokens = num_physical_draft_tokens - num_padding_tokens
-        assert 0 <= num_accepted_tokens <= num_valid_draft_tokens
+        assert 0 <= num_accepted_tokens <= num_physical_draft_tokens
+        num_accepted_tokens = min(
+            num_accepted_tokens, num_valid_draft_tokens
+        )
         if not num_valid_draft_tokens:
             # A full-padding frame contains no logical draft round.
             return spec_decoding_stats
