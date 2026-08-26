@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import os
+
 import torch
 
 import vllm.envs as envs
@@ -43,6 +45,48 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+def _top_k_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    top_k: int,
+) -> None:
+    if envs.VLLM_BATCH_INVARIANT:
+        if not hasattr(torch.ops.ds4_bi, "top_k_per_row_prefill"):
+            library = os.environ.get("DS4_BI_TOPK_LIB")
+            if library:
+                torch.ops.load_library(library)
+        if not hasattr(torch.ops.ds4_bi, "top_k_per_row_prefill"):
+            raise RuntimeError(
+                "VLLM_BATCH_INVARIANT requires the DS4 deterministic Top-K library"
+            )
+        torch.ops.ds4_bi.top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            num_rows,
+            stride0,
+            stride1,
+            top_k,
+        )
+        return
+    ops.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        stride0,
+        stride1,
+        top_k,
+    )
 
 
 def _assert_cutedsl_dcp_merge_supported(
@@ -506,7 +550,7 @@ def sparse_attn_indexer(
                         clean_logits=False,
                     )
                 num_rows = logits.shape[0]
-                ops.top_k_per_row_prefill(
+                _top_k_per_row_prefill(
                     logits,
                     cu_seqlen_ks,
                     cu_seqlen_ke,
@@ -635,7 +679,7 @@ def sparse_attn_indexer(
                 num_rows, dtype=torch.int32, device=logits.device
             )
             row_ends = seq_lens.reshape(-1)[:num_rows].contiguous()
-            ops.top_k_per_row_prefill(
+            _top_k_per_row_prefill(
                 logits,
                 row_starts,
                 row_ends,

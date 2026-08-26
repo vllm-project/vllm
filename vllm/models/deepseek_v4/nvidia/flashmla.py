@@ -620,6 +620,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 self.compress_ratio,
                 self.window_size,
             )
+            num_prefills = swa_metadata.num_prefills
             if len(chunk_plan) > num_prefills:
                 raise RuntimeError("prefill BI launch count exceeded request count")
         else:
