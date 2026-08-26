@@ -503,12 +503,18 @@ class DFlashQwen3Model(nn.Module):
 
             packed, group_scale = qkv.weight_packed, qkv.weight_scale
             in_f = int(qkv.input_size)
+            # `unpack_from_int32` reads 32-bit containers, and the bit width is
+            # derived from the column count on that assumption. An NVFP4 export
+            # packs two 4-bit values per uint8 instead, and that arithmetic gives
+            # a clean, wrong answer for it (bits=16, no remainder) rather than
+            # failing -- so the container dtype has to be checked, not inferred.
             bits, remainder = divmod(32 * int(packed.shape[1]), in_f)
-            if remainder or group_scale.dim() != 2:
+            if packed.dtype != torch.int32 or remainder or group_scale.dim() != 2:
                 raise ValueError(
-                    f"DFlash context-KV precompute cannot read a packed weight of "
-                    f"{tuple(packed.shape)} over {in_f} input features with a "
-                    f"weight_scale of {tuple(group_scale.shape)}."
+                    f"DFlash context-KV precompute cannot read a "
+                    f"{packed.dtype} packed weight of {tuple(packed.shape)} over "
+                    f"{in_f} input features with a weight_scale of "
+                    f"{tuple(group_scale.shape)}."
                 )
 
             # Slice to the K/V rows *before* unpacking. The q rows are discarded
@@ -530,6 +536,46 @@ class DFlashQwen3Model(nn.Module):
         kv = w[attn.q_size :]
         if kv.dtype == act_dtype:
             return kv
+
+        # Block-scaled FP8 (DeepSeek layout): the scale covers a 2-D tile rather
+        # than a row, and lives under `weight_scale_inv` -- vLLM's checkpoint
+        # compatibility name for it, not a reciprocal.
+        scale_inv = getattr(qkv, "weight_scale_inv", None)
+        if scale_inv is not None:
+            block = getattr(qkv, "weight_block_size", None)
+            si = scale_inv.data if hasattr(scale_inv, "data") else scale_inv
+            if block is None or len(block) != 2:
+                raise ValueError(
+                    f"DFlash context-KV precompute found a weight_scale_inv of "
+                    f"{tuple(si.shape)} but no usable weight_block_size "
+                    f"({block!r}) to interpret it with."
+                )
+            block_n, block_k = int(block[0]), int(block[1])
+            # Which axis each block size describes is a convention, so require it
+            # to explain the scale rather than assuming it does.
+            expected = (-(-w.shape[0] // block_n), -(-w.shape[1] // block_k))
+            if expected != tuple(si.shape):
+                raise ValueError(
+                    f"DFlash context-KV precompute: weight_block_size "
+                    f"{(block_n, block_k)} over a {tuple(w.shape)} weight implies "
+                    f"a scale of {expected}, but weight_scale_inv is "
+                    f"{tuple(si.shape)}."
+                )
+            if attn.q_size % block_n:
+                raise ValueError(
+                    f"DFlash context-KV precompute cannot slice a block-scaled "
+                    f"weight at row {attn.q_size}: it falls inside a {block_n}-row "
+                    f"block, so K would take part of q's scale."
+                )
+            # Drop q's block rows before expanding, as in the packed path.
+            si = si[attn.q_size // block_n :].to(torch.float32)
+            dense = (
+                kv.to(torch.float32)
+                * si.repeat_interleave(block_n, 0).repeat_interleave(block_k, 1)[
+                    : kv.shape[0], : kv.shape[1]
+                ]
+            )
+            return dense.to(act_dtype)
 
         # Plain quantized weight (e.g. compressed-tensors FP8) + a weight_scale.
         scale = getattr(qkv, "weight_scale", None)
