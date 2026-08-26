@@ -10,6 +10,14 @@ import math
 
 import pytest
 import torch
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
+from vllm.utils.deep_gemm import (
+    calc_diff,
+    is_deep_gemm_supported,
+    per_block_cast_to_fp8,
+)
 
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -28,20 +36,28 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
 )
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+    _fp8_workspace_shape,
+)
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
-from vllm.utils.deep_gemm import (
-    calc_diff,
-    is_deep_gemm_supported,
-    per_block_cast_to_fp8,
-)
 
 BLOCK_SIZE = [128, 128]
+
+
+@pytest.mark.parametrize("workspace_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_columns", [2048, 6144, 6145])
+def test_fp8_workspace_shape(workspace_dtype, num_columns):
+    num_rows = 17
+    shape = _fp8_workspace_shape(num_rows, num_columns, workspace_dtype)
+
+    allocated_bytes = math.prod(shape) * workspace_dtype.itemsize
+    required_bytes = num_rows * num_columns * torch.float8_e4m3fn.itemsize
+
+    assert allocated_bytes >= required_bytes
+    assert allocated_bytes - required_bytes < num_rows * workspace_dtype.itemsize
 
 
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
