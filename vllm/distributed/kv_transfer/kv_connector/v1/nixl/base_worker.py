@@ -2433,46 +2433,22 @@ class NixlBaseConnectorWorker:
         remote_dcp_size: int,
         local_num_computed_blocks: int,
     ) -> tuple[list[int], list[int]]:
-        """Handle DCP prefix cache hit for asymmetric DCP configurations.
+        """Match local and remote block IDs by global DCP position.
 
-        Scoped to MLA with `dcp_size in (1, tp_size)`: a side is either fully
-        replicated (holds the whole sequence) or fully sharded (one every
-        `dcp_size` blocks). The examples below number blocks by their *global*
-        sequence position purely to explain the modulo arithmetic, in practice
-        they have independent block tables.
+        ``local_ids`` excludes blocks already satisfied by the local prefix
+        cache, while ``remote_ids`` contains the full transferable remote list.
 
-        ``local_ids`` only carries the blocks still to be filled: the scheduler
-        already dropped the ``local_num_computed_blocks`` prefix-cached ones. The
-        count is passed separately because it fixes where this side's slice starts
-        in global position space, which is what the remote offset must line up
-        with.
+        Example:
+            local DCP size 2, rank 0 owns *global positions*=[0, 2, 4, 6]
+            cached_blocks=[0,2,4]
+            to transfer: [6] (the rest is cached)
 
-            local_dcp_size=4, local_dcp_rank=1
-            owns:       [1, 5, 9, 13, ...]
-            cached:     [1, 5]
-            next fetch: [9, 13, ...]
+            remote DCP size 4
+            remote rank 0 owns [0, 4] -> no more match, skip the read
+            remote rank 2 owns [2, 6] -> match position 6 and read
 
-        A given ``remote_rank`` can also drop out entirely: when the computed
-        slice lands past the end of the other side's list, the result is empty
-        (see the caller, which turns that into a notification-only read).
-
-            local_dcp_size=2, local_dcp_rank=0
-            owns:       [0, 2, 4, 6]
-            cached:     [0, 2, 4]
-            local_ids:  [6]
-
-            P0 owns:    [0, 4]
-            P2 owns:    [2, 6]
-
-            vs P0: start_local = (0-3) % 2 = 1  ->  [6][1::2] = []   (skip)
-            vs P2: start_local = (1-3) % 2 = 0  ->  [6][0::2] = [6]  (read)
-
-        When both sides interleave identically (including the non-sharded,
-        dcp_size=1 case), the remote list still starts at sequence position 0,
-        so skipping ``local_num_computed_blocks`` off its front is all that's
-        needed. Either way, the result is truncated to the shorter of the two
-        matched slices, so a subsequent, unconditional call to
-        ``_apply_prefix_caching`` is a guaranteed no-op on these lists.
+        An empty result (rank 0 above) takes the notification-only path, allowing the
+        remote to release its blocks without performing a transfer.
         """
         local_size, remote_size = local_dcp_size, remote_dcp_size
 
