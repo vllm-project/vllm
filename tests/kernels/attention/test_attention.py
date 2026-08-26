@@ -183,8 +183,27 @@ def test_paged_attention(
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
-    # Using default kv_scale
-    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    k_scale_value = 0.5 if kv_cache_dtype == "fp8" else 1.0
+    v_scale_value = 0.25 if kv_cache_dtype == "fp8" else 1.0
+    k_scale = torch.tensor(k_scale_value, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(v_scale_value, dtype=torch.float32, device=device)
+
+    if kv_cache_dtype == "fp8":
+        # Fill unused slots in referenced blocks with FP8 E4M3 NaNs. The
+        # attention result must not depend on values beyond each sequence.
+        valid_offsets_by_block: dict[int, set[int]] = {}
+        for seq_idx, seq_len in enumerate(seq_lens.tolist()):
+            for token_idx in range(seq_len):
+                block_idx = block_tables_lst[seq_idx][token_idx // block_size]
+                valid_offsets_by_block.setdefault(block_idx, set()).add(
+                    token_idx % block_size
+                )
+        for block_idx, valid_offsets in valid_offsets_by_block.items():
+            padding_offsets = [
+                offset for offset in range(block_size) if offset not in valid_offsets
+            ]
+            if padding_offsets:
+                value_cache[block_idx, :, :, padding_offsets] = 0x7F
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -256,14 +275,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(
             size=key_cache_shape, dtype=dtype, device=device
         )
-        ops.convert_fp8(dequantized_key_cache, key_cache)
+        ops.convert_fp8(dequantized_key_cache, key_cache, k_scale_value)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(
             size=value_cache_shape, dtype=dtype, device=device
         )
-        ops.convert_fp8(dequantized_value_cache, value_cache)
+        ops.convert_fp8(dequantized_value_cache, value_cache, v_scale_value)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)

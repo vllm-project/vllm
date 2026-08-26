@@ -59,6 +59,21 @@ enum class MFMAType {
   Fp4 = 2,
 };
 
+template <typename cache_t, int NUM_ELEMS>
+__device__ __forceinline__ void mask_v_cache_padding(cache_t* values,
+                                                     const int first_token_idx,
+                                                     const int seq_len) {
+  if (first_token_idx + NUM_ELEMS <= seq_len) {
+    return;
+  }
+#pragma unroll
+  for (int i = 0; i < NUM_ELEMS; i++) {
+    if (first_token_idx + i >= seq_len) {
+      values[i] = cache_t{};
+    }
+  }
+}
+
 #if defined(__HIP__GFX9__)
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
@@ -574,6 +589,16 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
         const _B16x8* v_fetch_ptr_16B =
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
         Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+
+        const int vglobal_fetch_start =
+            partition_start_token_idx +
+            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+            rowid * VTOKENS_PER_LANE +
+            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+        mask_v_cache_padding<cache_t, CONTIGUOUS_KV_ELEMS_16B_LOAD>(
+            reinterpret_cast<cache_t*>(
+                &Vlocal[vtoken_depth][vhe_depth][vfetch_depth]),
+            vglobal_fetch_start, seq_len);
       }
     }
   }
@@ -1117,6 +1142,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
           // iterate over all velems within block
           for (int d = 0; d < BLOCK_SIZE / 8; d++) {
             Vlocal[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+            const int vglobal_fetch_start =
+                warp_start_token_idx + b * BLOCK_SIZE + d * 8;
+            mask_v_cache_padding<cache_t, 8>(
+                reinterpret_cast<cache_t*>(&Vlocal[h][b * BLOCK_SIZE / 8 + d]),
+                vglobal_fetch_start, seq_len);
           }
         }
       }
@@ -1139,6 +1169,12 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
           // iterate over all velems within block
           for (int d = 0; d < BLOCK_SIZE / 8; d++) {
             Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+            const int vglobal_fetch_start =
+                warp_start_token_idx + b * BLOCK_SIZE + d * 8;
+            mask_v_cache_padding<cache_t, 8>(
+                reinterpret_cast<cache_t*>(
+                    &Vlocalb8[h][b * BLOCK_SIZE / 8 + d]),
+                vglobal_fetch_start, seq_len);
           }
         }
       }
@@ -1959,6 +1995,16 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
         Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2].xy[vfetch_depth % 2] =
             *v_fetch_ptr_16B;
+
+        const int vglobal_fetch_start =
+            partition_start_token_idx +
+            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+        mask_v_cache_padding<cache_t, CONTIGUOUS_KV_ELEMS_16B_LOAD>(
+            reinterpret_cast<cache_t*>(
+                &Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
+                     .xy[vfetch_depth % 2]),
+            vglobal_fetch_start, seq_len);
       }
     }
   }
@@ -2737,6 +2783,16 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
         const _B16x8* v_fetch_ptr_16B =
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
         Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+
+        const int vglobal_fetch_start =
+            partition_start_token_idx +
+            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+            rowid * VTOKENS_PER_LANE +
+            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+        mask_v_cache_padding<cache_t, CONTIGUOUS_KV_ELEMS_16B_LOAD>(
+            reinterpret_cast<cache_t*>(
+                &Vlocal[vtoken_depth][vhe_depth][vfetch_depth]),
+            vglobal_fetch_start, seq_len);
       }
     }
   }
