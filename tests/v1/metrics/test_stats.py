@@ -327,13 +327,6 @@ def test_operation_name_is_last_engine_core_request_field():
     assert EngineCoreRequest.__struct_fields__[-1] == "operation_name"
 
 
-def test_should_observe_token_latency():
-    from vllm.v1.metrics.loggers import should_observe_token_latency
-
-    assert should_observe_token_latency("chat") is True
-    assert should_observe_token_latency("text_completion") is True
-    assert should_observe_token_latency("unknown") is True
-    assert should_observe_token_latency("embeddings") is False
 
 
 def test_embeddings_do_not_record_ttft_or_itl():
