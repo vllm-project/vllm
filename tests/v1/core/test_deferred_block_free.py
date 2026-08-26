@@ -20,10 +20,6 @@ import pytest
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.request_queue import (
-    SchedulingPolicy,
-    create_request_queue,
-)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -52,13 +48,17 @@ def _make_model_runner_output(
     )
 
 
-def _create_deferring_scheduler():
+def _create_deferring_scheduler(scheduling_policy="fcfs"):
     """Async scheduler with deferred block freeing forced on.
 
     The production gate additionally requires a PD KV-consumer connector;
     the mechanism itself is independent of it.
     """
-    scheduler = create_scheduler(model=MODEL, async_scheduling=True)
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        scheduling_policy=scheduling_policy,
+    )
     scheduler.defer_block_free = True
     return scheduler
 
@@ -249,12 +249,12 @@ def test_preempt_defers_free_and_clears_bookkeeping():
 @pytest.mark.parametrize(
     ("policy", "failed_call"),
     [
-        (SchedulingPolicy.FCFS, 1),
-        (SchedulingPolicy.PRIORITY, 2),
+        ("fcfs", 1),
+        ("priority", 2),
     ],
 )
 def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
-    scheduler = _create_deferring_scheduler()
+    scheduler = _create_deferring_scheduler(policy)
     requests = create_requests(
         num_requests=3,
         num_tokens=NUM_PROMPT_TOKENS,
@@ -266,18 +266,15 @@ def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
     out0 = scheduler.schedule()
     out1 = scheduler.schedule()
 
-    worst, trigger, tail = scheduler.running
+    worst, trigger, tail = requests
     worst.priority, trigger.priority, tail.priority = 9, 0, 1
-    scheduler.policy = policy
-    scheduler.waiting = create_request_queue(policy)
-    scheduler.skipped_waiting = create_request_queue(policy)
-    running_before = list(scheduler.running)
 
     with _fail_one_allocation(scheduler, failed_call) as allocate:
         blocked = scheduler.schedule()
     assert allocate.call_count == failed_call
     assert not blocked.preempted_req_ids
-    assert scheduler.running == running_before
+    retry_trigger = requests[failed_call - 1]
+    assert retry_trigger.request_id not in blocked.num_scheduled_tokens
 
     for output in (out0, out1, blocked):
         if output.total_num_scheduled_tokens:
@@ -286,19 +283,14 @@ def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
                 _make_model_runner_output(output),
             )
 
-    expected_victim = (
-        scheduler.running[0]
-        if policy == SchedulingPolicy.PRIORITY
-        else scheduler.running[-1]
-    )
-    retry_trigger = scheduler.running[failed_call - 1]
+    expected_victim = worst if policy == "priority" else tail
     with _fail_one_allocation(scheduler, failed_call) as allocate:
         resumed = scheduler.schedule()
 
     assert allocate.call_count > failed_call
     assert expected_victim.request_id in resumed.preempted_req_ids
     assert retry_trigger.request_id in resumed.num_scheduled_tokens
-    if policy == SchedulingPolicy.PRIORITY:
+    if policy == "priority":
         assert tail.request_id in resumed.num_scheduled_tokens
 
 
