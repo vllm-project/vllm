@@ -2743,6 +2743,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
+                        spec_decode_metrics: None,
                     },
                 ],
                 scheduler_stats: None,
