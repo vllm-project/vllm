@@ -11,6 +11,7 @@ from collections.abc import (
 )
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -321,7 +322,13 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
+
+        Marked components are also routed through the active offloader (when
+        it supports tower offloading), since `make_layers` only ever sees the
+        decoder layer stack.
         """
+        from vllm.model_executor.offloader import get_offloader
+
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
         if isinstance(modalities, str):
@@ -347,6 +354,14 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                 yield
 
         self._tower_model_names = children_names
+
+        # Towers are constructed directly, so `make_layers` never routes them
+        # through the offloader. Do it here, at the same construction stage,
+        # so offloaded tower weights are never allocated on the device.
+        offloader = get_offloader()
+        if offloader.supports_tower_offload:
+            for name in children_names:
+                offloader.wrap_modules(iter([attrgetter(name)(self)]), prefix=name)
 
     @contextmanager
     def _mark_composite_model(
