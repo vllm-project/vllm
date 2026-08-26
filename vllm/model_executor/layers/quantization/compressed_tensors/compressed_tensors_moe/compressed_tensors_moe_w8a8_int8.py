@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -164,14 +163,16 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        # ZenDNN's swiglu_oai_mul reads gate/up interleaved (stride 2) but
-        # _load_w13 produces a half-split layout. Reorder w13 to interleaved
-        # once, gated on Zen CPU so other backends keep the half-split layout.
-        # This must happen before convert_to_int8_moe_kernel_format below.
+        # ZenDNN's swiglu_oai_mul reads gate/up interleaved (stride 2), not the
+        # half-split layout _load_w13 leaves; reorder before the conversion below.
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            ZenCPUExpertsInt8,
+        )
+
         _act = getattr(layer, "activation", None)
         _act_str = getattr(_act, "value", _act)
         if (
-            current_platform.is_zen_cpu()
+            self.experts_cls is ZenCPUExpertsInt8
             and isinstance(_act_str, str)
             and _act_str.lower() == "swigluoai"
         ):
