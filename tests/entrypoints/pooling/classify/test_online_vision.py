@@ -16,8 +16,12 @@ MAXIMUM_VIDEOS = 1
 HF_OVERRIDES = {"architectures": ["Qwen2_5_VLForSequenceClassification"]}
 input_text = "This product was excellent and exceeded my expectations"
 image_url = f"{VLLM_S3_BUCKET_URL}/multimodal_asset/cat_snow.jpg"
-image_base64 = {"url": encode_image_url(fetch_image(image_url))}
 video_url = f"{VLLM_S3_BUCKET_URL}/multimodal_asset/slow_traffic_small.mp4"
+
+
+@pytest.fixture(scope="module")
+def image_base64():
+    return {"url": encode_image_url(fetch_image(image_url))}
 
 
 @pytest.fixture(scope="module")
@@ -94,7 +98,9 @@ def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_chat_image_base64_request(server: RemoteOpenAIServer, model_name: str):
+def test_chat_image_base64_request(
+    server: RemoteOpenAIServer, model_name: str, image_base64: dict
+):
     messages = [
         {
             "role": "user",

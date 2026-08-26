@@ -12,7 +12,8 @@ from PIL import Image
 from vllm.multimodal.media.audio import load_audio_pyav
 from vllm.transformers_utils.repo_utils import hf_api
 
-from .base import get_cache_dir
+VIDEO_ASSET_REPO_ID = "raushan-testing-hf/videos-test"
+VIDEO_ASSET_REVISION = "4cba700bd771f44d72b549253da025c32e944d42"
 
 
 def _sample_frame_indices(total_frames: int, num_frames: int) -> npt.NDArray:
@@ -21,23 +22,13 @@ def _sample_frame_indices(total_frames: int, num_frames: int) -> npt.NDArray:
 
 @lru_cache
 def download_video_asset(filename: str) -> str:
-    """
-    Download and open an image from huggingface
-    repo: raushan-testing-hf/videos-test
-    """
-    video_directory = get_cache_dir() / "video-example-data"
-    video_directory.mkdir(parents=True, exist_ok=True)
-
-    video_path = video_directory / filename
-    video_path_str = str(video_path)
-    if not video_path.exists():
-        video_path_str = hf_api().hf_hub_download(
-            repo_id="raushan-testing-hf/videos-test",
-            filename=filename,
-            repo_type="dataset",
-            cache_dir=video_directory,
-        )
-    return video_path_str
+    """Download a test video from Hugging Face Hub."""
+    return hf_api().hf_hub_download(
+        repo_id=VIDEO_ASSET_REPO_ID,
+        filename=filename,
+        repo_type="dataset",
+        revision=VIDEO_ASSET_REVISION,
+    )
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:

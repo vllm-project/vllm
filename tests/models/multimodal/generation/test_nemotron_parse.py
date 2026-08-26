@@ -13,10 +13,14 @@ from vllm.tokenizers import TokenizerLike
 
 from ....conftest import HfRunner, PromptImageInput, VllmRunner
 
-IMAGE = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 PROMPT = (
     "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>"
 )
+
+
+@pytest.fixture(scope="module")
+def image():
+    return ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 
 
 class DummyLogprobs(dict[int, Logprob]):
@@ -109,13 +113,13 @@ def run_test(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
-    hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
+    hf_runner, vllm_runner, image, model: str, dtype: str, num_logprobs: int
 ) -> None:
     run_test(
         hf_runner,
         vllm_runner,
         inputs=[
-            ([PROMPT] * 10, [IMAGE] * 10),
+            ([PROMPT] * 10, [image] * 10),
         ],
         model=model,
         dtype=dtype,

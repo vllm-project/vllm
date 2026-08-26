@@ -3,9 +3,7 @@
 """Tests for EP weight filtering during model loading."""
 
 import glob
-import tempfile
 
-import huggingface_hub.constants
 import pytest
 import torch
 
@@ -15,6 +13,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
 from vllm.model_executor.model_loader.weight_utils import (
+    download_weights_from_hf,
     safetensors_weights_iterator,
 )
 
@@ -236,21 +235,15 @@ class TestSafetensorsWeightsIteratorWithEpFilter:
 
     @pytest.fixture(scope="class")
     def gpt2_files(self):
-        """Download GPT-2 safetensors to a temp dir (shared across class)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            huggingface_hub.constants.HF_HUB_OFFLINE = False
-            from vllm.model_executor.model_loader.weight_utils import (
-                download_weights_from_hf,
-            )
-
-            download_weights_from_hf(
-                "openai-community/gpt2",
-                allow_patterns=["*.safetensors"],
-                cache_dir=tmpdir,
-            )
-            files = glob.glob(f"{tmpdir}/**/*.safetensors", recursive=True)
-            assert len(files) > 0
-            yield files
+        """Load GPT-2 safetensors from the shared Hugging Face cache."""
+        model_dir = download_weights_from_hf(
+            "openai-community/gpt2",
+            allow_patterns=["*.safetensors"],
+            cache_dir=None,
+        )
+        files = glob.glob(f"{model_dir}/**/*.safetensors", recursive=True)
+        assert len(files) > 0
+        return files
 
     def test_no_filter_returns_all(self, gpt2_files):
         """With local_expert_ids=None, all weights are returned (no MoE)."""

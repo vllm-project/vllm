@@ -10,6 +10,7 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - tests/plugins_tests/test_terratorch_io_processor_plugins.py
   commands:
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform

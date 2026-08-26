@@ -550,6 +550,8 @@ initialize_native_environment() {
   VLLM_CACHE_ROOT="${native_root}/cache/vllm"
   XDG_CACHE_HOME="${native_root}/cache/xdg"
   : "${HF_HOME:=/home/buildkite-agent/huggingface}"
+  : "${MODELSCOPE_CACHE:=${HF_HOME}/modelscope}"
+  : "${VLLM_MEDIA_CACHE:=${HF_HOME}/media}"
   # datasets uses POSIX locks that are unsupported by the shared HF NFS cache.
   # Keep processed datasets job-local while retaining the persistent Hub cache.
   HF_DATASETS_CACHE="${native_root}/cache/huggingface/datasets"
@@ -567,6 +569,8 @@ initialize_native_environment() {
   export TMPDIR VLLM_RPC_BASE_PATH
   export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
   export HF_HOME HF_DATASETS_CACHE HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  export MODELSCOPE_CACHE
+  export VLLM_MEDIA_CACHE
   export TIKTOKEN_RS_CACHE_DIR
   export PYTORCH_ROCM_ARCH=""
 
@@ -576,6 +580,8 @@ initialize_native_environment() {
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
     "${HF_HOME}" \
+    "${MODELSCOPE_CACHE}" \
+    "${VLLM_MEDIA_CACHE}" \
     "${TIKTOKEN_RS_CACHE_DIR}" \
     "${HF_DATASETS_CACHE}" || return 1
 
@@ -1486,9 +1492,10 @@ fi
 # --- Prepare commands ---
 echo "--- Running container"
 
-HF_CACHE="$(realpath ~)/huggingface"
-mkdir -p "${HF_CACHE}"
+HF_CACHE="${HF_HOME:-$(realpath ~)/huggingface}"
 HF_MOUNT="/root/.cache/huggingface"
+
+mkdir -p "${HF_CACHE}" "${HF_CACHE}/media"
 
 # Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
 # CI image currently raises downloads to 60s. AMD model-test jobs routinely
@@ -1673,6 +1680,7 @@ else
     --rm \
     "${coredump_flags[@]}" \
     -e HF_TOKEN \
+    -e HF_HUB_OFFLINE \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
     -e AWS_ACCESS_KEY_ID \
@@ -1688,6 +1696,8 @@ else
     -e PYTEST_TIMEOUT \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
+    -e "MODELSCOPE_CACHE=${HF_MOUNT}/modelscope" \
+    -e "VLLM_MEDIA_CACHE=${HF_MOUNT}/media" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
     -e "TIKTOKEN_RS_CACHE_DIR=${HF_MOUNT}/tiktoken-rs-cache" \
