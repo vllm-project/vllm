@@ -111,6 +111,7 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
             tensor_parallel_size=2,
             decode_context_parallel_size=2,
             cp_kv_cache_interleave_size=3,
+            distributed_executor_backend="mp",
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="NixlConnector",
@@ -1758,6 +1759,7 @@ def test_validate_mamba_align_subblock_prefill():
             long_prefill_token_threshold=4096,
             disable_chunked_mm_input=False,
         ),
+        kv_transfer_config=None,
     )
 
     VllmConfig.validate_block_size(config)
