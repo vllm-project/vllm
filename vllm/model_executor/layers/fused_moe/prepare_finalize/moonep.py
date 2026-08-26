@@ -180,15 +180,32 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_dispatchers_ = num_dispatchers
         self.num_global_experts = num_global_experts
         self.weight_layout = weight_layout
+        self._fused_experts: Any = None
 
         # dispatch state consumed by finalize (and the expert runner)
         self._plan: Any = None
         self._cu_seqlens: torch.Tensor | None = None
         self._num_tokens: int = 0
 
-    def set_weight_layout(self, weight_layout: MoonEPExpertWeightLayout) -> None:
-        """Attach the ``[E+B, ...]`` weights once the layer has loaded them."""
-        self.weight_layout = weight_layout
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts) -> None:
+        # The [E+B] weight layout is attached to the experts by their
+        # process_weights_after_loading hook (after this runs), so keep the
+        # reference and resolve the layout lazily in prepare().
+        self._fused_experts = fused_experts
+
+    def _resolve_weight_layout(self) -> MoonEPExpertWeightLayout:
+        if self.weight_layout is None and self._fused_experts is not None:
+            layout = getattr(self._fused_experts, "weight_layout", None)
+            if isinstance(layout, MoonEPExpertWeightLayout):
+                self.weight_layout = layout
+        # Redundant experts' weights must be in rows [E, E+B) before the
+        # expert compute reads them; skipping prefetch silently corrupts
+        # output.
+        assert self.weight_layout is not None, (
+            "MoonEPPrepareAndFinalize: weight layout not available (the "
+            "experts' process_weights_after_loading has not run)"
+        )
+        return self.weight_layout
 
     @property
     def num_dispatched_slots(self) -> int:
@@ -292,17 +309,12 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._plan = plan
         self._cu_seqlens = cu_seqlens
 
-        # Redundant experts' weights must be in rows [E, E+B) before the
-        # expert compute reads them; skipping this silently corrupts output.
-        assert self.weight_layout is not None, (
-            "MoonEPPrepareAndFinalize: weight layout not set "
-            "(call set_weight_layout() after weight loading)"
-        )
+        weight_layout = self._resolve_weight_layout()
         self.buffer.prefetch_weight(
             plan=plan,
-            full_gate_weight=self.weight_layout.full_gate_weight,
-            full_up_weight=self.weight_layout.full_up_weight,
-            full_down_weight=self.weight_layout.full_down_weight,
+            full_gate_weight=weight_layout.full_gate_weight,
+            full_up_weight=weight_layout.full_up_weight,
+            full_down_weight=weight_layout.full_down_weight,
         )
 
         # Segment sizes per [E+B] weight row. NOTE: this is per *row*, not

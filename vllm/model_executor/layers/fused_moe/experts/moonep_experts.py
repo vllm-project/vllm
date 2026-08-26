@@ -18,8 +18,9 @@ Rows ``[E, E+B)`` are the redundant-expert prefetch slots that
 Weight layout: MoonEP's ``prefetch_weight`` requires each projection to be
 its own contiguous ``[E+B, ., .]`` tensor, so gate and up are separate
 tensors rather than vLLM's interleaved ``[E, 2I, H]`` ``w13``. The modular
-kernel passes ``w1``/``w2`` from the layer; ``w1`` is the gate tensor and
-the up tensor is supplied via ``set_up_weight``.
+kernel passes ``w1``/``w2`` from the layer (``w1`` is the gate tensor); the
+full layout is picked up from the layer in ``process_weights_after_loading``
+and shared with ``MoonEPPrepareAndFinalize`` via ``post_init_setup``.
 """
 
 import torch
@@ -70,12 +71,22 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         assert quant_config.quant_dtype is None, (
             "MoonEPExperts supports unquantized BF16 only"
         )
-        self._up_weight: torch.Tensor | None = None
+        self._weight_layout = None
 
-    def set_up_weight(self, up_weight: torch.Tensor) -> None:
-        """Attach the ``[E+B, I, H]`` up-projection weight tensor."""
-        assert up_weight.ndim == 3 and up_weight.is_contiguous()
-        self._up_weight = up_weight
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # The [E+B] gate/up/down layout built by
+        # convert_to_unquantized_kernel_format; MoonEPPrepareAndFinalize
+        # reads it from here (post_init_setup) for weight prefetch.
+        layout = getattr(layer, "_moonep_weight_layout", None)
+        assert layout is not None, (
+            "MoonEPExperts requires the layer to carry _moonep_weight_layout "
+            "(set by convert_to_unquantized_kernel_format)"
+        )
+        self._weight_layout = layout
+
+    @property
+    def weight_layout(self):
+        return self._weight_layout
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -166,7 +177,9 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         # the weights are addressed by global [E+B] row, on every rank.
         assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
-        assert self._up_weight is not None, "set_up_weight() not called"
+        assert self._weight_layout is not None, (
+            "process_weights_after_loading() not called"
+        )
         assert expert_tokens_meta is not None
         # MoonEPPrepareAndFinalize returns route weights in NvS order as the
         # dispatched topk_weights, and per-row segment lengths as
@@ -180,7 +193,9 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         assert cu_seqlens.numel() == w1.size(0)
 
         gate = moonep_grouped_gemm(hidden_states, w1, cu_seqlens)
-        up = moonep_grouped_gemm(hidden_states, self._up_weight, cu_seqlens)
+        up = moonep_grouped_gemm(
+            hidden_states, self._weight_layout.full_up_weight, cu_seqlens
+        )
         act = torch.nn.functional.silu(gate)
         act.mul_(up)
         act.mul_(route_weights_nvs.to(act.dtype).unsqueeze(-1))

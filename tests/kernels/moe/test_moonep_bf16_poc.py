@@ -12,6 +12,7 @@ Requires NVSwitch multicast capable GPUs.
 """
 
 import dataclasses
+import types
 
 import pytest
 import torch
@@ -121,6 +122,7 @@ def make_moonep_prepare_finalize(
     topk: int,
     max_tokens_per_rank: int,
     weight_layout: "MoonEPExpertWeightLayout",
+    pass_layout_to_pf: bool = True,
 ):
     from moonep import Buffer
     from moonep._C import nvl_multicast_supported
@@ -143,7 +145,7 @@ def make_moonep_prepare_finalize(
         max_tokens_per_rank=max_tokens_per_rank,
         num_dispatchers=pgi.world_size,
         num_global_experts=num_experts,
-        weight_layout=weight_layout,
+        weight_layout=weight_layout if pass_layout_to_pf else None,
     )
 
 
@@ -224,6 +226,8 @@ def moonep_modular_kernel_impl(
     max_tokens_per_rank = 128 * ((config.m + 127) // 128)
 
     weight_layout = make_moonep_weight_layout(w1, w2, num_prefetch_slots)
+    # weight_layout deliberately not passed to the P/F: the engine path
+    # resolves it through post_init_setup + the experts' weight hook.
     buffer, pf = make_moonep_prepare_finalize(
         pg,
         pgi,
@@ -232,6 +236,7 @@ def moonep_modular_kernel_impl(
         config.topk,
         max_tokens_per_rank,
         weight_layout,
+        pass_layout_to_pf=False,
     )
     try:
         moe_config = make_dummy_moe_config(
@@ -242,7 +247,10 @@ def moonep_modular_kernel_impl(
             max_num_tokens=max_tokens_per_rank,
         )
         experts = MoonEPExperts(moe_config=moe_config, quant_config=_no_quant_config())
-        experts.set_up_weight(weight_layout.full_up_weight)
+        # Stand-in for the layer carrying the layout, as
+        # convert_to_unquantized_kernel_format leaves it in the engine path.
+        fake_layer = types.SimpleNamespace(_moonep_weight_layout=weight_layout)
+        experts.process_weights_after_loading(fake_layer)
         kernel = FusedMoEKernel(prepare_finalize=pf, fused_experts=experts)
         out = kernel.apply(
             hidden_states=test_tensors.rank_tokens,
