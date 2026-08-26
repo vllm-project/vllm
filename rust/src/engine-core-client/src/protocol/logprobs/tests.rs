@@ -87,6 +87,7 @@ fn inline_prompt_logprobs_value() -> Value {
         ndarray_value("float32", &[2, 3], probs),
         ndarray_value("int64", &[2], ranks),
         Value::Nil,
+        Value::Nil,
     ])
 }
 
@@ -241,41 +242,11 @@ fn decodes_inline_prompt_logprobs() {
 }
 
 #[test]
-fn decodes_five_field_prompt_logprobs_payload() {
-    // vllm-project/vllm#52242 grew Python's `LogprobsTensors` to five
-    // positional fields; NamedTuple wire encoding always emits every slot,
-    // so prompt-logprobs payloads now arrive as 5-element arrays with a
-    // trailing `cu_num_generated_tokens_tensor` of `None`.
-    let Value::Array(mut fields) = inline_prompt_logprobs_value() else {
-        panic!("inline_prompt_logprobs_value must be an array");
-    };
-    fields.push(Value::Nil);
-
-    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
-        None,
-        Some(Value::Array(fields)),
-    )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
-
-    let logprobs = decoded.outputs[0]
-        .new_prompt_logprobs_tensors
-        .clone()
-        .unwrap()
-        .into_direct()
-        .unwrap();
-    assert_eq!(logprobs, expected_prompt_logprobs());
-}
-
-#[test]
 fn rejects_non_none_cu_num_generated_tokens_tensor() {
-    // Same base fixture as the accepting test above; the only difference is
-    // the trailing 5th slot: `Nil` decodes, any non-Nil value is rejected.
-    // A scalar sentinel is used because the slot is intentionally decoded
-    // opaquely.
     let Value::Array(mut fields) = inline_prompt_logprobs_value() else {
         panic!("inline_prompt_logprobs_value must be an array");
     };
-    fields.push(Value::from(42));
+    fields[4] = Value::from(42);
 
     let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
         None,
