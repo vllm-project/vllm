@@ -10,14 +10,6 @@ import math
 
 import pytest
 import torch
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
-from vllm.utils.deep_gemm import (
-    calc_diff,
-    is_deep_gemm_supported,
-    per_block_cast_to_fp8,
-)
 
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -35,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
+    ep_gather,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     _fp8_workspace_shape,
@@ -43,8 +36,39 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
+from vllm.utils.deep_gemm import (
+    calc_diff,
+    is_deep_gemm_supported,
+    per_block_cast_to_fp8,
+)
 
 BLOCK_SIZE = [128, 128]
+
+
+def test_ep_gather_uses_64_bit_row_offsets():
+    hidden_size = 4096
+    source_row = 1 << 18
+    input_tensor = torch.empty(
+        (source_row + 1, hidden_size),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    input_tensor[source_row].fill_(1)
+    output = torch.empty((1, hidden_size), device="cuda", dtype=torch.bfloat16)
+
+    ep_gather(
+        input_tensor=input_tensor,
+        recv_topk_ids=torch.zeros((1, 1), device="cuda", dtype=torch.int64),
+        recv_topk_weight=torch.ones((1, 1), device="cuda", dtype=torch.float32),
+        input_index=torch.full((1, 1), source_row, device="cuda", dtype=torch.int32),
+        expert_map=None,
+        output_tensor=output,
+    )
+
+    torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("workspace_dtype", [torch.float16, torch.bfloat16])
