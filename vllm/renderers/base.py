@@ -246,6 +246,8 @@ class BaseRenderer(ABC, Generic[_T]):
         """
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
+        self._pshm_tensor_ipc.connect()
+
         # prevent MM processor hangs
         with set_default_torch_num_threads(1):
             try:

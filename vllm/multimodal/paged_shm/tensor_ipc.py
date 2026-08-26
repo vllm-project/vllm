@@ -76,7 +76,7 @@ class PagedShmTensorIPC:
         self,
         model_config: ModelConfig,
         pin: bool = False,
-        connect: bool = True,
+        connect: bool = False,
         open_write_timeout: float = 5.0,
         read_timeout: float = 30.0,
     ):

@@ -62,7 +62,9 @@ class EncoderRunner:
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
 
-        self._pshm_tensor_ipc = PagedShmTensorIPC(vllm_config.model_config, pin=True)
+        self._pshm_tensor_ipc = PagedShmTensorIPC(
+            vllm_config.model_config, pin=True, connect=True
+        )
 
     def has_cudagraph(self) -> bool:
         return self.cudagraph_manager is not None
