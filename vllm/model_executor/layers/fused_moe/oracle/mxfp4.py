@@ -445,8 +445,11 @@ def _filter_by_activation(
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching ``requested_activation_key``; without one,
-    prefer BF16 if the list has any, else keep the list as-is so explicit
-    non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
+    prefer BF16 first but keep other variants as fallback candidates so
+    is_supported_config can reject BF16 on platforms where only the
+    activation-quantized variant is supported (e.g. FlashInfer CUTLASS
+    MXFP4: BF16-activation is SM90-only, MXFP8-activation is required on
+    SM100+/Blackwell)."""
     if requested_activation_key is not None:
         return [
             b
@@ -455,7 +458,8 @@ def _filter_by_activation(
             or b == Mxfp4MoeBackend.EMULATION
         ]
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
-    return bf16 if bf16 else backends
+    rest = [b for b in backends if _backend_activation_key(b) is not None]
+    return bf16 + rest if bf16 else backends
 
 
 def _get_requested_backends(
