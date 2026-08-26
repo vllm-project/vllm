@@ -694,7 +694,9 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
 
-            if hasattr(torch.ops.vllm, "xpu_mxfp8_quantize"):
+            if current_platform.is_xpu() and hasattr(
+                torch.ops.vllm, "xpu_mxfp8_quantize"
+            ):
                 FirstAllReduceRMSNormXPUMxFP8Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
