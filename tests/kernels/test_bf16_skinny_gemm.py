@@ -39,6 +39,7 @@ EXPECTED_SELECTIONS = {
     (7168, 8448): (set(range(1, 4)), set()),
     (8448, 7168): ({1, 2}, set()),
     (16896, 7168): ({1, 2}, set()),
+    (7168, 14336): ({1, 2}, set()),
     (20480, 7168): (set(range(1, 5)), set()),
     (40960, 7168): (set(range(1, 5)), set()),
     # TP16.
@@ -96,6 +97,8 @@ EXPECTED_CUTE_CONFIGS = {
     (8448, 7168, 2): (32, 4, 4, 8),
     (16896, 7168, 1): (224, 6, 4, 8),
     (16896, 7168, 2): (32, 4, 4, 8),
+    (7168, 14336, 1): (256, 2, 1, 4),
+    (7168, 14336, 2): (224, 4, 2, 8),
     (20480, 7168, 1): (224, 4, 2, 8),
     (20480, 7168, 2): (64, 4, 2, 8),
     (20480, 7168, 3): (64, 2, 2, 8),
@@ -218,7 +221,12 @@ def test_cute_configs_match_measured_table() -> None:
         for n, k, num_tokens, config in configs
     }
     assert actual == EXPECTED_CUTE_CONFIGS
-    assert all(config.static_k is None for *_, config in configs)
+    static_k_configs = {
+        (n, k, num_tokens, config.static_k)
+        for n, k, num_tokens, config in configs
+        if config.static_k is not None
+    }
+    assert static_k_configs == {(7168, 14336, 1, 14336)}
 
 
 def test_residual_cute_configs_match_measured_table() -> None:
