@@ -1300,12 +1300,13 @@ def _rocm_aiter_group_fp8_quant_fake(
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    activation: str = "silu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
     return act_mul_and_fp8_group_quant(
         x,
-        activation="silu",
+        activation=activation,
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
     )
@@ -1314,6 +1315,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
 def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     x: torch.Tensor,
     group_size: int,
+    activation: str = "silu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     assert N % 2 == 0

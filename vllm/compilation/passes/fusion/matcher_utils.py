@@ -9,7 +9,7 @@ from torch._ops import OpOverload
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -47,6 +47,7 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+GELU_TANH_MUL_OP = torch.ops._C.gelu_tanh_and_mul.default
 
 
 class MatcherCustomOp(ABC):
@@ -480,3 +481,33 @@ class MatcherSiluAndMul(MatcherCustomOp):
         x: torch.Tensor,
     ) -> torch.Tensor:
         return SiluAndMul.forward_native(x)
+
+
+class MatcherGeluAndMul(MatcherCustomOp):
+    def __init__(self, enabled: bool | None = None) -> None:
+        if enabled is None:
+            enabled = GeluAndMul.enabled()
+        super().__init__(enabled)
+        # tanh (GeGLU) variant; reproduces GeluAndMul's native decomposition,
+        # which on ROCm falls back from tanh to erf under torch.compile.
+        self._native = GeluAndMul(approximate="tanh")
+
+    def inputs(self) -> list[torch.Tensor]:
+        input = self.empty(5, 4)
+        return [input]
+
+    def forward_custom(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        result = auto_functionalized(GELU_TANH_MUL_OP, out=out, input=x)
+        return result[1]
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._native.forward_native(x)
