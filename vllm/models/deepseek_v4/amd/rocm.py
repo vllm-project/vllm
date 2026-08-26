@@ -6,7 +6,6 @@ from typing import cast
 
 import torch
 
-import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -532,10 +531,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._wo_b_scale = _prep(self.wo_b)
 
     def prepare_compressor_gemm_fusion(self) -> bool:
-        if (
-            not envs.VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS
-            or self._fused_compressor_weight is not None
-        ):
+        if self._fused_compressor_weight is not None:
             return False
 
         from vllm.model_executor.offloader import NoopOffloader, get_offloader

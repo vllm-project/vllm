@@ -136,7 +136,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS: bool = False
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -1254,11 +1253,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
-    ),
-    # Fuse the two C4 compressor GEMMs for DeepSeek V4 on ROCm.
-    "VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS": lambda: (
-        os.getenv("VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS", "False").lower()
-        in ("true", "1")
     ),
     # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
     # interleaved flydsl kernels instead of the default a16w4 separated path.

@@ -3,7 +3,6 @@
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.offloader as offloader
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4ROCMAiterMLAAttention,
@@ -47,18 +46,13 @@ def _make_attention(
     return attention
 
 
-def test_prepare_compressor_gemm_fusion_aliases_original_weights(monkeypatch):
+def test_prepare_compressor_gemm_fusion_aliases_original_weights():
     main_value = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     indexer_value = torch.arange(6, dtype=torch.float32).reshape(2, 3) + 100
     attention = _make_attention(main_value, indexer_value)
     main_weight = attention.compressor.fused_wkv_wgate.weight
     indexer_weight = attention.indexer.compressor.fused_wkv_wgate.weight
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS", False)
-    assert attention.prepare_compressor_gemm_fusion() is False
-    assert attention._fused_compressor_weight is None
-
-    monkeypatch.setattr(envs, "VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS", True)
     assert attention.prepare_compressor_gemm_fusion() is True
 
     fused_weight = attention._fused_compressor_weight
@@ -93,7 +87,6 @@ def test_prepare_compressor_gemm_fusion_skips_weight_offloading(monkeypatch):
     main_weight = attention.compressor.fused_wkv_wgate.weight
     indexer_weight = attention.indexer.compressor.fused_wkv_wgate.weight
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS", True)
     monkeypatch.setattr(offloader, "get_offloader", object)
 
     assert attention.prepare_compressor_gemm_fusion() is False
@@ -109,7 +102,6 @@ def test_fused_input_projection_uses_one_mm_and_returns_expected_tuple(
     main_weight = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32)
     indexer_weight = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
     attention = _make_attention(main_weight, indexer_weight)
-    monkeypatch.setattr(envs, "VLLM_ROCM_DSV4_FUSE_COMPRESSOR_GEMMS", True)
     assert attention.prepare_compressor_gemm_fusion() is True
 
     hidden_states = torch.tensor(
