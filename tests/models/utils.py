@@ -221,7 +221,8 @@ def check_logprobs_close(
 
         if skip_last_tokens_0 < 0 or skip_last_tokens_0 >= len(output_ids_0):
             raise ValueError(
-                f"skip_last_tokens_0={skip_last_tokens_0} must be in the range [0, {len(output_ids_0) - 1}]"
+                f"skip_last_tokens_0={skip_last_tokens_0} must be in the range"
+                f"[0, {len(output_ids_0) - 1}]"
             )
         if skip_last_tokens_0 > 0:
             output_ids_0 = output_ids_0[:-skip_last_tokens_0]
