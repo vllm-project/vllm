@@ -6,7 +6,7 @@ import pytest
 import torch
 from utils import skip_if_not_cuda, skip_unsupported
 
-from vllm.model_executor.layers.batch_invariant import (
+from vllm.model_executor.determinism.batch_invariant import (
     rms_norm_batch_invariant,
 )
 from vllm.platforms import current_platform
