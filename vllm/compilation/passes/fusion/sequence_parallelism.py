@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
+from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
@@ -70,8 +71,6 @@ def get_sequence_parallelism_threshold(
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
     """
-    from vllm.platforms import current_platform
-
     if current_platform.is_xpu():
         min_hidden_size = 4096
         min_per_gpu_size_mb = 8.0
@@ -535,6 +534,7 @@ class FirstAllReduceRMSNormXPUMxFP8Pattern(_SequenceParallelPatternHelper):
             # XCCL does not support f8e8m0fnu. For the collective, reinterpret it as
             # uint8 (since f8e8m0fnu is unsigned, uint8 is the natural bitwise alias),
             # then restore the view after gathering.
+            # TODO: Remove this cast and restore normal view once XCCL adds support.
             all_gather_scale = self._all_gather(quant[1].view(torch.uint8)).view(
                 torch.float8_e8m0fnu
             )
@@ -596,6 +596,7 @@ class MiddleAllReduceRMSNormXPUMxFP8Pattern(_SequenceParallelPatternHelper):
             # XCCL does not support f8e8m0fnu. For the collective, reinterpret it as
             # uint8 (since f8e8m0fnu is unsigned, uint8 is the natural bitwise alias),
             # then restore the view after gathering.
+            # TODO: Remove this cast and restore normal view once XCCL adds support.
             all_gather_scale = self._all_gather(quant[1].view(torch.uint8)).view(
                 torch.float8_e8m0fnu
             )
@@ -694,9 +695,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
 
-            if current_platform.is_xpu() and hasattr(
-                torch.ops.vllm, "xpu_mxfp8_quantize"
-            ):
+            if current_platform.is_xpu():
                 FirstAllReduceRMSNormXPUMxFP8Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
