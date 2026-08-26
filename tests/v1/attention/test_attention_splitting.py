@@ -460,3 +460,105 @@ def test_build_attention_metadata_zeros_stale_is_prefilling():
     assert not captured_is_prefilling[2]  # decode  (200 >= 200)
     assert not captured_is_prefilling[3]  # stale data (10 < 100) zeroed
     assert not captured_is_prefilling[4]  # stale data (20 < 200) zeroed
+
+
+# --- uniform_decode_split (mamba builder fast path) -------------------------
+
+
+def _mamba_full_split(common_metadata, decode_threshold: int):
+    """The full path the mamba builder runs when the fast path declines:
+    single-token-prefill reclassification, then the split."""
+    is_prefilling = common_metadata.is_prefilling
+    assert is_prefilling is not None
+    query_lens_cpu = torch.diff(common_metadata.query_start_loc_cpu)
+    prefill_to_decode = (
+        is_prefilling
+        & (query_lens_cpu == 1)
+        & (common_metadata.seq_lens_cpu_upper_bound > 1)
+    )
+    if torch.any(prefill_to_decode).item():
+        is_prefilling = is_prefilling.clone()
+        is_prefilling[prefill_to_decode] = False
+        common_metadata = common_metadata.replace(is_prefilling=is_prefilling)
+    return split_decodes_and_prefills(
+        common_metadata,
+        decode_threshold=decode_threshold,
+        treat_short_extends_as_decodes=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "query_lens,is_prefilling,decode_threshold,expect_fast",
+    [
+        # Steady spec decode: uniform 4-token queries, nothing prefilling.
+        ([4, 4, 4], [False, False, False], 4, True),
+        # Plain decode.
+        ([1, 1, 1], [False, False, False], 1, True),
+        # Non-uniform but all within threshold, none prefilling.
+        ([1, 3, 4], [False, False, False], 4, True),
+        # A prefilling row declines the fast path.
+        ([4, 4, 129], [False, False, True], 4, False),
+        # A single-token prefill chunk (reclassification case) declines.
+        ([1, 1, 1], [False, False, True], 4, False),
+        # Query longer than the threshold declines.
+        ([1, 129], [False, True], 4, False),
+    ],
+)
+def test_uniform_decode_split_matches_full_path(
+    query_lens: list[int],
+    is_prefilling: list[bool],
+    decode_threshold: int,
+    expect_fast: bool,
+):
+    """The fast path must fire only when its result is value-identical to
+    the reclassification + split_decodes_and_prefills chain it skips."""
+    from vllm.v1.attention.backends.mamba_attn import uniform_decode_split
+
+    seq_lens = [max(q + 5, 10) for q in query_lens]
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_metadata.is_prefilling = torch.tensor(is_prefilling)
+
+    fast = uniform_decode_split(common_metadata, decode_threshold)
+    assert (fast is not None) == expect_fast
+    if fast is not None:
+        assert fast == _mamba_full_split(common_metadata, decode_threshold)
+
+
+def test_uniform_decode_split_requires_is_prefilling():
+    from vllm.v1.attention.backends.mamba_attn import uniform_decode_split
+
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[10], query_lens=[1]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_metadata.is_prefilling = None
+    assert uniform_decode_split(common_metadata, 1) is None
+
+
+def test_mamba_block_table_gather_offsets_identity():
+    """Passing the cached step-invariant offsets must not change the
+    gathered state block table."""
+    from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        num_speculative_blocks=3,
+    )
+    torch.manual_seed(0)
+    block_table = torch.randint(0, 100, (5, 32), dtype=torch.int32)
+    seq_lens = torch.tensor([0, 1, 16, 17, 400], dtype=torch.int32)
+    offsets = torch.arange(1 + spec.num_speculative_blocks, dtype=torch.int32)
+
+    ref = mamba_get_block_table_tensor(block_table, seq_lens.clone(), spec, "align")
+    got = mamba_get_block_table_tensor(
+        block_table, seq_lens.clone(), spec, "align", gather_offsets=offsets
+    )
+    assert torch.equal(ref, got)
