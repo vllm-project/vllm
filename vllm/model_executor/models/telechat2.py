@@ -28,7 +28,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
 
-from .llama import LlamaDecoderLayer
+from .llama import LlamaAttention, LlamaDecoderLayer, LlamaMLP
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper
 
 
@@ -46,7 +46,7 @@ class TeleChat2Model(LlamaModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         hf_config = vllm_config.model_config.hf_config
 
-        vllm_config.model_config.hf_config.attribute_map = {
+        vllm_config.model_config.hf_config.attribute_map = {  # type: ignore[misc]
             "num_hidden_layers": "n_layer",
             "num_attention_heads": "n_head",
             "intermediate_size": "ffn_hidden_size",
@@ -63,11 +63,16 @@ class TeleChat2Model(LlamaModel):
         # Telechat2's gate_up_proj and qkv_proj don't have bias
         # see: https://github.com/vllm-project/vllm/pull/10311#issuecomment-2490297566
         for layer in self.layers:
-            if not isinstance(layer, PPMissingLayer):
-                layer.self_attn.qkv_proj.bias = None
-                layer.self_attn.qkv_proj.skip_bias_add = True
-                layer.mlp.gate_up_proj.bias = None
-                layer.mlp.gate_up_proj.skip_bias_add = True
+            if isinstance(layer, PPMissingLayer):
+                continue
+            self_attn = layer.self_attn
+            mlp = layer.mlp
+            assert isinstance(self_attn, LlamaAttention)
+            assert isinstance(mlp, LlamaMLP)
+            self_attn.qkv_proj.register_parameter("bias", None)
+            self_attn.qkv_proj.skip_bias_add = True
+            mlp.gate_up_proj.register_parameter("bias", None)
+            mlp.gate_up_proj.skip_bias_add = True
 
     def _split_key_value(
         self, weights: Iterable[tuple[str, torch.Tensor]]
