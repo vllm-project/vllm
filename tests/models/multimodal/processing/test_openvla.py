@@ -192,11 +192,11 @@ def test_openvla_prompt_update_inserts_image_tokens_after_bos() -> None:
     assert resolved.modality == "image"
     assert [
         (match.start_idx, match.end_idx)
-        for match in resolved.iter_matches([1, 10, 11], _FakeTokenizer())
+        for match in resolved.iter_token_matches([1, 10, 11])
     ] == [(1, 1)]
     assert content.full == [32000] * 256
 
-    is_embed = content.is_embed(None, content.full)
+    is_embed = content.is_embed(content.full)
     assert is_embed.dtype == torch.bool
     assert is_embed.tolist() == [True] * 256
 

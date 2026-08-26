@@ -10,53 +10,63 @@
 
 ### Text-only Language Models
 
-| Model                                              | Architecture                                     | BF16/FP16/Dynamic FP8 | Compressed_tensors FP8 | MXFP4 |
-| -------------------------------------------------- | ------------------------------------------------ | --------------------- | ---------------------- | ----- |
-| openai/gpt-oss-20b                                 | GPTForCausalLM                                   |                       |                        | ✅    |
-| openai/gpt-oss-120b                                | GPTForCausalLM                                   |                       |                        | ✅    |
-| deepseek-ai/DeepSeek-R1-Distill-Llama-8B           | LlamaForCausalLM                                 | ✅                    |                        |       |
-| deepseek-ai/DeepSeek-R1-Distill-Qwen-14B           | QwenForCausalLM                                  | ✅                    |                        |       |
-| deepseek-ai/DeepSeek-R1-Distill-Qwen-32B           | QwenForCausalLM                                  | ✅                    |                        |       |
-| deepseek-ai/DeepSeek-R1-Distill-Llama-70B          | LlamaForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen2.5-72B-Instruct                          | Qwen2ForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen3-14B                                     | Qwen3ForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen3-32B                                     | Qwen3ForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen3-30B-A3B                                 | Qwen3ForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen3-30B-A3B-GPTQ-Int4                       | Qwen3ForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen3-coder-30B-A3B-Instruct                  | Qwen3ForCausalLM                                 | ✅                    |                        |       |
-| Qwen/QwQ-32B                                       | QwenForCausalLM                                  | ✅                    |                        |       |
-| deepseek-ai/DeepSeek-V2-Lite                       | DeepSeekForCausalLM                              | ✅                    |                        |       |
-| meta-llama/Llama-3.1-8B-Instruct                   | LlamaForCausalLM                                 | ✅                    |                        |       |
-| THUDM/GLM-4-9B-chat                                | GLMForCausalLM                                   | ✅                    |                        |       |
-| THUDM/CodeGeex4-All-9B                             | CodeGeexForCausalLM                              | ✅                    |                        |       |
-| chuhac/TeleChat2-35B                               | LlamaForCausalLM (TeleChat2 based on Llama arch) | ✅                    |                        |       |
-| 01-ai/Yi1.5-34B-Chat                               | YiForCausalLM                                    | ✅                    |                        |       |
-| deepseek-ai/DeepSeek-Coder-33B-base                | DeepSeekCoderForCausalLM                         | ✅                    |                        |       |
-| meta-llama/Llama-2-13b-chat-hf                     | LlamaForCausalLM                                 | ✅                    |                        |       |
-| Qwen/Qwen1.5-14B-Chat                              | QwenForCausalLM                                  | ✅                    |                        |       |
-| Qwen/Qwen1.5-32B-Chat                              | QwenForCausalLM                                  | ✅                    |                        |       |
-| RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic    | LlamaForCausalLM                                 |                       | ✅                     |       |
+Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features/quantization/online/) to FP8.
+
+| Model                                           | Architecture                                     | Dtype                 |
+| ----------------------------------------------- | ------------------------------------------------ | --------------------- |
+| openai/gpt-oss-20b                              | GPTForCausalLM                                   | MXFP4                 |
+| openai/gpt-oss-120b                             | GPTForCausalLM                                   | MXFP4                 |
+| deepseek-ai/DeepSeek-R1-Distill-Llama-8B        | LlamaForCausalLM                                 | BF16/Online FP8       |
+| deepseek-ai/DeepSeek-R1-Distill-Qwen-14B        | QwenForCausalLM                                  | BF16/Online FP8       |
+| deepseek-ai/DeepSeek-R1-Distill-Qwen-32B        | QwenForCausalLM                                  | BF16/Online FP8       |
+| deepseek-ai/DeepSeek-R1-Distill-Llama-70B       | LlamaForCausalLM                                 | BF16/Online FP8       |
+| Qwen/Qwen2.5-72B-Instruct                       | Qwen2ForCausalLM                                 | BF16/Online FP8       |
+| Qwen/Qwen3-14B                                  | Qwen3ForCausalLM                                 | BF16/Online FP8       |
+| Qwen/Qwen3-32B                                  | Qwen3ForCausalLM                                 | BF16/Online FP8       |
+| Qwen/Qwen3-30B-A3B                              | Qwen3ForCausalLM                                 | BF16/Online FP8       |
+| Qwen/Qwen3-30B-A3B-FP8                          | Qwen3ForCausalLM                                 | FP8                   |
+| Qwen/Qwen3-30B-A3B-GPTQ-Int4                    | Qwen3ForCausalLM                                 | Int4                  |
+| Qwen/Qwen3-coder-30B-A3B-Instruct               | Qwen3ForCausalLM                                 | BF16/Online FP8       |
+| Qwen/Qwen3-Next-80B-A3B-Instruct                | Qwen3NextForCausalLM                             | BF16/Online FP8       |
+| Qwen/Qwen3-Next-80B-A3B-Thinking                | Qwen3NextForCausalLM                             | BF16/Online FP8       |
+| Qwen/QwQ-32B                                    | QwenForCausalLM                                  | BF16/Online FP8       |
+| deepseek-ai/DeepSeek-V2-Lite                    | DeepSeekForCausalLM                              | BF16/Online FP8       |
+| deepseek-ai/DeepSeek-V4-Flash                   | DeepseekV4ForCausalLM                            | BF16/Online FP8       |
+| meta-llama/Llama-3.1-8B-Instruct                | LlamaForCausalLM                                 | BF16/Online FP8       |
+| microsoft/Phi-3.5-mini-instruct                 | Phi3ForCausalLM                                  | BF16/Online FP8       |
+| THUDM/GLM-4-9B-chat                             | GLMForCausalLM                                   | BF16/Online FP8       |
+| THUDM/CodeGeex4-All-9B                          | CodeGeexForCausalLM                              | BF16/Online FP8       |
+| chuhac/TeleChat2-35B                            | LlamaForCausalLM (TeleChat2 based on Llama arch) | BF16/Online FP8       |
+| 01-ai/Yi1.5-34B-Chat                            | YiForCausalLM                                    | BF16/Online FP8       |
+| deepseek-ai/DeepSeek-Coder-33B-base             | DeepSeekCoderForCausalLM                         | BF16/Online FP8       |
+| meta-llama/Llama-2-13b-chat-hf                  | LlamaForCausalLM                                 | FP16/Online FP8       |
+| Qwen/Qwen1.5-14B-Chat                           | QwenForCausalLM                                  | BF16/Online FP8       |
+| Qwen/Qwen1.5-32B-Chat                           | QwenForCausalLM                                  | BF16/Online FP8       |
+| RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic | LlamaForCausalLM                                 | FP8                   |
 
 ### Multimodal Language Models
 
-| Model                        | Architecture                     | BF16 | Dynamic FP8 | MXFP4 |
-| ---------------------------- | -------------------------------- | ---- | ----------- | ----- |
-| OpenGVLab/InternVL3_5-8B     | InternVLForConditionalGeneration | ✅   | ✅          |       |
-| OpenGVLab/InternVL3_5-14B    | InternVLForConditionalGeneration | ✅   | ✅          |       |
-| OpenGVLab/InternVL3_5-38B    | InternVLForConditionalGeneration | ✅   | ✅          |       |
-| Qwen/Qwen2-VL-7B-Instruct    | Qwen2VLForConditionalGeneration  | ✅   | ✅          |       |
-| Qwen/Qwen2.5-VL-72B-Instruct | Qwen2VLForConditionalGeneration  | ✅   | ✅          |       |
-| Qwen/Qwen2.5-VL-32B-Instruct | Qwen2VLForConditionalGeneration  | ✅   | ✅          |       |
-| THUDM/GLM-4v-9B              | GLM4vForConditionalGeneration    | ✅   | ✅          |       |
-| openbmb/MiniCPM-V-4          | MiniCPMVForConditionalGeneration | ✅   | ✅          |       |
+| Model                         | Architecture                         | Dtype           |
+| ----------------------------- | ------------------------------------ | --------------- |
+| OpenGVLab/InternVL3_5-8B      | InternVLForConditionalGeneration     | BF16/Online FP8 |
+| OpenGVLab/InternVL3_5-14B     | InternVLForConditionalGeneration     | BF16/Online FP8 |
+| OpenGVLab/InternVL3_5-30B-A3B | InternVLForConditionalGeneration     | BF16/Online FP8 |
+| OpenGVLab/InternVL3_5-38B     | InternVLForConditionalGeneration     | BF16/Online FP8 |
+| meta-models/Muse-Glimmer-30B  | MuseGlimmerForConditionalGeneration  | BF16/Online FP8 |
+| Qwen/Qwen2-VL-7B-Instruct     | Qwen2VLForConditionalGeneration      | BF16/Online FP8 |
+| Qwen/Qwen2.5-VL-72B-Instruct  | Qwen2VLForConditionalGeneration      | BF16/Online FP8 |
+| Qwen/Qwen2.5-VL-32B-Instruct  | Qwen2VLForConditionalGeneration      | BF16/Online FP8 |
+| Qwen/Qwen3-VL-32B-Instruct    | Qwen3VLForConditionalGeneration      | BF16/Online FP8 |
+| Qwen/Qwen3.5-35B-A3B          | Qwen3_5MoeForConditionalGeneration   | BF16/Online FP8 |
+| google/gemma-3-27b-it         | Gemma3ForConditionalGeneration       | BF16/Online FP8 |
+| google/gemma-4-31B-it         | Gemma4ForConditionalGeneration       | BF16/Online FP8 |
+| google/gemma-4-26B-A4B-it     | Gemma4ForConditionalGeneration       | BF16/Online FP8 |
+| THUDM/GLM-4v-9B               | GLM4vForConditionalGeneration        | BF16/Online FP8 |
+| openbmb/MiniCPM-V-4           | MiniCPMVForConditionalGeneration     | BF16/Online FP8 |
 
 ### Embedding and Reranker Language Models
 
-| Model                   | Architecture                   | BF16 | Dynamic FP8 | MXFP4 |
-| ----------------------- | ------------------------------ | ---- | ----------- | ----- |
-| Qwen/Qwen3-Embedding-8B | Qwen3ForTextEmbedding          | ✅   | ✅          |       |
-| Qwen/Qwen3-Reranker-8B  | Qwen3ForSequenceClassification | ✅   | ✅          |       |
-
-✅ Runs and optimized.  
-🟨 Runs and correct but not optimized to green yet.  
-❌ Does not pass accuracy test or does not run.  
+| Model                   | Architecture                   | Dtype           |
+| ----------------------- | ------------------------------ | --------------- |
+| Qwen/Qwen3-Embedding-8B | Qwen3ForTextEmbedding          | BF16/Online FP8 |
+| Qwen/Qwen3-Reranker-8B  | Qwen3ForSequenceClassification | BF16/Online FP8 |
