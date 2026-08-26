@@ -34,6 +34,7 @@ engine drives on your behalf:
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Sparse flat-index weight patches (TP=1/PP=1) |
+| [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 
 ## Quickstart
 
@@ -48,7 +49,7 @@ from vllm.config import WeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc", "sparse_nccl"
+    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc", "sparse_nccl", "sharded_rdt"
 )
 ```
 
@@ -158,7 +159,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 !!! note
     The HTTP weight transfer endpoints require `VLLM_SERVER_DEV_MODE=1` to be set.
 
-The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, or sparse-NCCL transport.
+The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, sparse-NCCL, or sharded-RDT transport.
 
 ## Extending the System
 

@@ -1112,7 +1112,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             embed_t = torch.tensor(is_embed_mask)
             return PromptUpdateDetails(
                 full=full,
-                is_embed=lambda _tok, _seq: embed_t,
+                is_embed=lambda _seq: embed_t,
             )
 
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:

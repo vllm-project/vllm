@@ -1054,7 +1054,7 @@ def test_mamba_n1_d_side_builds_decode_metadata():
 
 @pytest.mark.cpu_test
 def test_mamba_n1_p_side_truncation():
-    """P-side: Mamba truncates prompt to N-1, sets max_tokens=1.
+    """P-side truncates to N-1 before the scheduler's prefix-cache lookup.
 
     Also verifies idempotency (calling again is a no-op) which is
     needed for preemption safety via the _p_side_truncated guard,
@@ -1065,17 +1065,20 @@ def test_mamba_n1_p_side_truncation():
     req.max_tokens = 128
     original_len = len(req.prompt_token_ids)
 
-    count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
-
-    assert count == 0
-    assert is_async is False
+    sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
     assert req.num_prompt_tokens == original_len - 1
     assert req.max_tokens == 1
     assert req.kv_transfer_params["_p_side_truncated"] is True
 
-    # Idempotency: second call must not truncate further
-    sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+
+    assert count == 0
+    assert is_async is False
+    assert len(req.prompt_token_ids) == original_len - 1
+
+    # Idempotency: re-adding a preempted request must not truncate further.
+    sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
 
     # Non-Mamba: truncation is skipped
@@ -1083,7 +1086,7 @@ def test_mamba_n1_p_side_truncation():
     fa_req = create_request(num_tokens=10, do_remote_decode=True)
     fa_original = len(fa_req.prompt_token_ids)
 
-    fa_sched.get_num_new_matched_tokens(fa_req, num_computed_tokens=0)
+    fa_sched.on_new_request(fa_req)
     assert len(fa_req.prompt_token_ids) == fa_original
 
 

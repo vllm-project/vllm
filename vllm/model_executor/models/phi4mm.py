@@ -47,6 +47,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     ResolvedPromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -934,8 +935,20 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+
+        def get_image_token_ids(item_idx: int) -> list[int]:
+            return cached_encode(
+                tokenizer, image_tokens[item_idx], add_special_tokens=False
+            )
+
+        def get_audio_token_ids(item_idx: int) -> list[int]:
+            return cached_encode(
+                tokenizer, audio_tokens[item_idx], add_special_tokens=False
+            )
+
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -970,12 +983,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_tokens.__getitem__,
+                target=get_image_token_ids,
                 replacement=get_image_replacement_phi4mm,
             ),
             PromptReplacement(
                 modality="audio",
-                target=audio_tokens.__getitem__,
+                target=get_audio_token_ids,
                 replacement=get_audio_replacement_phi4mm,
             ),
         ]
@@ -990,12 +1003,22 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             new_item_idx,
         )
 
+        tokenizer = self.info.get_tokenizer()
+
         if cached_update.modality == "image":
             image_tokens: list[str] = self.info.image_tokens  # type: ignore
-            new_update = new_update.with_target(image_tokens[new_item_idx])
+            new_update = new_update.with_target(
+                cached_encode(
+                    tokenizer, image_tokens[new_item_idx], add_special_tokens=False
+                )
+            )
         elif cached_update.modality == "audio":
             audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
-            new_update = new_update.with_target(audio_tokens[new_item_idx])
+            new_update = new_update.with_target(
+                cached_encode(
+                    tokenizer, audio_tokens[new_item_idx], add_special_tokens=False
+                )
+            )
 
         return new_update
 
