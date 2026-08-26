@@ -4,6 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from typing import Any
+from weakref import WeakValueDictionary
 
 import torch
 from torch.nn.parameter import Parameter
@@ -13,12 +14,14 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     divide,
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
@@ -27,6 +30,11 @@ from vllm.model_executor.determinism.batch_invariant import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.tp_weight_switch import (
+    TPWeightGatherSpec,
+    TPWeightSwitchMixin,
+    TPWeightSwitchState,
 )
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
@@ -44,6 +52,15 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def get_pcp_o_proj_batch_has_prefill(attn_metadata: Any) -> bool:
+    """Resolve a PCP-group-consistent O-Proj weight gather decision."""
+    global_has_prefill = get_forward_context().global_has_prefill
+    if global_has_prefill is not None:
+        return global_has_prefill
+    return attn_metadata is not None and getattr(attn_metadata, "num_prefills", 0) > 0
+
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "UnquantizedLinearMethod",
@@ -163,8 +180,11 @@ class LinearMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
-class UnquantizedLinearMethod(LinearMethodBase):
+class UnquantizedLinearMethod(TPWeightSwitchMixin, LinearMethodBase):
     """Linear method without quantization."""
+
+    supports_tp_weight_switch = True
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
 
     def create_weights(
         self,
@@ -1556,10 +1576,21 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
     ):
         # Divide the weight matrix along the first dimension.
-        self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
-        self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
@@ -1574,6 +1605,8 @@ class RowParallelLinear(LinearBase):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
         self.input_is_parallel = input_is_parallel
@@ -1673,3 +1706,227 @@ class RowParallelLinear(LinearBase):
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
+
+
+class PCPOProjLinearMethod(LinearMethodBase):
+    """Delegate linear execution while adding a post-load PCP switch hook."""
+
+    def __init__(self, quant_method: LinearMethodBase) -> None:
+        self.quant_method = quant_method
+
+    def __getattr__(self, name: str) -> Any:
+        """Preserve access to backend-specific method configuration."""
+        quant_method = self.__dict__.get("quant_method")
+        if quant_method is None:
+            raise AttributeError(name)
+        return getattr(quant_method, name)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        self.quant_method.create_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_method.process_weights_after_loading(layer)
+        layer._enable_pcp_weight_switch()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.quant_method.apply(layer, x, bias)
+
+
+class PCPOProjRowParallelLinear(RowParallelLinear):
+    """Row-parallel O-Proj with a second weight shard over PCP."""
+
+    _full_weight_buffers: WeakValueDictionary[tuple[Any, ...], torch.Tensor] = (
+        WeakValueDictionary()
+    )
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        reduce_results: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ) -> None:
+        if bias:
+            raise ValueError("PCP O-Proj TP MVP requires bias=False.")
+        if not input_is_parallel:
+            raise ValueError("PCP O-Proj TP MVP requires input_is_parallel=True.")
+
+        self.pcp_group = get_pcp_group()
+        self.pcp_rank = self.pcp_group.rank_in_group
+        self.pcp_size = self.pcp_group.world_size
+        if self.pcp_size <= 1:
+            raise ValueError("PCP O-Proj TP requires prefill context parallelism.")
+
+        self.o_proj_tp_rank = get_tensor_model_parallel_rank()
+        self.o_proj_tp_size = get_tensor_model_parallel_world_size()
+        weight_tp_rank = self.o_proj_tp_rank * self.pcp_size + self.pcp_rank
+        weight_tp_size = self.o_proj_tp_size * self.pcp_size
+
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            input_is_parallel=input_is_parallel,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            reduce_results=reduce_results,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            tp_rank=weight_tp_rank,
+            tp_size=weight_tp_size,
+        )
+
+        self._tp_input_size = divide(input_size, self.o_proj_tp_size)
+        self._buffer_scope = id(get_current_vllm_config())
+        self.quant_method = PCPOProjLinearMethod(self.quant_method)
+        self._tp_weight_method: TPWeightSwitchMixin | None = None
+        self._tp_weight_state: TPWeightSwitchState | None = None
+        self._use_full_weight: bool | None = None
+        if quant_config is None:
+            self._enable_pcp_weight_switch()
+
+    def _get_tp_weight_switch_method(self) -> TPWeightSwitchMixin:
+        quant_method = self.quant_method.quant_method
+        if (
+            isinstance(quant_method, TPWeightSwitchMixin)
+            and quant_method.supports_tp_weight_switch
+        ):
+            return quant_method
+        raise RuntimeError(
+            "PCP O-Proj TP does not support the selected O-Proj linear method "
+            f"or post-load layout: {type(quant_method).__name__}. Quantized "
+            "checkpoints may exclude O-Proj from weight quantization."
+        )
+
+    def _enable_pcp_weight_switch(self) -> None:
+        if self._tp_weight_state is not None:
+            if self._tp_weight_state.handles:
+                raise RuntimeError(
+                    "Cannot rebuild PCP O-Proj weight state while a gather is pending."
+                )
+            self._tp_weight_state = None
+        method = self._get_tp_weight_switch_method()
+        state = method.enable_tp_weight_switch(
+            self,
+            self.pcp_size,
+            pool=self._full_weight_buffers,
+            pool_key_prefix=(
+                self._buffer_scope,
+                type(method).__qualname__,
+                "pcp_o_proj",
+            ),
+        )
+        self._tp_weight_method = method
+        self._tp_weight_state = state
+
+    def _weight_switch(self) -> tuple[TPWeightSwitchMixin, TPWeightSwitchState]:
+        if self._tp_weight_method is None or self._tp_weight_state is None:
+            self._enable_pcp_weight_switch()
+        assert self._tp_weight_method is not None
+        assert self._tp_weight_state is not None
+        return self._tp_weight_method, self._tp_weight_state
+
+    def prefetch_full_weight_if_needed(self, has_prefill: bool) -> None:
+        """Start the PCP weight gather before attention compute when needed."""
+        if self._use_full_weight is not None:
+            raise RuntimeError(
+                "PCP O-Proj prefetch was called before the previous forward "
+                "consumed it."
+            )
+
+        self._use_full_weight = has_prefill
+        if not has_prefill:
+            return
+
+        method, state = self._weight_switch()
+        try:
+            method.all_gather_tp_weight(state, self.pcp_group)
+        except Exception:
+            self._use_full_weight = None
+            raise
+
+    def _apply_full_tp_weight(self, input_: torch.Tensor) -> torch.Tensor:
+        method, state = self._weight_switch()
+        method.wait_tp_weight_all_gather(state)
+        method.switch_tp_weight(self, state, use_full_weight=True)
+        try:
+            return self.quant_method.apply(self, input_, None)
+        finally:
+            method.switch_tp_weight(self, state, use_full_weight=False)
+
+    def _apply_pcp_weight_shard(self, input_: torch.Tensor) -> torch.Tensor:
+        shard_start = self.pcp_rank * self.input_size_per_partition
+        input_parallel = input_.narrow(
+            -1, shard_start, self.input_size_per_partition
+        ).contiguous()
+        output_parallel = self.quant_method.apply(self, input_parallel, None)
+        return self.pcp_group.all_reduce(output_parallel)
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        if self._use_full_weight is None:
+            raise RuntimeError(
+                "Attention must call o_proj.prefetch_full_weight_if_needed() "
+                "before PCP O-Proj forward."
+            )
+        if input_.shape[-1] != self._tp_input_size:
+            if self._use_full_weight and self._tp_weight_state is not None:
+                assert self._tp_weight_method is not None
+                self._tp_weight_method.wait_tp_weight_all_gather(self._tp_weight_state)
+            self._use_full_weight = None
+            raise ValueError(
+                "PCP O-Proj expected a TP-sharded input with last dimension "
+                f"{self._tp_input_size}, but got {input_.shape[-1]}."
+            )
+
+        try:
+            if self._use_full_weight:
+                output_parallel = self._apply_full_tp_weight(input_)
+            else:
+                output_parallel = self._apply_pcp_weight_shard(input_)
+
+            if self.reduce_results and self.o_proj_tp_size > 1:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
+        finally:
+            self._use_full_weight = None
+
+        if not self.return_bias:
+            return output
+        return output, None
+
+    def extra_repr(self) -> str:
+        s = super().extra_repr()
+        return f"{s}, pcp_size={self.pcp_size}, o_proj_tp_size={self.o_proj_tp_size}"
