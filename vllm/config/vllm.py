@@ -2541,9 +2541,6 @@ class VllmConfig:
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
-        if self.parallel_config.enable_elastic_ep:
-            unsupported.append("elastic expert parallelism")
-
         has_logitsproc_plugins = False
         if model_config is not None:
             from importlib.metadata import entry_points
