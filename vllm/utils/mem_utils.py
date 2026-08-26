@@ -14,13 +14,9 @@ import torch.types
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
+from .mem_constants import GiB_bytes, MiB_bytes
 
 logger = init_logger(__name__)
-
-
-def format_kib(b: int) -> str:
-    return f"{round(b / KiB_bytes, 2)}"
 
 
 def format_mib(b: int) -> str:
@@ -41,11 +37,6 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # will fail
     assert max_shared_mem > 0, "max_shared_mem cannot be zero"
     return int(max_shared_mem)
-
-
-def get_cpu_memory() -> int:
-    """Returns the total CPU memory of the node in bytes."""
-    return psutil.virtual_memory().total
 
 
 _UMA_PRESSURE_THRESHOLD = 0.8
