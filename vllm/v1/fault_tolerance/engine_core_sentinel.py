@@ -25,7 +25,11 @@ from vllm.v1.engine import (
     EngineStatusType,
     UtilityOutput,
 )
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.fault_tolerance.utils import (
+    ALLOWED_FT_INSTRUCTIONS,
+    FaultToleranceRequest,
+    FaultToleranceResult,
+)
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
@@ -35,10 +39,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 FT_UTILITY_METHOD = "handle_fault_tolerance"
-
-# Instructions the engine accepts from the utility channel. The API router
-# validates too; this guards the engine against any other utility caller.
-_ALLOWED_INSTRUCTIONS = frozenset({"retry", "scale_down"})
 
 
 class EngineCoreSentinel:
@@ -70,7 +70,7 @@ class EngineCoreSentinel:
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
-        if ft_request.instruction not in _ALLOWED_INSTRUCTIONS:
+        if ft_request.instruction not in ALLOWED_FT_INSTRUCTIONS:
             reason = (
                 f"[FT] Rejecting unknown instruction "
                 f"'{ft_request.instruction}' on engine {self.engine_index}"
