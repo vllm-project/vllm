@@ -909,3 +909,177 @@ class TestConsolidateSystemMessages:
         assert len(conversation) == original_len
         assert conversation[0]["role"] == "user"
         assert conversation[1]["role"] == "system"
+
+
+
+class TestDetectContentFormatMacros:
+    """Tests for content format detection when message.content is passed
+    through a macro parameter.
+
+    See https://github.com/vllm-project/vllm/issues/53820.
+    """
+
+    def test_direct_loop_message_content(self):
+        """Direct loop over message['content'] should detect as openai."""
+        template = (
+            "{% for message in messages %}"
+            "{% for content in message['content'] %}"
+            "{{ content.text }}"
+            "{% endfor %}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_loop_over_content_variable(self):
+        """Loop over a variable literally named 'content' should detect as openai."""
+        template = (
+            "{% for message in messages %}"
+            "{% set content = message.content %}"
+            "{% for item in content %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_macro_with_content_param(self):
+        """Macro called with message.content where param is named 'content'."""
+        template = (
+            "{% macro render_content(content) %}"
+            "{% for item in content %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endmacro %}"
+            "{%- for message in messages %}"
+            "{{ render_content(message.content) }}"
+            "{%- endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_macro_with_message_content_param(self):
+        """Macro called with message.content where param is named
+        'message_content' (MiMo-V2.5 pattern)."""
+        template = (
+            "{% macro render_content(message_content) %}"
+            "{%- for content in message_content %}"
+            "{{ content.text }}"
+            "{%- endfor %}"
+            "{%- endmacro %}"
+            "{%- for message in messages %}"
+            "{{ render_content(message.content) }}"
+            "{%- endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_macro_with_non_content_arg(self):
+        """Macro called with something other than message.content should
+        not trigger openai detection."""
+        template = (
+            "{% macro render_content(some_var) %}"
+            "{% for item in some_var %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endmacro %}"
+            "{% for message in messages %}"
+            "{{ render_content(message.title) }}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "string"
+
+    def test_plain_string_template(self):
+        """Template without any content loop should detect as string."""
+        template = (
+            "{% for message in messages %}"
+            "{{ message.role + ': ' + message.content }}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "string"
+
+    def test_macro_content_not_first_param(self):
+        """Macro where message.content is passed as the second argument."""
+        template = (
+            "{% macro render_content(prefix, body_content) %}"
+            "{{ prefix }}"
+            "{% for item in body_content %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endmacro %}"
+            "{% for message in messages %}"
+            "{{ render_content('Hello', message.content) }}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_multiple_macros_only_one_has_content(self):
+        """Multiple macros defined, but only one receives message.content."""
+        template = (
+            "{% macro render_title(title_var) %}"
+            "{{ title_var }}"
+            "{% endmacro %}"
+            "{% macro render_content(msg_content) %}"
+            "{% for item in msg_content %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endmacro %}"
+            "{% for message in messages %}"
+            "{{ render_title(message.role) }}"
+            "{{ render_content(message.content) }}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_macro_called_with_getitem_content(self):
+        """Macro called with message['content'] (Getitem instead of Getattr)."""
+        template = (
+            "{% macro render_content(msg_content) %}"
+            "{% for item in msg_content %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endmacro %}"
+            "{% for message in messages %}"
+            "{{ render_content(message['content']) }}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_macro_receives_content_but_no_loop(self):
+        """Macro receives message.content but doesn't loop over it."""
+        template = (
+            "{% macro render_content(msg_content) %}"
+            "{{ msg_content }}"
+            "{% endmacro %}"
+            "{% for message in messages %}"
+            "{{ render_content(message.content) }}"
+            "{% endfor %}"
+        )
+        result = _detect_content_format(template, default="string")
+        assert result == "string"
+
+    def test_both_direct_loop_and_macro_loop(self):
+        """Template with both a direct loop and a macro loop over content."""
+        template = (
+            "{% macro render_content(msg_content) %}"
+            "{% for item in msg_content %}"
+            "{{ item.text }}"
+            "{% endfor %}"
+            "{% endmacro %}"
+            "{% for message in messages %}"
+            "{% for content in message['content'] %}"
+            "{{ content.text }}"
+            "{% endfor %}"
+            "{{ render_content(message.content) }}"
+            "{% endfor %}"
+        )
+        assert _detect_content_format(template, default="string") == "openai"
+
+    def test_mimo_v25_real_template(self):
+        """Integration test with the real MiMo-V2.5 chat template."""
+        import os
+        template_path = os.environ.get(
+            "MIMO_TEMPLATE_PATH", "/tmp/mimo_chat_template.jinja"
+        )
+        if not os.path.exists(template_path):
+            pytest.skip("MiMo-V2.5 template not available")
+        with open(template_path) as f:
+            template = f.read()
+        assert _detect_content_format(template, default="string") == "openai"
