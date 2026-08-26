@@ -432,5 +432,18 @@ void reshape_and_cache_nvfp4_dispatch(
           STD_TORCH_CHECK(false,
                           "Unsupported NVFP4 KV cache dtype: ", kv_cache_dtype);
         }
+        // A launch against a binary with no SASS for this device fails with
+        // cudaErrorNoKernelImageForDevice and, unchecked, silently writes
+        // nothing -- which then surfaces as NaN/garbage "quantization"
+        // downstream. Fail loudly here instead.
+        const cudaError_t launch_err = cudaGetLastError();
+        STD_TORCH_CHECK(launch_err == cudaSuccess,
+                        "reshape_and_cache_nvfp4 launch failed: ",
+                        cudaGetErrorString(launch_err),
+                        " (device compute capability ",
+                        get_device_prop()->major, ".",
+                        get_device_prop()->minor,
+                        "; was the extension built with SASS for this "
+                        "arch, e.g. TORCH_CUDA_ARCH_LIST including it?)");
       });
 }
