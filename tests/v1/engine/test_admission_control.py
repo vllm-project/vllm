@@ -13,9 +13,10 @@ These tests cover:
 """
 
 import argparse
+import asyncio
 from http import HTTPStatus
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -255,6 +256,49 @@ def test_admission_params_without_explicit_n_count_as_one_slot(params):
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=10)
     with pytest.raises(QueueOverflowError):
         llm.check_admission(getattr(params, "n", 1) or 1)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_single_request_admission_respects_limit():
+    """Concurrent n=1 admissions cannot consume the same slot."""
+    llm = _make_async_llm(max_num_queued_reqs=1)
+    request_states: dict[str, SimpleNamespace] = {}
+    llm.output_processor.get_num_unfinished_requests.side_effect = lambda: len(
+        request_states
+    )
+    llm.output_processor.has_request.side_effect = request_states.__contains__
+
+    def add_request(request, *_args):
+        request_states[request.request_id] = _make_req_state(
+            len(request.prompt_token_ids)
+        )
+
+    llm.output_processor.add_request.side_effect = add_request
+
+    async def add_request_async(_request):
+        await asyncio.sleep(0)
+
+    llm.engine_core = SimpleNamespace(
+        add_request_async=AsyncMock(side_effect=add_request_async),
+        shutdown=MagicMock(),
+    )
+    llm.log_requests = False
+
+    requests = [
+        SimpleNamespace(request_id=f"request-{idx}", prompt_token_ids=[idx])
+        for idx in range(2)
+    ]
+    results = await asyncio.gather(
+        *(
+            llm._add_request(request, None, None, 0, MagicMock())
+            for request in requests
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(result is None for result in results) == 1
+    assert sum(isinstance(result, QueueOverflowError) for result in results) == 1
+    assert len(request_states) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -467,6 +467,9 @@ class OutputProcessor:
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
+    def has_request(self, request_id: str) -> bool:
+        return request_id in self.request_states
+
     def get_num_queued_tokens(self) -> int:
         """Total prompt tokens of requests currently in the prefill phase.
 

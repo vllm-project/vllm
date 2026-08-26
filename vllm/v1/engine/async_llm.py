@@ -382,10 +382,8 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        # Enforcement backstop: entrypoints pre-flight this check so that
-        # rejections carry an HTTP status, but paths without one (beam search,
-        # the realtime WebSocket) are only gated here.
-        self.check_admission(getattr(params, "n", 1) or 1, request_id)
+        if isinstance(params, SamplingParams) and params.n > 1:
+            self.check_admission(params.n, request_id)
 
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
@@ -500,7 +498,12 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        # Add the request to OutputProcessor (this process).
+        if parent_req is None and not self.output_processor.has_request(
+            request.request_id
+        ):
+            self.check_admission(request_id=request.request_id)
+
+        # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
