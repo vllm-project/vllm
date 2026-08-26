@@ -328,7 +328,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         additional_placeholders = []
         for modality, pattern in placeholders:
             sub_pattern = tokenizer.decode(
-                tokenizer.encode(pattern, add_special_tokens=False)
+                cached_encode(tokenizer, pattern, add_special_tokens=False)
             )
             if sub_pattern != pattern:
                 additional_placeholders.append((modality, sub_pattern))
