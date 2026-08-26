@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
+from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
@@ -690,7 +691,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
 
-            if hasattr(torch.ops.vllm, "xpu_mxfp4_quantize"):
+            if current_platform.is_xpu():
                 FirstAllReduceRMSNormXPUMxFP4Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)

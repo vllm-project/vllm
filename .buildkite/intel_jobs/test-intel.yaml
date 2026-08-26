@@ -228,4 +228,5 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        pytest -v -s compile/passes/distributed/test_sequence_parallelism.py::test_sequence_parallelism_pass_xpu_mxfp4'
+        pytest -v -s compile/passes/distributed/test_sequence_parallelism.py::test_sequence_parallelism_pass_xpu_mxfp4 &&
+        pytest -v -s compile/correctness_e2e/test_sequence_parallel.py::test_tp_sp_mxfp4_generation'

@@ -171,13 +171,6 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 
 
 class TestAllReduceRMSNormXPUMxFP4Model(torch.nn.Module):
-    """Model with all_reduce → rms_norm/fused_add_rms_norm → xpu_mxfp4_quantize.
-
-    Tests FirstAllReduceRMSNormXPUMxFP4Pattern (layer 0) and
-    MiddleAllReduceRMSNormXPUMxFP4Pattern (layers 1-3).
-    hidden_size must be divisible by 32 (MXFP4 block size).
-    """
-
     def __init__(self, hidden_size=32, eps=1e-6):
         super().__init__()
         self.vllm_config = get_current_vllm_config()
@@ -242,38 +235,6 @@ class TestAllReduceRMSNormXPUMxFP4Model(torch.nn.Module):
         ]
 
 
-def _run_sequence_parallelism_pass_test(
-    test_model_cls: type[torch.nn.Module],
-    custom_ops: str,
-    batch_size: int,
-    seq_len: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    fuse_norm_quant: bool,
-    dynamic: bool,
-    model_name: str,
-):
-    # need to use torch.mp.spawn otherwise will have problems with
-    # torch.distributed and cuda
-    num_processes = 2
-    torch.multiprocessing.spawn(
-        sequence_parallelism_pass_on_test_model,
-        args=(
-            num_processes,
-            test_model_cls,
-            custom_ops,
-            batch_size,
-            seq_len,
-            hidden_size,
-            dtype,
-            fuse_norm_quant,
-            dynamic,
-            model_name,
-        ),
-        nprocs=num_processes,
-    )
-
-
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model_cls, custom_ops",
@@ -303,17 +264,28 @@ def test_sequence_parallelism_pass(
     fuse_norm_quant: bool,
     dynamic: bool,
 ):
-    _run_sequence_parallelism_pass_test(
-        test_model_cls,
-        custom_ops,
-        batch_size,
-        seq_len,
-        hidden_size,
-        dtype,
-        fuse_norm_quant,
-        dynamic,
-        "RedHatAI/Llama-3.2-1B-Instruct-FP8",
-    )
+    num_processes = 2
+
+    def run_torch_spawn(fn, nprocs):
+        # need to use torch.mp.spawn otherwise will have problems with
+        # torch.distributed and cuda
+        torch.multiprocessing.spawn(
+            fn,
+            args=(
+                num_processes,
+                test_model_cls,
+                custom_ops,
+                batch_size,
+                seq_len,
+                hidden_size,
+                dtype,
+                fuse_norm_quant,
+                dynamic,
+            ),
+            nprocs=nprocs,
+        )
+
+    run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -345,19 +317,27 @@ def test_sequence_parallelism_pass_xpu_mxfp4(
     dtype: torch.dtype,
     dynamic: bool,
 ):
-    # MXFP4 has no fused rms_norm+quant kernel yet, so fuse_norm_quant
-    # doesn't change the traced graph; keep it fixed at False.
-    _run_sequence_parallelism_pass_test(
-        test_model_cls,
-        custom_ops,
-        batch_size,
-        seq_len,
-        hidden_size,
-        dtype,
-        False,
-        dynamic,
-        "INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-CT-AutoRound",
-    )
+    num_processes = 2
+
+    def run_torch_spawn(fn, nprocs):
+        # need to use torch.mp.spawn otherwise will have problems with
+        # torch.distributed and cuda
+        torch.multiprocessing.spawn(
+            fn,
+            args=(
+                num_processes,
+                test_model_cls,
+                custom_ops,
+                batch_size,
+                seq_len,
+                hidden_size,
+                dtype,
+                dynamic,
+            ),
+            nprocs=nprocs,
+        )
+
+    run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
 
 
 def test_sequence_parallelism_pass_requires_full_graph_compilation():
@@ -389,7 +369,6 @@ def sequence_parallelism_pass_on_test_model(
     dtype: torch.dtype,
     fuse_norm_quant: bool,
     dynamic: bool,
-    model_name: str,
 ):
     set_random_seed(0)
 
@@ -427,6 +406,7 @@ def sequence_parallelism_pass_on_test_model(
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
+    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     model_config = ModelConfig(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
