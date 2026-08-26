@@ -26,7 +26,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
-    from vllm.v1.hisparse.connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
         HiSparseConnectorMetadata,
     )
     from vllm.v1.worker.gpu.block_table import BlockTables

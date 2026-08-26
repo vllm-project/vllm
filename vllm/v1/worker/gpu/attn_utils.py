@@ -12,6 +12,13 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    get_hisparse_worker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
+    HiSparseConnectorWorker,
+    init_hisparse_worker,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -19,12 +26,10 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.hisparse.connector import get_hisparse_worker
 from vllm.v1.hisparse.runtime import (
     allocate_pinned_host_pool,
     check_hisparse_host_memory,
 )
-from vllm.v1.hisparse.worker import HiSparseConnectorWorker, init_hisparse_worker
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
