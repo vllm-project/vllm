@@ -1045,9 +1045,11 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
+
+        def executor_fail_callback():
+            self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
+            if ft_sentinel := getattr(self, "ft_sentinel", None):
+                ft_sentinel.on_executor_failed()
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
