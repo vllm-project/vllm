@@ -2186,9 +2186,7 @@ def test_kv_buffer_to_nixl_memory_types(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_remote_descriptors_use_remote_nixl_memory_type(
-    default_vllm_config, dist_init
-):
+def test_remote_descriptors_use_remote_nixl_memory_type(default_vllm_config, dist_init):
     vllm_config = create_vllm_config()
     connector = NixlConnector(
         vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
@@ -2204,9 +2202,7 @@ def test_remote_descriptors_use_remote_nixl_memory_type(
     worker.block_len_per_layer = [block_len]
     worker.num_blocks = 1
     worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-    worker.src_blocks_data = np.array(
-        [(0, block_len, worker.tp_rank)], dtype=np.uint64
-    )
+    worker.src_blocks_data = np.array([(0, block_len, worker.tp_rank)], dtype=np.uint64)
     worker.num_descs = len(worker.src_blocks_data)
 
     wrapper = MagicMock()
