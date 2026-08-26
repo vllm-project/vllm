@@ -411,14 +411,6 @@ def flash_attn_varlen_func(
             k.dtype == torch.float8_e4m3fn
             and torch.cuda.get_device_capability()[0] == 9
         )
-        if fa4_fp8_kv_dequant:
-            fa4_q_descale = None
-            fa4_k_descale = k_descale
-            fa4_v_descale = v_descale
-        else:
-            fa4_q_descale = None
-            fa4_k_descale = None
-            fa4_v_descale = None
 
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
@@ -444,9 +436,9 @@ def flash_attn_varlen_func(
             block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
             aux_tensor_leading_dims=aux_tensor_leading_dims,
-            q_descale=fa4_q_descale,
-            k_descale=fa4_k_descale,
-            v_descale=fa4_v_descale,
+            q_descale=None if fa4_fp8_kv_dequant else q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             output_scale=output_scale,
             fp8_kv_dequant=fa4_fp8_kv_dequant,
         )
