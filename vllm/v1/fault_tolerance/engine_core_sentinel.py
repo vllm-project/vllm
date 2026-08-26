@@ -143,6 +143,12 @@ class EngineCoreSentinel:
         )
         self._push_status(mask)
 
+    def on_executor_failed(self):
+        """Notify the client about the executor failure"""
+        if self.status_type == EngineStatusType.UNHEALTHY:
+            self.status_type = EngineStatusType.DEAD
+            self._push_status()
+
     def _push_status(self, mask: list[int] | None = None):
         """Push current health to the client so it can refresh its cache."""
         payload = {"id": self.engine_index, "status": self.status_type.name.lower()}
