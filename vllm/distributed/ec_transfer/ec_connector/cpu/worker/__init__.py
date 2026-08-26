@@ -52,22 +52,9 @@ def _coalesce_runs(
 
     Both callers derive the non-region side of a run from its slot, so that
     side advances in lockstep with the region and only the region has to be
-    split.
-
-    `block_ids` must be ascending and distinct, which `EmbeddingCache.alloc`
-    guarantees by sorting an entry's ids at allocation, and a prefix of such a
-    list keeps. Ascending order is what makes runs findable at all, and it is
-    what lets the whole entry be recognised as one run by comparing its span
-    against its length -- an O(1) test that skips unboxing every id into numpy.
-    That unboxing, not the arithmetic below, is the bulk of the cost here.
+    split. `EmbeddingCache` hands out ascending ids, which is what makes runs
+    findable at all.
     """
-    n = len(block_ids)
-    if n and block_ids[-1] - block_ids[0] == n - 1:
-        return (
-            np.zeros(1, dtype=np.int64),
-            np.array([block_ids[0]], dtype=np.int64),
-            np.array([n], dtype=np.int64),
-        )
 
     ids = np.fromiter(block_ids, dtype=np.int64, count=len(block_ids))
     breaks = np.flatnonzero(np.diff(ids) != 1) + 1
