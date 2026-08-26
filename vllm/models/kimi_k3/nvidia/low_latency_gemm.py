@@ -194,6 +194,14 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="dense_gate_up_proj",
     ),
+    (7168, 14336): ProjectionSpec(
+        7168,
+        14336,
+        cute_configs=(
+            (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=14336)),
+            (2, _cute(2, 224, 4, 2)),
+        ),
+    ),
     (20480, 7168): ProjectionSpec(
         20480,
         7168,
