@@ -253,6 +253,84 @@ def test_sync_load_failure_discards_multitoken_async_frames():
     assert request.num_in_flight_tokens == 0
 
 
+@pytest.mark.parametrize("preexisting_stale_tokens", [0, 1])
+def test_sync_load_failure_shared_blocks_rewinds_all_async_frames(
+    preexisting_stale_tokens: int,
+):
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    vllm_config.scheduler_config.async_scheduling = True
+    scheduler = create_scheduler(vllm_config)
+    scheduler.use_v2_model_runner = True
+
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    num_common_prefix_blocks = 50
+    num_prompt_tokens = num_prompt_blocks * scheduler.block_size
+    num_external_computed_tokens = num_external_computed_blocks * scheduler.block_size
+    common_prefix_len = num_common_prefix_blocks * scheduler.block_size
+
+    request1 = create_request(
+        num_tokens=num_prompt_tokens,
+        common_prefix_len=common_prefix_len,
+    )
+    scheduler.add_request(request1)
+    request2 = create_request(
+        num_tokens=num_prompt_tokens,
+        common_prefix_len=common_prefix_len,
+    )
+    scheduler.add_request(request2)
+
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request1.request_id: num_external_computed_tokens},
+            async_load=False,
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    failed_output = scheduler.schedule()
+    stale_output = scheduler.schedule()
+    assert stale_output.num_scheduled_tokens[request1.request_id] == 1
+    assert stale_output.num_scheduled_tokens[request2.request_id] > 0
+    assert (
+        request2.num_in_flight_tokens
+        > failed_output.num_scheduled_tokens[request2.request_id]
+    )
+    # A shared peer can also have an older frame that was already detached
+    # from num_computed_tokens by a preemption/reset but has not returned yet.
+    # It must not be subtracted a second time while finding the safe prefix.
+    request2.num_computed_tokens -= preexisting_stale_tokens
+    request2.num_stale_output_tokens = preexisting_stale_tokens
+
+    req1_block_ids = failed_output.scheduled_new_reqs[0].block_ids[0]
+    req2_block_ids = failed_output.scheduled_new_reqs[1].block_ids[0]
+    assert req1_block_ids[0] == req2_block_ids[0]
+
+    scheduler.update_from_output(
+        failed_output,
+        create_model_runner_output(
+            [request1, request2],
+            invalid_block_ids={req1_block_ids[0]},
+        ),
+    )
+
+    assert request1.num_computed_tokens == 0
+    # request2 relies on request1 to restore the shared invalid block. Its own
+    # safe offset is the confirmed local prefix, excluding every async frame
+    # still in flight when the load failure is reported.
+    assert request2.num_computed_tokens == common_prefix_len
+    assert (
+        request2.num_stale_output_tokens
+        == stale_output.num_scheduled_tokens[request2.request_id]
+    )
+    assert scheduler.rewound_req_ids == {
+        request1.request_id,
+        request2.request_id,
+    }
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,"
     "num_external_computed_blocks,"
