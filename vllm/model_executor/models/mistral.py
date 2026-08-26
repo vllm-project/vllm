@@ -29,6 +29,17 @@ from vllm.v1.attention.backend import AttentionType
 from .utils import AutoWeightsLoader
 
 
+def _get_llama_4_scaling(
+    original_max_position_embeddings: int,
+    scaling_beta: float,
+    positions: torch.Tensor,
+) -> torch.Tensor:
+    scaling = 1 + scaling_beta * torch.log(
+        1 + torch.floor(positions / original_max_position_embeddings)
+    )
+    return scaling.unsqueeze(-1)
+
+
 class MistralMLP(nn.Module):
     def __init__(
         self,
@@ -114,28 +125,23 @@ class MistralAttention(LlamaAttention):
             )
             self.llama_4_scaling_beta = llama_4_scaling_config["beta"]
 
-    def _get_llama_4_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
-        # Llama4 scaling
-        scaling = 1 + self.llama_4_scaling_beta * torch.log(
-            1
-            + torch.floor(
-                positions / self.llama_4_scaling_original_max_position_embeddings
-            )
-        )
-        # Broadcast over head_dim
-        return scaling.unsqueeze(-1)
-
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         if self.do_llama_4_scaling:
-            attn_scale = self._get_llama_4_attn_scale(positions)
-            q = (q * attn_scale).to(q.dtype)
+            if llama_4_scaling is None:
+                llama_4_scaling = _get_llama_4_scaling(
+                    self.llama_4_scaling_original_max_position_embeddings,
+                    self.llama_4_scaling_beta,
+                    positions,
+                )
+            q = (q * llama_4_scaling).to(q.dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -183,6 +189,7 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         t_cond: torch.Tensor | None = None,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -190,7 +197,11 @@ class MistralDecoderLayer(LlamaDecoderLayer):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            llama_4_scaling=llama_4_scaling,
+        )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -222,8 +233,21 @@ class MistralModel(LlamaModel):
         inputs_embeds: torch.Tensor | None = None,
         t_cond: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
+        llama_4_scaling = None
+        if llama_4_scaling_config is not None:
+            llama_4_scaling = _get_llama_4_scaling(
+                llama_4_scaling_config["original_max_position_embeddings"],
+                llama_4_scaling_config["beta"],
+                positions,
+            )
         return super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, t_cond=t_cond
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            t_cond=t_cond,
+            llama_4_scaling=llama_4_scaling,
         )
 
 

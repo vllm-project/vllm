@@ -23,6 +23,7 @@ from vllm.model_executor.models.mistral import (
     MistralDecoderLayer,
     MistralForCausalLM,
     MistralModel,
+    _get_llama_4_scaling,
 )
 from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
@@ -102,11 +103,20 @@ class EagleMistralModel(MistralModel):
             inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         residual = None
+        llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
+        llama_4_scaling = None
+        if llama_4_scaling_config is not None:
+            llama_4_scaling = _get_llama_4_scaling(
+                llama_4_scaling_config["original_max_position_embeddings"],
+                llama_4_scaling_config["beta"],
+                positions,
+            )
         for layer in self.layers:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
+                llama_4_scaling=llama_4_scaling,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
