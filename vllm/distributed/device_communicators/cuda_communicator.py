@@ -273,16 +273,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
-        # since currently we perform copy input -> symm_input -> out-of-place AR
-        # return symm_output, we don't need to check if input is symmetric
-        if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
-            self.pynccl_comm.world_size, input_
-        ):
-            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
-            if out is not None:
-                return out
-        # always try quick reduce first, then flashinfer, then the AITER or vLLM
-        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
+        # Always try quick reduce first, then an explicitly enabled FlashInfer,
+        # then symmetric memory, AITER/vLLM custom allreduce, and PyNCCL.
+        # (quick reduce is only for ROCm MI3*.)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -301,6 +294,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
+        # Since currently we perform copy input -> symm_input -> out-of-place AR
+        # and return symm_output, we don't need to check if input is symmetric.
+        if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
+            self.pynccl_comm.world_size, input_
+        ):
+            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            if out is not None:
+                return out
         aiter_ar_comm = self.aiter_ar_comm
         if (
             aiter_ar_comm is not None

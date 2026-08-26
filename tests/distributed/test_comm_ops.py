@@ -420,3 +420,178 @@ def test_multi_process_tensor_parallel_pipeline_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ):
     multi_process_parallel(monkeypatch, tp_size, pp_size, test_target)
+
+
+def _mock_flashinfer_allreduce(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(flashinfer_all_reduce, "fi_ar_available", True)
+    monkeypatch.setattr(
+        flashinfer_all_reduce.current_platform, "is_cuda", lambda: True
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce.dist, "get_world_size", lambda group: 8
+    )
+    monkeypatch.setattr(flashinfer_all_reduce.dist, "get_rank", lambda group: 0)
+
+
+def test_flashinfer_allreduce_workspace_uses_integer_token_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_flashinfer_allreduce(monkeypatch)
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: None
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce.PassConfig,
+        "default_fi_allreduce_fusion_max_size_mb",
+        staticmethod(lambda: {8: 1.5}),
+    )
+    get_workspace = Mock(return_value=object())
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_fi_ar_workspace", get_workspace
+    )
+
+    comm = flashinfer_all_reduce.FlashInferAllReduce(
+        group=Mock(), device="cuda:0"
+    )
+    assert comm._ensure_workspace(hidden_dim=7168, dtype=torch.bfloat16)
+
+    assert comm.max_workspace_size == int(1.5 * 1024 * 1024)
+    assert comm.max_num_tokens == 109
+    assert isinstance(comm.max_workspace_size, int)
+    assert isinstance(comm.max_num_tokens, int)
+    assert get_workspace.call_args.kwargs["max_token_num"] == comm.max_num_tokens
+
+
+def test_flashinfer_allreduce_honors_pass_config_size_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_flashinfer_allreduce(monkeypatch)
+    pass_config = Mock()
+    pass_config.flashinfer_max_size.return_value = 2 * 1024 * 1024
+    config = Mock()
+    config.compilation_config.pass_config = pass_config
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: config
+    )
+
+    comm = flashinfer_all_reduce.FlashInferAllReduce(
+        group=Mock(), device="cuda:0"
+    )
+
+    assert comm.max_workspace_size == 2 * 1024 * 1024
+    assert isinstance(comm.max_workspace_size, int)
+    assert pass_config.flashinfer_max_size.call_args.args == (8,)
+
+
+def test_flashinfer_allreduce_accepts_two_mib_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comm = object.__new__(flashinfer_all_reduce.FlashInferAllReduce)
+    comm.disabled = False
+    comm.world_size = 8
+    comm.rank = 0
+    comm.group = Mock()
+    comm.max_workspace_size = 2 * 1024 * 1024
+    comm.max_num_tokens = 0
+    get_workspace = Mock(return_value=object())
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_fi_ar_workspace", get_workspace
+    )
+    tensor = Mock(
+        is_cuda=True,
+        dtype=torch.bfloat16,
+        nbytes=146 * 7168 * 2,
+        shape=(146, 7168),
+    )
+    tensor.is_contiguous.return_value = True
+
+    assert comm.should_use_fi_ar(tensor)
+    assert comm.max_num_tokens == 146
+    assert isinstance(comm.max_num_tokens, int)
+    assert get_workspace.call_args.kwargs["max_token_num"] == 146
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"is_cuda": False}, False),
+        ({"is_contiguous": False}, False),
+        ({"shape": (1, 2, 3)}, False),
+        ({"dtype": torch.int8}, False),
+        ({"nbytes": 2 * 1024 * 1024 + 1}, False),
+    ],
+)
+def test_flashinfer_allreduce_rejects_ineligible_inputs(
+    overrides: dict[str, object], expected: bool
+) -> None:
+    comm = object.__new__(flashinfer_all_reduce.FlashInferAllReduce)
+    comm.disabled = False
+    comm.max_workspace_size = 2 * 1024 * 1024
+    comm.max_num_tokens = 0
+    tensor = Mock(
+        is_cuda=True,
+        dtype=torch.bfloat16,
+        nbytes=1024,
+        shape=(1, 7168),
+    )
+    tensor.is_contiguous.return_value = True
+    for name, value in overrides.items():
+        if name == "is_contiguous":
+            tensor.is_contiguous.return_value = value
+        else:
+            setattr(tensor, name, value)
+
+    assert comm.should_use_fi_ar(tensor) is expected
+
+
+def test_explicit_flashinfer_precedes_symmetric_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = object.__new__(CudaCommunicator)
+    communicator.qr_comm = None
+    communicator.fi_ar_comm = Mock(disabled=False)
+    communicator.fi_ar_comm.should_use_fi_ar.return_value = True
+    expected = torch.empty(1)
+    communicator.fi_ar_comm.all_reduce.return_value = expected
+    communicator.pynccl_comm = Mock(world_size=8, disabled=False)
+    symmetric_selector = Mock(return_value=True)
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.cuda_communicator."
+        "should_nccl_symm_mem_allreduce",
+        symmetric_selector,
+    )
+
+    result = communicator.all_reduce(torch.empty(128, 7168))
+
+    assert result is expected
+    communicator.fi_ar_comm.all_reduce.assert_called_once()
+    symmetric_selector.assert_not_called()
+
+
+@pytest.mark.parametrize("flashinfer_enabled", [False, True])
+def test_flashinfer_ineligible_or_disabled_falls_back_to_pynccl(
+    monkeypatch: pytest.MonkeyPatch, flashinfer_enabled: bool
+) -> None:
+    communicator = object.__new__(CudaCommunicator)
+    communicator.qr_comm = None
+    communicator.fi_ar_comm = (
+        Mock(disabled=False) if flashinfer_enabled else None
+    )
+    if communicator.fi_ar_comm is not None:
+        communicator.fi_ar_comm.should_use_fi_ar.return_value = False
+    communicator.aiter_ar_comm = None
+    communicator.ca_comm = None
+    communicator.symm_mem_comm = None
+    expected = torch.empty(1)
+    communicator.pynccl_comm = Mock(world_size=8, disabled=False)
+    communicator.pynccl_comm.all_reduce.return_value = expected
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.cuda_communicator."
+        "should_nccl_symm_mem_allreduce",
+        lambda world_size, input_tensor: False,
+    )
+
+    result = communicator.all_reduce(torch.empty(128, 7168))
+
+    assert result is expected
+    communicator.pynccl_comm.all_reduce.assert_called_once()

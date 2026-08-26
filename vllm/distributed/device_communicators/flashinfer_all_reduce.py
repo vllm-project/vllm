@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.compilation import PassConfig
 from vllm.distributed.parallel_state import get_node_count
 from vllm.logger import init_logger
@@ -346,12 +347,25 @@ class FlashInferAllReduce:
         if self.world_size == 1:
             return
 
-        # Use the same threshold as the allreduce-rms fusion pass
-        # TODO: tune the threshold
+        # Use the same threshold as the allreduce-rms fusion pass, including a
+        # user-provided pass-config override.  Previously the standalone path
+        # ignored fi_allreduce_fusion_max_size_mb and always used the default.
         MiB = 1024 * 1024
-        max_workspace_size = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
-            self.world_size, None
-        )
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            max_workspace_size = (
+                PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
+                    self.world_size, None
+                )
+            )
+            if max_workspace_size is not None:
+                max_workspace_size = int(max_workspace_size * MiB)
+        else:
+            max_workspace_size = (
+                vllm_config.compilation_config.pass_config.flashinfer_max_size(
+                    self.world_size
+                )
+            )
         if not max_workspace_size:
             logger.warning(
                 "FlashInfer All Reduce is disabled because it "
@@ -359,7 +373,7 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        self.max_workspace_size = max_workspace_size * MiB
+        self.max_workspace_size = int(max_workspace_size)
         self.max_num_tokens = 0
         self.disabled = False
 
@@ -392,6 +406,16 @@ class FlashInferAllReduce:
             return False
 
         if len(input_tensor.shape) != 2:
+            return False
+
+        if input_tensor.dtype not in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ):
+            return False
+
+        if input_tensor.nbytes > self.max_workspace_size:
             return False
 
         num_tokens, hidden_dim = input_tensor.shape
