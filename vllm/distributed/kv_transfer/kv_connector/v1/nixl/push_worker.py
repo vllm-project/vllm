@@ -144,7 +144,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self, drain_timeout: float | None = None) -> None:
+    def shutdown(self) -> None:
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
@@ -156,7 +156,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 for handle in handles:
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
-        super().shutdown(drain_timeout)
+        super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
 
