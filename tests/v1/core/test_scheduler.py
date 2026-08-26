@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -27,6 +27,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -3805,6 +3806,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
     )
     scheduler.need_mamba_block_aligned_split = True
     scheduler.use_eagle = True
+    scheduler.drop_prefix_cache_tail = True
     scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
@@ -3823,6 +3825,47 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
 
     assert output.num_scheduled_tokens[request.request_id] == block_size
     assert output.scheduled_encoder_inputs[request.request_id] == [0]
+
+
+@pytest.mark.parametrize(
+    ("method", "expected_drop"),
+    [("dspark", False), ("dflash", False), ("eagle3", True)],
+)
+def test_kv_cache_manager_drop_wiring_for_drafter_method(
+    method: str, expected_drop: bool
+):
+    """The scheduler must wire `prefix_cache_needs_last_block_drop()` — not
+    `use_eagle`, which stays True for all of these drafters and keeps driving
+    the prefill lookahead — into the KV cache manager's last-block drop."""
+    # A real drafter-method SpeculativeConfig requires a drafter checkpoint,
+    # so build a skeleton with only the attributes Scheduler.__init__ reads.
+    spec_config = object.__new__(SpeculativeConfig)
+    object.__setattr__(spec_config, "method", method)
+    object.__setattr__(spec_config, "num_speculative_tokens", 3)
+    object.__setattr__(spec_config, "num_speculative_tokens_per_batch_size", None)
+
+    base = create_scheduler(num_speculative_tokens=3)
+    vllm_config = base.vllm_config
+    vllm_config.speculative_config = spec_config
+
+    with patch(
+        "vllm.v1.core.sched.scheduler.KVCacheManager", wraps=KVCacheManager
+    ) as spy:
+        scheduler = Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=base.kv_cache_config,
+            structured_output_manager=base.structured_output_manager,
+            block_size=base.block_size,
+            log_stats=True,
+        )
+
+    # The manager's drop must come from the predicate, not from use_eagle.
+    assert spy.call_args.kwargs["use_eagle"] is expected_drop
+    assert scheduler.drop_prefix_cache_tail is expected_drop
+    # The prefill lookahead is the other half of use_eagle's old job and
+    # must survive for every drafter method here.
+    assert scheduler.use_eagle is True
+    assert scheduler.num_prefill_lookahead == 1
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])

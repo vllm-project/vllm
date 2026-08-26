@@ -132,7 +132,7 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=False,
+        drop_prefix_cache_tail=False,
         hash_block_size=hash_block_size,
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
@@ -180,7 +180,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=False,
+        drop_prefix_cache_tail=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
@@ -219,7 +219,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         scheduler_config=SimpleNamespace(
             long_prefill_token_threshold=long_prefill_threshold
         ),
-        use_eagle=False,
+        drop_prefix_cache_tail=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,

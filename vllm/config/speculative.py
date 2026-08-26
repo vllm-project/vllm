@@ -1795,6 +1795,23 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
+    def prefix_cache_needs_last_block_drop(self) -> bool:
+        """Whether prefix-cache hits must exclude the last matched block.
+
+        EAGLE-family drafters combine the token one past a chunked-prefill
+        boundary (the prefill lookahead) with the chunk's final hidden state
+        and write the result into the drafter's KV cache, so the last block of
+        a hit may hold KV polluted by a continuation that a matching request
+        does not share. dflash/dspark drafters are exempt: their cached
+        context KV is a function of target hidden states and positions only;
+        the lookahead (anchor) token contributes KV only at positions past the
+        chunk end, in a block that is overwritten with clean context KV before
+        it can be completed and hashed. Expressed as an exemption from
+        use_eagle() so that new eagle-family methods keep the drop (fail
+        closed) until their drafter KV provenance is audited.
+        """
+        return self.use_eagle() and self.method not in ("dflash", "dspark")
+
     def use_dflash(self) -> bool:
         return self.method == "dflash"
 

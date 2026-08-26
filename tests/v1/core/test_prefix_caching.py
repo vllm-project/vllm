@@ -13,6 +13,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -1086,7 +1087,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=False,
+        drop_prefix_cache_tail=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
@@ -2586,6 +2587,28 @@ def test_emit_cached_block_events_zero_cached():
     )
 
     assert pool.take_events() == []
+
+
+@pytest.mark.parametrize(
+    ("method", "needs_drop"),
+    [
+        ("eagle", True),
+        ("eagle3", True),
+        ("mtp", True),
+        ("dflash", False),
+        ("dspark", False),
+    ],
+)
+def test_last_block_drop_only_for_lookahead_polluted_kv(method: str, needs_drop: bool):
+    """EAGLE-family drafters cache chunk-boundary KV mixed with the prefill
+    lookahead token, so their hits must drop the last block. dflash/dspark
+    cache context KV derived from target hidden states and positions only, so
+    they keep it (the scheduler wires this predicate, not `use_eagle()`, into
+    the KV cache manager and the mamba align chunk-split backoff)."""
+    spec_config = object.__new__(SpeculativeConfig)
+    object.__setattr__(spec_config, "method", method)
+    assert spec_config.prefix_cache_needs_last_block_drop() is needs_drop
+    assert spec_config.use_eagle()
 
 
 def test_eagle_enabled_removes_last_block():

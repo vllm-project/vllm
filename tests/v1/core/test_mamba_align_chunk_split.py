@@ -80,13 +80,20 @@ def _split(
     request: Request,
     num_new_tokens: int,
     use_eagle: bool = True,
+    drop_prefix_cache_tail: bool | None = None,
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
 ) -> int:
-    """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
+    """Call the real `Scheduler._mamba_block_aligned_split` on a stub self.
+
+    `drop_prefix_cache_tail` defaults to `use_eagle`, matching EAGLE-family
+    drafters; dflash/dspark set it to False (no last-block drop).
+    """
+    if drop_prefix_cache_tail is None:
+        drop_prefix_cache_tail = use_eagle
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
-        use_eagle=use_eagle,
+        drop_prefix_cache_tail=drop_prefix_cache_tail,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -126,6 +133,19 @@ def test_internal_checkpoint_split(
         mamba_manager = manager.coordinator.single_type_managers[MAMBA_GROUP_ID]
         blocks = mamba_manager.req_to_blocks[request.request_id]
         assert all(not block.is_null for block in blocks)  # checkpoint + running state
+
+
+def test_dspark_split_keeps_last_cacheable_block() -> None:
+    """dflash/dspark hits keep the last matched block (no EAGLE drop), so the
+    split must not back `last_cache_position` off by one block either."""
+    prompt_len = 3602
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    assert (
+        _split(request, prompt_len, use_eagle=True, drop_prefix_cache_tail=False)
+        == 2 * MAMBA_BLOCK_SIZE
+    )
+    # EAGLE-family drafters still back off one block.
+    assert _split(request, prompt_len, use_eagle=True) == MAMBA_BLOCK_SIZE
 
 
 def _run_chunked_prefill(
