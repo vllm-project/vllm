@@ -17,7 +17,7 @@ from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_ports_list
+from vllm.utils.network_utils import get_open_ports_list, get_open_zmq_ipc_path
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
@@ -346,6 +346,9 @@ class ParallelConfig:
     """Port of the coordination TCPStore. Can be set by the API server; workers
     connect as clients to exchange self-picked group ports at runtime."""
 
+    _ple_offload_ipc_path: str = ""
+    """Node-local ZMQ IPC address for the PLE offload worker."""
+
     decode_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that shard the decode KV cache. DCP does not expand
     the process world size. Without PCP, DCP reuses TP ranks. With PCP, DCP
@@ -484,6 +487,9 @@ class ParallelConfig:
                 f"(--api-server-count=1), but got {self._api_process_count}. "
                 "The FT system assumes one AsyncMPClient manages all engines."
             )
+
+        if envs.VLLM_PLE_CPU_OFFLOAD and not self._ple_offload_ipc_path:
+            self._ple_offload_ipc_path = get_open_zmq_ipc_path()
 
         if self.all2all_backend in ["pplx", "naive"]:
             logger.warning(
@@ -844,6 +850,7 @@ class ParallelConfig:
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
+            "_ple_offload_ipc_path",
             # NUMA binding is per-rank host-side memory locality; it does
             # not affect collective-communication semantics. When numa_bind
             # is enabled with auto-detection, each DP rank stores its own

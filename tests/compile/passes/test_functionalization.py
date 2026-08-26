@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import operator
 
 import pytest
 import torch
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
@@ -258,6 +260,46 @@ MODELS_AND_DO_FUSION = {
     TestRotaryEmbeddingSliceScatter: [False],
     TestFunctionWithMutatedArgsAndReturn: [False],
 }
+
+
+def test_fix_ple_offload_wait_functionalization() -> None:
+    # Importing the layer registers vllm::ple_offload_wait.
+    import vllm.model_executor.layers.ple_offload_layer  # noqa: F401
+
+    graph = torch.fx.Graph()
+    sem_flag_tensor = graph.placeholder("sem_flag_tensor")
+    gpu_output_buffer = graph.placeholder("gpu_output_buffer")
+    hidden_states = graph.placeholder("hidden_states")
+    functionalized_wait = graph.call_function(
+        auto_functionalized,
+        args=(torch.ops.vllm.ple_offload_wait.default,),
+        kwargs={
+            "sem_flag_tensor": sem_flag_tensor,
+            "gpu_output_buffer": gpu_output_buffer,
+            "hidden_states": hidden_states,
+        },
+    )
+    functionalized_output = graph.call_function(
+        operator.getitem,
+        args=(functionalized_wait, 1),
+    )
+    graph.output(functionalized_output)
+    graph_module = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    FixFunctionalizationPass(VllmConfig())(graph_module.graph)
+    graph_module.graph.lint()
+
+    assert not any(
+        is_func(node, auto_functionalized) for node in graph_module.graph.nodes
+    )
+    wait_nodes = [
+        node
+        for node in graph_module.graph.nodes
+        if is_func(node, torch.ops.vllm.ple_offload_wait.default)
+    ]
+    assert len(wait_nodes) == 1
+    output_node = next(node for node in graph_module.graph.nodes if node.op == "output")
+    assert output_node.args == (gpu_output_buffer,)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

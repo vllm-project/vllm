@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +17,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor import multiproc_executor as multiproc_executor_module
+from vllm.v1.executor import uniproc_executor as uniproc_executor_module
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.executor.uniproc_executor import (
@@ -43,6 +45,38 @@ def test_supports_async_scheduling_executor_with_external_launcher():
 
 def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
+
+
+def test_uniproc_executor_starts_ple_worker_around_model_load(monkeypatch):
+    """PLE worker must start before registration and become ready after load."""
+    driver_worker = MagicMock()
+    monkeypatch.setattr(
+        uniproc_executor_module,
+        "WorkerWrapperBase",
+        MagicMock(return_value=driver_worker),
+    )
+    monkeypatch.setattr(uniproc_executor_module.envs, "VLLM_PLE_CPU_OFFLOAD", True)
+    monkeypatch.setattr(
+        uniproc_executor_module.envs, "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", False
+    )
+    monkeypatch.setattr(
+        uniproc_executor_module, "set_worker_net_device", lambda *args: None
+    )
+    monkeypatch.setattr(uniproc_executor_module, "current_platform", MagicMock())
+
+    executor = UniProcExecutor.__new__(UniProcExecutor)
+    executor.vllm_config = object()
+    monkeypatch.setattr(executor, "_distributed_args", lambda: ("local://", 0, 0))
+
+    executor._init_executor()
+
+    assert [call[0] for call in driver_worker.method_calls] == [
+        "init_worker",
+        "init_device",
+        "spawn_ple_offload",
+        "load_model",
+        "wait_ple_offload_ready",
+    ]
 
 
 class _FakeClock:
