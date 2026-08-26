@@ -109,6 +109,12 @@ def _lazy_import_wrapper(
     return wrapper
 
 
+def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
+    return (
+        x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
+    )
+
+
 # Create lazy wrappers for each function
 flashinfer_trtllm_bf16_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_bf16_moe"
@@ -1079,6 +1085,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "swap_w13_to_w31",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",

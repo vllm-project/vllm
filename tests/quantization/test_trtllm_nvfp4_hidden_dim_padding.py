@@ -7,12 +7,16 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 from vllm.model_executor.layers.quantization.utils import flashinfer_fp4_moe
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    swap_w13_to_w31 as legacy_swap_w13_to_w31,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
+from vllm.utils.flashinfer import swap_w13_to_w31
 
 
 def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
@@ -53,6 +57,14 @@ def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
     a2_scale.copy_(distinct_values)
     torch.testing.assert_close(a13_scale, distinct_values)
     torch.testing.assert_close(a2_scale, distinct_values)
+
+
+def test_swap_w13_to_w31_is_available_from_flashinfer_wrapper():
+    w13 = torch.arange(2 * 2 * 3 * 4, dtype=torch.float32).reshape(2, 6, 4)
+
+    expected = torch.cat([w13[:, 3:], w13[:, :3]], dim=1)
+    torch.testing.assert_close(swap_w13_to_w31(w13), expected)
+    torch.testing.assert_close(legacy_swap_w13_to_w31(w13), expected)
 
 
 def test_align_trtllm_fp4_moe_hidden_dim_noop():

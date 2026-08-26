@@ -6,6 +6,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.utils.flashinfer import swap_w13_to_w31
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -48,12 +49,6 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
-
-
-def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
-    return (
-        x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
-    )
 
 
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(

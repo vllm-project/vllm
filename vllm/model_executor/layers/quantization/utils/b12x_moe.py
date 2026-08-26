@@ -5,12 +5,10 @@
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
+from vllm.utils.flashinfer import swap_w13_to_w31
 from vllm.utils.math_utils import round_up
 
 
