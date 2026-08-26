@@ -399,6 +399,8 @@ def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
         per_out_ch_quant=False,
         block_shape=ckpt_block,
     )
+    assert w1_s_full is not None
+    assert w2_s_full is not None
 
     # TP shard the weights (exact slicing, no scale involvement).
     lo, hi = tp_rank * n_shard, (tp_rank + 1) * n_shard
