@@ -243,7 +243,7 @@ class KVCacheManager:
                 - ``shared_prefix_boundary``: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
-                  Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
+                  Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
         """
         # We skip finding the prefix cache hit when prefix caching is
