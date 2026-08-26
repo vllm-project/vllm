@@ -102,10 +102,21 @@ def _make_qwen3_vl_dspark_configs(target_model_type="qwen3_vl"):
 
 
 @pytest.mark.parametrize("target_model_type", ["qwen3_vl", "qwen3_vl_moe"])
+@pytest.mark.parametrize("num_speculative_tokens", [1, 15, 16])
 @pytest.mark.skip_global_cleanup
-def test_qwen3_vl_dspark_checkpoint_contract_is_accepted(target_model_type):
+def test_qwen3_vl_dspark_checkpoint_contract_is_accepted(
+    target_model_type, num_speculative_tokens
+):
     target_config, draft_config = _make_qwen3_vl_dspark_configs(target_model_type)
-    _validate_qwen3_vl_dspark(target_config, draft_config, 16)
+    _validate_qwen3_vl_dspark(target_config, draft_config, num_speculative_tokens)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_vl_dspark_rejects_tokens_above_trained_block_size():
+    target_config, draft_config = _make_qwen3_vl_dspark_configs()
+
+    with pytest.raises(ValueError, match="no greater than the trained block_size"):
+        _validate_qwen3_vl_dspark(target_config, draft_config, 17)
 
 
 @pytest.mark.skip_global_cleanup

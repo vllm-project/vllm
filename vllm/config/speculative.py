@@ -153,10 +153,11 @@ def _validate_qwen3_vl_dspark(
     if block_size is None:
         block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
     block_size = _require_positive_int(block_size, "block_size")
-    if num_speculative_tokens != block_size:
+    if num_speculative_tokens > block_size:
         raise ValueError(
-            "Qwen3-VL DSpark requires num_speculative_tokens to match the "
-            f"trained block_size ({block_size}); got {num_speculative_tokens}."
+            "Qwen3-VL DSpark requires num_speculative_tokens to be no greater "
+            f"than the trained block_size ({block_size}); got "
+            f"{num_speculative_tokens}."
         )
 
     target_text_config = getattr(target_model_config.hf_config, "text_config", None)
