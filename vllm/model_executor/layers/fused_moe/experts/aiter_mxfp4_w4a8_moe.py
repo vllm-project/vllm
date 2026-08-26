@@ -379,9 +379,15 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
 
 def a4w4_backend():
-    #Override aiter's moe_gemm_a4w4 backend ("triton" | "gluon").
-    #Default is "gluon" on gfx1250. Set VLLM_AITER_A4W4_BACKEND=triton to take triton
-    
+    """Override aiter's moe_gemm_a4w4 backend ("triton" | "gluon").
+
+    Default (None) lets aiter choose, which is "gluon" on gfx1250. Set
+    VLLM_AITER_A4W4_BACKEND=triton to take the non-gluon path, which avoids the
+    gfx1250 TDM descriptor API the installed aiter/Triton pair disagrees on.
+
+    Read at weight-load time (oracle/mxfp4.py picks the w_scale layout) as well
+    as at forward time, so both must see the same value.
+    """
     return os.environ.get("VLLM_AITER_A4W4_BACKEND") or None
 
 
@@ -820,19 +826,15 @@ def aiter_triton_kernel_w4a4_moe_forward(
 
     gammas = routing_data.gate_scal if routing_data else None
 
-    swiglu_alpha = (
-        quant_config.gemm1_alpha
-        if quant_config.gemm1_alpha is not None
-        else 1.0
-    )
     swiglu_limit = (
         quant_config.gemm1_clamp_limit
         if quant_config.gemm1_clamp_limit is not None
         else 7.0
     )
-    swiglu_add_residual = activation != MoEActivation.SILU
-
-    # GFX1250_SCALE is a gluon-only scale layout. Triton kernel only branches on CDNA4_SCALE / None
+    # GFX1250_SCALE is a gluon-only scale layout. The Triton kernel only
+    # branches on CDNA4_SCALE / None, so it would read a swizzled buffer with
+    # plain [E, K_scale, N] indexing and stride off the end of it. Keep this in
+    # sync with the swizzle decision in the oracle's
     # convert_gpt_oss_weight_to_mxfp4_moe_kernel_format.
     swizzle_mx_scale = (
         "GFX1250_SCALE" if on_gfx1250() and a4w4_backend() != "triton" else None
@@ -840,7 +842,9 @@ def aiter_triton_kernel_w4a4_moe_forward(
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
 
-    intermediate = moe_gemm_a4w4(
+    # GEMM1: gate+up projection. DeepSeek uses concatenated [gate | up] with
+    # SiLU activation applied externally (not fused), matching ATOM's approach.
+    raw_intermediate = moe_gemm_a4w4(
         x_q,
         w1_data,
         x_scale,
@@ -850,19 +854,31 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gather_indx=gather_idx,
         gammas=gammas if apply_router_weight_on_input else None,
         swizzle_mx_scale=swizzle_mx_scale,
-        apply_swiglu=True,
-        alpha=swiglu_alpha,
-        limit=swiglu_limit,
-        swiglu_add_residual=swiglu_add_residual,
-        out_dtype=torch.bfloat16,
-        unpadded_N=unpadded_N_w1,
-        unpadded_K=unpadded_K_w1,
+        apply_swiglu=False,
         backend=a4w4_backend(),
     )
 
     if unpadded_N_w1 is not None:
-        intermediate = intermediate[:, : unpadded_N_w1 // 2]
+        raw_intermediate = raw_intermediate[:, :unpadded_N_w1]
 
+    # SiLU(gate) * up on the concatenated [gate | up] halves
+    from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
+
+    half_n = raw_intermediate.shape[-1] // 2
+    intermediate = torch.empty(
+        raw_intermediate.shape[0], half_n,
+        dtype=raw_intermediate.dtype,
+        device=raw_intermediate.device,
+    )
+    fused_clamp_act_mul(
+        raw_intermediate,
+        out=intermediate,
+        swiglu_limit=swiglu_limit,
+        activation="silu",
+        dtype_quant=None,
+    )
+
+    # GEMM2: down projection with scatter-reduce
     mid_q, mid_scale = mxfp4_quant(intermediate.to(torch.bfloat16))
 
     out = moe_gemm_a4w4(
@@ -876,9 +892,6 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gammas=None if apply_router_weight_on_input else gammas,
         swizzle_mx_scale=swizzle_mx_scale,
         apply_swiglu=False,
-        out_dtype=torch.bfloat16,
-        unpadded_N=unpadded_N_w2,
-        unpadded_K=unpadded_K_w2,
         backend=a4w4_backend(),
     )
 

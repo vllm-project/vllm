@@ -1000,11 +1000,11 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         fp4_dtype = torch.float4_e2m1fn_x2
 
         if is_gfx1250:
-            from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (  # noqa: E501
                 a4w4_backend,
             )
 
-            # Triton moe_gemm_a4w4: uint8 column-major weights
+            # Triton moe_gemm_a4w4: uint8 column-major weights.
             w13_data = w13_weight.data.view(torch.uint8)
             w2_data = w2_weight.data.view(torch.uint8)
 
@@ -1013,16 +1013,23 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_data = w13_data.transpose(1, 2)
             w2_data = w2_data.transpose(1, 2)
 
-            # Scales are [E, N, K_scale]; the kernels index [E, K_scale, N], so
-            # transpose(1, 2) keeps K contiguous. Keep uint8: Triton has no
-            # float8_e8m0fnu binding, matching mxfp4_quant's uint8 x_scale
+            # Scales are [E, N, K_scale]; both kernels index them as
+            # [E, K_scale, N] with K innermost, so transpose(1, 2) is the base
+            # layout (it leaves K contiguous, which the Triton kernel requires).
+            # Keep them uint8: the shuffle is a pure permute, and the Triton
+            # moe_gemm_a4w4 takes e8m0 scales as uint8 pointers (Triton has no
+            # binding for float8_e8m0fnu), matching mxfp4_quant's uint8 x_scale.
             w13_scale = w13_weight_scale.data.view(torch.uint8).transpose(1, 2)
             w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
 
-            # GFX1250_SCALE is gluon-only; the Triton kernel branches only on
-            # CDNA4_SCALE / None and would read a swizzled buffer as plain
-            # [E, K_scale, N], striding past the allocation. Keep in sync with
-            # swizzle_mx_scale in aiter_triton_kernel_w4a4_moe_forward.
+            # GFX1250_SCALE is a gluon-only layout. The Triton kernel in
+            # aiter.ops.triton._triton_kernels.moe.moe_op_gemm_a4w4 only branches
+            # on CDNA4_SCALE / None, so handing it a swizzled buffer makes it
+            # index the scales as plain [E, K_scale, N] and stride far past the
+            # end of the allocation (GPU page fault at model dims, silent garbage
+            # at small ones). Only swizzle when gluon will actually consume it;
+            # aiter_triton_kernel_w4a4_moe_forward makes the matching choice for
+            # swizzle_mx_scale.
             if a4w4_backend() != "triton":
                 from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
