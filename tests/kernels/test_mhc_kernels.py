@@ -153,6 +153,65 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",
 )
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_pre_batch_invariance(monkeypatch, hidden_size, hc_mult):
+    """One token's output must be bitwise independent of the batch it runs in."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    pool = 2048
+    hc_mult2 = hc_mult * hc_mult
+    hc_mult3 = 2 * hc_mult + hc_mult2
+    residual_pool = torch.randn((pool, hc_mult, hidden_size), dtype=torch.bfloat16)
+    fn = (
+        torch.randn((hc_mult3, hc_mult, hidden_size), dtype=torch.float)
+        * 1e-4
+        * (1 + torch.arange(hc_mult).mul(0.01).view(1, -1, 1))
+    ).flatten(1, 2)
+    hc_scale = torch.randn((3,), dtype=torch.float) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float) * 0.1
+    norm_weight = torch.ones((hidden_size,), dtype=torch.bfloat16)
+
+    hc_sinkhorn_eps = hc_pre_eps = rms_eps = norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+
+    def run(residual):
+        return torch.ops.vllm.mhc_pre_tilelang(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_alpha,
+            sinkhorn_repeat,
+            1,
+            norm_weight,
+            norm_eps,
+        )
+
+    anchor = residual_pool[0:1].clone()
+    ref = run(anchor)
+
+    for num_tokens in (1, 2, 7, 63, 64, 65, 127, 128, 129, 511, 512, 1000):
+        filler = residual_pool[1 : num_tokens]
+        for pos in sorted({0, num_tokens // 2, num_tokens - 1}):
+            batch = torch.cat([filler[:pos], anchor, filler[pos:]], dim=0)
+            assert batch.shape[0] == num_tokens
+            for actual, expected in zip(run(batch), ref, strict=True):
+                assert torch.equal(actual[pos : pos + 1], expected), (
+                    f"batch invariance broken: num_tokens={num_tokens} pos={pos}"
+                )
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
 @pytest.mark.parametrize(
     ("num_tokens", "hidden_size"),
     [

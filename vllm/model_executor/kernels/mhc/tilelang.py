@@ -132,28 +132,6 @@ def mhc_pre_tilelang(
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
-    if _batch_invariant_enabled() and residual.ndim == 3 and residual.shape[0] > 1:
-        token_outputs = [
-            mhc_pre_tilelang(
-                residual[index : index + 1],
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-                n_splits,
-                norm_weight,
-                norm_eps,
-            )
-            for index in range(residual.shape[0])
-        ]
-        return tuple(
-            torch.cat(parts, dim=0) for parts in zip(*token_outputs, strict=True)
-        )
-
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_tilelang,
@@ -197,7 +175,9 @@ def mhc_pre_tilelang(
         # these numbers are from deepgemm kernel impl
         block_k = 64
         block_m = 64
-        n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
+        # keep the split-k factor independent of the batch
+        split_tokens = 1 if _batch_invariant_enabled() else num_tokens
+        n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(split_tokens, block_m))
     else:
         n_splits = 1
 
@@ -344,29 +324,6 @@ def mhc_pre_broadcast_tilelang(
     fn_broadcast: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
-    if _batch_invariant_enabled() and residual.shape[0] > 1:
-        token_outputs = [
-            mhc_pre_broadcast_tilelang(
-                residual[index : index + 1],
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-                n_splits,
-                norm_weight,
-                norm_eps,
-                fn_broadcast,
-            )
-            for index in range(residual.shape[0])
-        ]
-        return tuple(
-            torch.cat(parts, dim=0) for parts in zip(*token_outputs, strict=True)
-        )
-
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
@@ -399,7 +356,9 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    # keep the split-k factor independent of the batch
+    split_tokens = 1 if _batch_invariant_enabled() else num_tokens
+    n_splits = compute_num_split(64, hidden_size, cdiv(split_tokens, 64))
 
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
