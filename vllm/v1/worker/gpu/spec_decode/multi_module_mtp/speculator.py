@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.dp_utils import DPSync, dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
@@ -150,7 +150,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSync | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -201,7 +201,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
             dp_sync=dp_sync,
         )
-        num_tokens_across_dp = batch_sync.num_tokens if batch_sync is not None else None
+        num_tokens_across_dp = (
+            batch_sync.num_tokens_across_dp if batch_sync is not None else None
+        )
 
         # Rebuild the slot mappings and attention metadata.
         skip_attn = dummy_run and skip_attn_for_dummy_run

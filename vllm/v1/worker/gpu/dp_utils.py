@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 
 
 @dataclass(frozen=True)
-class DPSync:
+class DPSyncState:
     """What a `dispatch_cg_and_sync_dp` call agreed across DP ranks.
 
     Every field is identical on every rank, so callers can branch on them
@@ -26,7 +26,7 @@ class DPSync:
 
     # Per-rank token counts, for the forward context. All entries hold the
     # agreed padded count, unless `eager`, where nothing was padded.
-    num_tokens: torch.Tensor
+    num_tokens_across_dp: torch.Tensor
     # Agreed uniform decode length. None means the ranks disagreed, which is an
     # answer, not "unknown".
     uniform_token_count: int | None
@@ -45,7 +45,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
-) -> tuple[BatchExecutionDescriptor, DPSync | None]:
+) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
 
@@ -89,8 +89,8 @@ def sync_cudagraph_and_dp_padding(
                 num_reqs=num_reqs,
                 num_active_loras=desired_batch_desc.num_active_loras,
             ),
-            DPSync(
-                num_tokens=num_tokens_across_dp,
+            DPSyncState(
+                num_tokens_across_dp=num_tokens_across_dp,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
             ),
@@ -122,8 +122,8 @@ def sync_cudagraph_and_dp_padding(
     # Update num_tokens_across_dp to reflect padded size.
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
-    return synced_desc, DPSync(
-        num_tokens=num_tokens_across_dp,
+    return synced_desc, DPSyncState(
+        num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
     )
@@ -139,8 +139,8 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
-    dp_sync: DPSync | None = None,
-) -> tuple[BatchExecutionDescriptor, DPSync | None]:
+    dp_sync: DPSyncState | None = None,
+) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
     Runs a collective when dp_size > 1 so every rank dispatches to the same
@@ -199,7 +199,7 @@ def dispatch_cg_and_sync_dp(
         return batch_desc, None
 
     if dp_sync is not None:
-        assert dp_sync.num_tokens[dp_rank] == num_tokens, (
+        assert dp_sync.num_tokens_across_dp[dp_rank] == num_tokens, (
             "reusing a DP sync taken over a different batch"
         )
         assert (
@@ -211,7 +211,9 @@ def dispatch_cg_and_sync_dp(
             # pad further. Every rank pads alike, so report what will run.
             dp_sync = replace(
                 dp_sync,
-                num_tokens=torch.full_like(dp_sync.num_tokens, batch_desc.num_tokens),
+                num_tokens_across_dp=torch.full_like(
+                    dp_sync.num_tokens_across_dp, batch_desc.num_tokens
+                ),
             )
         return batch_desc, dp_sync
 

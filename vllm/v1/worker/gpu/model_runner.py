@@ -97,7 +97,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
 )
-from vllm.v1.worker.gpu.dp_utils import DPSync, dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
@@ -1710,7 +1710,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=input_batch.num_tokens_after_padding,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
                 num_tokens_across_dp=(
-                    dp_sync.num_tokens if dp_sync is not None else None
+                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
                 ),
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
@@ -2049,7 +2049,7 @@ class ExecuteModelState(NamedTuple):
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
-    dp_sync: DPSync | None
+    dp_sync: DPSyncState | None
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
