@@ -183,6 +183,10 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
+    # The fused all-reduce + RMSNorm path is not batch-invariant
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+
     if current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
 
