@@ -33,6 +33,21 @@ from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 logger = init_logger(__name__)
 
 
+def _normalize_qwen3_vl_dspark_weight_name(name: str) -> str:
+    """Remove wrappers used by training-side Qwen3-VL draft models."""
+    for prefix in (
+        "model.language_model.",
+        "language_model.model.",
+        "draft_model.model.",
+        "language_model.",
+        "draft_model.",
+        "model.",
+    ):
+        if name.startswith(prefix):
+            return name.removeprefix(prefix)
+    return name
+
+
 class DSparkMarkovHead(nn.Module):
     """Sequential transition-bias head (low-rank V x r, r x V).
 
@@ -152,6 +167,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         includes_lm_head = False
         includes_draft_id_mapping = False
         for name, loaded_weight in weights:
+            name = _normalize_qwen3_vl_dspark_weight_name(name)
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
                 continue
@@ -182,4 +198,5 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             skip_substrs.append("draft_id_to_target_id")
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
+        self.has_own_draft_id_mapping = includes_draft_id_mapping
         self.model._build_fused_kv_buffers()

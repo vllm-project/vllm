@@ -147,14 +147,25 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         drafter. Mapped to both eagle_aux_hidden_state_layer_ids and
         target_layer_ids (DSpark's i-1 layer semantics).
     """
-    pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
-    # Speculators DSpark uses the 1+N fill-in block (anchor is a bonus token).
-    pre_trained_config["dspark_bonus_anchor"] = True
+    architectures = config_dict.get("architectures") or []
+    if "Qwen3VLDSparkModel" in architectures:
+        pre_trained_config["architectures"] = ["Qwen3VLDSparkModel"]
+    else:
+        pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
+    sample_from_anchor = config_dict.get("sample_from_anchor", False)
+    pre_trained_config["sample_from_anchor"] = sample_from_anchor
+    pre_trained_config["dspark_bonus_anchor"] = not sample_from_anchor
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
     # DSpark indexes target layers as aux_id - 1 (matches the dense configs).
     pre_trained_config["target_layer_ids"] = [i - 1 for i in aux_layer_ids]
+    pre_trained_config["dflash_config"] = {
+        "causal": not config_dict.get("sliding_window_non_causal", True),
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
+        "use_aux_hidden_state": config_dict.get("use_aux_hidden_state", True),
+    }
 
     for key in (
         "draft_vocab_size",
@@ -165,6 +176,7 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         "block_size",
         "enable_confidence_head",
         "confidence_head_with_markov",
+        "use_aux_hidden_state",
     ):
         if config_dict.get(key) is not None:
             pre_trained_config[key] = config_dict[key]
