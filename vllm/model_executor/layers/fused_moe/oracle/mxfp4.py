@@ -998,13 +998,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias = w2_bias.data.to(torch.float32)
 
         fp4_dtype = torch.float4_e2m1fn_x2
-        e8m0_dtype = torch.float8_e8m0fnu
 
         if is_gfx1250:
-            from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+            from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+                a4w4_backend,
+            )
 
-            # Triton moe_gemm_a4w4: uint8 column-major weights,
-            # GFX1250_SCALE swizzled scales.
+            # Triton moe_gemm_a4w4: uint8 column-major weights
             w13_data = w13_weight.data.view(torch.uint8)
             w2_data = w2_weight.data.view(torch.uint8)
 
@@ -1013,22 +1013,31 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_data = w13_data.transpose(1, 2)
             w2_data = w2_data.transpose(1, 2)
 
-            # Scales are [E, N, K_scale]; shuffle_scale_moe expects [E, K_scale, N]
-            w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
-            w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
+            # Scales are [E, N, K_scale]; the kernels index [E, K_scale, N], so
+            # transpose(1, 2) keeps K contiguous. Keep uint8: Triton has no
+            # float8_e8m0fnu binding, matching mxfp4_quant's uint8 x_scale
+            w13_scale = w13_weight_scale.data.view(torch.uint8).transpose(1, 2)
+            w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
 
-            w13_scale = shuffle_scale_moe(
-                w13_scale_raw.transpose(1, 2),
-                arch="gfx1250",
-                preshuffle_factor=32,
-                scale_kwidth=8,
-            )
-            w2_scale = shuffle_scale_moe(
-                w2_scale_raw.transpose(1, 2),
-                arch="gfx1250",
-                preshuffle_factor=32,
-                scale_kwidth=8,
-            )
+            # GFX1250_SCALE is gluon-only; the Triton kernel branches only on
+            # CDNA4_SCALE / None and would read a swizzled buffer as plain
+            # [E, K_scale, N], striding past the allocation. Keep in sync with
+            # swizzle_mx_scale in aiter_triton_kernel_w4a4_moe_forward.
+            if a4w4_backend() != "triton":
+                from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+
+                w13_scale = shuffle_scale_moe(
+                    w13_scale,
+                    arch="gfx1250",
+                    preshuffle_factor=32,
+                    scale_kwidth=8,
+                )
+                w2_scale = shuffle_scale_moe(
+                    w2_scale,
+                    arch="gfx1250",
+                    preshuffle_factor=32,
+                    scale_kwidth=8,
+                )
 
             return (w13_data, w2_data, w13_scale, w2_scale,
                     w13_bias, w2_bias)

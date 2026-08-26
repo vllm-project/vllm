@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -374,6 +376,13 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             unpadded_N_w2=self.moe_config.hidden_dim_unpadded,
             unpadded_K_w2=self.moe_config.intermediate_size_per_partition_unpadded,
         )
+
+
+def a4w4_backend():
+    #Override aiter's moe_gemm_a4w4 backend ("triton" | "gluon").
+    #Default is "gluon" on gfx1250. Set VLLM_AITER_A4W4_BACKEND=triton to take triton
+    
+    return os.environ.get("VLLM_AITER_A4W4_BACKEND") or None
 
 
 def _aiter_raw(t):
@@ -823,7 +832,11 @@ def aiter_triton_kernel_w4a4_moe_forward(
     )
     swiglu_add_residual = activation != MoEActivation.SILU
 
-    swizzle_mx_scale = "GFX1250_SCALE" if on_gfx1250() else None
+    # GFX1250_SCALE is a gluon-only scale layout. Triton kernel only branches on CDNA4_SCALE / None
+    # convert_gpt_oss_weight_to_mxfp4_moe_kernel_format.
+    swizzle_mx_scale = (
+        "GFX1250_SCALE" if on_gfx1250() and a4w4_backend() != "triton" else None
+    )
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
 
@@ -844,6 +857,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
         out_dtype=torch.bfloat16,
         unpadded_N=unpadded_N_w1,
         unpadded_K=unpadded_K_w1,
+        backend=a4w4_backend(),
     )
 
     if unpadded_N_w1 is not None:
@@ -865,6 +879,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
         out_dtype=torch.bfloat16,
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
+        backend=a4w4_backend(),
     )
 
     return out
