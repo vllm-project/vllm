@@ -321,6 +321,7 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        logger.info("engine core execute_model")
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -333,6 +334,7 @@ class MultiprocExecutor(Executor):
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        logger.info("engine core sample_tokens")
         return self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),
@@ -343,6 +345,7 @@ class MultiprocExecutor(Executor):
         )
 
     def execute_dummy_batch(self) -> None:
+        logger.info("engine core execute_dummy_batch")
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -615,6 +618,10 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
     ):
+        self.get_method_count = 0
+        self.enqueue_output_count = 0
+        self.dequeue_output_count = 0
+        self.enqueue_response_count = 0
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
@@ -965,6 +972,8 @@ class WorkerProc:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
         if (response_mq := self.worker_response_mq) is not None:
             response_mq.enqueue(result)
+            self.enqueue_response_count += 1
+            logger.info(f"{self.rank=} worker_response_mq enqueue, {self.enqueue_response_count=}")
 
     def handle_output(self, output: Any):
         """Handles output from the worker. If async scheduling is enabled,
@@ -973,6 +982,8 @@ class WorkerProc:
         """
         if self.use_async_scheduling:
             self.async_output_queue.put(output)
+            self.enqueue_output_count += 1
+            logger.info(f"{self.rank=} async_output_queue put, {self.enqueue_output_count=}")
         else:
             self.enqueue_output(output)
 
@@ -992,6 +1003,8 @@ class WorkerProc:
 
         while True:
             output = self.async_output_queue.get()
+            self.dequeue_output_count += 1
+            logger.info(f"{self.rank=} async_output_queue get, {self.dequeue_output_count=}")
             self.enqueue_output(output)
 
     def worker_busy_loop(self):
@@ -1001,14 +1014,15 @@ class WorkerProc:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 indefinite=True
             )
+            self.get_method_count += 1
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
-
+                logger.info(f"{self.rank=} exec {method=} {self.get_method_count=}")
                 output = func(*args, **kwargs)
-
+                logger.info(f"{self.rank=} exec finish {method=}, {self.get_method_count=}")
                 if output_rank is None or self.rank == output_rank:
                     self.handle_output(output)
             except Exception as e:

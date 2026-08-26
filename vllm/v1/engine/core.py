@@ -651,6 +651,17 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            print(
+                    f"[DEBUG] scheduler_output: "
+                    f"total_scheduled={scheduler_output.total_num_scheduled_tokens}, "
+                    f"num_new_reqs={len(scheduler_output.scheduled_new_reqs)}, "
+                    f"num_cached_reqs={len(scheduler_output.scheduled_cached_reqs.req_ids)}, "
+                    f"finished_req_ids={scheduler_output.finished_req_ids}, "
+                    f"num_scheduled_tokens={scheduler_output.num_scheduled_tokens}, "
+                    f"num_common_prefix_blocks={scheduler_output.num_common_prefix_blocks}, "
+                    f"num_spec_tokens={scheduler_output.num_spec_tokens_to_schedule}"
+                )
+
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
