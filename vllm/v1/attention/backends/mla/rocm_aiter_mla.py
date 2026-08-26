@@ -482,12 +482,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         # After kv_b_proj decompression, K has num_heads heads (same as Q).
         # So gqa_ratio=1 and num_head_k=num_heads for the PS kernel.
-        # Head counts that are not a multiple of 16 (K3: 12/rank at TP8,
-        # 24/rank at TP4) are replicate-padded up to one in
-        # _mla_fp8_prefill_attn; build the PS metadata for that padded head
-        # count so the work/reduce maps match what the kernel is handed. This
-        # also lowers the partial-tile count: gcd(16, cu_num=256)=16
-        # (~960 tiles) vs gcd(12,256)=4 (~4032), saving ~6 GiB.
+        # Head counts that are not a multiple of 16 (K3: 12/rank at TP8) are
+        # replicate-padded up to one in _mla_fp8_prefill_attn; build the PS
+        # metadata for that same padded count so the work/reduce maps and the
+        # scratch reservations describe the width the kernel is handed.
+        #
+        # This was previously max(16, num_heads), which agrees with the helper
+        # at every head count reachable today (12 and 16 both give 16) and
+        # differs only above 16: at 24 it leaves num_head_k=24 while the
+        # forward pads to 32. That is not a correctness bug -- the 24-wide work
+        # maps still cover head-tiles 0..23, which are the real heads -- but it
+        # is expensive, because a lower head alignment yields more partial
+        # tiles: gcd-driven, 24 heads -> 64 tiles vs 32 heads -> 16, i.e.
+        # 193.6 MiB of reservations instead of 68.6 MiB at batch=1/qlen=512
+        # (measured on gfx950). Sizing both from one helper keeps the widths
+        # equal and takes the cheaper tiling.
         num_head_k = AiterMLAHelper.get_fp8_prefill_num_heads(self.num_heads)
         v_head_dim = self.mla_dims.v_head_dim
         # gqa_ratio = 1
@@ -590,12 +599,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kv_indptr_cpu = qo_indptr_cpu.clone()
         seq_lens_cpu = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(torch.int32)
 
-        # Head counts that are not a multiple of 16 (K3: 12/rank at TP8,
-        # 24/rank at TP4) are replicate-padded up to one in
-        # _mla_fp8_prefill_attn; build the PS metadata for that padded head
-        # count so the work/reduce maps match what the kernel is handed. This
-        # also lowers the partial-tile count: gcd(16, cu_num=256)=16
-        # (~960 tiles) vs gcd(12,256)=4 (~4032), saving ~6 GiB.
+        # Head counts that are not a multiple of 16 (K3: 12/rank at TP8) are
+        # replicate-padded up to one in _mla_fp8_prefill_attn; build the PS
+        # metadata for that same padded count so the work/reduce maps and the
+        # scratch reservations describe the width the kernel is handed.
+        #
+        # This was previously max(16, num_heads), which agrees with the helper
+        # at every head count reachable today (12 and 16 both give 16) and
+        # differs only above 16: at 24 it leaves num_head_k=24 while the
+        # forward pads to 32. That is not a correctness bug -- the 24-wide work
+        # maps still cover head-tiles 0..23, which are the real heads -- but it
+        # is expensive, because a lower head alignment yields more partial
+        # tiles: gcd-driven, 24 heads -> 64 tiles vs 32 heads -> 16, i.e.
+        # 193.6 MiB of reservations instead of 68.6 MiB at batch=1/qlen=512
+        # (measured on gfx950). Sizing both from one helper keeps the widths
+        # equal and takes the cheaper tiling.
         num_head_k = AiterMLAHelper.get_fp8_prefill_num_heads(self.num_heads)
         # gqa_ratio = 1
         # qhead_granularity = max(gqa_ratio, 1)
@@ -969,6 +987,14 @@ class AiterMLAHelper:
         The PS metadata in ``_init_fp8_prefill_ps_buffers``/``build()`` must be
         sized with this same function, or the work/reduce maps describe a
         different head count than the kernel is handed.
+
+        This function itself has no upper bound; the ceiling comes from the
+        ``is_valid_num_heads`` gate, which rejects counts above
+        ``_AITER_MAX_PADDED_MLA_HEADS`` (128) unless they are already
+        16-aligned. That bound was established for the asm *decode* padding, so
+        an architecture with, say, 136 heads per rank would be refused the
+        prefill here for a reason that was never measured against this kernel
+        pair. Revisit the constant rather than special-casing prefill.
         """
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         return -(-num_heads // m) * m
@@ -1141,9 +1167,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         total_q = q.shape[0]
         # PS asm prefill + mla_reduce_v1 require 16-aligned heads, and the PS
         # metadata is built for get_fp8_prefill_num_heads(num_heads). For head
-        # counts that are not a multiple of 16 (K3 = 12/rank at TP8, 24/rank at
-        # TP4) replicate-pad q/k/v up to that count, then slice the output back
-        # to the real head count.
+        # counts that are not a multiple of 16 (K3 = 12/rank at TP8)
+        # replicate-pad q/k/v up to that count, then slice the output back to
+        # the real head count.
+        #
+        # Counts above 16 that are not multiples of 16 (24, 40, ...) are
+        # handled by the same code but are not reached by any current model
+        # and TP that fits: 96 heads would need TP4, whose weights exceed a
+        # 288 GiB GPU, and 128-head models land on 128/64/32/16/8. The path is
+        # kept general for future architectures and its numerics are covered by
+        # test_fp8_prefill_matches_reference[num_heads=24]. Note the cost is
+        # (padded - real)/real extra FLOPs and q/k/v bytes, which is worst just
+        # above a multiple of 16 (17 heads pad to 32); a future arch landing
+        # there should measure against the flash_attn_varlen_func fallback
+        # rather than assume the asm path wins.
         #
         # Exact, not approximate: after kv_b_proj gqa_ratio is 1, so q, k and v
         # all carry num_heads heads and attention is independent per head.

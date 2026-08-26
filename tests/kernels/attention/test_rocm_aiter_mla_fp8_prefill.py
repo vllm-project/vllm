@@ -47,12 +47,15 @@ pytestmark = pytest.mark.skipif(
 #
 # The kernel requires 16-aligned heads, so _mla_fp8_prefill_attn replicate-pads
 # q/k/v up to get_fp8_prefill_num_heads(num_heads) and slices the output back.
-# Cover all three regimes -- a K3 rank sees 12 heads at TP8 and 24 at TP4:
-#   12 -> padded to 16 (non-divisor, tile+slice)
-#   16 -> no padding, output aliases the caller's buffer
-#   24 -> padded to 32 (only reachable above 16; the metadata sizing in
-#         _init_fp8_prefill_ps_buffers must agree with the forward, or the
-#         work/reduce maps describe a different head count than the kernel gets)
+# Cover all three regimes:
+#   12 -> padded to 16 (non-divisor, tile+slice). Live case: a K3 rank at TP8.
+#   16 -> no padding, output aliases the caller's buffer.
+#   24 -> padded to 32. No current model and TP reaches this band (96 heads
+#         would need TP4, which does not fit in 288 GiB; 128-head models give
+#         128/64/32/16/8), so this case exists to keep the general path honest
+#         for future architectures: it is the only one of the three where
+#         padding above 16 actually happens, so it is what proves the
+#         replicate-pad/slice-back argument holds for a target other than 16.
 HEAD_COUNTS = [12, 16, 24]
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
@@ -134,7 +137,7 @@ def _build_prefill_metadata(
     metadata = SimpleNamespace(prefill=prefill, num_decodes=0)
     common = SimpleNamespace(query_start_loc_cpu=qo_indptr_cpu)
     builder._build_fp8_prefill_ps_metadata(metadata, common)
-    return metadata, total_q
+    return metadata, total_q, builder
 
 
 def _reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -154,7 +157,21 @@ def test_fp8_prefill_matches_reference(seq_len: int, num_heads: int) -> None:
     device = torch.device("cuda")
     torch.manual_seed(0)
 
-    metadata, total_q = _build_prefill_metadata([seq_len], device, num_heads)
+    metadata, total_q, _ = _build_prefill_metadata([seq_len], device, num_heads)
+
+    # Lock the workspace, as GPUModelRunner does after warmup, so the forward
+    # cannot quietly grow it. The builder reserves scratch at num_head_k and
+    # the forward requests it at its own padded width; if a future change makes
+    # the forward's width exceed the builder's, that is an under-reservation
+    # which is invisible on an unlocked workspace (it just grows) and fatal in
+    # a real serve. Locking turns it into a failure here.
+    #
+    # Note this does not catch the reverse -- a builder wider than the forward
+    # merely over-reserves -- so it would not have flagged the pre-PR
+    # max(16, num_heads) sizing, which over-reserves 2.8x at 24 heads.
+    from vllm.v1.worker.workspace import lock_workspace
+
+    lock_workspace()
 
     qkv_kwargs = dict(dtype=ATTN_OUT_DTYPE, device=device)
     q = torch.randn(total_q, num_heads, QK_HEAD_DIM, **qkv_kwargs)
@@ -184,8 +201,12 @@ def test_fp8_prefill_metadata_width_matches_forward(num_heads: int) -> None:
 
     ``_init_fp8_prefill_ps_buffers``/``build()`` size the work and reduce maps
     from ``num_head_k``, while ``_mla_fp8_prefill_attn`` pads q/k/v to its own
-    target. If the two ever diverge the kernel silently reads maps describing a
-    different head count, so pin them to one another rather than to a literal.
+    target. Divergence is not a numerical bug in either direction -- maps built
+    narrower than the kernel width still cover the real heads, since padding
+    only ever appends duplicate heads above them. It is a sizing bug: narrower
+    maps mean a lower head alignment, hence more partial tiles and a larger
+    reservation, while wider ones under-reserve the forward's scratch. Pin the
+    two to one helper rather than to independent expressions.
     """
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 
@@ -195,3 +216,29 @@ def test_fp8_prefill_metadata_width_matches_forward(num_heads: int) -> None:
     assert width - num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
     # Every count the enable gate accepts must have a usable padded width.
     assert AiterMLAHelper.is_valid_num_heads(num_heads)
+
+    # The builder must actually size its maps at that width. Assert against the
+    # buffer it allocated rather than recomputing the width here, or the test
+    # passes no matter what _init_fp8_prefill_ps_buffers does.
+    #
+    # fp8_ps_reduce_partial_map is sized by the partial-tile count, which is
+    # gcd-driven and so is a sharp probe of the width used: a lower head
+    # alignment yields *more* tiles. At 24 heads, sizing at the unpadded count
+    # gives 4x the tiles (64 vs 16) and ~2.8x the scratch reservation (193.6
+    # vs 68.6 MiB at batch=1/qlen=512) -- not wrong numerically (the 24-wide
+    # maps still cover the real heads) but the reason to pin the widths
+    # together.
+    from aiter import get_ps_metadata_info_v1
+
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import _FP8_PREFILL_TILE_Q
+
+    def _tiles(nhk: int) -> int:
+        return get_ps_metadata_info_v1(
+            batch_size=1,
+            num_head_k=nhk,
+            max_qlen=512,
+            qlen_granularity=_FP8_PREFILL_TILE_Q,
+        )[5][0]
+
+    _, _, builder = _build_prefill_metadata([512], torch.device("cuda"), num_heads)
+    assert builder.fp8_ps_reduce_partial_map.numel() == _tiles(width)
