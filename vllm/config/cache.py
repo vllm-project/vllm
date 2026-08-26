@@ -288,6 +288,8 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "worker_kv_cache_configs",
+            "simple_cpu_offload_num_blocks",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
