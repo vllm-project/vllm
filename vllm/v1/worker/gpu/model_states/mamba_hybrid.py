@@ -227,9 +227,8 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        # Prefer the batch's promised bound (default.py does the same): measuring it
-        # from a capture dummy reports that dummy's even split, not the length the
-        # graph is expected to replay, so builders bake the wrong branch/tiling in.
+        # Prefer the promised bound: a capture dummy's measured max is its even
+        # split, not the length the graph must replay.
         max_query_len = input_batch.max_query_len
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
@@ -260,12 +259,9 @@ class MambaHybridModelState(DefaultModelState):
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
-                # A row is a spec-decode row only when its whole prompt is already
-                # computed. Test the request state, not num_scheduled_tokens ==
-                # draft_count + 1: adaptive verification rewrites num_scheduled_tokens
-                # to its own even split of the budget, so that equality almost never
-                # holds and every verification row would be demoted to plain decode.
-                # The > 0 test still guards zero-length rows under either mode.
+                # Test request state, not num_scheduled_tokens == draft_count+1:
+                # adaptive rewrites num_scheduled_tokens to an even split, so that
+                # equality rarely holds and would demote every verify row to decode.
                 is_decode = (~input_batch.is_prefilling_np) & (
                     input_batch.num_scheduled_tokens > 0
                 )

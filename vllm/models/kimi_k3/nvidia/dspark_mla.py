@@ -187,9 +187,6 @@ class K3DSparkModel(nn.Module):
             self.config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
-        # Acceptance-confidence head for adaptive verification. Config-driven, so a
-        # checkpoint without one (fixed spec decode) leaves it None. Input width
-        # mirrors the generic DSpark head.
         self.confidence_head: DSparkConfidenceHead | None = None
         if getattr(self.config, "enable_confidence_head", False):
             with_markov = getattr(self.config, "confidence_head_with_markov", False)
@@ -417,8 +414,7 @@ class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
-    # confidence_head is no longer skipped unconditionally; load_weights adds it
-    # back only when the draft did not build one.
+    # confidence_head skip is conditional; see load_weights.
     checkpoint_skip_substrs = ("embed_tokens", "lm_head")
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -504,9 +500,6 @@ class K3DSparkForCausalLM(nn.Module):
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The frozen target embedding and LM head are shared after this
-        # draft-specific checkpoint is loaded. Skip the checkpoint's confidence_head
-        # weights only when this draft did not build one.
         skip_substrs = list(self.checkpoint_skip_substrs)
         if self.model.confidence_head is None:
             skip_substrs.append("confidence_head")

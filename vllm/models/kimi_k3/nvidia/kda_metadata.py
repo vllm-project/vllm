@@ -296,11 +296,8 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
-    # The KDA spec-decode kernels run off device per-request query_start_loc +
-    # num_accepted_tokens within a fixed k+1 window, and build stages that into the
-    # persistent decode-cudagraph buffers, so a graph captured at the uniform k+1
-    # promise replays any 1..k+1 ragged mix. Overrides the UNIFORM_BATCH default
-    # inherited from GDN.
+    # ALWAYS (overrides GDN's UNIFORM_BATCH): KDA reads per-request offsets off
+    # device within a fixed k+1 window, so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
 
     def __init__(
@@ -327,10 +324,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=device,
             )
-
-    # No build_for_cudagraph_capture override needed: build() now routes every
-    # active decode through the spec path (see active_decode_mask below), so the
-    # inherited GDN uniform capture bakes the same branch ragged replay hits.
 
     def _get_recoverssm_context(self) -> "KDARecoverSSMCommitContext":
         context = self.recoverssm_context
@@ -379,15 +372,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_sequence_masks_cpu = None
             num_spec_decodes = 0
         else:
-            # Route EVERY active decode through the spec path, whatever its draft
-            # count. Adaptive verification hands out ragged draft budgets (some
-            # requests get 0 drafts, others 1..k); classifying by draft count lets
-            # a decode-only batch flip between the spec and plain-decode branches
-            # step to step. Under FULL cudagraph that corrupts the KDA SSM state
-            # (NaN, 0% acceptance): capture bakes one branch + its num_decodes == 0
-            # persistent staging, ragged replay hits the other and skips it. A
-            # query_len == 1 spec row equals a plain decode, so this only unifies
-            # the path; RecoverSSM already relied on it, native KDA now shares it.
+            # Route every active decode through the spec path regardless of draft
+            # count: classifying by draft count lets a batch flip branches step-to-
+            # step, which under FULL cudagraph corrupts KDA state (NaN, 0% accept).
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
             assert m.is_prefilling is not None
             assert m.is_prefilling.device.type == "cpu"
@@ -397,8 +384,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_sequence_masks_cpu |= active_decode_mask_cpu
             num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
             if num_spec_decodes == 0:
-                # No active decode and no drafts (e.g. a pure-prefill batch):
-                # fall through to the non-spec branch below.
                 spec_sequence_masks_cpu = None
 
         spec_request_indices = None
@@ -674,11 +659,6 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Unlike the generic SSM opt-out, a pure spec-decode batch reads its plan
-        # from the DEVICE offsets: build slices spec_query_start_loc out of the
-        # device query_start_loc by a request count trimming does not change, and
-        # pairs it with device num_accepted_tokens. The mixed spec/non-spec branch,
-        # however, still partitions tokens by CPU totals (num_query_tokens as the
-        # repeat_interleave output_size, num_non_spec_tokens as the split), so it
-        # assumes those totals match the device offsets.
+        # Pure spec-decode reads its plan from DEVICE offsets, so CPU/device
+        # mismatch is fine; the mixed branch still assumes CPU totals match.
         return True
