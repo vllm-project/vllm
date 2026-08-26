@@ -101,6 +101,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.remote_kv_wait_started_at: float | None = None
+        self.remote_kv_wait_time = 0.0
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 
@@ -333,6 +335,16 @@ class Request:
         timestamp: float | None = None,
     ) -> None:
         self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
+
+    def start_remote_kv_wait(self) -> None:
+        assert self.remote_kv_wait_started_at is None
+        self.remote_kv_wait_started_at = time.monotonic()
+
+    def stop_remote_kv_wait(self) -> None:
+        if self.remote_kv_wait_started_at is None:
+            return
+        self.remote_kv_wait_time += time.monotonic() - self.remote_kv_wait_started_at
+        self.remote_kv_wait_started_at = None
 
     def take_events(self) -> list[EngineCoreEvent] | None:
         if not self.events:

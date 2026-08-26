@@ -130,6 +130,8 @@ pub struct EngineCoreOutput {
     /// the Rust frontend does not yet surface it in responses.
     #[serde(default)]
     pub spec_decode_metrics: Option<OpaqueValue>,
+    #[serde(default)]
+    pub remote_kv_wait_time: Option<f64>,
 }
 
 impl EngineCoreOutput {
@@ -449,6 +451,7 @@ mod tests {
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
+                            remote_kv_wait_time: None,
                         },
                     ],
                     scheduler_stats: None,
