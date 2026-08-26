@@ -238,6 +238,22 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
+    """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
+
+    The public sparse MLA API predates some DSV4 shapes, so checking only that
+    the callable exists can select a package that later aborts or rejects a
+    valid vLLM configuration. Inspect FlashInfer's dispatch table until it
+    exposes a public capability query.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
+    dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
+    return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
@@ -711,6 +727,36 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_mxfp8_quantize_8x4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mxfp8_quantize_8x4(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import mxfp8_quantize as mxfp8_quantize_
+
+        return mxfp8_quantize_(
+            a,
+            backend="cuda",
+            sf_swizzle_layout=SfLayout.layout_8x4,
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mxfp8_quantize_8x4",
+    )
+    def flashinfer_mxfp8_quantize_8x4_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, k = a.shape
+        scale_size = cdiv(m, 8) * 8 * cdiv(k // 32, 4) * 4
+        return (
+            torch.empty(m, k, dtype=torch.float8_e4m3fn, device=a.device),
+            torch.empty(scale_size, dtype=torch.uint8, device=a.device),
+        )
+
+    @torch.library.custom_op(
         "vllm::mm_mxfp8",
         mutates_args=[],
         device_types="cuda",
@@ -722,6 +768,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         out_dtype: torch.dtype,
         backend: str = "cutlass",
+        use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
@@ -733,6 +780,7 @@ if has_flashinfer():
             out=None,
             out_dtype=out_dtype,
             backend=backend,
+            use_8x4_sf_layout=use_8x4_sf_layout,
         )
 
     @torch.library.register_fake(
@@ -745,6 +793,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         out_dtype: torch.dtype,
         backend: str = "cutlass",
+        use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)

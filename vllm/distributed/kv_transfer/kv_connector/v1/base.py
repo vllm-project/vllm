@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -183,14 +183,6 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        """
-        Indicates whether this connector prefers KV blocks that hold KV data for all
-        layers, which can speed up KV data transfers. Defaults to False.
-        """
-        return False
-
-    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 
@@ -276,23 +268,6 @@ class KVConnectorBase_V1(ABC):
 
         Args:
             kv_caches: dictionary of layer names, kv cache
-        """
-        return
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
-    ):
-        """
-        Initialize with a single KV cache tensor used by all layers.
-        The first dimension should be num_layers.
-        This function will only be called for models with uniform layers,
-        and only if the prefers_cross_layer_blocks is set to True.
-        Only one of the functions
-        {register_kv_caches, register_cross_layers_kv_cache} will be called.
-
-        Args:
-            kv_cache: a cross-layers kv cache tensor
-            attn_backend: The attention backend that corresponds to all layers
         """
         return
 

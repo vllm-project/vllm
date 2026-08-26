@@ -68,6 +68,7 @@ from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -90,6 +91,16 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+    spec_config = vllm_config.speculative_config
+    return (
+        2
+        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        else 1
+    )
+
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
@@ -402,15 +413,24 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
-        # Initialize workspace manager
+        # DSpark target and draft CUDA graphs retain workspace views concurrently.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        init_workspace_manager(
+            self.device,
+            num_ubatches,
+            _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+        )
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            from vllm.v1.worker.gpu.model_runner import (
-                GPUModelRunner as GPUModelRunnerV2,
-            )
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import (
+                    MMEncoderModelRunner as GPUModelRunnerV2,
+                )
+            else:
+                from vllm.v1.worker.gpu.model_runner import (  # type: ignore[assignment]
+                    GPUModelRunner as GPUModelRunnerV2,
+                )
 
             # HACK(woosuk): This is a temporary fix to avoid type errors.
             self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
@@ -654,6 +674,11 @@ class Worker(WorkerBase):
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+
+        # Adopt the engine core's layout; workers spawned after resolution
+        # (e.g. elastic EP scale-up) only see it through the config.
+        if kv_cache_config.kv_cache_layout is not None:
+            record_kv_cache_layout(self.cache_config, kv_cache_config.kv_cache_layout)
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
@@ -1362,6 +1387,8 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        self.elastic_ep_executor.shutdown()
+
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
@@ -1389,7 +1416,7 @@ def init_worker_distributed_environment(
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
-    from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+    from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
 
     init_batch_invariance()
     override_envs_for_eplb(
