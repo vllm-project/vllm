@@ -391,7 +391,10 @@ void fused_kda_decode(
     torch::stable::Tensor const& state_indices, torch::stable::Tensor& state,
     torch::stable::Tensor& out, std::optional<double> lower_bound,
     std::optional<torch::stable::Tensor> output_gate,
-    std::optional<torch::stable::Tensor> norm_weight, double norm_eps);
+    std::optional<torch::stable::Tensor> norm_weight, double norm_eps,
+    std::optional<torch::stable::Tensor> mxfp4_out,
+    std::optional<torch::stable::Tensor> mxfp4_scale,
+    const std::string& mxfp4_layout);
 
 void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,

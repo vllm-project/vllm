@@ -526,7 +526,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor raw_g, Tensor raw_beta, Tensor A_log, Tensor dt_bias, "
       "Tensor state_indices, Tensor! state, Tensor! out, "
       "float? lower_bound=None, Tensor? output_gate=None, "
-      "Tensor? norm_weight=None, float norm_eps=1e-5) -> ()");
+      "Tensor? norm_weight=None, float norm_eps=1e-5, "
+      "Tensor!? mxfp4_out=None, Tensor!? mxfp4_scale=None, "
+      "str mxfp4_layout='') -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE

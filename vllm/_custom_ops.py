@@ -2747,6 +2747,9 @@ def fused_kda_decode(
     output_gate: torch.Tensor | None = None,
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-5,
+    mxfp4_out: torch.Tensor | None = None,
+    mxfp4_scale: torch.Tensor | None = None,
+    mxfp4_layout: str = "",
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty(
@@ -2773,6 +2776,9 @@ def fused_kda_decode(
         output_gate,
         norm_weight,
         norm_eps,
+        mxfp4_out,
+        mxfp4_scale,
+        mxfp4_layout,
     )
     return out
 
