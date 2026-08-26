@@ -907,10 +907,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.encoder_runner.capture()
 
             if capture_decoder:
+                input_buffers = self.input_buffers
+                if self.pcp_manager is not None:
+                    input_buffers = self.pcp_manager.input_buffers
                 self.cudagraph_manager.capture(
                     self.model,
                     self.model_state,
-                    self.input_buffers,
+                    input_buffers,
                     self.intermediate_tensors,
                     self.block_tables,
                     self.attn_groups,
@@ -1141,7 +1144,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         batch_desc: BatchExecutionDescriptor,
     ) -> InputBatch:
         num_tokens = batch_req_state.num_tokens
-        num_tokens_after_padding = batch_desc.num_tokens
+        num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
         if envs.VLLM_MOE_SKIP_PADDING:
             # Mark trailing cudagraph-padding rows so kernels can skip work for
@@ -1333,7 +1336,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
-        return pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+        return pcp.maybe_partition_pcp_batch(
+            self.pcp_manager,
+            input_batch,
+            padded_num_tokens=batch_desc.num_tokens,
+        )
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -1517,6 +1524,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
+            if self.pcp_manager is not None:
+                num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
+                    batch_req_state.num_scheduled_tokens,
+                    batch_req_state.is_prefilling_np,
+                )
 
         num_active_loras = 0
         if self.lora_config:
