@@ -61,6 +61,7 @@ class TieringOffloadingMetrics:
     )
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
+    PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
 
 
 @dataclass
