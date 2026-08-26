@@ -66,7 +66,7 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str | list[str] | list[int] | list[dict[str, Any]]
+    prompt: str | list[str] | list[int] | list[list[int]] | list[dict[str, Any]]
     api_url: str
     prompt_len: int
     output_len: int
@@ -100,6 +100,7 @@ class RequestFuncOutput:
     error: str = ""
     start_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
+    num_input_sequences: int = 1
 
 
 class RequestFunc(Protocol):
@@ -586,8 +587,9 @@ async def _run_pooling_request(
     payload: dict[str, Any],
     headers: dict[str, Any],
     pbar: tqdm | None = None,
+    num_input_sequences: int = 1,
 ) -> RequestFuncOutput:
-    output = RequestFuncOutput()
+    output = RequestFuncOutput(num_input_sequences=num_input_sequences)
     st = time.perf_counter()
     output.start_time = st
     try:
@@ -615,6 +617,12 @@ async def _run_pooling_request(
     if pbar:
         pbar.update(1)
     return output
+
+
+def _get_num_input_sequences(prompt: Any) -> int:
+    if prompt and isinstance(prompt, list) and isinstance(prompt[0], (str, list)):
+        return len(prompt)
+    return 1
 
 
 async def async_request_openai_embeddings(
@@ -645,6 +653,7 @@ async def async_request_openai_embeddings(
         payload=payload,
         headers=headers,
         pbar=pbar,
+        num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
     )
 
 
@@ -681,6 +690,7 @@ async def async_request_vllm_rerank(
         payload=payload,
         headers=headers,
         pbar=pbar,
+        num_input_sequences=len(request_func_input.prompt) - 1,
     )
 
 
@@ -818,6 +828,7 @@ async def async_request_infinity_embeddings(
         payload=payload,
         headers=headers,
         pbar=pbar,
+        num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
     )
 
 
@@ -866,6 +877,7 @@ async def async_request_vllm_pooling(
         payload=payload,
         headers=headers,
         pbar=pbar,
+        num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
     )
 
 

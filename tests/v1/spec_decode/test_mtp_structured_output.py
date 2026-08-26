@@ -189,7 +189,7 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
 
 
 @pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
-def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend):
+def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend, caplog):
     """Post-marker drafts predate the bitmask and may be grammar-invalid;
     grammar_bitmask must skip the grammar advance instead of asserting.
     """
@@ -235,6 +235,7 @@ def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend):
     assert not (bitmask[2] == -1).all()
     # Grammar must not have advanced through the unvalidated draft.
     assert not grammar.is_terminated()
+    assert "Failed to advance FSM" not in caplog.text
 
 
 @pytest.mark.parametrize("backend", ["xgrammar", "guidance"])

@@ -107,6 +107,8 @@ def _mxfp8_quant_triton_kernel():
         ssm,
         ssk,
         BLOCK_M: tl.constexpr,
+        FP8_MAX: tl.constexpr,
+        TINY: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
         pid_b = tl.program_id(1)  # which 32-element block along K
@@ -118,8 +120,11 @@ def _mxfp8_quant_triton_kernel():
             mask=m_mask[:, None],
             other=0.0,
         ).to(tl.float32)
-        amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-30)  # [BLOCK_M]
-        sb = tl.floor(tl.log2(amax)) + 127.0
+        # Mirror _mxfp8_e4m3_quantize_torch: the scale has to put the block amax
+        # at the top of the e4m3 range rather than at 1.0, or small elements of
+        # the block end up in the subnormals.
+        amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [BLOCK_M]
+        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
         sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
         descale = tl.exp2(sb - 127.0)
         xq = (x / descale[:, None]).to(xq_ptr.dtype.element_ty)
@@ -167,6 +172,8 @@ def _mxfp8_e4m3_quantize_triton(
         scales.stride(0),
         scales.stride(1),
         BLOCK_M=BLOCK_M,
+        FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
     )
     return xq, scales
 

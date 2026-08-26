@@ -14,7 +14,7 @@
       "default": "2.30.7"
     },
     "BUILD_BASE_IMAGE": {
-      "default": "pytorch/manylinux2_28-builder:cuda13.0"
+      "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
     },
     "FINAL_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.3-base-ubuntu24.04"

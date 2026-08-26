@@ -153,6 +153,22 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
         assert expected in dockerfile
 
 
+def test_rust_build_cache_excludes_git_metadata() -> None:
+    for name in ("Dockerfile", "Dockerfile.cpu", "Dockerfile.xpu"):
+        dockerfile = (REPO_ROOT / "docker" / name).read_text()
+        cached_stage, exact_version_stage = dockerfile.split(
+            "FROM rust-build-cache AS rust-build", maxsplit=1
+        )
+        exact_version_stage = exact_version_stage.split("\nFROM ", maxsplit=1)[0]
+        cached_run = cached_stage.rsplit("RUN ", maxsplit=1)[1]
+
+        assert 'SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache"' in cached_run
+        assert "source=.git,target=.git" not in cached_run
+        assert "source=.git,target=.git" in exact_version_stage
+        assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in exact_version_stage
+        assert "bash build_rust.sh" in exact_version_stage
+
+
 def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
     bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
 

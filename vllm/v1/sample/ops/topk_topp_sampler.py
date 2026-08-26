@@ -200,7 +200,7 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0] and not self.use_fp64_gumbel:
+        if not generators and not self.use_fp64_gumbel:
             return compiled_random_sample(logits), logits_to_return
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)

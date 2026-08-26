@@ -1,5 +1,5 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="532137f" # release/internal/3.7.x as of 08/07
+ARG TRITON_BRANCH="f0b55c0" # release/internal/3.7.x as of 08/18
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="6bbd260" # release/2.12 as of 08/02
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
@@ -13,6 +13,8 @@ ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+ARG ROCPROFILER_SDK_REPO="https://github.com/ROCm/rocm-systems.git"
+ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -58,7 +60,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
@@ -313,9 +315,44 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
+# rocprofiler-sdk 1.3.2 fixes torch 2.12 profiler on ROCm 7.2.3
+FROM base AS build_rocprofiler_sdk
+ARG ROCPROFILER_SDK_REPO
+ARG ROCPROFILER_SDK_COMMIT
+ARG USE_SCCACHE
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libdw-dev libelf-dev libsqlite3-dev libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCPROFILER_SDK_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
+    && git checkout -q FETCH_HEAD
+RUN cd /src/projects/rocprofiler-sdk \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+       fi \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/rocm \
+        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
+        -DROCPROFILER_BUILD_TESTS=OFF \
+        -DROCPROFILER_BUILD_SAMPLES=OFF \
+        -DROCPROFILER_BUILD_DOCS=OFF \
+    && cmake --build build --parallel "$(nproc)" \
+    && cmake --install build --prefix /staging --strip
+
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
+
+COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
+RUN ldconfig
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
@@ -332,7 +369,11 @@ ARG AITER_BRANCH
 ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
+ARG ROCPROFILER_SDK_REPO
+ARG ROCPROFILER_SDK_COMMIT
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
+    && echo "ROCPROFILER_SDK_REPO: ${ROCPROFILER_SDK_REPO}" >> /app/versions.txt \
+    && echo "ROCPROFILER_SDK_COMMIT: ${ROCPROFILER_SDK_COMMIT}" >> /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \

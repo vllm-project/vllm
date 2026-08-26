@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+from tests.v1.attention.test_attention_backends import create_and_prepopulate_kv_cache
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -16,14 +17,9 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
-from vllm.v1.attention.backends.utils import (
-    PerLayerParameters,
-    get_kv_cache_layout,
-    set_kv_cache_layout,
-)
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.attention.backends.utils import PerLayerParameters
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
 
 if not current_platform.is_device_capability_family(100):
     pytest.skip(
@@ -87,96 +83,6 @@ def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
     }
 
 
-def _create_hnd_kv_cache(
-    k_contexts,
-    v_contexts,
-    block_size,
-    num_kv_heads,
-    head_size,
-    dtype,
-    device,
-    num_blocks,
-    common_attn_metadata,
-    kv_in_head_dim=False,
-):
-    """Create and populate a packed KV cache with HND-compatible strides.
-
-    When kv_in_head_dim=False (default), returns (B, H, N, 2*hs) with K/V
-    packed in the content dim. When kv_in_head_dim=True, returns
-    (B, 2*H, N, hs) with K/V as separate head groups.
-    """
-    seq_lens = common_attn_metadata.seq_lens.cpu()
-    query_lens = (
-        common_attn_metadata.query_start_loc_cpu[1:]
-        - common_attn_metadata.query_start_loc_cpu[:-1]
-    )
-    block_table = common_attn_metadata.block_table_tensor
-    slot_mapping = common_attn_metadata.slot_mapping
-    batch_size = len(k_contexts)
-
-    # kv_in_head_dim: (B, N, 2*H, hs) — K/V as separate head groups
-    # else:           (B, N, H, 2*hs) — K/V packed in content dim
-    n_heads, content = (
-        (2 * num_kv_heads, head_size)
-        if kv_in_head_dim
-        else (num_kv_heads, 2 * head_size)
-    )
-    kv_cache = torch.zeros(
-        num_blocks,
-        block_size,
-        n_heads,
-        content,
-        dtype=dtype,
-        device=device,
-    )
-    kv_cache_flat = kv_cache.view(-1, n_heads, content)
-
-    start_block_idx = 1
-    for i in range(batch_size):
-        k_ctx, v_ctx = k_contexts[i], v_contexts[i]
-        start = start_block_idx * block_size
-        end = start + k_ctx.shape[0]
-        if kv_in_head_dim:
-            kv_cache_flat[start:end, :num_kv_heads] = k_ctx
-            kv_cache_flat[start:end, num_kv_heads:] = v_ctx
-        else:
-            kv_cache_flat[start:end, :, :head_size] = k_ctx
-            kv_cache_flat[start:end, :, head_size:] = v_ctx
-        start_block_idx += cdiv(int(seq_lens[i]), block_size)
-
-    blocks_end = start_block_idx
-
-    # Randomly permute blocks (starting from block 1; block 0 is null).
-    perm = torch.randperm(blocks_end - 1) + 1
-    inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache[1:blocks_end] = kv_cache[perm]
-
-    # Build block table.
-    start_block_idx = 1
-    for i in range(batch_size):
-        n_blocks = cdiv(int(seq_lens[i]), block_size)
-        block_table[i, :n_blocks] = inv_perm[
-            start_block_idx : start_block_idx + n_blocks
-        ]
-        start_block_idx += n_blocks
-
-    # Build slot mapping that is consistent with the block table.
-    for i in range(batch_size):
-        ctx_len = int(seq_lens[i]) - int(query_lens[i])
-        token_offsets = torch.arange(int(query_lens[i])) + ctx_len
-        block_indices = token_offsets // block_size
-        intra_block_offsets = token_offsets % block_size
-        start = common_attn_metadata.query_start_loc_cpu[i]
-        end = common_attn_metadata.query_start_loc_cpu[i + 1]
-        slot_mapping[start:end] = block_table[
-            i, block_indices
-        ] * block_size + intra_block_offsets.to(device)
-
-    # Transpose to canonical: (B, H, N, 2*hs) or (B, 2*H, N, hs)
-    return kv_cache.transpose(1, 2).contiguous()
-
-
 def _create_nvfp4_hnd_kv_cache(
     k_contexts,
     v_contexts,
@@ -191,7 +97,7 @@ def _create_nvfp4_hnd_kv_cache(
 ):
     """Create an nvfp4 KV cache by quantizing bf16 context via
     reshape_and_cache_flash, using the same block-table layout as
-    _create_hnd_kv_cache.
+    create_and_prepopulate_kv_cache.
 
     The returned tensor is dtype ``uint8`` with head-group layout
       ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``
@@ -217,11 +123,10 @@ def _create_nvfp4_hnd_kv_cache(
             during quantization.
 
     Returns:
-        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HND-strided).
+        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
     """
-    # First create a bf16 HND cache so block tables are populated.
-    # Use kv_in_head_dim=True so K/V are separate head groups (B, 2*H, N, hs).
-    bf16_cache = _create_hnd_kv_cache(
+    # First create a bf16 cache so block tables are populated.
+    bf16_cache = create_and_prepopulate_kv_cache(
         k_contexts,
         v_contexts,
         block_size,
@@ -231,7 +136,7 @@ def _create_nvfp4_hnd_kv_cache(
         device,
         num_blocks,
         common_attn_metadata,
-        kv_in_head_dim=True,
+        layout=KVCacheLayout.LBHNC,
     )
 
     # (num_blocks, 2 * num_kv_heads, block_size, full_dim) — K heads first, then V heads
@@ -244,7 +149,7 @@ def _create_nvfp4_hnd_kv_cache(
     k_cache, v_cache = nvfp4_cache.split(num_kv_heads, dim=1)
 
     # Flatten bf16 context into tokens and quantize via reshape_and_cache_flash.
-    # bf16_cache is (B, 2*H, N, hs); split K/V on head dim.
+    # bf16_cache is (B, H, N, 2*hs); split K/V on the content dim.
     block_table = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -260,10 +165,16 @@ def _create_nvfp4_hnd_kv_cache(
         # Gather context tokens from the bf16 cache using block table.
         n_ctx_blocks = (ctx_len + block_size - 1) // block_size
         blocks = block_table[i, :n_ctx_blocks]
-        # bf16_cache is (B, 2*H, N, hs); split K and V head groups.
-        k_bf16, v_bf16 = bf16_cache[blocks].split(num_kv_heads, dim=1)
-        k_ctx = k_bf16.transpose(1, 2).reshape(-1, num_kv_heads, head_size)[:ctx_len]
-        v_ctx = v_bf16.transpose(1, 2).reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        k_ctx = (
+            bf16_cache[blocks, :, :, :head_size]
+            .transpose(1, 2)
+            .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        )
+        v_ctx = (
+            bf16_cache[blocks, :, :, head_size:]
+            .transpose(1, 2)
+            .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        )
         # Build slot mapping for these context tokens.
         token_offsets = torch.arange(ctx_len, device=device)
         block_indices = token_offsets // block_size
@@ -383,7 +294,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
     else:
         kv_scale_val = 1.0
-        kv_cache = _create_hnd_kv_cache(
+        kv_cache = create_and_prepopulate_kv_cache(
             k_contexts,
             v_contexts,
             BLOCK_SIZE,
@@ -393,127 +304,117 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             device,
             NUM_GPU_BLOCKS,
             common_attn_metadata,
+            layout=KVCacheLayout.LBHNC,
         )
 
     # 3. Run through FlashInfer with TRTLLM enabled
-    set_kv_cache_layout("HND")
-    get_kv_cache_layout.cache_clear()
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
 
-    try:
-        is_nvfp4 = kv_cache_dtype == "nvfp4"
-        kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
-        spec_dtype = torch.uint8 if is_nvfp4 else dtype
-        kv_cache_spec = FullAttentionSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=spec_dtype,
-            kv_quant_mode=kv_quant_mode,
+    is_nvfp4 = kv_cache_dtype == "nvfp4"
+    kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
+    spec_dtype = torch.uint8 if is_nvfp4 else dtype
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=spec_dtype,
+        kv_quant_mode=kv_quant_mode,
+    )
+    layer_names = ["test_layer_0"]
+
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch(
+            "vllm.utils.flashinfer.supports_trtllm_attention",
+            return_value=True,
+        ),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            _mock_get_per_layer_parameters,
+        ),
+    ):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, device
         )
-        layer_names = ["test_layer_0"]
+        attn_metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
-        with (
-            set_current_vllm_config(vllm_config),
-            unittest.mock.patch(
-                "vllm.utils.flashinfer.supports_trtllm_attention",
-                return_value=True,
-            ),
-            unittest.mock.patch(
-                "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-                _mock_get_per_layer_parameters,
-            ),
-        ):
-            builder = FlashInferMetadataBuilder(
-                kv_cache_spec, layer_names, vllm_config, device
+        # Verify the correct TRTLLM metadata types were produced.
+        has_prefills = any(ql > 1 for ql in batch_spec.query_lens)
+        has_decodes = any(ql == 1 for ql in batch_spec.query_lens)
+
+        if has_prefills:
+            assert isinstance(attn_metadata.prefill, TRTLLMPrefill), (
+                f"Expected TRTLLMPrefill, got {type(attn_metadata.prefill)}"
             )
-            attn_metadata = builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
+        if has_decodes:
+            assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode), (
+                f"Expected FlashInferTrtllmAPIDecode, got {type(attn_metadata.decode)}"
             )
+            assert attn_metadata.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
 
-            # Verify the correct TRTLLM metadata types were produced.
-            has_prefills = any(ql > 1 for ql in batch_spec.query_lens)
-            has_decodes = any(ql == 1 for ql in batch_spec.query_lens)
+        impl = FlashInferImpl(
+            num_heads=num_q_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=kv_cache_dtype,
+        )
 
-            if has_prefills:
-                assert isinstance(attn_metadata.prefill, TRTLLMPrefill), (
-                    f"Expected TRTLLMPrefill, got {type(attn_metadata.prefill)}"
-                )
-            if has_decodes:
-                assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode), (
-                    "Expected FlashInferTrtllmAPIDecode, got "
-                    f"{type(attn_metadata.decode)}"
-                )
-                assert attn_metadata.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
-
-            impl = FlashInferImpl(
-                num_heads=num_q_heads,
-                head_size=head_size,
-                scale=scale,
-                num_kv_heads=num_kv_heads,
-                alibi_slopes=None,
-                sliding_window=None,
-                kv_cache_dtype=kv_cache_dtype,
-            )
-
-            mock_layer = MockAttentionLayer(device)
-            if is_nvfp4:
-                # For nvfp4, k_scale/v_scale are the global quantization
-                # scales (amax/448) used by reshape_and_cache_flash.
-                kv_scale_t = torch.tensor(
-                    kv_scale_val, dtype=torch.float32, device=device
-                )
-                mock_layer._k_scale = kv_scale_t
-                mock_layer._v_scale = kv_scale_t
-                mock_layer._k_scale_float = kv_scale_val
-                mock_layer._v_scale_float = kv_scale_val
-            output = torch.empty_like(query_vllm)
-
-            impl.do_kv_cache_update(
-                mock_layer,
-                key_vllm,
-                value_vllm,
-                kv_cache,
-                attn_metadata.slot_mapping,
-            )
-
-            # nvfp4 trtllm kernel requires FP8 queries. In the real
-            # pipeline the attention layer handles this; here we
-            # quantize manually.
-            if is_nvfp4:
-                finfo = torch.finfo(torch.float8_e4m3fn)
-                q_amax = query_vllm.abs().amax().clamp(min=1e-12)
-                q_s = (finfo.max / q_amax * 0.1).item()
-                query_vllm = (
-                    (query_vllm * q_s)
-                    .clamp(finfo.min, finfo.max)
-                    .to(torch.float8_e4m3fn)
-                )
-                mock_layer._q_scale = torch.tensor(
-                    1.0 / q_s, dtype=torch.float32, device=device
-                )
-                mock_layer._q_scale_float = 1.0 / q_s
-
-            output = impl.forward(
-                mock_layer,
-                query_vllm,
-                key_vllm,
-                value_vllm,
-                kv_cache,
-                attn_metadata,
-                output=output,
-            )
-
-        # 4. Compare against SDPA reference
+        mock_layer = MockAttentionLayer(device)
         if is_nvfp4:
-            atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
-        else:
-            atol, rtol = 1e-2, 1e-2
-        torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
+            # For nvfp4, k_scale/v_scale are the global quantization
+            # scales (amax/448) used by reshape_and_cache_flash.
+            kv_scale_t = torch.tensor(kv_scale_val, dtype=torch.float32, device=device)
+            mock_layer._k_scale = kv_scale_t
+            mock_layer._v_scale = kv_scale_t
+            mock_layer._k_scale_float = kv_scale_val
+            mock_layer._v_scale_float = kv_scale_val
+        output = torch.empty_like(query_vllm)
 
-    finally:
-        set_kv_cache_layout(None)
-        get_kv_cache_layout.cache_clear()
+        impl.do_kv_cache_update(
+            mock_layer,
+            key_vllm,
+            value_vllm,
+            kv_cache,
+            attn_metadata.slot_mapping,
+        )
+
+        # nvfp4 trtllm kernel requires FP8 queries. In the real
+        # pipeline the attention layer handles this; here we
+        # quantize manually.
+        if is_nvfp4:
+            finfo = torch.finfo(torch.float8_e4m3fn)
+            q_amax = query_vllm.abs().amax().clamp(min=1e-12)
+            q_s = (finfo.max / q_amax * 0.1).item()
+            query_vllm = (
+                (query_vllm * q_s).clamp(finfo.min, finfo.max).to(torch.float8_e4m3fn)
+            )
+            mock_layer._q_scale = torch.tensor(
+                1.0 / q_s, dtype=torch.float32, device=device
+            )
+            mock_layer._q_scale_float = 1.0 / q_s
+
+        output = impl.forward(
+            mock_layer,
+            query_vllm,
+            key_vllm,
+            value_vllm,
+            kv_cache,
+            attn_metadata,
+            output=output,
+        )
+
+    # 4. Compare against SDPA reference
+    if is_nvfp4:
+        atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
+    else:
+        atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(

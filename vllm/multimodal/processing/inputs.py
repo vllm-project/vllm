@@ -17,11 +17,10 @@ class ProcessorInputs:
     [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
 
-    prompt: str | list[int]
+    prompt: list[int]
     mm_data_items: MultiModalDataItems
     mm_uuid_items: MultiModalUUIDItems | None = None
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
-    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
     def get_mm_hashes(
         self,

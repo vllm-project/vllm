@@ -319,6 +319,66 @@ class PyNcclCommunicator:
             split_offset += split_size
         self.nccl.ncclGroupEnd()
 
+    def reduce(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        root: int,
+        op: ReduceOp = ReduceOp.SUM,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclReduce(
+            buffer_type(input_tensor.data_ptr()),
+            buffer_type(output_tensor.data_ptr()),
+            input_tensor.numel(),
+            ncclDataTypeEnum.from_torch(input_tensor.dtype),
+            ncclRedOpTypeEnum.from_torch(op),
+            root,
+            self.comm,
+            cudaStream_t(stream.cuda_stream),
+        )
+
+    def scatter(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        sizes: list[int],
+        root: int = 0,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert output_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the output tensor is on {output_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclGroupStart()
+        if self.rank == root:
+            split_offset = 0
+            for dst, split_size in enumerate(sizes):
+                if split_size == 0:
+                    continue
+
+                chunk = input_tensor[split_offset : split_offset + split_size, ...]
+                if dst == root:
+                    output_tensor.copy_(chunk)
+                else:
+                    self.send(chunk, dst, stream)
+                split_offset += split_size
+        elif sizes[self.rank] > 0:
+            self.recv(output_tensor, root, stream)
+        self.nccl.ncclGroupEnd()
+
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
             return

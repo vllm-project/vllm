@@ -31,6 +31,9 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_input_tensor_strategy_moe,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -45,6 +48,16 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+def test_static_fp8_moe_input_scales_remain_scalar() -> None:
+    a1_scale, a2_scale = process_fp8_input_tensor_strategy_moe(
+        torch.tensor([0.25, 0.5]),
+        torch.tensor([0.75, 0.6]),
+        enable_eplb=False,
+    )
+
+    assert a1_scale.ndim == a2_scale.ndim == 0
 
 
 @pytest.mark.skipif(

@@ -22,8 +22,8 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
-use vllm_chat::ReasoningParserFactory;
 use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -185,6 +185,12 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// The source of generation-config sampling defaults. `"auto"` loads the
+    /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub generation_config: GenerationConfigMode,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -482,6 +488,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
@@ -535,6 +542,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,

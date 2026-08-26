@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -127,20 +128,6 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # V3.2 main MLA: 656-byte custom storage format. See module docstring.
-            return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
 
 
 @dataclass
@@ -643,18 +630,22 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill). req_id_per_token covers the whole batch; slice it
         # to the MQA tokens (q may exclude prefill tokens routed to dense MHA).
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[: topk_indices.shape[0]],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
 
         return self._bf16_flash_mla_kernel(
             q,
-            kv_c_and_k_pe_cache,
+            kv_rows,
             topk_indices,
             topk_length,
         )

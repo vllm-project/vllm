@@ -452,6 +452,5 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

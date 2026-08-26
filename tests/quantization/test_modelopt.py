@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
+    ModelOptFp8PbWoLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
@@ -137,6 +138,64 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
 
 
+def test_modelopt_fp8_pb_wo_hides_output_padding(default_vllm_config):
+    config = ModelOptFp8Config(
+        quant_method="FP8_PB_WO",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    default_vllm_config.model_config = Mock(dtype=torch.bfloat16)
+    kernel = Mock()
+
+    with (
+        set_current_vllm_config(default_vllm_config),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.init_fp8_linear_kernel",
+            return_value=kernel,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+    ):
+        method = ModelOptFp8PbWoLinearMethod(config)
+        layer = torch.nn.Module()
+        method.create_weights(
+            layer,
+            input_size_per_partition=128,
+            output_partition_sizes=[128, 65],
+            input_size=128,
+            output_size=193,
+            params_dtype=torch.bfloat16,
+        )
+
+    assert layer.weight.shape == (193, 128)
+    assert layer.weight_scale.shape == (2, 1, 1, 1)
+
+    layer.weight.data.fill_(1)
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.shape == (256, 128)
+    assert torch.count_nonzero(layer.weight[193:].float()) == 0
+    kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+    physical_output = torch.randn(2, 256, dtype=torch.bfloat16)
+    kernel.apply_weights.return_value = physical_output
+    bias = torch.randn(193, dtype=torch.bfloat16)
+    output = method.apply(layer, torch.randn(2, 128), bias)
+
+    torch.testing.assert_close(output, physical_output[:, :193] + bias)
+    assert output.shape == (2, 193)
+    assert output.is_contiguous()
+    kernel.apply_weights.assert_called_once()
+    assert kernel.apply_weights.call_args.args[2] is None
+
+
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
     config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
@@ -214,9 +273,9 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
 
     config.apply_vllm_mapper(
-        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_unstacked_mapper()
+        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_rename_mapper()
     )
-    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_unstacked_mapper())
+    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
     expected_prefix = "language_model.model.layers.0.moe.experts"
     assert set(config.quantized_layers) == {
@@ -449,10 +508,11 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PbWoLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PbWoLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            fp8_dtype = current_platform.fp8_dtype()
+            assert qkv_proj.weight.dtype == fp8_dtype
+            assert o_proj.weight.dtype == fp8_dtype
+            assert gate_up_proj.weight.dtype == fp8_dtype
+            assert down_proj.weight.dtype == fp8_dtype
 
             # Block scales; should be materialized as a 2D [out_blk, in_blk] tensor.
             assert hasattr(qkv_proj, "weight_scale")

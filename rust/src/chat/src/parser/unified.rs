@@ -6,7 +6,8 @@
 use std::sync::LazyLock;
 
 pub use vllm_parser::unified::{
-    Gemma4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser, UnifiedParser,
+    Gemma4UnifiedParser, HyV3UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser,
+    UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -16,6 +17,7 @@ use crate::request::ChatTool;
 /// Canonical public names for registered unified parsers.
 pub mod names {
     pub const GEMMA4: &str = "gemma4";
+    pub const HY_V3: &str = "hy_v3";
     pub const INKLING: &str = "inkling";
     pub const KIMI_K3: &str = "kimi_k3";
 }
@@ -41,12 +43,14 @@ impl UnifiedParserFactory {
         let mut factory = Self::default();
 
         factory.register_parser::<Gemma4UnifiedParser>(names::GEMMA4);
+        factory.register_parser::<HyV3UnifiedParser>(names::HY_V3);
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("gemma4", names::GEMMA4)
+            .register_pattern("hy3", names::HY_V3)
             .register_pattern("inkling", names::INKLING)
             .register_pattern("kimi-k3", names::KIMI_K3)
             .register_pattern("kimi_k3", names::KIMI_K3);

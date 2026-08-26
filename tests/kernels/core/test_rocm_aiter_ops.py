@@ -256,11 +256,6 @@ def test_rocm_aiter_rmsnorm_with_add_vs_torch():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AITER Triton RoPE precision issue: https://github.com/ROCm/aiter/issues/4765",
-)
 def test_rocm_aiter_triton_rotary_embedding_vs_torch():
     """rocm_aiter_triton_rotary_embedding matches manual NeoX-style RoPE reference.
 
@@ -298,12 +293,13 @@ def test_rocm_aiter_triton_rotary_embedding_vs_torch():
     sin_pos = sin_half[positions]  # [num_tokens, half_dim]
 
     def apply_rope_ref(t: torch.Tensor) -> torch.Tensor:
-        t_r = t.float().view(num_tokens, num_heads, head_size)
-        c = cos_pos.float().unsqueeze(1)  # [num_tokens, 1, half_dim]
-        s = sin_pos.float().unsqueeze(1)
+        # AITER triton keeps native dtype (no fp32 upcast), so reference must match.
+        t_r = t.view(num_tokens, num_heads, head_size)
+        c = cos_pos.unsqueeze(1)  # [num_tokens, 1, half_dim]
+        s = sin_pos.unsqueeze(1)
         x1, x2 = t_r[..., :half_dim], t_r[..., half_dim:]
         rotated = torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
-        return rotated.to(t.dtype).view(num_tokens, num_heads * head_size)
+        return rotated.view(num_tokens, num_heads * head_size)
 
     ref_q = apply_rope_ref(query)
     ref_k = apply_rope_ref(key)
@@ -320,20 +316,8 @@ def test_rocm_aiter_triton_rotary_embedding_vs_torch():
         True,  # is_neox style -> rotate_style=0
     )
 
-    _assert_close_budget(
-        q_aiter.float(),
-        ref_q.float(),
-        label="triton_rope query",
-        atol=1e-3,
-        rtol=1.6e-2,
-    )
-    _assert_close_budget(
-        k_aiter.float(),
-        ref_k.float(),
-        label="triton_rope key",
-        atol=1e-3,
-        rtol=1.6e-2,
-    )
+    torch.testing.assert_close(q_aiter, ref_q)
+    torch.testing.assert_close(k_aiter, ref_k)
 
 
 def test_rocm_aiter_act_mul_fp8_group_quant_roundtrip():

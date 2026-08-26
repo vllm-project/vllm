@@ -318,6 +318,90 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
         workspace.checkpoint_restore.assert_called_once_with(group)
 
 
+@pytest.mark.parametrize(
+    ("backend", "capability", "world_size", "nodes", "expected"),
+    [
+        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 103, 8, 2, 64 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 103, 2, 1, None),
+        ("mnnvl", 103, 12, 3, None),
+        ("mnnvl", 103, 8, 1, 64 * flashinfer_all_reduce.MiB - 1),
+        ("trtllm", 103, 8, 2, None),
+        ("mnnvl", 90, 8, 2, None),
+    ],
+)
+def test_flashinfer_standalone_size_tuning(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    capability: int,
+    world_size: int,
+    nodes: int,
+    expected: int | None,
+) -> None:
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "current_platform",
+        Mock(get_device_capability=lambda: Mock(to_int=lambda: capability)),
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: nodes)
+
+    assert (
+        flashinfer_all_reduce._get_tuned_standalone_max_size(
+            world_size, backend, Mock()
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(("enabled", "expected"), [(True, 4681), (False, 128)])
+def test_flashinfer_standalone_workspace_size(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool, expected: int
+) -> None:
+    create_workspace = Mock(return_value=Mock(backend="mnnvl"))
+    monkeypatch.setattr(
+        flashinfer_all_reduce.envs, "VLLM_ALLREDUCE_USE_FLASHINFER", enabled
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_resolve_fi_ar_backend",
+        Mock(return_value=("mnnvl", False)),
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "get_node_count", lambda: 2)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_get_tuned_standalone_max_size",
+        Mock(return_value=64 * flashinfer_all_reduce.MiB - 1),
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_create_workspace", create_workspace)
+
+    flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
+
+    assert create_workspace.call_args.args[3] == expected
+
+
+def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
+    output = torch.empty(2)
+    fi_ar_comm = Mock(disabled=False)
+    fi_ar_comm.should_use_fi_ar.return_value = True
+    fi_ar_comm.all_reduce.return_value = output
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.fi_ar_comm = fi_ar_comm
+    communicator.pynccl_comm = Mock(world_size=8)
+    communicator.qr_comm = None
+    nccl_selector = Mock(return_value=True)
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.cuda_communicator."
+        "should_nccl_symm_mem_allreduce",
+        nccl_selector,
+    )
+
+    assert communicator.all_reduce(torch.empty(1)) is output
+    nccl_selector.assert_not_called()
+
+
 def test_async_intermediate_tensors_lazy_wait() -> None:
     work = _DummyWork()
     post_calls = {"n": 0}

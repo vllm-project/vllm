@@ -206,7 +206,7 @@ def get_max_tokens(
 
 
 def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
 
     non_default_args = {}
 
@@ -268,10 +268,10 @@ def jsonify_non_default_args(
 
 
 # Fields whose values must never be logged verbatim.
-_SENSITIVE_ARG_FIELDS = frozenset({"api_key"})
+_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token"})
 
 
-def _redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
+def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of `args` with sensitive values redacted for logging."""
     if not any(key in _SENSITIVE_ARG_FIELDS for key in args):
         return args
@@ -283,7 +283,7 @@ def _redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def log_non_default_args(args: Namespace | EngineArgs):
     non_default_args = get_non_default_args(args)
-    logger.info("non-default args: %s", _redact_sensitive_args(non_default_args))
+    logger.info("non-default args: %s", redact_sensitive_args(non_default_args))
 
 
 def should_include_usage(

@@ -33,6 +33,11 @@ following `quantization.quant_algo` values:
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
 
+!!! note
+    For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
+    use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
+    GEMM backend.
+
 ## Quantizing HuggingFace Models with PTQ
 
 You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.

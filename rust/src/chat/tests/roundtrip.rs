@@ -55,6 +55,12 @@ enum ThinkingBehavior {
     Toggleable { default: bool },
     /// The chat template always behaves as `value` for this fixture.
     Always { value: bool },
+    /// The chat template selects thinking mode through `reasoning_effort`.
+    ReasoningEffort {
+        default: bool,
+        enabled: &'static str,
+        disabled: &'static str,
+    },
 }
 
 impl ThinkingBehavior {
@@ -62,6 +68,7 @@ impl ThinkingBehavior {
         match self {
             Self::Toggleable { default } => default,
             Self::Always { value } => value,
+            Self::ReasoningEffort { default, .. } => default,
         }
     }
 
@@ -76,6 +83,33 @@ impl ThinkingBehavior {
                 Some(value), // explicitly request the supported thinking behavior
                 None,        // use default template behavior
             ],
+            Self::ReasoningEffort { .. } => vec![
+                Some(true),  // explicitly enable thinking
+                Some(false), // explicitly disable thinking
+                None,        // use default template behavior
+            ],
+        }
+    }
+
+    fn apply(self, request: &mut ChatRequest, thinking: Option<bool>) {
+        let Some(thinking) = thinking else {
+            return;
+        };
+
+        match self {
+            Self::Toggleable { .. } | Self::Always { .. } => {
+                for key in ["thinking", "enable_thinking"] {
+                    request.chat_options.template_kwargs.insert(key.to_string(), thinking.into());
+                }
+            }
+            Self::ReasoningEffort {
+                enabled, disabled, ..
+            } => {
+                request.chat_options.template_kwargs.insert(
+                    "reasoning_effort".to_string(),
+                    if thinking { enabled } else { disabled }.into(),
+                );
+            }
         }
     }
 }
@@ -242,6 +276,23 @@ impl RoundtripCase {
         }
     }
 
+    /// HY3 suffixed reasoning/tool markers discovered from tokenizer added vocab.
+    fn hy_v3() -> Self {
+        Self {
+            model_id: "tencent/Hy3",
+            assistant_stop_suffix: "<｜hy_eos:opensource｜>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::ReasoningEffort {
+                default: false,
+                enabled: "high",
+                disabled: "no_think",
+            },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
     fn seed_oss() -> Self {
         Self {
@@ -345,6 +396,9 @@ roundtrip_tests! {
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     // K3 drops plain-assistant reasoning in history; tool-call turns keep it.
     kimi_k3 => [tool_call_mix],
+    // HY3's final plain-assistant history omits EOS; tool-call history keeps it
+    // and exercises both stages of the tokenizer-derived unified parser.
+    hy_v3 => [tool_call_mix],
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
 }
@@ -370,6 +424,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
         Vec::new(),
         thinking,
+        case.thinking_behavior,
     );
     let expected_reasoning = "Need compute 2 + 2 directly.";
     let expected_text = "The answer is 4.";
@@ -417,6 +472,7 @@ async fn run_roundtrip_tool_call_mix(
         )],
         test_tools(),
         Some(true), // always enable thinking in this fixture
+        case.thinking_behavior,
     );
     let expected_reasoning = "Need call the weather and add tools.";
     let expected_text = "I will call the tools.";
@@ -838,6 +894,7 @@ fn roundtrip_request(
     messages: Vec<ChatMessage>,
     tools: Vec<ChatTool>,
     thinking: Option<bool>,
+    thinking_behavior: ThinkingBehavior,
 ) -> ChatRequest {
     let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, None, true)
         .expect("tool context should resolve");
@@ -848,13 +905,9 @@ fn roundtrip_request(
         ..ChatRequest::for_test()
     };
 
-    // Explicitly enable or disable thinking so that rendering and parsing the reasoning block is
-    // exercised or skipped in the roundtrip. If unspecified, use the default template behavior.
-    if let Some(thinking) = thinking {
-        for key in ["thinking", "enable_thinking"] {
-            request.chat_options.template_kwargs.insert(key.to_string(), thinking.into());
-        }
-    }
+    // Explicitly enable or disable thinking using the controls understood by
+    // this model's template. If unspecified, use the template default.
+    thinking_behavior.apply(&mut request, thinking);
 
     request
 }

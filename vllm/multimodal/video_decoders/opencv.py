@@ -78,6 +78,27 @@ class OpenCVVideoBackendMixin:
     def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
+        # CAP_PROP_FRAME_COUNT counts every physical sample in the container,
+        # overstating the presentable frames when an mp4 edit list hides the
+        # decode lead-in (e.g. a lossless `ffmpeg -ss ... -c copy` trim).
+        # Cross-check with an end-of-stream seek: the FFMPEG backend reports
+        # the resulting position against the edit-list-aware timeline, which
+        # exposes the true frame count without decoding anything. The seek
+        # may land mid-stream on corrupt files, so only trust it when the
+        # stream really ends there. A one-frame tolerance keeps mere header
+        # miscounts from being "corrected".
+        if total_frames_num > 0 and cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
+            visible_frames = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+            at_stream_end = not cap.grab()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            if at_stream_end and 0 < visible_frames < total_frames_num - 1:
+                logger.warning(
+                    "Video header claims %d frames but only %d are "
+                    "presentable; sampling over the true frame count.",
+                    total_frames_num,
+                    visible_frames,
+                )
+                total_frames_num = visible_frames
         duration = total_frames_num / original_fps if original_fps > 0 else 0
         return VideoSourceMetadata(
             total_frames_num=total_frames_num,

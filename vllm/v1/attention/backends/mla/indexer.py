@@ -36,7 +36,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
 
@@ -157,8 +157,11 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Only the varlen paged MQA logits kernel takes per-request query
-        # lengths from device tensors; otherwise the indexer needs uniform ones.
-        return _supports_varlen_paged_mqa_logits()
+        # lengths from device tensors natively. Hopper can instead flatten each
+        # query into a single-token row using device-built metadata.
+        return _supports_varlen_paged_mqa_logits() or (
+            _supports_flattened_device_query_lens()
+        )
 
     @staticmethod
     def get_name() -> str:
@@ -176,33 +179,17 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def get_builder_cls() -> type["DeepseekV32IndexerMetadataBuilder"]:
         return DeepseekV32IndexerMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # DeepseekV32Indexer kernels do not support cross-layer
-            # KV cache layout. Identity permutation keeps num_layers
-            # first, signaling incompatibility.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
-
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # DeepSeek-V4 packs the indexer pages beside the MLA latent pages inside
+        # each block, so the layer dim must sit inside the block dim.
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -493,6 +480,14 @@ def _supports_varlen_paged_mqa_logits() -> bool:
     )
 
 
+def _supports_flattened_device_query_lens() -> bool:
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(90)
+        and has_deep_gemm()
+    )
+
+
 def _supports_native_decode(next_n: int) -> bool:
     """Whether decode can pass `next_n` Q rows per request to the kernel
     instead of flattening to one single-token row per query, which re-reads
@@ -507,6 +502,16 @@ def _supports_native_decode(next_n: int) -> bool:
     return next_n in (1, 2)
 
 
+def _use_flattening(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    next_n = 1 + vllm_config.num_speculative_tokens
+    return not _supports_native_decode(next_n) or (
+        speculative_config is not None
+        and speculative_config.enable_adaptive_verification
+        and _supports_flattened_device_query_lens()
+    )
+
+
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # The indexer opts out of the shared reorder-threshold vote (see __init__),
     # so this is None; its own split uses self.decode_threshold.
@@ -519,7 +524,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
-        if _supports_varlen_paged_mqa_logits():
+        if _supports_varlen_paged_mqa_logits() or _use_flattening(vllm_config):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
@@ -553,7 +558,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
-        self.use_flattening = not _supports_native_decode(next_n)
+        self.use_flattening = _use_flattening(self.vllm_config)
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
@@ -617,7 +622,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = 1
         # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-            self.compress_ratio = self.kv_cache_spec.compress_ratio
+            # MLA compression is a whole number of tokens per state (fractions
+            # are whisper block pooling and never reach MLA).
+            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
                 "DCP is not supported with sparse indexer KV compression "
@@ -674,11 +682,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         max_decode_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
         """Prepare native or per-token flattened decode tensors."""
+        spec_config = self.vllm_config.speculative_config
+        adaptive = bool(spec_config and spec_config.enable_adaptive_verification)
         min_decode_len = int(decode_lens_cpu.min().item())
         if not use_native:
             assert self.decode_seq_lens_buffer.dim() == 1
             if (
                 not self.supports_varlen
+                and (num_decodes == 1 or not adaptive)
                 and min_decode_len == max_decode_len
                 and num_decodes * max_decode_len == num_decode_tokens
             ):
@@ -861,7 +872,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
                 seq_lens,
                 block_table,
-                self.kv_cache_spec.storage_block_size,
+                self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
@@ -1029,7 +1040,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
-                    self.kv_cache_spec.storage_block_size,
+                    self.kv_cache_spec.num_states,
                     self.num_sms,
                     indices=decode_indices,
                 )

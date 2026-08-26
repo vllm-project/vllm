@@ -100,8 +100,13 @@ class XPUWorker(Worker):
             current_platform.dist_backend,
         )
 
-        # global all_reduce needed for overall oneccl warm up
-        if torch.distributed.is_xccl_available():
+        # oneCCL warm-up; only meaningful for multi-device runs. Requiring it
+        # with a single worker breaks platforms where oneCCL cannot enumerate
+        # device topology (e.g. paravirtualized GPUs).
+        if (
+            self.parallel_config.world_size > 1
+            and torch.distributed.is_xccl_available()
+        ):
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
         if self.use_v2_model_runner:

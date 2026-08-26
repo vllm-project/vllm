@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 class _DictStore:
@@ -160,8 +162,18 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     cfg = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
-            KVCacheTensor(size=8192, shared_by=["L0"]),
-            KVCacheTensor(size=8192, shared_by=["L1"]),
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * swa.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * swa.page_size_bytes,
+                block_stride=swa.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["L0"], full),
@@ -178,9 +190,11 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # Register kv_caches using mocked thread classes so register_kv_caches
     # doesn't try to start real background threads (which set ready_event).
+    raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
+    raw_swa = torch.zeros(4 * swa.page_size_bytes, dtype=torch.int8)
     kv_caches = {
-        "L0": torch.zeros(2, 4, 8, 8, 64),
-        "L1": torch.zeros(2, 4, 8, 8, 64),
+        "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_swa, swa, 4, 1, KVCacheLayout.LBNHC)[0],
     }
 
     def _fake_thread_init(*args, **kwargs):
@@ -225,7 +239,8 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+        # Block 0 is reserved as NULL_BLOCK_ID by the production block pool.
+        block_ids=([1, 2, 3, 4], [1, 2, 3, 4]),
         block_hashes=hs,
         can_save=True,
         store_job_id=1,

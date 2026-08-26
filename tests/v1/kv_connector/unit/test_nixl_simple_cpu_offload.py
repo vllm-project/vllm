@@ -145,10 +145,15 @@ def _make_kv_cache_config(
             ),
         )
     ]
+    # Each group packs its two layers densely; groups overlay one allocation.
+    layer_stride = _BYTES_PER_BLOCK * num_blocks
+    size = 2 * layer_stride
     tensors = [
         KVCacheTensor(
-            size=_BYTES_PER_BLOCK * num_blocks,
-            shared_by=fa_layers,
+            size=size,
+            layers=fa_layers,
+            layer_stride=layer_stride,
+            block_stride=_BYTES_PER_BLOCK,
         )
     ]
     if swa_enabled:
@@ -167,8 +172,10 @@ def _make_kv_cache_config(
         )
         tensors.append(
             KVCacheTensor(
-                size=_BYTES_PER_BLOCK * num_blocks,
-                shared_by=sw_layers,
+                size=size,
+                layers=sw_layers,
+                layer_stride=layer_stride,
+                block_stride=_BYTES_PER_BLOCK,
             )
         )
     return KVCacheConfig(

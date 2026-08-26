@@ -16,7 +16,11 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    PrefillStats,
+    RequestSpecDecodeMetrics,
+    SchedulerStats,
+)
 from vllm.v1.outputs import IterStats, LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
@@ -90,6 +94,7 @@ class EngineCoreReadyResponse:
     instance_id: str
     supports_lora: bool
     max_loras: int
+    mamba_block_size: int | None = None
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
@@ -264,6 +269,10 @@ class EngineCoreOutput(
     new_sampling_mask: SamplingMaskLists | None = None
 
     iter_stats: IterStats | None = None
+    
+    # Per-request spec-decode acceptance; attached only on the final output.
+    # Appended last so `array_like` positional serialization stays compatible.
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
     @property
     def finished(self) -> bool:

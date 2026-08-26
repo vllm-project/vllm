@@ -45,7 +45,7 @@ def fused_rope_unified_mla_kv_cache_update_impl(
             cos_sin_cache,
             is_neox,
             layer_slot_mapping,
-            kv_cache,
+            kv_cache.squeeze(1),
             kv_cache_dtype,
             kv_cache_scale,
         )

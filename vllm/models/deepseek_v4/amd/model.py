@@ -305,6 +305,10 @@ class DeepseekV4MoE(nn.Module):
         return final_hidden_states.view(org_shape)
 
 
+# Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
+_AITER_MHC_FUSED_RMSNORM_SIZES = frozenset({1280, 2560, 4096, 7168})
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -384,9 +388,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
-        self.use_fused_mhc = HAS_TILELANG_MHC and not (
-            HAS_AITER_MHC and self.hidden_size % 256 == 0
+        # AITER mhc kernels (pre/post/fused) require hc_mult == 4.
+        use_aiter_mhc = (
+            HAS_AITER_MHC and self.hidden_size % 256 == 0 and self.hc_mult == 4
         )
+        # Prefer AITER fused post+pre when eligible; otherwise TileLang.
+        self.use_fused_mhc = use_aiter_mhc or HAS_TILELANG_MHC
+        # Fold attn/ffn RMSNorm into MHC only when the active backend's
+        # fused-rmsnorm path supports this hidden size.
+        if use_aiter_mhc:
+            self.fuse_mhc_rmsnorm = self.hidden_size in _AITER_MHC_FUSED_RMSNORM_SIZES
+        else:
+            self.fuse_mhc_rmsnorm = HAS_TILELANG_MHC and self.use_fused_mhc
 
     def hc_pre(
         self,
@@ -394,7 +407,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ):
+        """Reduce HC residual streams to the next sub-layer input.
+
+        When ``norm_weight`` is set, RMSNorm is fused into the pre kernel.
+        """
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
             fn=hc_fn,
@@ -405,6 +424,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             hc_sinkhorn_eps=self.hc_eps,
             hc_post_mult_value=self.hc_post_alpha,
             sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
         return layer_input, post_mix, res_mix
 
@@ -426,11 +447,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_norm_weight = self.attn_norm.weight if self.fuse_mhc_rmsnorm else None
+        attn_norm_eps = (
+            self.attn_norm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
+        )
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
             x, post_mix, res_mix = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
         else:
             residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
@@ -446,11 +476,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
 
-        x = self.attn_norm(x)
+        if not self.fuse_mhc_rmsnorm:
+            x = self.attn_norm(x)
         x = self.attn(positions, x, None)
 
+        ffn_norm_weight = self.ffn_norm.weight if self.fuse_mhc_rmsnorm else None
+        ffn_norm_eps = self.ffn_norm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
@@ -464,8 +499,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
+            norm_weight=ffn_norm_weight,
+            norm_eps=ffn_norm_eps,
         )
-        x = self.ffn_norm(x)
+        if not self.fuse_mhc_rmsnorm:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
@@ -678,7 +716,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
             )
             if (idx + 1) in self.aux_hidden_state_layers:
-                # On the unfused (aiter) path the layer already applied hc_post,
+                # On the unfused path the layer already applied hc_post,
                 # so hidden_states is the reconstructed stream; on the fused
                 # path reconstruct it via hc_post before averaging.
                 if layer.use_fused_mhc:
@@ -909,11 +947,12 @@ def _make_deepseek_v4_weights_mapper(
     # When shared experts are fused into the routed MXFP4 grouped GEMM, the
     # shared_experts tensors are redirected to routed expert slots ; leave
     # their names untouched here.
-    substr_map = (
+    orig_to_new_substr: dict[str, str | None] = (
         {}
         if fuse_shared_experts
         else {".shared_experts.w2": ".shared_experts.down_proj"}
     )
+    orig_to_new_substr["mtp."] = None
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
@@ -929,7 +968,7 @@ def _make_deepseek_v4_weights_mapper(
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
             ".input_scale": ".input_scale_2",
         },
-        orig_to_new_substr=substr_map,
+        orig_to_new_substr=orig_to_new_substr,
     )
 
 
@@ -1000,7 +1039,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:

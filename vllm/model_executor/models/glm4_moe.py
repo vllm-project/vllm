@@ -502,6 +502,8 @@ class Glm4MoeModel(nn.Module):
 
 
 class Glm4MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list[Glm4MoE]
+
     def extract_moe_parameters(self, example_moe: Glm4MoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No Glm4MoE layer found in model.layers.")

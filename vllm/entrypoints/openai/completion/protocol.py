@@ -13,7 +13,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
     UsageInfo,
@@ -660,7 +660,7 @@ class CompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -692,4 +692,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None

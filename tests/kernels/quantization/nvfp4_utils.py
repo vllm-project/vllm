@@ -43,6 +43,7 @@ def dequantize_nvfp4_to_dtype(
     device,
     block_size=16,
     is_sf_128x4_layout=True,
+    is_sf_linear_layout=False,
 ):
     """Dequantize the fp4 tensor back to high precision."""
     # Two fp4 values are packed into one uint8.
@@ -52,7 +53,9 @@ def dequantize_nvfp4_to_dtype(
     tensor_f32 = break_fp4_bytes(tensor_fp4, dtype)
     tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
     tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
-    if is_sf_128x4_layout:
+    if is_sf_linear_layout:
+        tensor_sf = tensor_sf[:m, : k // block_size]
+    elif is_sf_128x4_layout:
         tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
     else:
         tensor_sf = convert_swizzled_8x4_layout_to_linear(tensor_sf, m, k, block_size)
@@ -146,7 +149,15 @@ def get_nvfp4_global_scale(a: torch.Tensor):
     return (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.abs(a).max().to(torch.float32)
 
 
-def quant_nvfp4_tensor(a: torch.Tensor):
+def quant_nvfp4_tensor(
+    a: torch.Tensor,
+    *,
+    is_sf_swizzled_layout: bool = True,
+):
     a_global_scale = get_nvfp4_global_scale(a)
-    a_quant, a_block_scale = scaled_fp4_quant(a, a_global_scale)
+    a_quant, a_block_scale = scaled_fp4_quant(
+        a,
+        a_global_scale,
+        is_sf_swizzled_layout=is_sf_swizzled_layout,
+    )
     return a_quant, a_block_scale, a_global_scale

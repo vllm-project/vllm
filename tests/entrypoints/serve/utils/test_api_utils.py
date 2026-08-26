@@ -8,8 +8,8 @@ import pytest
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
-    _redact_sensitive_args,
     get_max_tokens,
+    redact_sensitive_args,
     should_include_usage,
 )
 
@@ -120,15 +120,23 @@ class TestRedactSensitiveArgs:
     API_KEY = "sk-test-secret-12345"
 
     def test_redact_replaces_sensitive_values_only(self):
-        args = {"api_key": self.API_KEY, "other": "visible"}
-        redacted = _redact_sensitive_args(args)
-        assert redacted == {"api_key": "***", "other": "visible"}
+        args = {"api_key": self.API_KEY, "hf_token": "hf_secret", "other": "visible"}
+        redacted = redact_sensitive_args(args)
+        assert redacted == {
+            "api_key": "***",
+            "hf_token": "***",
+            "other": "visible",
+        }
         # original dict must not be mutated
-        assert args == {"api_key": self.API_KEY, "other": "visible"}
+        assert args == {
+            "api_key": self.API_KEY,
+            "hf_token": "hf_secret",
+            "other": "visible",
+        }
 
     def test_no_sensitive_fields_returns_original(self):
         args = {"model_tag": "org/model", "other": "visible"}
-        assert _redact_sensitive_args(args) is args
+        assert redact_sensitive_args(args) is args
 
     def test_api_key_not_in_log(self, monkeypatch, caplog):
         non_default = {
@@ -147,3 +155,18 @@ class TestRedactSensitiveArgs:
         # non-sensitive args are still logged
         assert "org/model" in message
         assert "qwen3_coder" in message
+
+    def test_hf_token_not_in_log(self, monkeypatch, caplog):
+        hf_token = "hf_TESTTOKENVALUE123"
+        non_default = {
+            "model_tag": "org/model",
+            "hf_token": hf_token,
+            "tool_call_parser": "qwen3_coder",
+        }
+        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
+            api_utils.log_non_default_args(args=Namespace())
+        message = caplog.text
+        assert hf_token not in message
+        assert "'hf_token': '***'" in message
+        assert "org/model" in message

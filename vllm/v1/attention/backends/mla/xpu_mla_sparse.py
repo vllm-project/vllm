@@ -23,7 +23,8 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
@@ -66,16 +67,6 @@ class XPUMLASparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
@@ -96,6 +87,23 @@ class XPUMLASparseMetadata(AttentionMetadata):
 
     block_size: int = 1
     topk_tokens: int = 2048
+
+    # The shared MLA layer (`mla_attention.py::forward_impl`) reads these
+    # decode/prefill counts unconditionally for every MLA metadata (it asserts
+    # `num_decodes`/`num_prefills`/`num_decode_tokens is not None` and uses
+    # `num_decode_tokens` to split MQA vs dense-MHA tokens). The CUDA sparse
+    # backends carry them via `SparseMLACommonMetadataBuilder`; this XPU backend
+    # builds its own metadata and previously omitted them, so a sparse-MLA
+    # (DeepSeek / GLM DSA) run on XPU crashed with
+    # `'XPUMLASparseMetadata' object has no attribute 'num_decode_tokens'`.
+    # This backend serves both prefill and decode through the top-k sparse MQA
+    # path (see `forward_mqa`), so all tokens are routed as "decode"
+    # (`num_decode_tokens == num_actual_tokens`, `num_prefills == 0`); that keeps
+    # the shared layer's `num_mha_tokens` at 0 and never enters the dense-MHA
+    # prefill branch (which needs prefill-only fields this backend lacks).
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
 
 
 @dataclass
@@ -166,6 +174,11 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            # Route every token through the sparse MQA path (see the field
+            # definitions above); this backend has no dense-MHA prefill.
+            num_decodes=common_attn_metadata.num_reqs,
+            num_prefills=0,
+            num_decode_tokens=common_attn_metadata.num_actual_tokens,
         )
         return metadata
 
@@ -249,16 +262,18 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_indices_global = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
-        attn_out = self._forward_bf16_kv(
-            q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
-        )
+        attn_out = self._forward_bf16_kv(q, kv_rows, topk_indices_global, attn_metadata)
 
         return attn_out, None

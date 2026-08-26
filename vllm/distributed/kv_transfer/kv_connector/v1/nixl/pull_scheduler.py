@@ -65,9 +65,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
-
         if (
             params is not None
             and params.get("do_remote_decode")

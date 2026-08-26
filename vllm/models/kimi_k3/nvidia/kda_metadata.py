@@ -44,6 +44,9 @@ if TYPE_CHECKING:
     )
 
 
+FLASHKDA_CHUNK_SIZE = 16
+
+
 @cache
 def _metadata_launch_pdl() -> bool:
     return current_platform.is_arch_support_pdl()
@@ -258,11 +261,18 @@ class KDARecoverSSMCommitMetadata:
 
 
 @dataclass
+class KDACheckpointMetadata:
+    checkpoint_offsets: torch.Tensor
+    state_indices: torch.Tensor
+
+
+@dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
+    checkpoint: KDACheckpointMetadata | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -296,6 +306,8 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    mamba_aligned_state_indices: torch.Tensor | None = None
+
     def __init__(
         self,
         kv_cache_spec: MambaSpec,
@@ -357,12 +369,22 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)
         #   indices = (start[:, None] + offsets).to(torch.int64)
         #   block_table_tensor = torch.gather(block_table, 1, indices)
-        block_table_tensor = _mamba_get_block_table_tensor(
-            m.block_table_tensor,
-            m.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            if self.mamba_aligned_state_indices is not None:
+                block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
+            else:
+                assert not self.vllm_config.use_v2_model_runner, (
+                    "Aligned Mamba state indices must be precomputed"
+                )
+                # TODO: remove this MRV1 fallback once MRV2 is the default runner.
+                block_table_tensor = _mamba_get_block_table_tensor(
+                    m.block_table_tensor,
+                    m.seq_lens,
+                    self.kv_cache_spec,
+                    self.vllm_config.cache_config.mamba_cache_mode,
+                )
+        else:
+            block_table_tensor = m.block_table_tensor
 
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks_cpu = None
@@ -557,6 +579,62 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             has_initial_state = None
 
+        checkpoint = None
+        if (
+            num_prefills > 0
+            and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            and self.vllm_config.cache_config.mamba_cache_mode == "align"
+        ):
+            # prepare checkpoint metadata
+            assert m.seq_lens_cpu_upper_bound is not None
+            request_rows = list(range(m.num_reqs))
+            if spec_sequence_masks_cpu is not None:
+                # get non spec request rows
+                request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
+            all_query_lens = query_start_loc_cpu.diff().tolist()
+            query_lens = [all_query_lens[row] for row in request_rows]
+            seq_lens = m.seq_lens_cpu_upper_bound.tolist()
+            block_size = self.kv_cache_spec.block_size
+            checkpoint_splits = []
+            checkpoint_cols = []
+            for row, query_len in zip(request_rows, query_lens):
+                seq_len = seq_lens[row]
+                offset = seq_len // block_size * block_size - (seq_len - query_len)
+                # offset should be less than query_len
+                valid = (
+                    seq_len % block_size != 0
+                    and 0 < offset < query_len
+                    and offset % FLASHKDA_CHUNK_SIZE == 0
+                )
+                offset = offset if valid else 0
+                first_len = offset or query_len
+                checkpoint_splits.append((first_len, query_len - first_len))
+                checkpoint_cols.append(seq_len // block_size - 1 if valid else -1)
+            if any(tail for _, tail in checkpoint_splits):
+                checkpoint_offsets_tensor = async_tensor_h2d(
+                    [first if tail else 0 for first, tail in checkpoint_splits],
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
+                request_rows_tensor = async_tensor_h2d(
+                    request_rows, dtype=torch.int64, device=query_start_loc.device
+                )
+                checkpoint_cols_tensor = async_tensor_h2d(
+                    checkpoint_cols, dtype=torch.int64, device=query_start_loc.device
+                )
+                checkpoint_state_indices = m.block_table_tensor[
+                    request_rows_tensor, checkpoint_cols_tensor
+                ]
+                checkpoint_state_indices = torch.where(
+                    checkpoint_cols_tensor >= 0,
+                    checkpoint_state_indices,
+                    NULL_BLOCK_ID,
+                )
+                checkpoint = KDACheckpointMetadata(
+                    checkpoint_offsets_tensor,
+                    checkpoint_state_indices,
+                )
+
         # Prepare per-request tensors for cudagraph replay. num_actual_tokens
         # may be token-padded, while state/query/acceptance metadata is indexed
         # by request.
@@ -647,6 +725,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            checkpoint=checkpoint,
         )
 
 

@@ -11,7 +11,7 @@
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
-/vllm/model_executor/layers/batch_invariant.py @yewentao256
+/vllm/model_executor/determinism/ @yewentao256
 /vllm/model_executor/custom_op.py @shen-shanshan
 /vllm/ir @ProExpertProg
 /vllm/kernels/ @ProExpertProg @tjtanaa
@@ -107,7 +107,6 @@
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
-/tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium

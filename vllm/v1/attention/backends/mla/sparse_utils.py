@@ -7,6 +7,28 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
+def flat_kv_row_view(
+    kv_cache: torch.Tensor,  # [num_blocks, block_size, head_dim]
+    block_size: int,
+) -> tuple[torch.Tensor, int]:
+    """Flat [row, head_dim] view of a paged cache and its physical rows per block.
+
+    Token offset is  ``block_idx * block_stride_rows + offset_in_block``.
+    When other layers' pages sit between consecutive blocks of this cache,
+    ``block_stride_rows`` exceeds ``block_size``; those in-between rows are never
+    indexed (`triton_convert_req_index_to_global_index` ensures this).
+    """
+    num_blocks, _, head_dim = kv_cache.shape
+    assert kv_cache.stride(0) % head_dim == 0, (
+        "block stride is not a whole number of rows; flat row indexing would "
+        "silently misaddress"
+    )
+    block_stride_rows = kv_cache.stride(0) // head_dim
+    num_rows = (num_blocks - 1) * block_stride_rows + block_size
+    rows = kv_cache.as_strided((num_rows, head_dim), (head_dim, 1))
+    return rows, block_stride_rows
+
+
 # Kernel with prefill workspace support and valid count tracking
 @triton.jit
 def _convert_req_index_to_global_index_kernel(
@@ -20,6 +42,7 @@ def _convert_req_index_to_global_index_kernel(
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_STRIDE_ROWS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
@@ -86,7 +109,7 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     is_invalid_tok |= ~valid_block | is_remote
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
-    out_val = base * BLOCK_SIZE + inblock_off
+    out_val = base * BLOCK_STRIDE_ROWS + inblock_off
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -156,6 +179,7 @@ def triton_convert_req_index_to_global_index(
     block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     BLOCK_SIZE: int = 64,
+    BLOCK_STRIDE_ROWS: int | None = None,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
     HAS_PREFILL_WORKSPACE: bool = False,
@@ -249,6 +273,7 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS if BLOCK_STRIDE_ROWS is not None else BLOCK_SIZE,
         block_n,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
@@ -365,6 +390,7 @@ def triton_filter_and_convert_dcp_index(
         None,
         max_num_blocks_per_req,
         BLOCK_SIZE,
+        BLOCK_SIZE,  # dense caches on the DCP path
         block_n,
         False,  # HAS_PREFILL
         count_valid,
