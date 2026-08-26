@@ -348,9 +348,20 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             )
         )
 
-        # For TRITON backends, weights are wrapped tensors from triton_kernels
-        # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        # For TRITON backends (and AITER_MXFP4_BF16 on gfx1250), weights
+        # are wrapped tensors from triton_kernels that don't support
+        # .detach(). Manually assign parameters.
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
+
+        uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and is_gfx1250
+        )
+        if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -398,7 +409,16 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
+
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and is_gfx1250
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
