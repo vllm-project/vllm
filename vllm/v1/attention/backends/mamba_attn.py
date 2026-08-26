@@ -26,6 +26,39 @@ from vllm.v1.kv_cache_interface import MambaSpec
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
+def uniform_decode_split(
+    common_attn_metadata: CommonAttentionMetadata, decode_threshold: int
+) -> tuple[int, int, int, int] | None:
+    """Fast pure-decode replacement for the builder's batch split.
+
+    In steady decode (every step of a long generation) the batch has no
+    prefilling row and every query fits the decode threshold, so the
+    single-token-prefill reclassification and
+    ``split_decodes_and_prefills`` re-derive the same constants from CPU
+    tensors on every step. Under exactly those conditions both are
+    value-determined: no row reclassifies (nothing is prefilling) and the
+    split is all-decode by contract.
+
+    Returns:
+        ``(num_decodes, num_prefills, num_decode_tokens,
+        num_prefill_tokens)`` when the fast path applies, else ``None``
+        (callers must then run the full path).
+    """
+    is_prefilling = common_attn_metadata.is_prefilling
+    if (
+        common_attn_metadata.max_query_len > decode_threshold
+        or is_prefilling is None
+        or bool(is_prefilling.any())
+    ):
+        return None
+    return (
+        common_attn_metadata.num_reqs,
+        0,
+        common_attn_metadata.num_actual_tokens,
+        0,
+    )
+
+
 @dataclass
 class BaseMambaAttentionMetadata:
     num_prefills: int
@@ -196,6 +229,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
         else:
             self.decode_bc_pre_scratch = None
+
+        # Step-invariant gather offsets for mamba_get_block_table_tensor
+        # ("align" mode otherwise re-materializes this arange every build).
+        self._state_gather_offsets: torch.Tensor | None = None
+        if vllm_config.cache_config.mamba_cache_mode not in ("all", "none"):
+            self._state_gather_offsets = torch.arange(
+                1 + kv_cache_spec.num_speculative_blocks,
+                device=device,
+                dtype=torch.int32,
+            )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -450,37 +493,48 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.reorder_batch_threshold if num_accepted_tokens is not None else 1
         )
 
-        # FULL-CG dispatch is shape-based, so one-token prefills with
-        # prior Mamba state can replay a decode graph while `is_prefilling`
-        # is still true. Treat them as decode/update rows. This is required
-        # for NIXL disagg's h(N-1)->N recompute path and for sporadic
-        # final single-token prefill chunks that land in a `uniform` FULL-CG
-        # batch. Relies on `reorder` putting short extends before pure prefills.
-        is_prefilling = common_attn_metadata.is_prefilling
-        assert is_prefilling is not None
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        assert seq_lens_cpu is not None
-        query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
-        single_token_prefill_rows = is_prefilling & (query_lens_cpu == 1)
-        # First-token prefills have no prior Mamba state and must stay prefills.
-        has_prior_state = seq_lens_cpu > 1
-        prefill_to_decode = single_token_prefill_rows & has_prior_state
-        if torch.any(prefill_to_decode).item():
-            # ReplaySSM handles these rows as single-token flushes (see the
-            # write-position derivation below), same as the baseline decode path.
-            is_prefilling = is_prefilling.clone()
-            is_prefilling[prefill_to_decode] = False
-            common_attn_metadata = common_attn_metadata.replace(
-                is_prefilling=is_prefilling
+        fast_split = uniform_decode_split(common_attn_metadata, decode_threshold)
+        if fast_split is not None:
+            # Steady decode: skip the reclassification + split re-derivation
+            # (their results are value-determined, see uniform_decode_split).
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                fast_split
             )
+        else:
+            # FULL-CG dispatch is shape-based, so one-token prefills with
+            # prior Mamba state can replay a decode graph while `is_prefilling`
+            # is still true. Treat them as decode/update rows. This is required
+            # for NIXL disagg's h(N-1)->N recompute path and for sporadic
+            # final single-token prefill chunks that land in a `uniform` FULL-CG
+            # batch. Relies on `reorder` putting short extends before pure
+            # prefills.
+            is_prefilling = common_attn_metadata.is_prefilling
+            assert is_prefilling is not None
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
+            query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
+            single_token_prefill_rows = is_prefilling & (query_lens_cpu == 1)
+            # First-token prefills have no prior Mamba state and must stay
+            # prefills.
+            has_prior_state = seq_lens_cpu > 1
+            prefill_to_decode = single_token_prefill_rows & has_prior_state
+            if torch.any(prefill_to_decode).item():
+                # ReplaySSM handles these rows as single-token flushes (see the
+                # write-position derivation below), same as the baseline decode
+                # path.
+                is_prefilling = is_prefilling.clone()
+                is_prefilling[prefill_to_decode] = False
+                common_attn_metadata = common_attn_metadata.replace(
+                    is_prefilling=is_prefilling
+                )
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=decode_threshold,
-                treat_short_extends_as_decodes=False,
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=decode_threshold,
+                    treat_short_extends_as_decodes=False,
+                )
             )
-        )
 
         # Need flags to indicate if there are initial states
         has_initial_states_p = None
@@ -529,6 +583,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 common_attn_metadata.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
+                gather_offsets=self._state_gather_offsets,
             )
 
         if state_indices_tensor.dim() == 1:
@@ -815,6 +870,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            gather_offsets=self._state_gather_offsets,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

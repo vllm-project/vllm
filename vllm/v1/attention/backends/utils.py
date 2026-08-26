@@ -1130,6 +1130,7 @@ def mamba_get_block_table_tensor(
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
     mamba_cache_mode: str,
+    gather_offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Get the block table tensor for mamba kernels from the input
@@ -1146,6 +1147,10 @@ def mamba_get_block_table_tensor(
     - "align": input  (#requests, cdiv(max_model_len, block_size));
                output (#requests, 1 + num_speculative_blocks), which are the last
                1 + num_speculative_blocks of each request.
+
+    ``gather_offsets`` optionally supplies the step-invariant
+    ``arange(1 + num_speculative_blocks)`` int32 tensor so per-step callers
+    avoid re-materializing it.
     """
     if mamba_cache_mode in ("all", "none"):
         return block_table
@@ -1157,10 +1162,13 @@ def mamba_get_block_table_tensor(
         start_indices.clamp_(min=0)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
-        offsets = torch.arange(
-            1 + kv_cache_spec.num_speculative_blocks,
-            device=block_table.device,
-            dtype=torch.int32,
+        if gather_offsets is None:
+            gather_offsets = torch.arange(
+                1 + kv_cache_spec.num_speculative_blocks,
+                device=block_table.device,
+                dtype=torch.int32,
+            )
+        indices_to_gather = (start_indices.unsqueeze(1) + gather_offsets).to(
+            torch.int64
         )
-        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
         return torch.gather(block_table, 1, indices_to_gather)
