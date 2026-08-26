@@ -1531,7 +1531,10 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         estimate_local_valid_shape_m=lambda _: 6,
         prepare_buffers=lambda *_: buffers,
         _get_permute_scratch=lambda _: None,
-        quantize_input=lambda _, *, inputs, quanted_input: (inputs, None),
+        quantize_input=lambda _, *, inputs, input_scale=None, quanted_input: (
+            inputs,
+            input_scale,
+        ),
         humming_forward=Mock(),
         compute_config_str="",
         w13_tuning_config_str="",

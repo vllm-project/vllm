@@ -30,16 +30,22 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     k_out_stride_t,
     gate_out_stride_t,
     cache_stride_p,
+    positions_stride_m,
+    positions_stride_t,
     num_q_heads: tl.constexpr,
     num_kv_heads: tl.constexpr,
     head_dim: tl.constexpr,
     rotary_dim: tl.constexpr,
     half_rotary: tl.constexpr,
     eps: tl.constexpr,
+    norm_beta: tl.constexpr,
     INPUT_DTYPE: tl.constexpr,
     HEAD_BLOCK: tl.constexpr,
     ROT_HALF_BLOCK: tl.constexpr,
     HAS_PASS: tl.constexpr,
+    HAS_MROPE: tl.constexpr,
+    MROPE_SECTION_H: tl.constexpr,
+    MROPE_SECTION_W: tl.constexpr,
 ):
     token = tl.program_id(0)
     head = tl.program_id(1)
@@ -61,7 +67,7 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     x = tl.load(in_base + head_offs, mask=head_mask, other=0.0).to(tl.float32)
     var = tl.sum(x * x, axis=0) / head_dim
     inv_rms = tl.rsqrt(var + eps)
-    w = tl.load(w_ptr + head_offs, mask=head_mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + head_offs, mask=head_mask, other=0.0).to(tl.float32) + norm_beta
     # Round-trip through INPUT_DTYPE so the RoPE input matches the bf16-storage
     # behavior of the unfused (qk_rmsnorm -> memory -> apply_rope) reference path.
     x_norm = (x * inv_rms * w).to(INPUT_DTYPE).to(tl.float32)
@@ -82,15 +88,30 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     x_rot2 = tl.load(in_base + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
         tl.float32
     )
-    w_rot1 = tl.load(w_ptr + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
-    w_rot2 = tl.load(w_ptr + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
-        tl.float32
+    w_rot1 = (
+        tl.load(w_ptr + rot_offs, mask=rot_mask, other=0.0).to(tl.float32) + norm_beta
+    )
+    w_rot2 = (
+        tl.load(w_ptr + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
+        + norm_beta
     )
     x_rot1 = (x_rot1 * inv_rms * w_rot1).to(INPUT_DTYPE).to(tl.float32)
     x_rot2 = (x_rot2 * inv_rms * w_rot2).to(INPUT_DTYPE).to(tl.float32)
 
-    # Always use int64 for position to avoid overflow in address computation.
-    pos = tl.load(positions_ptr + token).to(tl.int64)
+    # Always use int64 for positions to avoid overflow in address computation.
+    pos_t = tl.load(positions_ptr + token * positions_stride_t).to(tl.int64)
+    if HAS_MROPE:
+        pos_h = tl.load(
+            positions_ptr + positions_stride_m + token * positions_stride_t
+        ).to(tl.int64)
+        pos_w = tl.load(
+            positions_ptr + 2 * positions_stride_m + token * positions_stride_t
+        ).to(tl.int64)
+        is_h = (rot_offs % 3 == 1) & (rot_offs < 3 * MROPE_SECTION_H)
+        is_w = (rot_offs % 3 == 2) & (rot_offs < 3 * MROPE_SECTION_W)
+        pos = tl.where(is_h, pos_h, tl.where(is_w, pos_w, pos_t))
+    else:
+        pos = pos_t
     cache_offset = pos * cache_stride_p
     cos = tl.load(
         cos_sin_cache_ptr + cache_offset + rot_offs, mask=rot_mask, other=0.0
@@ -126,21 +147,25 @@ def fused_qk_rmsnorm_rope_gate(
     num_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
+    mrope_section: list[int] | tuple[int, int, int] | None = None,
+    norm_beta: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused split + QK-RMSNorm + (partial) RoPE + gate copy for Qwen3.5 attn.
+    """Fused split + QK-RMSNorm + (partial) RoPE + gate copy for Qwen attn.
 
     Args:
         q_gate: (n_tokens, num_q_heads * 2 * head_dim) -- per head: [q|gate]
         k: (n_tokens, num_kv_heads * head_dim)
-        q_weight: (head_dim,) GemmaRMSNorm effective weight (already +1)
-        k_weight: (head_dim,) GemmaRMSNorm effective weight (already +1)
+        q_weight: (head_dim,) RMSNorm weight
+        k_weight: (head_dim,) RMSNorm weight
         cos_sin_cache: (max_pos, rotary_dim) packed [cos|sin]
-        positions: (n_tokens,) int32 or int64
+        positions: (n_tokens,) or (3, n_tokens) int32 or int64
         eps: RMSNorm epsilon
         num_q_heads: number of Q heads (after TP split)
         num_kv_heads: number of KV heads (after TP split)
         head_dim: per-head dimension
         rotary_dim: rotary dimension; must be even and <= head_dim
+        mrope_section: interleaved T/H/W frequency counts for 2D positions
+        norm_beta: scalar added to the RMSNorm weight
 
     Returns:
         (q_out, k_out, gate_out) -- all contiguous (n_tokens, heads * head_dim).
@@ -151,6 +176,52 @@ def fused_qk_rmsnorm_rope_gate(
             f"rotary_dim must be a positive even integer <= head_dim, "
             f"got rotary_dim={rotary_dim}, head_dim={head_dim}"
         )
+    if q_gate.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q_gate.dtype:
+        raise ValueError(
+            "q_gate and k must have the same FP16 or BF16 dtype, "
+            f"got {q_gate.dtype} and {k.dtype}"
+        )
+    for name, tensor in (
+        ("q_gate", q_gate),
+        ("k", k),
+        ("q_weight", q_weight),
+        ("k_weight", k_weight),
+        ("cos_sin_cache", cos_sin_cache),
+    ):
+        if tensor.stride(-1) != 1:
+            raise ValueError(f"{name} must be contiguous in its last dimension")
+
+    if positions.ndim not in (1, 2):
+        raise ValueError(f"positions must be 1D or 2D, got shape={positions.shape}")
+    if positions.shape[-1] != q_gate.shape[0]:
+        raise ValueError(
+            "positions token dimension must match q_gate, "
+            f"got {positions.shape[-1]} and {q_gate.shape[0]}"
+        )
+
+    has_mrope = positions.ndim == 2
+    if has_mrope:
+        if positions.shape[0] != 3:
+            raise ValueError(
+                f"MRoPE positions must have shape (3, n_tokens), got {positions.shape}"
+            )
+        if mrope_section is None or len(mrope_section) != 3:
+            raise ValueError("mrope_section must contain the T/H/W frequency counts")
+        if sum(mrope_section) != rotary_dim // 2:
+            raise ValueError(
+                "mrope_section must sum to rotary_dim // 2, "
+                f"got {mrope_section} and rotary_dim={rotary_dim}"
+            )
+        mrope_section_h = mrope_section[1]
+        mrope_section_w = mrope_section[2]
+        positions_stride_m, positions_stride_t = positions.stride()
+    else:
+        if mrope_section is not None:
+            raise ValueError("mrope_section requires 2D MRoPE positions")
+        mrope_section_h = 0
+        mrope_section_w = 0
+        positions_stride_m = 0
+        positions_stride_t = positions.stride(0)
 
     n_tokens = q_gate.shape[0]
     q_out = torch.empty(
@@ -185,16 +256,22 @@ def fused_qk_rmsnorm_rope_gate(
         k_out.stride(0),
         gate_out.stride(0),
         cos_sin_cache.stride(0),
+        positions_stride_m,
+        positions_stride_t,
         num_q_heads,
         num_kv_heads,
         head_dim,
         rotary_dim,
         half_rotary,
         eps,
+        norm_beta=norm_beta,
         INPUT_DTYPE=tl.bfloat16 if q_gate.dtype == torch.bfloat16 else tl.float16,
         HEAD_BLOCK=head_block,
         ROT_HALF_BLOCK=rot_half_block,
         HAS_PASS=rotary_dim < head_dim,
+        HAS_MROPE=has_mrope,
+        MROPE_SECTION_H=mrope_section_h,
+        MROPE_SECTION_W=mrope_section_w,
         num_warps=num_warps,
         num_stages=2,
     )

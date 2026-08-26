@@ -100,8 +100,9 @@ class ExpertTokensMetadata:
     Metadata regarding expert-token routing.
     """
 
-    expert_num_tokens: torch.Tensor
+    expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
+    psum_recv_per_rank: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(

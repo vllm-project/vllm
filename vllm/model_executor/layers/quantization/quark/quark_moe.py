@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
@@ -1063,8 +1064,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             self.input_dtype = None
 
-        self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
         )
@@ -1444,7 +1443,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(

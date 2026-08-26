@@ -324,8 +324,9 @@ def apply_moe_activation(
 
     The configuration drives specialized activation behavior. Routing tensors
     and valid token counts remain per-call inputs because they depend on the
-    current token assignment. A single count masks a flat ``[T, D]`` buffer;
-    one count per expert masks each prefix in a padded ``[E, T, D]`` buffer.
+    current token assignment. A single token count masks a flat ``[T, D]``
+    buffer; one count per expert masks each prefix in a padded ``[E, T, D]``
+    buffer.
     """
     config = (
         _DEFAULT_APPLY_MOE_ACTIVATION_CONFIG
@@ -404,3 +405,45 @@ def apply_moe_activation(
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
     return output
+
+
+def situ_and_mul_quant(
+    output: torch.Tensor,
+    scale: torch.Tensor,
+    input: torch.Tensor,
+    *,
+    beta: float,
+    linear_beta: float | None,
+    group_size: int = 0,
+    num_valid_tokens: torch.Tensor | None = None,
+    topk: int = 1,
+) -> None:
+    """Fused Kimi SITU activation + dynamic FP8 quantization.
+
+    Writes the quantized fp8 down-projection input into ``output`` [M, d] and its
+    float32 scale into ``scale`` (dequant = q * scale), fusing the SITU
+    activation with the FP8 quant that Humming's w2 GEMM would otherwise perform
+    in a separate pass -- this avoids materializing (and rounding through) the
+    bf16 activation_output buffer.
+
+    ``group_size`` selects the quant granularity: ``0`` gives per-token scales
+    ``scale`` [M, 1]; ``128`` gives k-major block-FP8 group scales ``scale``
+    [M, d // 128], matching humming ``quant_input(group_size=128, float32)``.
+
+    ``linear_beta`` <= 0 (or None) means "unset" (up passed through), matching
+    ``SituAndMul(linear_beta=None)``. ``num_valid_tokens`` (int32 scalar tensor)
+    is the DeepEP v2 contiguous-layout token count (e.g. ``psum[-1:]``); the
+    kernel multiplies it by ``topk`` to bound rows. Padding rows are skipped and
+    receive a benign scale of 1.0. Kept in this module so that every
+    ``torch.ops._C.situ*`` call lives in one file.
+    """
+    torch.ops._C.situ_and_mul_quant(
+        output,
+        scale,
+        input,
+        beta,
+        -1.0 if linear_beta is None else linear_beta,
+        group_size,
+        num_valid_tokens,
+        topk,
+    )

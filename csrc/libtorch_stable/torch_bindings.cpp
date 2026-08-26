@@ -538,23 +538,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float scale, float norm_eps=1e-5) -> ()");
 #endif
 
-#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
-  ops.def(
-      "fused_kda_prologue("
-      "Tensor q, Tensor k, Tensor v, Tensor raw_g, Tensor raw_beta, "
-      "Tensor A_log, Tensor dt_bias, Tensor! qg, Tensor! w, Tensor! u, "
-      "Tensor! kg_t, Tensor! aqk, Tensor! decay, Tensor cu_seqlens, "
-      "Tensor chunk_indices, Tensor? conv_weight, Tensor(e!)? conv_state, "
-      "Tensor? conv_state_indices, Tensor? conv_has_initial_state, "
-      "float scale, float lower_bound) -> ()");
-  ops.def(
-      "fused_kda_chunk("
-      "Tensor qg, Tensor w, Tensor u, Tensor kg_t, Tensor aqk, Tensor decay, "
-      "Tensor? initial_state, Tensor(a!)? final_state, Tensor! out, "
-      "Tensor cu_seqlens, Tensor chunk_offsets, float scale, "
-      "Tensor(b!)? group_state, int groups) -> ()");
-#endif
-
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
@@ -629,6 +612,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
       "linear_beta=-1.0) -> ()");
+  // Fused SituGLU activation + dynamic FP8 quantization for the Humming w2 path
+  // (writes the fp8 down input and its float32 scale). group_size=0 ->
+  // per-token scale [.., 1]; group_size=128 -> k-major block-FP8 scale [..,
+  // d/128].
+  ops.def(
+      "situ_and_mul_quant(Tensor! out, Tensor! scale, Tensor input, "
+      "float beta=1.0, float linear_beta=-1.0, int group_size=0, "
+      "Tensor? num_valid_tokens=None, int topk=1) -> ()");
   ops.def(
       "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
       "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
@@ -826,11 +817,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
 #endif
 
-#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
-  ops.impl("fused_kda_prologue", TORCH_BOX(&fused_kda_prologue));
-  ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
-#endif
-
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.impl("kimi_k3_attn_res", TORCH_BOX(&kimi_k3_attn_res));
 #endif
@@ -857,6 +843,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
   ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
   ops.impl("situ_and_mul", TORCH_BOX(&situ_and_mul));
+  ops.impl("situ_and_mul_quant", TORCH_BOX(&situ_and_mul_quant));
   ops.impl("masked_situ_and_mul", TORCH_BOX(&masked_situ_and_mul));
   ops.impl("masked_moe_activation", TORCH_BOX(&masked_moe_activation));
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
