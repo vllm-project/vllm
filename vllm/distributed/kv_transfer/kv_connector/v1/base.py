@@ -197,6 +197,11 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def prefix_completion_group_ids(self) -> frozenset[int]:
+        """Cache groups this connector can restore behind a deeper local hit."""
+        return frozenset()
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 
@@ -504,6 +509,15 @@ class KVConnectorBase_V1(ABC):
             into account.
         """
         pass
+
+    def get_num_new_matched_tokens_capped(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        max_num_new_tokens: int,
+    ) -> tuple[int | None, bool]:
+        """Like get_num_new_matched_tokens, bounded by a local prefix source."""
+        raise NotImplementedError
 
     @abstractmethod
     def update_state_after_alloc(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from functools import cached_property
 from typing import Any
 
 import torch
@@ -25,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
+    get_offloading_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -47,6 +49,17 @@ from vllm.v1.request import Request
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+    @cached_property
+    def prefix_completion_group_ids(self) -> frozenset[int]:
+        if self._kv_cache_config.hisparse_host_num_blocks is None:
+            return frozenset()
+        return frozenset(get_offloading_group_ids(self._kv_cache_config))
+
+    @property
+    def scheduler(self) -> OffloadingConnectorScheduler:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler
+
     @property
     def requires_kv_delivery(self) -> bool:
         # Runs as kv_both, but is a best-effort cache: a dropped save is just a
@@ -139,6 +152,18 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
+        )
+
+    def get_num_new_matched_tokens_capped(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        max_num_new_tokens: int,
+    ) -> tuple[int | None, bool]:
+        return self.scheduler.get_num_new_matched_tokens(
+            request,
+            num_computed_tokens,
+            max_num_new_tokens=max_num_new_tokens,
         )
 
     def update_state_after_alloc(

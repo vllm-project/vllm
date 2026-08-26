@@ -166,9 +166,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output.block_table_updates = (
             self._coordinator.take_block_table_updates() or None
         )
-        command = self._coordinator.build_offload_command(
-            list(scheduler_output.num_scheduled_tokens)
-        )
+        command = self._coordinator.build_offload_command()
         return HiSparseConnectorMetadata(command)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:

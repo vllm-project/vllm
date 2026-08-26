@@ -9,10 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from vllm.v1.core.kv_cache_utils import (
-    HISPARSE_INDEXER_SOURCE_SUFFIX,
-    HISPARSE_RESIDENT_SUFFIX,
-)
+from vllm.v1.core.kv_cache_utils import HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheGroupRole,
@@ -76,8 +73,6 @@ class HiSparseNixlAdapter:
         host_layer_name = None
         if layer_name.endswith(HISPARSE_RESIDENT_SUFFIX):
             host_layer_name = self.transfer_layer_name(layer_name)
-        elif group.role is KVCacheGroupRole.HISPARSE_INDEXER:
-            host_layer_name = f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"
         if host_layer_name is None:
             self.host_regions.append(None)
             return

@@ -392,18 +392,6 @@ class DeepseekV32Attention(MLAAttention):
                 self._k_scale,
             )
 
-        if self.indexer is not None and indexer_slot is not None:
-            source = self.indexer.k_cache.hisparse_indexer_source
-            if source is not None:
-                host_cache, source_slot_mapping = source
-                torch.ops._C_cache_ops.hisparse_backup_indexer(
-                    self.indexer.k_cache.kv_cache,
-                    indexer_slot,
-                    host_cache,
-                    source_slot_mapping[: indexer_slot.numel()],
-                    self.indexer.head_dim,
-                )
-
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)

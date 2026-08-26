@@ -277,6 +277,20 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert req_status.partial_tail_boundary is None
 
 
+def test_lookup_cap_stops_at_authoritative_prefix_boundary():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.skip_reading_prefix_cache = False
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    tokens, load_async = scheduler.get_num_new_matched_tokens(
+        request, 0, max_num_new_tokens=20
+    )
+
+    assert (tokens, load_async) == (20, True)
+    assert scheduler._req_status["req"].partial_tail_boundary == 20
+
+
 def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     """A recurrent group may hold unhashed blocks inside the computed prefix.
 
