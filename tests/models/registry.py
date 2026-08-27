@@ -444,9 +444,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {"tiny": "TitanML/tiny-mixtral"},
     ),
-    "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
-    # FIXME: mosaicml/mpt-7b has been deleted
-    "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b", is_available_online=False),
     "NanbeigeForCausalLM": _HfExamplesInfo(
         "Nanbeige/Nanbeige4.2-3B",
         trust_remote_code=True,
