@@ -118,16 +118,38 @@ def find_last_user_index(messages: list[dict[str, Any]]) -> int:
     return last_user_index
 
 
-def _folded_system_content(messages: list[dict[str, Any]], index: int) -> str:
+def _render_system_payload(msg: dict[str, Any]) -> str:
+    payload = system_msg_template.format(content=msg.get("content") or "")
+    tools = msg.get("tools")
+    if tools:
+        payload += "\n\n" + render_tools(tools_from_openai_format(tools))
+    response_format = msg.get("response_format")
+    if response_format:
+        payload += "\n\n" + response_format_template.format(
+            schema=to_json(response_format)
+        )
+    return payload
+
+
+def _folded_system_content(
+    messages: list[dict[str, Any]], index: int, render_start: int
+) -> str:
     nxt = index + 1
-    if nxt < len(messages) and _folds_into_previous_user_turn(messages, nxt):
-        return messages[nxt].get("content") or ""
+    if nxt < len(messages) and _folds_into_previous_user_turn(
+        messages, nxt, render_start
+    ):
+        return _render_system_payload(messages[nxt])
     return ""
 
 
-def _folds_into_previous_user_turn(messages: list[dict[str, Any]], index: int) -> bool:
+def _folds_into_previous_user_turn(
+    messages: list[dict[str, Any]], index: int, render_start: int
+) -> bool:
     """The user turn already emitted ``<|Assistant|>``, so this text goes before it."""
     if index <= 0 or messages[index].get("role") != "system":
+        return False
+    # Only fold onto a user turn this call actually renders, or the text is lost.
+    if index - 1 < render_start:
         return False
     if messages[index - 1].get("role") not in ("user", "developer"):
         return False
@@ -139,6 +161,7 @@ def render_message(
     messages: list[dict[str, Any]],
     thinking_mode: str,
     last_user_idx: int | None = None,
+    render_start: int = 0,
 ) -> str:
     if not (0 <= index < len(messages)):
         raise ValueError(
@@ -167,16 +190,9 @@ def render_message(
         tool_calls = tool_calls_from_openai_format(tool_calls)
 
     if role == "system":
-        if _folds_into_previous_user_turn(messages, index):
+        if _folds_into_previous_user_turn(messages, index, render_start):
             return ""
-        prompt += system_msg_template.format(content=content or "")
-        if tools:
-            prompt += "\n\n" + render_tools(tools)
-
-        if response_format:
-            prompt += "\n\n" + response_format_template.format(
-                schema=to_json(response_format)
-            )
+        prompt += _render_system_payload(msg)
 
     elif role == "developer":
         if not content:
@@ -193,7 +209,8 @@ def render_message(
         content_developer += "\n\n# The user's message is: {}".format(content)
 
         prompt += user_msg_template.format(
-            content=content_developer + _folded_system_content(messages, index)
+            content=content_developer
+            + _folded_system_content(messages, index, render_start)
         )
         if index == last_user_idx and thinking_mode == "thinking":
             prompt += thinking_start_token
@@ -202,7 +219,7 @@ def render_message(
 
     elif role == "user":
         prompt += user_msg_template.format(
-            content=f"{content}{_folded_system_content(messages, index)}"
+            content=f"{content}{_folded_system_content(messages, index, render_start)}"
         )
 
         if index == last_user_idx and thinking_mode == "thinking":
@@ -329,6 +346,7 @@ def encode_messages(
             full_messages,
             thinking_mode=thinking_mode,
             last_user_idx=last_user_idx,
+            render_start=len(context),
         )
 
     return prompt
