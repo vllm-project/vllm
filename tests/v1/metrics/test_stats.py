@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -43,6 +43,34 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_prefill_cache_sources_serialization():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=8,
+        external_cached_token_sources=[("p2p", 4), ("cpu", 4)],
+    )
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput(
+                request_id="request",
+                new_token_ids=[1],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.outputs[0].prefill_stats is not None
+    assert decoded.outputs[0].prefill_stats.external_cached_token_sources == [
+        ("p2p", 4),
+        ("cpu", 4),
+    ]
 
 
 def test_compute_iteration_details_includes_encoder_stats():
@@ -183,6 +211,7 @@ def test_prompt_token_stats_all_computed():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 0
+    assert stats.cached_tokens_by_source == {}
     assert stats.total == 1000
 
 
@@ -203,6 +232,7 @@ def test_prompt_token_stats_partial_local_cache():
     assert stats.local_cache_hit == 300
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 300
+    assert stats.cached_tokens_by_source == {"device": 300}
     assert stats.total == 1000
 
 
@@ -223,6 +253,7 @@ def test_prompt_token_stats_partial_external_transfer():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 500
     assert stats.cached_tokens == 500
+    assert stats.cached_tokens_by_source == {"external": 500}
     assert stats.total == 1000
 
 
@@ -236,6 +267,7 @@ def test_prompt_token_stats_mixed_sources():
         num_prompt_tokens=1000,
         num_local_cached_tokens=400,
         num_external_cached_tokens=200,
+        external_cached_token_sources=[("cpu", 100), ("disk", 100)],
     )
     stats.update_from_output(prefill_stats)
 
@@ -243,6 +275,11 @@ def test_prompt_token_stats_mixed_sources():
     assert stats.local_cache_hit == 400
     assert stats.external_kv_transfer == 200
     assert stats.cached_tokens == 600
+    assert stats.cached_tokens_by_source == {
+        "device": 400,
+        "cpu": 100,
+        "disk": 100,
+    }
     assert stats.total == 1000
 
 
@@ -267,6 +304,7 @@ def test_prompt_token_stats_full_local_cache_recompute():
     assert stats.local_cache_hit == 999
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 999
+    assert stats.cached_tokens_by_source == {"device": 999}
     assert stats.total == 1000
 
 
@@ -287,4 +325,34 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
+    assert stats.cached_tokens_by_source == {"external": 999}
     assert stats.total == 1000
+
+
+def test_prefill_stats_truncates_failed_external_source_segments():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=100,
+        num_external_cached_tokens=400,
+        external_cached_token_sources=[("p2p", 200), ("cpu", 200)],
+    )
+
+    prefill_stats.truncate_external_cached_tokens(250)
+
+    assert prefill_stats.num_computed_tokens == 650
+    assert prefill_stats.num_cached_tokens == 350
+    assert prefill_stats.num_local_cached_tokens == 100
+    assert prefill_stats.num_external_cached_tokens == 250
+    assert prefill_stats.external_cached_token_sources == [
+        ("p2p", 200),
+        ("cpu", 50),
+    ]
+
+    stats = PromptTokenStats()
+    stats.update_from_output(prefill_stats)
+    assert stats.cached_tokens_by_source == {
+        "device": 100,
+        "p2p": 200,
+        "cpu": 50,
+    }
