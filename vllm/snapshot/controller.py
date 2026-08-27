@@ -7,44 +7,50 @@ import shutil
 import sys
 from pathlib import Path
 
-from vllm.snapshot import runtime as _runtime
-from vllm.snapshot.manifest import validate_artifact_root, validate_identity
+from vllm.snapshot.manifest import (
+    read_manifest,
+    validate_artifact_root,
+    validate_identity,
+)
+from vllm.snapshot.runtime import (
+    LocalSnapshotTools,
+    SnapshotCreateError,
+    SnapshotRestoreError,
+    _error_detail,
+)
 from vllm.snapshot.types import Oracle, oracles_match
 
-LocalSnapshotTools = _runtime.LocalSnapshotTools
-SnapshotCreateError = _runtime.SnapshotCreateError
-SnapshotRestoreError = _runtime.SnapshotRestoreError
-_error_detail = _runtime._error_detail
 
-
-def _remove_snapshot_option(argv: tuple[str, ...]) -> tuple[str, ...]:
-    remaining: list[str] = []
-    iterator = iter(argv)
+def _child_engine_argv(
+    args: argparse.Namespace, engine_argv: tuple[str, ...] | None
+) -> tuple[str, ...]:
+    """Build the child argv: no snapshot options, sleep mode always enabled."""
+    if not engine_argv:
+        process_argv = tuple(sys.argv[1:])
+        if process_argv[:2] == ("snapshot", "create"):
+            engine_argv = process_argv[2:]
+        else:
+            model = getattr(args, "model_tag", None) or getattr(args, "model", None)
+            if not model:
+                raise SnapshotCreateError("snapshot create requires a model argument")
+            engine_argv = (str(model),)
+    child_argv: list[str] = []
+    iterator = iter(engine_argv)
     for item in iterator:
         if item == "--snapshot-dir":
             next(iterator, None)
-        elif item.startswith("--snapshot-dir="):
-            continue
-        else:
-            remaining.append(item)
-    return tuple(remaining)
-
-
-def _current_engine_argv(args: argparse.Namespace) -> tuple[str, ...]:
-    process_argv = tuple(sys.argv[1:])
-    if len(process_argv) >= 2 and process_argv[:2] == ("snapshot", "create"):
-        return process_argv[2:]
-    model = getattr(args, "model_tag", None) or getattr(args, "model", None)
-    if not model:
-        raise SnapshotCreateError("snapshot create requires a model argument")
-    return (str(model),)
+        elif not item.startswith("--snapshot-dir="):
+            child_argv.append(item)
+    if "--enable-sleep-mode" not in child_argv:
+        child_argv.append("--enable-sleep-mode")
+    return tuple(child_argv)
 
 
 def create_snapshot(
     args: argparse.Namespace,
     *,
     engine_argv: tuple[str, ...] | None = None,
-    tools: "LocalSnapshotTools | None" = None,
+    tools: LocalSnapshotTools | None = None,
 ) -> None:
     target = Path(args.snapshot_dir).absolute()
     toolset = tools or LocalSnapshotTools()
@@ -59,9 +65,7 @@ def create_snapshot(
     published = False
     root_pid: int | None = None
     try:
-        child_argv = _remove_snapshot_option(engine_argv or _current_engine_argv(args))
-        if "--enable-sleep-mode" not in child_argv:
-            child_argv = (*child_argv, "--enable-sleep-mode")
+        child_argv = _child_engine_argv(args, engine_argv)
         root_pid = toolset.launch_child(target, child_argv)
         oracle = toolset.wait_ready(target, root_pid)
         inventory = toolset.inventory(root_pid)
@@ -75,21 +79,19 @@ def create_snapshot(
             toolset.abort_create(root_pid)
         raise
     finally:
+        # Runs even when abort_create raised, so no partial artifact is left.
         if not published and target.exists():
             shutil.rmtree(target)
 
 
 def restore_snapshot(
-    args: argparse.Namespace, *, tools: "LocalSnapshotTools | None" = None
+    args: argparse.Namespace, *, tools: LocalSnapshotTools | None = None
 ) -> None:
     artifact = Path(args.snapshot_dir).absolute()
     toolset = tools or LocalSnapshotTools()
     toolset.preflight("restore", artifact)
-    from vllm.snapshot.manifest import read_manifest
-
     manifest = read_manifest(artifact)
-    current = toolset.current_identity(manifest.gpu_uuid)
-    validate_identity(manifest, current)
+    validate_identity(manifest, toolset.current_identity(manifest.gpu_uuid))
 
     root_pid: int | None = None
     try:
