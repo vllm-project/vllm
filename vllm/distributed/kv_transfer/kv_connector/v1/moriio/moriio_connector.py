@@ -489,8 +489,6 @@ class MoRIIOConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        # Block-id lists are per KV cache group (BlockIds); a non-hybrid
-        # model simply has a single group (outer length 1).
         self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
         self._reqs_need_save: dict[ReqId, tuple[Request, BlockIds]] = {}
         # Snapshot of kv_transfer_params for chunked prefill recovery.
@@ -528,10 +526,11 @@ class MoRIIOConnectorScheduler:
         self,
         block_ids: BlockIds,
     ) -> BlockIds:
-        """Clip each sliding-window group's block list to its in-window tail.
+        """Clip the block list based on the layer type.
 
-        Full-attention groups (budget 0) are left untouched. A no-op when HMA
-        is not engaged or the input is empty.
+        Behavior:
+        - sliding window: keep only the last window size blocks
+        - full attention: keep all blocks
         """
         if len(block_ids) == 0 or not self._is_hma_required:
             return [list(blocks) for blocks in block_ids]
@@ -539,29 +538,6 @@ class MoRIIOConnectorScheduler:
             blocks[-self.blocks_per_sw[i] :] if self.blocks_per_sw[i] > 0 else blocks
             for i, blocks in enumerate(block_ids)
         ]
-
-    @staticmethod
-    def _match_local_to_remote_tails(
-        local_group_ids: BlockIds,
-        remote_group_ids: BlockIds,
-    ) -> BlockIds:
-        """Per-group tail match of local blocks against remote block ids.
-
-        Preserves the single-group behaviour: when the decode leg allocated
-        fewer blocks than the prefill holds (partial prefix hit), pull only the
-        matching tail of the remote list for that group.
-        """
-        matched: list[list[int]] = []
-        for i, local in enumerate(local_group_ids):
-            remote = remote_group_ids[i] if i < len(remote_group_ids) else []
-            assert len(local) <= len(remote), (
-                f"group {i}: local blocks {len(local)} > remote {len(remote)}"
-            )
-            if len(local) != len(remote):
-                matched.append(list(remote[-len(local) :]))
-            else:
-                matched.append(list(local))
-        return matched
 
     def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
         self.transfer_id_to_request_id[transfer_id] = request_id
@@ -776,24 +752,24 @@ class MoRIIOConnectorScheduler:
                     # remote_engine_id is returned by the prefill's request_finished.
                     # host/ports come from the request_id (parsed in add_new_req).
                     if "remote_engine_id" in params:
-                        # remote_block_ids arrives per KV cache group (already
-                        # SWA-clipped by the prefill's request_finished).
-                        remote_group_ids = remote_block_ids
                         if num_external_tokens > 0:
-                            # Get unhashed blocks to pull from remote. Clip our
-                            # own sliding-window groups so per-group lengths
-                            # line up with the (already clipped) remote tails.
-                            local_group_ids = self.get_exchange_clipped_blocks(
+                            # Get unhashed blocks to pull from remote.
+                            local_block_ids = self.get_exchange_clipped_blocks(
                                 blocks.get_block_ids()
                             )
-                            local_block_ids = self._match_local_to_remote_tails(
-                                local_group_ids, remote_group_ids
+                            # Partial cache hits can lead to fewer local blocks vs
+                            # remote blocks, but never more
+                            assert all(
+                                len(local) <= len(remote)
+                                for local, remote in zip(
+                                    local_block_ids, remote_block_ids, strict=True
+                                )
                             )
                         else:
                             # If remote_blocks and num_external_tokens = 0, we have
                             # a full prefix cache hit on the D worker. We need to call
                             # send_notify in _read_blocks to free the memory on the P.
-                            local_block_ids = [[] for _ in remote_group_ids]
+                            local_block_ids = [[] for _ in remote_block_ids]
 
                         self._reqs_need_recv[request.request_id] = (
                             request,

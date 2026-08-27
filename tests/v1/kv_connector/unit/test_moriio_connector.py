@@ -880,16 +880,6 @@ def test_metadata_hma_block_ids_preserved_per_group():
     assert save_meta.remote_block_ids == []
 
 
-def test_match_local_to_remote_tails_per_group():
-    """Per group: an equal-length local keeps its own ids; a shorter local
-    pulls the matching remote tail."""
-    matched = MoRIIOConnectorScheduler._match_local_to_remote_tails(
-        [[1, 2], [7]],
-        [[1, 2], [5, 6, 7]],
-    )
-    assert matched == [[1, 2], [7]]
-
-
 def test_single_group_path_unchanged():
     """A non-hybrid single-group config does not engage HMA and never clips."""
     scheduler = _read_scheduler(_make_test_kv_cache_config())
