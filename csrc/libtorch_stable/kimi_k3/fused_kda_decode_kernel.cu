@@ -46,11 +46,6 @@ __device__ __forceinline__ float conv_weight_load(const float* ptr, int channel,
   return ptr[width * kChannels + channel];
 }
 
-template <int kConvStateChannelStride, int kConvStateTapStride>
-__device__ __forceinline__ int conv_state_offset(int channel, int tap) {
-  return channel * kConvStateChannelStride + tap * kConvStateTapStride;
-}
-
 __device__ __forceinline__ __nv_bfloat16 bf16_store(float value) {
   return __float2bfloat16(value);
 }
@@ -374,8 +369,7 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
         const int cs_idx =
-            conv_state_offset<kConvStateChannelStride, kConvStateTapStride>(hk,
-                                                                            w);
+            hk * kConvStateChannelStride + w * kConvStateTapStride;
         const __nv_bfloat16 q_state = cs_q_for_slot[cs_idx];
         const __nv_bfloat16 k_state = cs_k_for_slot[cs_idx];
         q_acc += __bfloat162float(q_state) *
@@ -397,18 +391,16 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       k_acc += __bfloat162float(k_new) *
                conv_weight_load<kLocalDim>(w_k_t, hk, kKernelWidth - 1);
 
-      cs_q_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hk, 0)] = q_shift0;
-      cs_q_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hk, 1)] = q_shift1;
-      cs_q_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hk, 2)] = q_new;
-      cs_k_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hk, 0)] = k_shift0;
-      cs_k_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hk, 1)] = k_shift1;
-      cs_k_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hk, 2)] = k_new;
+      cs_q_for_slot[hk * kConvStateChannelStride] = q_shift0;
+      cs_q_for_slot[hk * kConvStateChannelStride + kConvStateTapStride] =
+          q_shift1;
+      cs_q_for_slot[hk * kConvStateChannelStride + 2 * kConvStateTapStride] =
+          q_new;
+      cs_k_for_slot[hk * kConvStateChannelStride] = k_shift0;
+      cs_k_for_slot[hk * kConvStateChannelStride + kConvStateTapStride] =
+          k_shift1;
+      cs_k_for_slot[hk * kConvStateChannelStride + 2 * kConvStateTapStride] =
+          k_new;
 
       s_q[k] = silu_fast(q_acc);
       s_k[k] = silu_fast(k_acc);
@@ -433,8 +425,7 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
         const int cs_idx =
-            conv_state_offset<kConvStateChannelStride, kConvStateTapStride>(hk,
-                                                                            w);
+            hk * kConvStateChannelStride + w * kConvStateTapStride;
         q_acc += bf16_load(cs_q_for_slot, cs_idx) *
                  conv_weight_load<kLocalDim>(w_q_t, hk, w);
         k_acc += bf16_load(cs_k_for_slot, cs_idx) *
@@ -470,8 +461,7 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
         const int cs_idx =
-            conv_state_offset<kConvStateChannelStride, kConvStateTapStride>(hvv,
-                                                                            w);
+            hvv * kConvStateChannelStride + w * kConvStateTapStride;
         const __nv_bfloat16 v_state = cs_v_for_slot[cs_idx];
         v_acc += __bfloat162float(v_state) *
                  conv_weight_load<kLocalDim>(w_v_t, hvv, w);
@@ -484,12 +474,11 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       const __nv_bfloat16 v_new = x_v[xv_idx];
       v_acc += __bfloat162float(v_new) *
                conv_weight_load<kLocalDim>(w_v_t, hvv, kKernelWidth - 1);
-      cs_v_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hvv, 0)] = v_shift0;
-      cs_v_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hvv, 1)] = v_shift1;
-      cs_v_for_slot[conv_state_offset<kConvStateChannelStride,
-                                      kConvStateTapStride>(hvv, 2)] = v_new;
+      cs_v_for_slot[hvv * kConvStateChannelStride] = v_shift0;
+      cs_v_for_slot[hvv * kConvStateChannelStride + kConvStateTapStride] =
+          v_shift1;
+      cs_v_for_slot[hvv * kConvStateChannelStride + 2 * kConvStateTapStride] =
+          v_new;
       s_v[v] = silu_fast(v_acc);
 
       if constexpr (kApplyOnorm && kPreloadOnormParams) {
@@ -507,8 +496,7 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
         const int cs_idx =
-            conv_state_offset<kConvStateChannelStride, kConvStateTapStride>(hvv,
-                                                                            w);
+            hvv * kConvStateChannelStride + w * kConvStateTapStride;
         v_acc += bf16_load(cs_v_for_slot, cs_idx) *
                  conv_weight_load<kLocalDim>(w_v_t, hvv, w);
       }
