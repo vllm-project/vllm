@@ -4,6 +4,10 @@
 
 set -euxo pipefail
 
+# Surface the isolated snapshot-runtime install cost in the CI build log.
+_snapshot_install_started=$(date +%s)
+trap 'echo "[TIMING] snapshot runtime install: $(( $(date +%s) - _snapshot_install_started )) s (exit $?)"' EXIT
+
 readonly CRIU_VERSION="4.2.1"
 readonly CRIU_SOURCE_SHA256="feffdf4638125ebb12d2434754f80a1d7bbba85a3e6bee98c216f88fb99a5d96"
 readonly DYNAMO_CHECKPOINT_HELPER_COMMIT="fdf25efad60f696a73393caf341c527a93d84190"
