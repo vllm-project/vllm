@@ -222,7 +222,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -353,10 +353,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
             speculative_config is not None
             and speculative_config.method == "mtp"
             and not speculative_config.mtp_share_lm_head
-        )
-        parallel_config = vllm_config.parallel_config
-        self.share_target_embeddings = (
-            parallel_config is None or parallel_config.pipeline_parallel_size == 1
         )
         lm_head_quant_config = self.quant_config if self.use_private_lm_head else None
 
@@ -579,14 +575,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 name for name in params_dict if name.startswith("lm_head.")
             )
 
-        if self.share_target_embeddings:
-            # At PP=1 the target embedding replaces the draft embedding, so
-            # both full and MTP-only checkpoint layouts are valid.
-            loaded_params.update(
-                name
-                for name in params_dict
-                if name.startswith("model.embed_tokens.")
-            )
 
         # Quantized model loading disables the generic missing-weight check
         # because some quantizers synthesize parameters. These ModelOpt MTP
