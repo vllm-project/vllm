@@ -32,7 +32,7 @@ from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.interfaces_base import VllmModel, is_vllm_model
+from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
