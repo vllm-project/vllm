@@ -579,30 +579,48 @@ def test_snapshot_restore_rejects_unavailable_pid_before_mutation(
     assert {path.name: path.read_bytes() for path in artifact.iterdir()} == before
 
 
-def test_snapshot_restore_never_signals_an_unpinned_pid(
+@pytest.mark.parametrize("pinned", [True, False])
+def test_snapshot_restore_terminates_only_a_pinned_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    pinned: bool,
 ):
     _mark_snapshot_pids_free(monkeypatch)
     artifact = _local_restore_artifact(tmp_path)
+    manifest = _manifest()
+    root_pid = manifest.process_tree[0]
     tools = LocalSnapshotTools()
-    signaled: list[int] = []
-    monkeypatch.setattr(tools, "cleanup", signaled.append)
+    terminated: list[int] = []
+
+    def terminate_and_wait(pid: int) -> None:
+        terminated.append(pid)
+        tools._restored_processes.pop(pid)
+
+    def pin(
+        _artifact: Path, process_tree: tuple[int, ...], _holders: tuple[int, ...]
+    ) -> None:
+        if not pinned:
+            raise SnapshotRestoreError(
+                "restored session does not match the captured process tree"
+            )
+        tools._restored_processes[process_tree[0]] = ()
+
+    monkeypatch.setattr(tools, "cleanup", terminate_and_wait)
+    monkeypatch.setattr(tools, "_pin_restored_tree", pin)
+    monkeypatch.setattr(tools, "_criu", lambda *_args: None)
     monkeypatch.setattr(
         tools,
         "_run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(
-            command, 0, (artifact / "restored.pid").read_text(), ""
-        ),
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "333\n", ""),
     )
 
-    def restore(_action: str, root: Path, _arguments: list[str]) -> None:
-        (root / "restored.pid").write_text("333\n")
-
-    monkeypatch.setattr(tools, "_criu", restore)
     with pytest.raises(SnapshotRestoreError, match="does not match"):
-        tools.restore(artifact, _manifest())
-    assert signaled == []
+        tools.restore(artifact, manifest)
+
+    # A pinned tree is ours: it must be terminated and waited for, not left to
+    # honour the abort marker. An unpinned PID is never signalled.
+    assert terminated == ([root_pid] if pinned else [])
+    assert tools._restored_processes == {}
     assert json.loads((artifact / "release.json").read_text())["release"] is False
 
 

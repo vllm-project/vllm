@@ -854,6 +854,7 @@ class LocalSnapshotTools:
     def _abort_failed_restore(
         self,
         artifact: Path,
+        root_pid: int,
         staged_remaps: dict[str, tuple[int, int]],
         primary: BaseException,
     ) -> NoReturn:
@@ -864,6 +865,14 @@ class LocalSnapshotTools:
             )
         except BaseException as error:
             secondary.append(f"abort marker failed: {_error_detail(error)}")
+        # The marker above is only a request. Terminate and wait for the tree we
+        # own, before releasing the shared state it may still be using. A tree
+        # that could not be pinned is not ours to signal.
+        if root_pid in self._restored_processes:
+            try:
+                self.cleanup(root_pid)
+            except BaseException as error:
+                secondary.append(f"restore cleanup failed: {_error_detail(error)}")
         try:
             self._rollback_link_remaps(staged_remaps)
         except BaseException as error:
@@ -911,16 +920,20 @@ class LocalSnapshotTools:
                     str(pidfile),
                 ],
             )
+            # Pin before reading the PID file so that a failure between restore
+            # and the read cannot orphan the tree.
+            self._pin_restored_tree(
+                artifact, manifest.process_tree, manifest.cuda_holders
+            )
             restored_pid = self._read_restored_pid(pidfile)
             if restored_pid != expected_root_pid:
                 raise SnapshotRestoreError(
                     "restored PID does not match the captured process tree"
                 )
-            self._pin_restored_tree(
-                artifact, manifest.process_tree, manifest.cuda_holders
-            )
         except BaseException as error:
-            self._abort_failed_restore(artifact, staged_remaps, error)
+            self._abort_failed_restore(
+                artifact, expected_root_pid, staged_remaps, error
+            )
         return restored_pid
 
     def release(self, artifact: Path, host: str | None, port: int) -> None:
