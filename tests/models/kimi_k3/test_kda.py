@@ -895,13 +895,18 @@ def test_kda_recoverssm_verify_and_group_commit(
 
 
 @pytest.mark.parametrize(
-    ("num_heads", "num_seqs", "lower_bound", "fuse_output_norm"),
+    ("num_heads", "num_seqs", "lower_bound", "fuse_output_norm", "conv_layout"),
     [
-        (12, 1, -5.0, True),
-        (12, 4, None, False),
-        (24, 4, None, False),
-        (48, 1, -5.0, True),
-        (96, 1, -5.0, True),
+        (12, 1, -5.0, True, "SD"),
+        (12, 4, None, False, "SD"),
+        (24, 4, None, False, "SD"),
+        (48, 1, -5.0, True, "SD"),
+        (96, 1, -5.0, True, "SD"),
+        (12, 1, -5.0, True, "DS"),
+        (12, 4, None, False, "DS"),
+        (24, 4, None, False, "DS"),
+        (48, 1, -5.0, True, "DS"),
+        (96, 1, -5.0, True, "DS"),
     ],
 )
 @torch.inference_mode()
@@ -910,6 +915,7 @@ def test_fused_kda_decode_correctness(
     num_seqs: int,
     lower_bound: float | None,
     fuse_output_norm: bool,
+    conv_layout: str,
 ):
     D, W = 128, 4
     if not is_fused_kda_decode_supported(
@@ -921,7 +927,7 @@ def test_fused_kda_decode_correctness(
         conv_state_dtype=torch.bfloat16,
     ):
         pytest.skip("Fused KDA decode is not supported on this platform")
-    torch.manual_seed(967 + num_heads + num_seqs)
+    torch.manual_seed(967 + num_heads + num_seqs + (conv_layout == "DS"))
     dim = num_heads * D
     slots = num_seqs + 2
     packed_x_storage = torch.randn(
@@ -929,13 +935,25 @@ def test_fused_kda_decode_correctness(
     )
     packed_x = packed_x_storage[:, : 3 * dim]
     weight = 0.1 * torch.randn(3 * dim, W, dtype=torch.float32, device=DEVICE)
-    conv_seed = 0.1 * torch.randn(
-        slots,
-        W - 1,
-        3 * dim,
-        dtype=torch.bfloat16,
-        device=DEVICE,
-    ).transpose(1, 2)
+    if conv_layout == "DS":
+        # DS cache layout: per slot the taps are innermost
+        # (stride (W-1, 1)), matching VLLM_SSM_CONV_STATE_LAYOUT=DS.
+        conv_seed = 0.1 * torch.randn(
+            slots,
+            3 * dim,
+            W - 1,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+    else:
+        # SD cache layout: per slot the channels are innermost.
+        conv_seed = 0.1 * torch.randn(
+            slots,
+            W - 1,
+            3 * dim,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        ).transpose(1, 2)
     raw_g = torch.randn(
         1,
         num_seqs,
@@ -1017,7 +1035,11 @@ def test_fused_kda_decode_correctness(
     conv_actual = torch.as_strided(
         cache_storage.view(torch.bfloat16),
         size=(slots, 3 * dim, W - 1),
-        stride=(page_bytes // torch.bfloat16.itemsize, 1, 3 * dim),
+        stride=(
+            page_bytes // torch.bfloat16.itemsize,
+            (W - 1) if conv_layout == "DS" else 1,
+            1 if conv_layout == "DS" else 3 * dim,
+        ),
     )
     state_actual = torch.as_strided(
         cache_storage.view(torch.float32),
