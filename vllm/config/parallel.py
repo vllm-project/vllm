@@ -164,6 +164,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_batch_sharded_sampling: bool | None = None
+    """Use sharded sampling across tensor parallel ranks. Each rank samples
+    a slice of the batch instead of every rank sampling all of it. Currently
+    defaults to False if not set. Enabling it explicitly raises when the config
+    cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
+    least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
+    by implementing `compute_logits_local`."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -194,8 +201,8 @@ class ParallelConfig:
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
