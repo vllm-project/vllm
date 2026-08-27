@@ -90,12 +90,12 @@ class NixlBaseConnectorScheduler:
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -131,7 +131,7 @@ class NixlBaseConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
@@ -146,7 +146,7 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.num_speculative_blocks
             if isinstance(g.kv_cache_spec, MambaSpec)
             else None
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # Only "all" mode keeps a state per block position; the other modes
         # keep a single running state in the last non-speculative slot.
@@ -260,8 +260,11 @@ class NixlBaseConnectorScheduler:
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
-        if len(block_ids) == 0 or not self._is_hma_required:
-            # No blocks to clip eg Full prefix cache hit or not a hybrid model.
+        if len(block_ids) == 0:
+            # No blocks to clip, e.g. a full prefix cache hit.
+            return block_ids
+        block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
+        if not self._is_hma_required:
             return block_ids
         # NOTE (NickLucche) This logic is currently handled at the connector level
         # because offloading connectors might want to receive the whole sequence even
