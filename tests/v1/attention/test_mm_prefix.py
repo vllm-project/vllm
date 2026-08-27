@@ -15,6 +15,8 @@ auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 import torch
@@ -1007,7 +1009,10 @@ def test_flashinfer_mm_prefix_kv_cache_path():
             sliding_window=sliding_window,
             kv_cache_dtype="auto",
         )
-        mock_layer = MockAttentionLayer(device)
+        # mm_prefix_clamp_sliding_window is read off the layer with getattr(),
+        # so the mock grows it here; the annotation keeps mypy from rejecting
+        # an attribute the stub class does not declare.
+        mock_layer: Any = MockAttentionLayer(device)
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
@@ -1322,9 +1327,9 @@ def test_mm_prefix_variant_reads_packed_nvfp4_kv_cache():
     )
     torch.accelerator.synchronize()
 
-    ranges = {i: r for i, (_, _, r) in enumerate(NVFP4_MM_REQS) if r}
+    ranges_by_req = {i: r for i, (_, _, r) in enumerate(NVFP4_MM_REQS) if r}
     ref_args = (query, k_deq, v_deq, qo_lens, kv_lens)
-    expected = _dense_reference(*ref_args, ranges, sw, scale)
+    expected = _dense_reference(*ref_args, ranges_by_req, sw, scale)
     torch.testing.assert_close(actual.float(), expected, atol=5e-2, rtol=5e-2)
 
     causal_only = _dense_reference(*ref_args, {}, sw, scale)
