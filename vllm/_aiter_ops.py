@@ -2282,6 +2282,34 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @staticmethod
+    def _gdn_flydsl_prefill_kernels_importable() -> bool:
+        try:
+            import inspect
+
+            from aiter.ops.flydsl.linear_attention_prefill_kernels import (  # noqa: F401
+                chunk_gated_delta_rule_fwd_h_flydsl_opt,
+                gdn_prepare_flydsl_supported,
+                gdn_prepare_fwd_flydsl,
+            )
+            from aiter.ops.triton.gated_delta_net import (  # noqa: F401
+                build_gated_delta_rule_prefill_metadata,
+                chunk_gated_delta_rule_opt_vk,
+            )
+
+            required_parameters = {
+                "use_chunk_flydsl",
+                "use_prepare_flydsl",
+                "prefill_metadata",
+                "initial_state_indices",
+                "inplace_final_state",
+            }
+            return required_parameters.issubset(
+                inspect.signature(chunk_gated_delta_rule_opt_vk).parameters
+            )
+        except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+            return False
+
     @classmethod
     @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
@@ -2292,6 +2320,19 @@ class rocm_aiter_ops:
         in older aiter builds.
         """
         return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
+
+    @classmethod
+    @functools.cache
+    def is_gdn_flydsl_prefill_available(cls) -> bool:
+        """Whether the opt-in AITER FlyDSL GDN prefill path is installed.
+
+        This is a capability check rather than an environment-variable gate:
+        explicitly selecting the backend is sufficient to enable it.
+        """
+        return (
+            is_aiter_found_and_supported()
+            and cls._gdn_flydsl_prefill_kernels_importable()
+        )
 
     @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:

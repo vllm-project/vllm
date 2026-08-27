@@ -24,6 +24,22 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
+def _build_aiter_flydsl_prefill_metadata(
+    seq_lens_cpu: list[int],
+    *,
+    cu_seqlens: torch.Tensor,
+):
+    from aiter.ops.triton.gated_delta_net import (
+        build_gated_delta_rule_prefill_metadata,
+    )
+
+    return build_gated_delta_rule_prefill_metadata(
+        seq_lens_cpu,
+        cu_seqlens=cu_seqlens,
+        chunk_size=64,
+    )
+
+
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -72,6 +88,7 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    aiter_prefill_metadata: object | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -99,7 +116,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             _resolve_gdn_prefill_backend,
         )
 
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
+        self.gdn_prefill_backend: Literal[
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+        ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
         if self.speculative_config:
@@ -169,8 +188,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor,
         prefill_query_start_loc_cpu: torch.Tensor,
         device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, object | None]:
         from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+        if self.gdn_prefill_backend == "aiter_flydsl":
+            seq_lens_cpu = torch.diff(prefill_query_start_loc_cpu).tolist()
+            return (
+                None,
+                None,
+                _build_aiter_flydsl_prefill_metadata(
+                    seq_lens_cpu,
+                    cu_seqlens=prefill_query_start_loc,
+                ),
+            )
 
         if self.gdn_prefill_backend == "cutedsl":
             from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
@@ -180,11 +210,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             assert prefill_query_start_loc is not None
             assert prefill_query_start_loc_cpu is not None
             total_tokens = int(prefill_query_start_loc_cpu[-1].item())
-            return prepare_metadata_cutedsl(
-                prefill_query_start_loc,
-                total_tokens,
-                FLA_CHUNK_SIZE,
+            chunk_indices, chunk_offsets = prepare_metadata_cutedsl(
+                prefill_query_start_loc, total_tokens, FLA_CHUNK_SIZE
             )
+            return chunk_indices, chunk_offsets, None
 
         # Only prefill batches use FLA chunk ops.
         # Pre-compute on CPU and async-copy to GPU to avoid
@@ -204,6 +233,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prepare_chunk_offsets(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
                 device=device,
             ),
+            None,
         )
 
     def build(  # type: ignore[override]
@@ -369,6 +399,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        aiter_prefill_metadata: object | None = None
         if num_prefills > 0:
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
             # kernel (decode-first front slice), so build chunk metadata from the
@@ -390,10 +421,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
 
-            chunk_indices, chunk_offsets = self._build_chunk_metadata(
-                prefill_query_start_loc,
-                prefill_query_start_loc_cpu,
-                query_start_loc.device,
+            chunk_indices, chunk_offsets, aiter_prefill_metadata = (
+                self._build_chunk_metadata(
+                    prefill_query_start_loc,
+                    prefill_query_start_loc_cpu,
+                    query_start_loc.device,
+                )
             )
 
         if num_prefills > 0:
@@ -507,6 +540,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
