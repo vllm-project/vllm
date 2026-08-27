@@ -67,6 +67,14 @@ def _get_prefix_cache_retention_interval() -> int | None:
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
+MambaSSMCacheDType = Literal[
+    "auto",
+    "float32",
+    "float16",
+    "bfloat16",
+    "fp8_e4m3fn",
+    "int8",
+]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -181,7 +189,7 @@ class CacheConfig:
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
     config."""
-    mamba_ssm_cache_dtype: MambaDType = "auto"
+    mamba_ssm_cache_dtype: MambaSSMCacheDType = "auto"
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
@@ -195,15 +203,17 @@ class CacheConfig:
       caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
-    speculative decoding does not use B. Default 16."""
+    """ReplaySSM logical history length B for Mamba2. Triton uses B physical
+    rows and FlashInfer uses B+T, where T is the target verification length.
+    Kimi-K3 speculative decode does not use B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    mamba backend; standard (non-speculative) decode only. In align mode flushes
-    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
-    but this is not required."""
+    or FlashInfer mamba backend. Mamba2 speculative decode requires FlashInfer
+    and mamba_cache_mode 'none'. In align mode flushes are most efficient when
+    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
+    required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
