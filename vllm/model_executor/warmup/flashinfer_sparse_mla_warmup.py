@@ -42,6 +42,33 @@ _FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS = {
 _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 
 
+def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
+    """Autotune each HiSparse FlashInfer sparse-MLA configuration."""
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+
+    tuned: set[tuple[object, ...]] = set()
+    for layer in runner.vllm_config.compilation_config.static_forward_context.values():
+        impl = getattr(layer, "impl", None)
+        if not isinstance(impl, FlashInferMLASparseImpl):
+            continue
+        if impl.hisparse_cache is None or impl.topk_indices_buffer is None:
+            continue
+        key = (
+            impl.kv_cache_dtype,
+            impl.num_heads,
+            impl.qk_nope_head_dim,
+            impl.qk_rope_head_dim,
+            impl.kv_lora_rank,
+            impl.topk_indices_buffer.shape[1],
+        )
+        if key in tuned:
+            continue
+        impl.autotune_hisparse_decode(layer)
+        tuned.add(key)
+
+
 def _attention_backend_name(backend: object) -> str | None:
     get_name = getattr(backend, "get_name", None)
     if get_name is None:
