@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ClassificationHeadWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
@@ -141,6 +142,17 @@ def from_layer_logits_processor(
     )
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
+
+
+def from_layer_classification(
+    layer: nn.Module,
+    max_loras: int,
+    lora_config: LoRAConfig,
+    model_config: PretrainedConfig | None = None,
+) -> ClassificationHeadWithLoRA:
+    instance_layer = ClassificationHeadWithLoRA(layer)
+    instance_layer.create_lora_weights(max_loras, lora_config, model_config)
+    return instance_layer
 
 
 def replace_submodule(

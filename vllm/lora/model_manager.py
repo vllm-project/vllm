@@ -13,7 +13,6 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
-    ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LoRAMapping,
@@ -24,6 +23,7 @@ from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
 from vllm.lora.utils import (
     from_layer,
+    from_layer_classification,
     from_layer_logits_processor,
     get_supported_lora_modules,
     is_in_target_modules,
@@ -525,14 +525,15 @@ class LoRAModelManager:
                 )
 
             if module_name in self.supported_modules_to_save:
-                new_module = ClassificationHeadWithLoRA(module)
-                new_module.create_lora_weights(
-                    self.lora_slots, self.lora_config, self.model.config
-                )
                 new_module = replace_submodule(
                     self.model,
                     module_name,
-                    new_module,
+                    from_layer_classification(
+                        module,
+                        self.lora_slots,
+                        self.lora_config,
+                        self.model.config,
+                    ),
                 )
 
             # Some matched modules can be unsupported by LoRA wrappers
@@ -759,6 +760,11 @@ class LoRAModelManager:
         """
         # For language model (early return)
         if not self.supports_mm:
+            return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
+
+        if module_name in self.supported_modules_to_save:
+            # TODO language wrapper key in self.punica_wrapper_mapping may not
+            # match DEFAULT_LANGUAGE_WRAPPER_KEY
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
 
         # For multimodal model
