@@ -209,6 +209,15 @@ class Scheduler(SchedulerInterface):
         self.reset_preempted_req_ids: set[str] = set()
         # Cached worker requests whose computed-token offset moved backward.
         self.rewound_req_ids: set[str] = set()
+        # A rejected synchronous KV load can invalidate blocks shared by
+        # multiple running requests. The first request that reaches an
+        # invalid suffix repairs its physical blocks; peers must not consume
+        # those blocks until the repair has completed on the worker.
+        #
+        # block_id -> (repair owner request_id, exclusive repaired token end)
+        self._kv_recovery_block_owners: dict[int, tuple[str, int]] = {}
+        # dependent request_id -> {owner request_id: required confirmed end}
+        self._kv_recovery_dependencies: dict[str, dict[str, int]] = {}
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -501,6 +510,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        self._update_kv_recovery_progress()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -552,6 +562,14 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+
+            if not self._kv_recovery_can_schedule(
+                request.request_id, num_scheduled_tokens
+            ):
+                # This request retains physical KV blocks that another
+                # request is repairing.
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -789,6 +807,11 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                if not self._kv_recovery_can_schedule(request_id, num_scheduled_tokens):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -842,6 +865,15 @@ class Scheduler(SchedulerInterface):
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                    ) = self._truncate_quarantined_prefix_cache_hit(
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                    )
+                    if request.shared_prefix_boundary > num_new_local_computed_tokens:
+                        request.shared_prefix_boundary = num_new_local_computed_tokens
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -897,6 +929,20 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                            ) = self._truncate_quarantined_prefix_cache_hit(
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                            )
+                            if (
+                                request.shared_prefix_boundary
+                                > num_new_local_computed_tokens
+                            ):
+                                request.shared_prefix_boundary = (
+                                    num_new_local_computed_tokens
+                                )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -1374,6 +1420,156 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
 
+    @staticmethod
+    def _get_confirmed_num_computed_tokens(request: Request) -> int:
+        """Return the prefix whose worker execution has completed."""
+        active_in_flight_tokens = (
+            request.num_in_flight_tokens - request.num_stale_output_tokens
+        )
+        assert 0 <= active_in_flight_tokens <= request.num_computed_tokens
+        return request.num_computed_tokens - active_in_flight_tokens
+
+    def _update_kv_recovery_progress(self) -> None:
+        """Release shared-block recovery barriers using confirmed progress."""
+        if not self._kv_recovery_block_owners:
+            assert not self._kv_recovery_dependencies
+            return
+
+        owner_progress: dict[str, int] = {}
+        for owner_id, _ in self._kv_recovery_block_owners.values():
+            owner = self.requests.get(owner_id)
+            if owner is not None:
+                owner_progress[owner_id] = self._get_confirmed_num_computed_tokens(
+                    owner
+                )
+
+        for block_id, (owner_id, required_end) in tuple(
+            self._kv_recovery_block_owners.items()
+        ):
+            if owner_progress.get(owner_id, -1) >= required_end:
+                del self._kv_recovery_block_owners[block_id]
+
+        for req_id, dependencies in tuple(self._kv_recovery_dependencies.items()):
+            for owner_id, required_end in tuple(dependencies.items()):
+                if owner_progress.get(owner_id, -1) >= required_end:
+                    del dependencies[owner_id]
+            if not dependencies:
+                del self._kv_recovery_dependencies[req_id]
+
+    def _kv_recovery_can_schedule(
+        self,
+        req_id: str,
+        num_scheduled_tokens: dict[str, int],
+    ) -> bool:
+        """Whether every shared-block repair dependency is ordered safely.
+
+        Confirmed owner progress is always safe. We may also use owner tokens
+        scheduled earlier in this same frame when there is no older active
+        owner frame: Model Runner V2 writes the frame's KV for all requests
+        before attention consumes it. This preserves the normal same-frame
+        prefix-sharing path without relying on optimistic cross-frame state.
+        """
+        dependencies = self._kv_recovery_dependencies.get(req_id)
+        if not dependencies:
+            return True
+
+        for owner_id, required_end in dependencies.items():
+            owner = self.requests.get(owner_id)
+            if owner is None:
+                return False
+            confirmed = self._get_confirmed_num_computed_tokens(owner)
+            if confirmed >= required_end:
+                continue
+
+            scheduled_now = num_scheduled_tokens.get(owner_id, 0)
+            if (
+                not self.use_v2_model_runner
+                or scheduled_now == 0
+                or owner.num_computed_tokens != confirmed
+                or confirmed + scheduled_now < required_end
+            ):
+                return False
+        return True
+
+    def _truncate_quarantined_prefix_cache_hit(
+        self,
+        computed_blocks: KVCacheBlocks,
+        num_computed_tokens: int,
+    ) -> tuple[KVCacheBlocks, int]:
+        """Exclude externally-invalid blocks still being repaired."""
+        if not self._kv_recovery_block_owners or num_computed_tokens == 0:
+            return computed_blocks, num_computed_tokens
+
+        (block_ids,) = computed_blocks.get_block_ids()
+        for block_idx, block_id in enumerate(block_ids):
+            if block_id not in self._kv_recovery_block_owners:
+                continue
+            valid_tokens = block_idx * self.block_size
+            return (
+                self.kv_cache_manager.truncate_computed_blocks(
+                    computed_blocks, valid_tokens
+                ),
+                valid_tokens,
+            )
+        return computed_blocks, num_computed_tokens
+
+    def _remove_request_from_kv_recovery(self, request: Request) -> None:
+        """Drop a participant and transfer any unfinished repair ownership."""
+        req_id = request.request_id
+        self._update_kv_recovery_progress()
+        self._kv_recovery_dependencies.pop(req_id, None)
+
+        orphaned_block_ids = {
+            block_id
+            for block_id, (owner_id, _) in self._kv_recovery_block_owners.items()
+            if owner_id == req_id
+        }
+        if not orphaned_block_ids:
+            return
+
+        for block_id in orphaned_block_ids:
+            del self._kv_recovery_block_owners[block_id]
+        for dependent_id, dependencies in tuple(self._kv_recovery_dependencies.items()):
+            dependencies.pop(req_id, None)
+            if not dependencies:
+                del self._kv_recovery_dependencies[dependent_id]
+
+        # A peer still holding an orphaned physical block becomes its new
+        # repair owner. Requests without those blocks need no dependency.
+        candidates: list[Request] = []
+        held_block_ids: set[int] = set()
+        seen_req_ids: set[str] = set()
+        for candidate in itertools.chain(
+            self.running, self.waiting, self.skipped_waiting
+        ):
+            candidate_id = candidate.request_id
+            if (
+                candidate_id == req_id
+                or candidate_id in seen_req_ids
+                or candidate.is_finished()
+            ):
+                continue
+            seen_req_ids.add(candidate_id)
+            try:
+                (request_block_ids,) = self.kv_cache_manager.get_block_ids(candidate_id)
+            except KeyError:
+                continue
+            if orphaned_block_ids.intersection(request_block_ids):
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            (block_ids,) = self.kv_cache_manager.get_block_ids(candidate.request_id)
+            held_block_ids.update(block_ids)
+
+        unclaimed_block_ids = orphaned_block_ids - held_block_ids
+        if unclaimed_block_ids:
+            # No live request will overwrite these blocks. Remove their stale
+            # hashes before the departing owner returns them to the pool.
+            self.kv_cache_manager.evict_blocks(unclaimed_block_ids)
+
+        if candidates:
+            self._register_sync_kv_recovery(candidates, orphaned_block_ids)
+
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
     ) -> None:
@@ -1390,6 +1586,7 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        self._remove_request_from_kv_recovery(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -2450,6 +2647,7 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        self._remove_request_from_kv_recovery(request)
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -2583,6 +2781,11 @@ class Scheduler(SchedulerInterface):
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
+            # Every running request is about to drop its blocks and restart
+            # from a freshly reset prefix cache, so no repair ownership can
+            # survive this operation.
+            self._kv_recovery_block_owners.clear()
+            self._kv_recovery_dependencies.clear()
             # Invalidate all the current running requests KV's by pushing them to
             # the waiting queue. In this case, we can reduce the ref count of all
             # the kv blocks to 0 and thus we can make sure the reset is successful.
@@ -2890,6 +3093,123 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
+    def _register_sync_kv_recovery(
+        self,
+        requests: Iterable[Request],
+        invalid_block_ids: set[int],
+    ) -> tuple[set[str], int, set[int]]:
+        """Register repair ownership for a synchronous rejected KV load.
+
+        Full-attention prefix sharing is contiguous. A request can therefore
+        depend on an already-owned shared prefix, then become the owner of its
+        first private downstream block. The dependency is expressed in terms
+        of worker-confirmed tokens, not the scheduler's optimistic offset.
+        """
+        affected_req_ids: set[str] = set()
+        total_affected_tokens = 0
+        blocks_to_evict: set[int] = set()
+
+        for request in requests:
+            req_id = request.request_id
+            try:
+                # TODO (davidb): add support for hybrid memory allocator.
+                (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            except KeyError:
+                continue
+
+            req_num_computed_tokens = self._get_confirmed_num_computed_tokens(request)
+            req_num_computed_blocks = (
+                req_num_computed_tokens + self.block_size - 1
+            ) // self.block_size
+            first_invalid_idx = next(
+                (
+                    idx
+                    for idx, block_id in enumerate(
+                        req_block_ids[:req_num_computed_blocks]
+                    )
+                    if block_id in invalid_block_ids
+                ),
+                None,
+            )
+            if first_invalid_idx is None:
+                continue
+
+            dependencies: dict[str, int] = {}
+            repair_start_idx: int | None = None
+            for idx in range(first_invalid_idx, req_num_computed_blocks):
+                block_id = req_block_ids[idx]
+                ownership = self._kv_recovery_block_owners.get(block_id)
+                if ownership is None or ownership[0] == req_id:
+                    repair_start_idx = idx
+                    break
+                owner_id, owner_required_end = ownership
+                required_end = min(
+                    owner_required_end,
+                    req_num_computed_tokens,
+                )
+                dependencies[owner_id] = max(
+                    dependencies.get(owner_id, 0), required_end
+                )
+
+            if repair_start_idx is None:
+                # Every invalid/downstream block in this request's confirmed
+                # prefix will be repaired by an earlier request.
+                request.num_computed_tokens = req_num_computed_tokens
+            else:
+                request.num_computed_tokens = repair_start_idx * self.block_size
+                total_affected_tokens += (
+                    req_num_computed_tokens - request.num_computed_tokens
+                )
+                blocks_to_evict.update(req_block_ids[repair_start_idx:])
+
+                # Quarantine every allocated downstream block, including
+                # blocks optimistically cached for later in-flight frames.
+                # Those frames were computed from the rejected prefix and are
+                # discarded, so their block hashes are unsafe until the owner
+                # has recomputed the corresponding accepted-token frontier.
+                for idx in range(repair_start_idx, len(req_block_ids)):
+                    block_id = req_block_ids[idx]
+                    ownership = self._kv_recovery_block_owners.get(block_id)
+                    if ownership is not None and ownership[0] != req_id:
+                        raise AssertionError(
+                            "KV recovery encountered non-contiguous physical "
+                            "block sharing, which is unsupported"
+                        )
+                    required_end = min(
+                        (idx + 1) * self.block_size,
+                        request.num_tokens,
+                    )
+                    if ownership is not None:
+                        required_end = max(required_end, ownership[1])
+                    self._kv_recovery_block_owners[block_id] = (
+                        req_id,
+                        required_end,
+                    )
+
+            if dependencies:
+                request_dependencies = self._kv_recovery_dependencies.setdefault(
+                    req_id, {}
+                )
+                for owner_id, required_end in dependencies.items():
+                    request_dependencies[owner_id] = max(
+                        request_dependencies.get(owner_id, 0),
+                        required_end,
+                    )
+
+            request.spec_token_ids = []
+            self._mark_inflight_output_stale(request, drop_stale_output=True)
+            request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens
+            if request.is_prefill_chunk:
+                self._inflight_prefills.add(request)
+            else:
+                self._inflight_prefills.discard(request)
+            if self.use_v2_model_runner and request.status == RequestStatus.RUNNING:
+                self.rewound_req_ids.add(req_id)
+
+            affected_req_ids.add(req_id)
+
+        return affected_req_ids, total_affected_tokens, blocks_to_evict
+
     def _update_requests_with_invalid_blocks(
         self,
         requests: Iterable[Request],
@@ -2921,6 +3241,9 @@ class Scheduler(SchedulerInterface):
                 - blocks_to_evict (set[int]): Block IDs to evict from cache,
                 including invalid blocks and downstream dependent blocks.
         """
+        if evict_blocks and self.recompute_kv_load_failures:
+            return self._register_sync_kv_recovery(requests, invalid_block_ids)
+
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
         blocks_to_evict: set[int] = set()
