@@ -40,6 +40,16 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
+        # in most cases.
+        vllm_config.parallel_config.set_dcp_defaults(
+            comm_backend="a2a", q_replicate=True
+        )
+
+
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -539,9 +549,19 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling)
+        pooling = getattr(hf_config, "pooling", None)
+        if pooling is None:
+            raise ValueError(
+                "This bidirectional model requires a 'pooling' field in its HF "
+                "config (one of 'avg', 'cls', 'last'), but none was found. "
+                "Unlike the VL variants, no default is assumed here because "
+                "silently picking a pooling for an embedding model can produce "
+                "wrong embeddings."
+            )
+
+        pooling_type = pooling_type_map.get(pooling)
         if pooling_type is None:
-            raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
+            raise ValueError(f"pool_type {pooling!r} not supported")
 
         assert model_config.pooler_config is not None
         model_config.pooler_config.seq_pooling_type = pooling_type
@@ -913,6 +933,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,

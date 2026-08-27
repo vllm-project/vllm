@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
@@ -30,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     MambaSpec,
 )
 
@@ -99,25 +101,45 @@ def test_hybrid_gdn_remote_prefill_uses_mamba_n_minus_one():
 
 
 @pytest.mark.cpu_test
-def test_hybrid_gdn_remote_decode_truncates_prefill_once():
-    scheduler = make_hybrid_gdn_scheduler(kv_role="kv_producer")
+def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    connector = MooncakeConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size),
+    )
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
     request = create_request(num_tokens=10, do_remote_decode=True)
     original_tokens = list(request.prompt_token_ids)
 
-    num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
-        request, num_computed_tokens=0
-    )
-
-    assert num_new_tokens == 0
-    assert is_async is False
+    connector.on_new_request(request)
     assert request.prompt_token_ids == original_tokens[:-1]
     assert request._all_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.max_tokens == 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
 
-    scheduler.get_num_new_matched_tokens(request, num_computed_tokens=0)
+    # Re-adding or rescheduling the request must not truncate another token.
+    scheduler.on_new_request(request)
     assert request.prompt_token_ids == original_tokens[:-1]
+
+    # Prefix-cache matching must not mutate the request after its local lookup.
+    with patch.object(
+        scheduler,
+        "_truncate_mamba_request_for_prefill",
+        side_effect=AssertionError("late Mamba truncation"),
+    ):
+        num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens=0
+        )
+
+    assert num_new_tokens == 0
+    assert is_async is False
 
 
 def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
@@ -138,14 +160,22 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         )
         worker = connector.connector_worker
 
-        fa_cache = torch.empty((2, 2, 11), dtype=torch.float16)
-        gdn_conv_state = torch.empty((2, 22), dtype=torch.float16)
-        gdn_ssm_state = torch.empty((2, 4), dtype=torch.float16)
+        num_blocks = kv_cache_config.num_blocks
+        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        fa_raw = torch.empty(num_blocks * fa_spec.page_size_bytes, dtype=torch.int8)
+        gdn_raw = torch.empty(num_blocks * gdn_spec.page_size_bytes, dtype=torch.int8)
+        (fa_cache,) = dense_kv_cache_views(
+            fa_raw, fa_spec, num_blocks, 1, KVCacheLayout.LBHNC
+        )
+        (gdn_cache,) = dense_kv_cache_views(
+            gdn_raw, gdn_spec, num_blocks, 1, KVCacheLayout.LBHNC
+        )
 
         worker.register_kv_caches(
             {
                 "model.layers.0.self_attn": fa_cache,
-                "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+                "model.layers.1.linear_attn": gdn_cache,
             }
         )
 
@@ -154,10 +184,14 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             "model.layers.0.self_attn",
             "model.layers.1.linear_attn",
         ]
+        assert worker.block_len_per_layer == [
+            fa_spec.page_size_bytes,
+            gdn_spec.page_size_bytes,
+        ]
         assert worker.registered_group_indices == [0, 1]
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
+            gdn_cache.data_ptr(),
         ]
 
         worker.shutdown()
@@ -185,8 +219,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
 
         backing = torch.empty((4, 64), dtype=torch.float16)
         fa_cache = backing[:2, :16]
-        gdn_conv_state = backing[:3]
-        gdn_ssm_state = torch.empty((3, 4), dtype=torch.float16)
+        gdn_cache = backing[:3]
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -194,13 +227,13 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             worker.register_kv_caches(
                 {
                     "model.layers.0.self_attn": fa_cache,
-                    "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+                    "model.layers.1.linear_attn": gdn_cache,
                 }
             )
 
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
+            gdn_cache.data_ptr(),
         ]
         batch_register_memory.assert_called_once()
         registered_ptrs, registered_lens = batch_register_memory.call_args[0]
@@ -339,7 +372,7 @@ def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     assert kernel_block_ids == [list(range(34, 51)), [2]]
 
 
-def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
+def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
     monkeypatch,
 ):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
@@ -359,7 +392,7 @@ def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
         )
         worker = connector.connector_worker
 
-        worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=True)
+        worker.transfer_topo = SimpleNamespace(is_kv_layout_blocks_first=False)
         regions = worker._get_transfer_regions(
             base_addrs=[0x1000, 0x2000],
             block_lens=[0x100, 0x100],
@@ -377,7 +410,6 @@ def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
             for region in regions
         ] == [
             (0, 0x1000, 0x40),
-            (0, 0x1040, 0x40),
             (1, 0x2000, 0x100),
         ]
 
