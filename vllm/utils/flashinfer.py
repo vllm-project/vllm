@@ -230,12 +230,10 @@ def has_flashinfer_moe_ep(transport: str = "nccl_ep") -> bool:
         return False
     if importlib.util.find_spec("flashinfer.moe_ep") is None:
         return False
-    try:
-        from flashinfer.moe_ep import available_backends
 
-        return transport in available_backends()
-    except Exception:
-        return False
+    from flashinfer.moe_ep import available_backends
+
+    return transport in available_backends()
 
 
 def has_flashinfer_moe_ep_fault_tolerance(transport: str = "nccl_ep") -> bool:
@@ -247,20 +245,15 @@ def has_flashinfer_moe_ep_fault_tolerance(transport: str = "nccl_ep") -> bool:
     `libnccl_ep` exporting the `ncclEpMask*` symbols; `nixl_ep` allocates its
     mask buffer unconditionally.
 
-    Also returns `False` against a FlashInfer that predates the FT API, so
-    this stays safe across the versions vLLM may be installed with.
+    `supports_fault_tolerance` itself never raises -- it reports `False` rather
+    than propagating a probe failure -- so no guard is needed here.
     """
     if not has_flashinfer_moe_ep(transport):
         return False
-    try:
-        from flashinfer.moe_ep import supports_fault_tolerance
 
-        return bool(supports_fault_tolerance(transport))
-    except ImportError:
-        # FlashInfer older than the FT API (flashinfer-ai/flashinfer#4183).
-        return False
-    except Exception:
-        return False
+    from flashinfer.moe_ep import supports_fault_tolerance
+
+    return bool(supports_fault_tolerance(transport))
 
 
 @functools.cache
