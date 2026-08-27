@@ -129,6 +129,20 @@ def test_gsm8k_correctness(config_filename):
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
                 "The quantization scheme is not supported on non-GFX950 platforms."
             )
+    unsupported_list_xpu = [
+        "GLM-5.2-NVFP4",
+        "DeepSeek-V4-Flash-DSpark",
+        "Nemotron-3-Super-120B-A12B-NVFP4",
+    ]
+
+    if current_platform.is_xpu():
+        for name in unsupported_list_xpu:
+            if name in config_filename.name:
+                pytest.skip(
+                    f"gsm8k correctness check config {config_filename.name}"
+                    " is not supported on XPU platform."
+                )
+
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
