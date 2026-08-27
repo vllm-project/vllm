@@ -20,6 +20,8 @@ Class structure mirrors the GPU worker pattern in multiproc_executor.py:
 """
 
 import contextlib
+import json
+import mmap as _mmap
 import multiprocessing.process
 import pickle
 import signal
@@ -322,6 +324,111 @@ class PleOffloadWorker:
             death_pipe.close()
 
 
+def _ple_disk_shard_of(mapped_name: str) -> str | None:
+    """"<layer>.a.b.shard_3.weight" -> "<layer>.a.b" (the parameter the shard fills)."""
+    import re
+
+    m = re.match(r"^(.*)\.shard_\d+\.weight$", mapped_name)
+    return m.group(1) if m else None
+
+
+def _ple_disk_dir() -> str | None:
+    return envs.VLLM_PLE_DISK_OFFLOAD_DIR or None
+
+
+_PLE_DISK_MAPS: dict[str, object] = {}
+
+
+def _disk_backed_tensor(path: str, shape: tuple[int, ...], dtype: torch.dtype,
+                        writable: bool) -> torch.Tensor:
+    """Map ``path`` as a tensor of ``shape``/``dtype``.
+
+    numpy has no bfloat16, so the file is mapped with a same-width integer dtype
+    and reinterpreted. ``writable`` selects a shared read-write mapping (first
+    boot, shard writes must reach the file) versus copy-on-write (steady state).
+    MADV_RANDOM is applied either way: gathers are random-access and readahead
+    only evicts useful pages.
+    """
+    import numpy as np
+
+    _NP = {torch.bfloat16: (np.uint16, torch.uint16), torch.float16: (np.uint16, torch.uint16),
+           torch.float32: (np.uint32, torch.uint32), torch.float8_e4m3fn: (np.uint8, torch.uint8)}
+    np_dtype, torch_int = _NP[dtype]
+    arr = np.memmap(path, dtype=np_dtype, mode="r+" if writable else "c", shape=shape)
+    with contextlib.suppress(Exception):
+        arr._mmap.madvise(_mmap.MADV_RANDOM)  # noqa: SLF001 - numpy has no public madvise
+    _PLE_DISK_MAPS[path] = arr
+    return torch.from_numpy(arr).view(dtype)
+
+
+def _ple_disk_attach(layer_name: str, layer: torch.nn.Module,
+                     disk_dir: str) -> tuple[str, bool] | None:
+    """Swap the layer's largest parameter (the n-gram table) for a disk-backed map.
+
+    Returns ``(param_name, file_complete)`` or ``None`` when the layer has no
+    parameter large enough to be worth spilling (>= 1 GiB).
+    """
+    import os
+
+    named = sorted(layer.named_parameters(), key=lambda kv: kv[1].numel(), reverse=True)
+    if not named or named[0][1].numel() * named[0][1].element_size() < (1 << 30):
+        return None
+    pname, param = named[0]
+    shape, dtype = tuple(param.shape), param.dtype
+    nbytes = param.numel() * param.element_size()
+    os.makedirs(disk_dir, exist_ok=True)
+    base = os.path.join(disk_dir, layer_name.replace("/", "_") + "." + pname)
+    bin_path, done_path = base + ".bin", base + ".done.json"
+
+    complete = False
+    if os.path.exists(done_path) and os.path.exists(bin_path)             and os.path.getsize(bin_path) == nbytes:
+        meta = json.load(open(done_path))
+        complete = meta.get("shape") == list(shape) and meta.get("dtype") == str(dtype)
+    if not complete:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(done_path)
+        with open(bin_path, "ab") as f:
+            f.truncate(nbytes)
+
+    mapped = _disk_backed_tensor(bin_path, shape, dtype, writable=not complete)
+    # Replace the parameter data in place; module structure and names are unchanged,
+    # so load_weights and the gather path are untouched.
+    owner = layer
+    parts = pname.split(".")
+    for p in parts[:-1]:
+        owner = getattr(owner, p)
+    getattr(owner, parts[-1]).data = mapped
+    logger.info(
+        "PLE disk offload: %s.%s -> %s (%.1f GiB, %s)",
+        layer_name, pname, bin_path, nbytes / (1 << 30),
+        "reusing finished file" if complete else "first boot, writing through",
+    )
+    return pname, complete
+
+
+def _ple_disk_finalize(layer_name: str, layer: torch.nn.Module, pname: str,
+                       disk_dir: str) -> None:
+    """Flush the written mapping, record completion, and remap copy-on-write."""
+    import os
+
+    owner = layer
+    parts = pname.split(".")
+    for p in parts[:-1]:
+        owner = getattr(owner, p)
+    param = getattr(owner, parts[-1])
+    base = os.path.join(disk_dir, layer_name.replace("/", "_") + "." + pname)
+    arr = _PLE_DISK_MAPS.get(base + ".bin")
+    if arr is not None:
+        with contextlib.suppress(Exception):
+            arr.flush()
+    json.dump({"shape": list(param.shape), "dtype": str(param.dtype)},
+              open(base + ".done.json", "w"))
+    param.data = _disk_backed_tensor(base + ".bin", tuple(param.shape), param.dtype,
+                                     writable=False)
+    logger.info("PLE disk offload: %s.%s finalized and remapped copy-on-write.",
+                layer_name, pname)
+
+
 class PleOffloadRunner:
     """Own all discovered PLE tables and serve every local DP rank."""
 
@@ -390,6 +497,28 @@ class PleOffloadRunner:
         )
         offload_prefixes = tuple(f"{name}." for name in offload_layers)
 
+        disk_dir = _ple_disk_dir()
+        disk_attached: dict[str, str] = {}
+        disk_complete_params: set[str] = set()
+        disk_complete_tables: tuple[str, ...] = ()
+        if disk_dir is not None:
+            table_prefixes = []
+            for layer_name, layer in offload_layers.items():
+                attached = _ple_disk_attach(layer_name, layer, disk_dir)
+                if attached is None:
+                    continue
+                pname, complete = attached
+                disk_attached[layer_name] = pname
+                if complete:
+                    full = f"{layer_name}.{pname}"
+                    disk_complete_params.add(full)
+                    # "...ngram_embedding.weight" -> "...ngram_embedding": the module
+                    # whose shard_N.weight checkpoint tensors fill this table.
+                    table_prefixes.append(full.rsplit(".", 1)[0])
+            # Shard tensors that land inside an already-finished table are not
+            # re-read from the checkpoint: mapping the file replaces them.
+            disk_complete_tables = tuple(table_prefixes)
+
         # Step 3: filter checkpoint tensors before model.load_weights(). The
         # conditional-generation checkpoint uses HF names such as
         # ``model.language_model.*`` while named_modules exposes mapped vLLM
@@ -410,6 +539,10 @@ class PleOffloadRunner:
                     mapped_name = mapped_names[0] if mapped_names else None
                 if mapped_name is not None and mapped_name.startswith(offload_prefixes):
                     matched_checkpoint_tensors += 1
+                    if disk_complete_tables:
+                        table = _ple_disk_shard_of(mapped_name)
+                        if table is not None and table.startswith(disk_complete_tables):
+                            continue
                     yield weight_name, tensor
 
         loader = get_model_loader(load_config)
@@ -440,6 +573,7 @@ class PleOffloadRunner:
             loaded_expected_params = expected_offload_params.intersection(loaded_params)
             missing_offload_params = sorted(
                 expected_offload_params.difference(loaded_expected_params)
+                - disk_complete_params
             )
             if missing_offload_params:
                 raise RuntimeError(
@@ -466,6 +600,12 @@ class PleOffloadRunner:
         # the remainder of the model is still on meta and must not be visited.
         for layer in offload_layers.values():
             process_weights_after_loading(layer, model_config, torch.device("cpu"))
+
+        if disk_dir is not None:
+            for layer_name, pname in disk_attached.items():
+                if f"{layer_name}.{pname}" not in disk_complete_params:
+                    _ple_disk_finalize(layer_name, offload_layers[layer_name],
+                                       pname, disk_dir)
 
         self._layers.update(offload_layers)
         del model
