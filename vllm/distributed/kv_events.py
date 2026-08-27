@@ -44,8 +44,7 @@ class KVCacheEvent(
 
 MEDIUM_GPU = "GPU"
 MEDIUM_CPU = "CPU"
-MEDIUM_FS = "FS"
-MEDIUM_OBJ = "OBJ"
+MEDIUM_STORAGE = "STORAGE"
 
 
 class BlockStored(KVCacheEvent):
@@ -74,6 +73,8 @@ class BlockStored(KVCacheEvent):
     # filter groups as they are learned. Remove events only need group_idx+hash.
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
+    locality: str | None = None
+    """LOCAL or REMOTE relative to the publisher; None means unspecified."""
 
     def __hash__(self) -> int:
         return hash(
@@ -88,6 +89,7 @@ class BlockStored(KVCacheEvent):
                 self.group_idx,
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
+                self.locality,
             )
         )
 
@@ -96,6 +98,8 @@ class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
     group_idx: int | None = None
+    locality: str | None = None
+    """LOCAL or REMOTE relative to the publisher; None means unspecified."""
 
     def __hash__(self) -> int:
         return hash(
@@ -103,6 +107,7 @@ class BlockRemoved(KVCacheEvent):
                 tuple(self.block_hashes),
                 self.medium,
                 self.group_idx,
+                self.locality,
             )
         )
 
@@ -267,6 +272,10 @@ class EventPublisher(ABC):
     def shutdown(self) -> None:
         """Shutdown the publisher."""
 
+    def get_publisher_config(self) -> KVEventsConfig | None:
+        """Return the publisher's resolved runtime configuration."""
+        return None
+
 
 class NullEventPublisher(EventPublisher):
     """No-op implementation (default when disabled)."""
@@ -330,6 +339,17 @@ class ZmqEventPublisher(EventPublisher):
         self._replay_endpoint = self.offset_endpoint_port(
             replay_endpoint, self._dp_rank
         )
+        assert self._endpoint is not None
+        self._publisher_config = KVEventsConfig(
+            enable_kv_cache_events=True,
+            publisher="zmq",
+            endpoint=self._endpoint,
+            replay_endpoint=self._replay_endpoint,
+            buffer_steps=buffer_steps,
+            hwm=hwm,
+            max_queue_size=max_queue_size,
+            topic=topic,
+        )
         self._hwm = hwm
         self._socket_setup()
 
@@ -345,6 +365,9 @@ class ZmqEventPublisher(EventPublisher):
             target=self._publisher_thread, daemon=True, name="zmq-publisher"
         )
         self._thread.start()
+
+    def get_publisher_config(self) -> KVEventsConfig:
+        return self._publisher_config
 
     def publish(self, events: EventBatch) -> None:
         if not self._running:

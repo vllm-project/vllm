@@ -148,6 +148,7 @@ def test_openapi_stateless(case: schemathesis.Case):
         "/start_draft_weight_update",
         "/update_weights",
         "/finish_weight_update",
+        "/update_weight_version",
     ):
         return
 
