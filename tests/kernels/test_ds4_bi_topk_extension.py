@@ -27,7 +27,7 @@ def test_bi_dispatch_uses_standalone_topk_with_request_offsets(
     row_starts = torch.tensor([0, 17, 65], dtype=torch.int32, device="cuda")
     row_ends = row_starts + 512
     logits = torch.ones((3, 1024), dtype=torch.float32, device="cuda")
-    expected = row_ends[:, None] - 1 - torch.arange(
+    expected = (row_ends - row_starts)[:, None] - 1 - torch.arange(
         top_k, dtype=torch.int32, device="cuda"
     )
 

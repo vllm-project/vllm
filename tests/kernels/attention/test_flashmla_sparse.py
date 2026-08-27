@@ -278,7 +278,7 @@ def test_deepseek_v4_batch_invariant_decode_is_request_local():
 
 @pytest.mark.parametrize("batch_size", [1, 4, 32])
 @pytest.mark.parametrize("seq_len", [2048, 6144])
-def test_deepseek_v4_batch_invariant_fixed_shape_buckets(
+def test_deepseek_v4_batch_invariant_identical_shapes_stay_request_local(
     batch_size: int, seq_len: int
 ):
     from vllm.models.deepseek_v4.nvidia.flashmla import (
@@ -293,7 +293,10 @@ def test_deepseek_v4_batch_invariant_fixed_shape_buckets(
     decode_plan = _batch_invariant_decode_request_ranges(
         offsets, seq_lens, batch_size, compress_ratio=4, window_size=128
     )
-    assert decode_plan == [(0, 0, batch_size, batch_size * query_len)]
+    assert decode_plan == [
+        (request_index, request_index * query_len, 1, query_len)
+        for request_index in range(batch_size)
+    ]
 
     metadata = DeepseekSparseSWAMetadata(
         block_table=torch.empty(0, dtype=torch.int32),
@@ -307,11 +310,12 @@ def test_deepseek_v4_batch_invariant_fixed_shape_buckets(
         prefill_window_size=128,
     )
     assert _batch_invariant_prefill_chunk_plan(metadata, 4, 128) == [
-        (0, batch_size, seq_len // 4, seq_len // 4 + 129)
+        (request_index, request_index + 1, seq_len // 4, seq_len // 4 + 129)
+        for request_index in range(batch_size)
     ]
 
 
-def test_deepseek_v4_batch_invariant_ragged_buckets_do_not_scale_with_tokens():
+def test_deepseek_v4_batch_invariant_ragged_ranges_stay_request_local():
     from vllm.models.deepseek_v4.nvidia.flashmla import (
         _batch_invariant_decode_request_ranges,
     )
@@ -323,8 +327,8 @@ def test_deepseek_v4_batch_invariant_ragged_buckets_do_not_scale_with_tokens():
     plan = _batch_invariant_decode_request_ranges(
         offsets, seq_lens, batch_size, compress_ratio=4, window_size=128
     )
-    assert 1 <= len(plan) <= batch_size
-    assert len(plan) < int(query_lens.sum())
+    assert len(plan) == batch_size
+    assert all(request_count == 1 for _, _, request_count, _ in plan)
 
 
 def test_flashinfer_sparse_indices_cache(monkeypatch):

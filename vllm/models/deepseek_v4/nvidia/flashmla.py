@@ -54,26 +54,17 @@ def _batch_invariant_prefill_chunk_plan(
             rounding_mode="floor",
         )
     )
-    query_lens = metadata.prefill_query_lens_cpu
     compressed_values = compressed_lens.numpy()
     gather_values = gather_lens.numpy()
-    query_values = query_lens.numpy()
-    plan: list[tuple[int, int, int, int]] = []
-    chunk_start = 0
-    while chunk_start < metadata.num_prefills:
-        chunk_n = int(compressed_values[chunk_start])
-        chunk_gather = int(gather_values[chunk_start])
-        chunk_query = int(query_values[chunk_start])
-        chunk_end = chunk_start + 1
-        while chunk_end < metadata.num_prefills and (
-            int(compressed_values[chunk_end]),
-            int(gather_values[chunk_end]),
-            int(query_values[chunk_end]),
-        ) == (chunk_n, chunk_gather, chunk_query):
-            chunk_end += 1
-        plan.append((chunk_start, chunk_end, chunk_n, chunk_n + chunk_gather))
-        chunk_start = chunk_end
-    return plan
+    return [
+        (
+            request_index,
+            request_index + 1,
+            int(compressed_values[request_index]),
+            int(compressed_values[request_index] + gather_values[request_index]),
+        )
+        for request_index in range(metadata.num_prefills)
+    ]
 
 
 def _batch_invariant_decode_request_ranges(
@@ -84,39 +75,15 @@ def _batch_invariant_decode_request_ranges(
     window_size: int,
 ) -> list[tuple[int, int, int, int]]:
     query_offsets = query_start_loc_cpu.numpy()
-    seq_values = seq_lens_cpu.numpy()
-    ranges: list[tuple[int, int, int, int]] = []
-    request_start = 0
-    while request_start < num_decodes:
-        token_start = int(query_offsets[request_start])
-        query_len = int(query_offsets[request_start + 1]) - token_start
-        seq_len = int(seq_values[request_start])
-        compressed_len = 0 if compress_ratio <= 1 else seq_len // compress_ratio
-        gather_len = query_len + min(max(seq_len - query_len, 0), window_size - 1)
-        request_end = request_start + 1
-        while request_end < num_decodes:
-            next_token_start = int(query_offsets[request_end])
-            next_query_len = int(query_offsets[request_end + 1]) - next_token_start
-            next_seq_len = int(seq_values[request_end])
-            next_shape = (
-                next_query_len,
-                0 if compress_ratio <= 1 else next_seq_len // compress_ratio,
-                next_query_len
-                + min(max(next_seq_len - next_query_len, 0), window_size - 1),
-            )
-            if next_shape != (query_len, compressed_len, gather_len):
-                break
-            request_end += 1
-        ranges.append(
-            (
-                request_start,
-                token_start,
-                request_end - request_start,
-                int(query_offsets[request_end]) - token_start,
-            )
+    return [
+        (
+            request_index,
+            int(query_offsets[request_index]),
+            1,
+            int(query_offsets[request_index + 1] - query_offsets[request_index]),
         )
-        request_start = request_end
-    return ranges
+        for request_index in range(num_decodes)
+    ]
 
 
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):

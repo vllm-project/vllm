@@ -41,12 +41,13 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
       const float score =
           logits[static_cast<int64_t>(row) * stride0 +
                  static_cast<int64_t>(absolute_index) * stride1];
-      // Descending score, then descending source index, matching vLLM's
-      // insertion-sort tie semantics. The key is unique, so
-      // neither candidate selection nor output depends on warp scheduling.
+      // Descending score, then descending request-local source index,
+      // matching vLLM's insertion-sort tie and output semantics. The key is
+      // unique, so neither candidate selection nor output depends on warp
+      // scheduling or the request's offset in a packed buffer.
       score_keys[item] =
           (static_cast<uint64_t>(ordered_float_bits(score)) << 32) |
-          static_cast<uint32_t>(absolute_index);
+          static_cast<uint32_t>(local_index);
     } else {
       score_keys[item] = 0;
     }
