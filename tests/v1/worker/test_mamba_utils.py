@@ -14,6 +14,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+from vllm.model_executor.models.mamba import MambaForCausalLM
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -45,6 +46,16 @@ _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.GDN_ATTN: _DEFAULT_COPY_FUNCS,
     MambaAttentionBackendEnum.SHORT_CONV: (get_conv_copy_spec,),
 }
+
+
+def test_mamba_model_inherits_default_state_copy_funcs_by_type() -> None:
+    """Pure Mamba models adapt their legacy copy functions by backend type."""
+    mamba_types = {MambaAttentionBackendEnum.MAMBA1}
+    copy_funcs = MambaForCausalLM.get_mamba_state_copy_func()
+
+    assert MambaForCausalLM.get_mamba_state_copy_funcs(mamba_types) == {
+        MambaAttentionBackendEnum.MAMBA1: copy_funcs
+    }
 
 
 def postprocess_mamba(
