@@ -11,7 +11,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     ChunkGatedDeltaRule,
-    _prepare_gdn_prefill_initial_state,
     _resolve_gdn_prefill_backend,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -89,8 +88,7 @@ def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
     v = torch.empty(1, 8, 4, 128, dtype=torch.bfloat16)
     g = torch.empty(1, 8, 4, dtype=torch.float32)
     beta = torch.empty_like(g)
-    state_pool = torch.empty(7, 4, 128, 128, dtype=torch.float32)
-    state_indices = torch.tensor([2, 5], dtype=torch.int32)
+    initial_state = torch.empty(2, 4, 128, 128, dtype=torch.float32)
     cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
     prefill_metadata = object()
     expected_o = torch.empty_like(v)
@@ -98,7 +96,7 @@ def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
 
     def fake_aiter(**kwargs):
         captured.update(kwargs)
-        return expected_o, state_pool
+        return expected_o, initial_state
 
     monkeypatch.setattr(
         qwen_gdn_linear_attn,
@@ -112,22 +110,21 @@ def test_aiter_flydsl_dispatch_arguments(monkeypatch: pytest.MonkeyPatch):
         v=v,
         g=g,
         beta=beta,
-        initial_state=state_pool,
+        initial_state=initial_state,
         output_final_state=True,
         cu_seqlens=cu_seqlens,
         use_qk_l2norm_in_kernel=False,
         prefill_metadata=prefill_metadata,
-        initial_state_indices=state_indices,
     )
 
     assert output is expected_o
-    assert final_state is state_pool
+    assert final_state is initial_state
     assert captured["use_chunk_flydsl"] is True
     assert captured["use_prepare_flydsl"] is True
     assert captured["state_dtype"] is torch.float32
     assert captured["prefill_metadata"] is prefill_metadata
-    assert captured["initial_state_indices"] is state_indices
-    assert captured["inplace_final_state"] is True
+    assert captured["initial_state_indices"] is None
+    assert captured["inplace_final_state"] is False
     assert captured["use_qk_l2norm_in_kernel"] is False
 
 
@@ -162,25 +159,3 @@ def test_aiter_metadata_is_built_once_from_host_sequence_lengths(monkeypatch):
         "seq_lens_cpu": [70, 130],
         "cu_seqlens": cu_seqlens,
     }
-
-
-def test_indexed_prefill_state_pool_zeroes_only_fresh_slots():
-    state_pool = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 1, 2, 2)
-    state_pool_before = state_pool.clone()
-    state_indices = torch.tensor([3, 1, 4], dtype=torch.int32)
-    has_initial_state = torch.tensor([True, False, True])
-
-    initial_state, initial_state_indices = _prepare_gdn_prefill_initial_state(
-        state_pool,
-        state_indices,
-        has_initial_state,
-        use_indexed_state_pool=True,
-    )
-
-    assert initial_state is state_pool
-    assert initial_state_indices is state_indices
-    assert torch.count_nonzero(state_pool[1]) == 0
-    assert torch.equal(state_pool[3], state_pool_before[3])
-    assert torch.equal(state_pool[4], state_pool_before[4])
-    assert torch.equal(state_pool[0], state_pool_before[0])
-    assert torch.equal(state_pool[2], state_pool_before[2])

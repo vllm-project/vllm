@@ -281,23 +281,6 @@ def _aiter_flydsl_chunk_gated_delta_rule(**kwargs):
     return chunk_gated_delta_rule_opt_vk(**kwargs)
 
 
-def _prepare_gdn_prefill_initial_state(
-    ssm_state: torch.Tensor,
-    prefill_state_indices: torch.Tensor,
-    prefill_has_initial_state: torch.Tensor,
-    *,
-    use_indexed_state_pool: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if use_indexed_state_pool:
-        fresh_state_indices = prefill_state_indices[~prefill_has_initial_state]
-        ssm_state[fresh_state_indices, ...] = 0
-        return ssm_state, prefill_state_indices
-
-    initial_state = ssm_state[prefill_state_indices]
-    initial_state[~prefill_has_initial_state, ...] = 0
-    return initial_state, None
-
-
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -1644,13 +1627,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            use_indexed_state_pool = self.gdn_prefill_backend == "aiter_flydsl"
-            initial_state, initial_state_indices = _prepare_gdn_prefill_initial_state(
-                ssm_state,
-                prefill_state_indices,
-                prefill_has_initial_state,
-                use_indexed_state_pool=use_indexed_state_pool,
-            )
+            # The per-layer cache exposed by vLLM is a non-contiguous view, while
+            # AITER's indexed K5 path requires a contiguous state pool. Keep the
+            # existing dense gather/write-back contract for every prefill backend.
+            initial_state = ssm_state[prefill_state_indices]
+            initial_state[~prefill_has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1667,14 +1648,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
                 prefill_metadata=attn_metadata.aiter_prefill_metadata,
-                initial_state_indices=initial_state_indices,
             )
-            if not use_indexed_state_pool:
-                # Init cache. The AITER indexed path writes directly into
-                # ``ssm_state`` and returns that same pool.
-                ssm_state[prefill_state_indices] = last_recurrent_state.to(
-                    ssm_state.dtype
-                )
+            # Init cache
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
