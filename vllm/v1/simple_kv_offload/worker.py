@@ -99,6 +99,8 @@ class SimpleCPUOffloadWorker:
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
+        assert self.kv_cache_config.kv_cache_tensors
+        logical_storage_bytes = self.kv_cache_config.kv_cache_tensors[0].size
 
         # The DMA backend copies whole blocks as base + block_id * stride(0),
         # so view each unique allocation as [num_blocks, block_bytes].
@@ -118,15 +120,11 @@ class SimpleCPUOffloadWorker:
             )
             block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
             raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
-            region_bytes = num_blocks * block_bytes
-            num_regions = raw.numel() // region_bytes
-            assert num_regions > 0, (
-                f"KV cache {name!r} storage has {raw.numel()} bytes, fewer than "
-                f"one {region_bytes}-byte cache region"
+            assert raw.numel() >= logical_storage_bytes, (
+                f"KV cache {name!r} storage has {raw.numel()} bytes, smaller "
+                f"than the configured {logical_storage_bytes}-byte allocation"
             )
-            regions = raw[: num_regions * region_bytes].view(
-                num_regions, num_blocks, block_bytes
-            )
+            regions = raw[:logical_storage_bytes].view(-1, num_blocks, block_bytes)
             for idx, region in enumerate(regions):
                 key_name = name if len(regions) == 1 else f"{name}.{idx}"
                 unique_gpu_caches[key_name] = region
