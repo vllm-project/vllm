@@ -1209,6 +1209,7 @@ class MoRIIOConnectorWorker:
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.is_producer = self.kv_transfer_config.is_kv_producer
         self.layer_to_spec = build_layer_to_spec(kv_cache_config)
+        # we transfer by layer, but store by kv cache group
         self.layer_to_group: dict[str, int] = {
             layer_name: group_idx
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
