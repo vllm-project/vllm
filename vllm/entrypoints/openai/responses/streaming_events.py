@@ -62,7 +62,11 @@ from openai.types.responses.tool import Tool
 from openai_harmony import Message as HarmonyMessage
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    DeltaToolCall,
+    FunctionCall,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
@@ -1110,6 +1114,49 @@ class _StateHandlers(NamedTuple):
     open_fn: Callable[..., list[StreamingResponsesResponse]]
     delta_fn: Callable[..., list[StreamingResponsesResponse]]
     done_fn: Callable[..., list[StreamingResponsesResponse]]
+
+
+class StreamingParsedOutput:
+    """Accumulates the components parsed out of streaming deltas.
+
+    Reasoning and content text are concatenated in arrival order; tool-call
+    argument fragments are merged per tool index. The final response can be
+    built from this accumulation instead of reparsing the full output.
+    """
+
+    def __init__(self) -> None:
+        self.reasoning_text: str = ""
+        self.content_text: str = ""
+        self.tool_calls: list[FunctionCall] = []
+        self._index_positions: dict[int, int] = {}
+
+    def has_any(self) -> bool:
+        return bool(self.reasoning_text or self.content_text or self.tool_calls)
+
+    def update(self, delta_message: DeltaMessage) -> None:
+        if delta_message.reasoning is not None:
+            self.reasoning_text += delta_message.reasoning
+        if delta_message.content is not None:
+            self.content_text += delta_message.content
+        for tc in delta_message.tool_calls or []:
+            if tc.function is None:
+                continue
+            entry = self._entry_for(tc)
+            if tc.id is not None and not entry.id:
+                entry.id = tc.id
+            if tc.function.name and not entry.name:
+                entry.name = tc.function.name
+            if tc.function.arguments:
+                entry.arguments += tc.function.arguments
+
+    def _entry_for(self, tc: DeltaToolCall) -> FunctionCall:
+        key = 0 if tc.index is None else tc.index
+        position = self._index_positions.get(key)
+        if position is None:
+            position = len(self.tool_calls)
+            self._index_positions[key] = position
+            self.tool_calls.append(FunctionCall(name="", arguments=""))
+        return self.tool_calls[position]
 
 
 def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:

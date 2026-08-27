@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Se
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from fastapi import Request
 from openai.types.responses import (
@@ -75,6 +75,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingParsedOutput,
     StreamingState,
     _StateType,
     emit_content_delta_events,
@@ -84,6 +85,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
+    construct_builtin_and_mcp_tool_dicts,
     construct_input_messages,
     construct_tool_dicts,
     extract_function_tool_names,
@@ -241,6 +243,24 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+
+    def _build_prompt_tool_dicts(
+        self, request: ResponsesRequest
+    ) -> list[dict[str, Any]] | None:
+        """Function tools plus builtin/MCP tools rendered for prompting."""
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
+        builtin_dicts = construct_builtin_and_mcp_tool_dicts(
+            request.tools, self.tool_server
+        )
+        if builtin_dicts:
+            tool_dicts = (tool_dicts or []) + builtin_dicts
+        return tool_dicts
 
     def _effective_chat_template_kwargs(
         self, request: ResponsesRequest
@@ -481,6 +501,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
+                        tool_server=self.tool_server,
                     )
                 else:
                     context = SimpleContext(
@@ -611,13 +632,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        tool_dicts = construct_tool_dicts(
-            request.tools,
-            request.tool_choice,
-            exclude_tools_when_tool_choice_none=(
-                self.online_renderer.exclude_tools_when_tool_choice_none
-            ),
-        )
+        tool_dicts = self._build_prompt_tool_dicts(request)
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -811,6 +826,12 @@ class OpenAIServingResponses(GenerateBaseServing):
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
+        incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
+
+        def _mark_incomplete_length() -> None:
+            nonlocal status, incomplete_reason
+            status = "incomplete"
+            incomplete_reason = "max_output_tokens"
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
@@ -836,7 +857,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
-                    status = "incomplete"
+                    _mark_incomplete_length()
                 elif context.finish_reason == "abort":
                     status = "cancelled"
                 else:
@@ -850,13 +871,13 @@ class OpenAIServingResponses(GenerateBaseServing):
                 input_messages = context.input_messages
                 output_messages = context.output_messages
 
-            # TODO: Calculate usage.
-            # assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+            num_tool_output_tokens = sum(
+                turn.tool_output_tokens for turn in context.all_turn_metrics
+            )
 
             # Check finish reason from the parser
             if context.finish_reason == "length":
-                status = "incomplete"
+                _mark_incomplete_length()
         else:
             assert isinstance(context, SimpleContext)
             # Use final_output which has accumulated text/token_ids/logprobs
@@ -870,16 +891,39 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             # Check if generation was stopped due to max_tokens
             if final_output.finish_reason == "length":
-                status = "incomplete"
+                _mark_incomplete_length()
 
-            # TODO: Build final response items from the accumulated streaming
-            # parser results instead of reparsing the complete output.
-            output = self._make_response_output_items(
-                request,
-                final_output,
-                tokenizer,
-                parser=context.response_parser,
-            )
+            parsed = context.streaming_parsed_output
+            if parsed is not None and parsed.has_any():
+                # Prefer the results already parsed out of the stream over
+                # reparsing the complete output.
+                reasoning = parsed.reasoning_text or None
+                logprobs = None
+                if request.is_include_output_logprobs() and final_output.logprobs:
+                    logprobs = self._create_response_logprobs(
+                        token_ids=final_output.token_ids,
+                        logprobs=final_output.logprobs,
+                        tokenizer=tokenizer,
+                        top_logprobs=request.top_logprobs,
+                    )
+                if not request.include_reasoning:
+                    reasoning = None
+                    logprobs = None
+                output = build_response_output_items(
+                    reasoning=reasoning,
+                    content=parsed.content_text or None,
+                    tool_calls=parsed.tool_calls or None,
+                    logprobs=logprobs,
+                    tools=request.tools,
+                )
+            else:
+                # Non-streaming path: parse the complete output.
+                output = self._make_response_output_items(
+                    request,
+                    final_output,
+                    tokenizer,
+                    parser=context.response_parser,
+                )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -887,7 +931,9 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+            num_tool_output_tokens = sum(
+                turn.tool_output_tokens for turn in context.all_turn_metrics
+            )
 
         assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
@@ -944,6 +990,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
             ec_transfer_params=context.ec_transfer_params,
+            incomplete_reason=incomplete_reason,
         )
 
         if request.store:
@@ -1356,6 +1403,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
+        parsed_output = StreamingParsedOutput()
+        context.streaming_parsed_output = parsed_output
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
@@ -1398,6 +1447,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 continue
 
             for dm in split_delta(delta_message):
+                parsed_output.update(dm)
                 target_state, tool_call = processor.resolve_target_state(dm)
                 if target_state == _StateType.NONE:
                     continue
