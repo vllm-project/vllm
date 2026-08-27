@@ -68,6 +68,8 @@ def test_mtp_correctness(
     test_prompts = get_test_prompts(mm_enabled)
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
 
