@@ -260,7 +260,10 @@ class Config:
     def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
         if self.prepare_finalize_format() != self.fused_experts_format():
-            return False, f"Mismatched format {self.prepare_finalize_format()} != {self.fused_experts_format()}."
+            return (
+                False,
+                f"Mismatched format {self.prepare_finalize_format()} != {self.fused_experts_format()}.",
+            )
 
         # Check quantization sanity
         if (

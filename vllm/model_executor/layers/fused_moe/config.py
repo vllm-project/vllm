@@ -21,7 +21,9 @@ from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEActivationFormat
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
 
 logger = init_logger(__name__)
 
@@ -1389,14 +1391,24 @@ class FusedMoEConfig:
 
     @property
     def use_batched_activation_format(self):
-        from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEActivationFormat
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEActivationFormat,
+        )
+
         return self.activation_format == FusedMoEActivationFormat.BatchedExperts
 
     @property
     def activation_format(self) -> "FusedMoEActivationFormat":
-        from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEActivationFormat
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEActivationFormat,
+        )
+
         conf = self.moe_parallel_config
-        if conf.use_deepep_ll_kernels or conf.use_nixl_ep_kernels or conf.moe_backend == "batched_triton":
+        if (
+            conf.use_deepep_ll_kernels
+            or conf.use_nixl_ep_kernels
+            or conf.moe_backend == "batched_triton"
+        ):
             return FusedMoEActivationFormat.BatchedExperts
         elif conf.use_deepep_v2_kernels:
             return FusedMoEActivationFormat.PaddedStandard

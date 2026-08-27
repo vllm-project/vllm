@@ -241,7 +241,7 @@ def select_unquantized_moe_backend(
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = config.activation_format
+    activation_format = moe_config.activation_format
 
     def _make_log_backend(backend: UnquantizedMoeBackend) -> str:
         available_strs = [b.value for b in AVAILABLE_BACKENDS]
