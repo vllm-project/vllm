@@ -61,12 +61,15 @@ enum class MFMAType {
 
 // Score masking is insufficient for unwritten V padding: 0 * NaN is NaN.
 template <typename cache_t, typename Vec>
-__device__ __forceinline__ void load_v_cache_vec(Vec& values, const Vec* src,
-                                                 const int first_token_idx,
-                                                 const int seq_len) {
-  values = *src;
+__device__ __forceinline__ void mask_v_cache_padding(Vec& values,
+                                                     const int first_token_idx,
+                                                     const int seq_len) {
   constexpr int NUM_ELEMS = sizeof(Vec) / sizeof(cache_t);
   if (first_token_idx + NUM_ELEMS <= seq_len) {
+    return;
+  }
+  if (first_token_idx >= seq_len) {
+    values = Vec{};
     return;
   }
   cache_t* values_ptr = reinterpret_cast<cache_t*>(&values);
@@ -590,14 +593,27 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
             v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         const _B16x8* v_fetch_ptr_16B =
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        const int vglobal_fetch_start =
-            partition_start_token_idx +
-            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
-            rowid * VTOKENS_PER_LANE +
-            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-        load_v_cache_vec<cache_t>(Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
-                                  v_fetch_ptr_16B, vglobal_fetch_start,
-                                  seq_len);
+        Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+      }
+    }
+  }
+
+  if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+  #pragma unroll
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+  #pragma unroll
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+  #pragma unroll
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              rowid * VTOKENS_PER_LANE +
+              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          mask_v_cache_padding<cache_t>(
+              Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
+              vglobal_fetch_start, seq_len);
+        }
       }
     }
   }
@@ -1140,11 +1156,22 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
           const _B16x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
           // iterate over all velems within block
           for (int d = 0; d < BLOCK_SIZE / 8; d++) {
-            const int vglobal_fetch_start =
-                warp_start_token_idx + b * BLOCK_SIZE + d * 8;
-            load_v_cache_vec<cache_t>(Vlocal[h][b * BLOCK_SIZE / 8 + d],
-                                      v_ptrh8be + d, vglobal_fetch_start,
-                                      seq_len);
+            Vlocal[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+          }
+        }
+      }
+      if (partition_start_token_idx + partition_size > seq_len) {
+  #pragma unroll
+        for (int h = 0; h < VHELOOP; h++) {
+  #pragma unroll
+          for (int b = 0; b < VBLOCKS; b++) {
+  #pragma unroll
+            for (int d = 0; d < BLOCK_SIZE / 8; d++) {
+              const int vglobal_fetch_start =
+                  warp_start_token_idx + b * BLOCK_SIZE + d * 8;
+              mask_v_cache_padding<cache_t>(Vlocal[h][b * BLOCK_SIZE / 8 + d],
+                                            vglobal_fetch_start, seq_len);
+            }
           }
         }
       }
@@ -1166,11 +1193,22 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
           const _B8x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
           // iterate over all velems within block
           for (int d = 0; d < BLOCK_SIZE / 8; d++) {
-            const int vglobal_fetch_start =
-                warp_start_token_idx + b * BLOCK_SIZE + d * 8;
-            load_v_cache_vec<cache_t>(Vlocalb8[h][b * BLOCK_SIZE / 8 + d],
-                                      v_ptrh8be + d, vglobal_fetch_start,
-                                      seq_len);
+            Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+          }
+        }
+      }
+      if (partition_start_token_idx + partition_size > seq_len) {
+  #pragma unroll
+        for (int h = 0; h < VHELOOP; h++) {
+  #pragma unroll
+          for (int b = 0; b < VBLOCKS; b++) {
+  #pragma unroll
+            for (int d = 0; d < BLOCK_SIZE / 8; d++) {
+              const int vglobal_fetch_start =
+                  warp_start_token_idx + b * BLOCK_SIZE + d * 8;
+              mask_v_cache_padding<cache_t>(Vlocalb8[h][b * BLOCK_SIZE / 8 + d],
+                                            vglobal_fetch_start, seq_len);
+            }
           }
         }
       }
@@ -1989,14 +2027,25 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
             (vfetch_depth % VBLOCKS_PER_LANE) * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         const _B16x8* v_fetch_ptr_16B =
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        const int vglobal_fetch_start =
-            partition_start_token_idx +
-            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
-            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-        load_v_cache_vec<cache_t>(
-            Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
-                .xy[vfetch_depth % 2],
-            v_fetch_ptr_16B, vglobal_fetch_start, seq_len);
+        Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2].xy[vfetch_depth % 2] =
+            *v_fetch_ptr_16B;
+      }
+    }
+  }
+
+  if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          mask_v_cache_padding<cache_t>(
+              Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
+                  .xy[vfetch_depth % 2],
+              vglobal_fetch_start, seq_len);
+        }
       }
     }
   }
@@ -2774,14 +2823,24 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
             v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         const _B16x8* v_fetch_ptr_16B =
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        const int vglobal_fetch_start =
-            partition_start_token_idx +
-            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
-            rowid * VTOKENS_PER_LANE +
-            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-        load_v_cache_vec<cache_t>(Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
-                                  v_fetch_ptr_16B, vglobal_fetch_start,
-                                  seq_len);
+        Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+      }
+    }
+  }
+
+  if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              rowid * VTOKENS_PER_LANE +
+              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          mask_v_cache_padding<cache_t>(
+              Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
+              vglobal_fetch_start, seq_len);
+        }
       }
     }
   }
