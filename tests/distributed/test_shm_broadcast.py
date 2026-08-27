@@ -21,9 +21,11 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     ShmRingBuffer,
     _rebuild_tensor,
     _reduce_tensor,
+    check_cgroup_memory_available,
     check_shm_free_space,
 )
 from vllm.distributed.utils import StatelessProcessGroup
+from vllm.utils import cpu_resource_utils
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -694,14 +696,63 @@ def test_check_shm_free_space_raises_when_insufficient(tmp_path):
 
 
 def test_check_shm_free_space_passes_when_sufficient(tmp_path):
-    with mock.patch.object(
-        shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(512 << 20)
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(shm_broadcast, "check_cgroup_memory_available"),
     ):
         check_shm_free_space(240 << 20, shm_path=str(tmp_path))
 
 
 def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
-    check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+    with mock.patch.object(shm_broadcast, "check_cgroup_memory_available"):
+        check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+
+
+def test_check_shm_free_space_checks_cgroup(tmp_path):
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(
+            shm_broadcast, "check_cgroup_memory_available"
+        ) as check_cgroup,
+    ):
+        check_shm_free_space(
+            240 << 20,
+            shm_path=str(tmp_path),
+            allocation_name="SHM mmap",
+        )
+
+    check_cgroup.assert_called_once_with(
+        240 << 20,
+        "SHM mmap",
+    )
+
+
+def test_check_cgroup_memory_available_raises(monkeypatch):
+    monkeypatch.setattr(
+        cpu_resource_utils,
+        "get_cgroup_memory_limit",
+        lambda: (1 << 30, 512 << 20),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient cgroup memory for mmap"):
+        check_cgroup_memory_available(600 << 20, "mmap")
+
+
+def test_check_cgroup_memory_available_passes_without_limit(monkeypatch):
+    monkeypatch.setattr(
+        cpu_resource_utils,
+        "get_cgroup_memory_limit",
+        lambda: (None, None),
+    )
+    check_cgroup_memory_available(1 << 60, "mmap")
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
