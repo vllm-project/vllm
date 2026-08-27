@@ -1008,7 +1008,7 @@ void hisparse_resolve_residency(
   if (stats.has_value()) {
     auto const& st = stats.value();
     STD_TORCH_CHECK(
-        st.is_cuda() &&
+        st.is_cuda() && st.is_contiguous() && st.dim() == 1 &&
             st.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
             st.numel() == 2,
         "stats must be a contiguous two-element uint64 CUDA tensor");

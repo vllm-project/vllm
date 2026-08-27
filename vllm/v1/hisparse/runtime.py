@@ -442,6 +442,7 @@ class HiSparseIndexGroup:
         self.logical_topk_ready = logical_topk_ready
         self.followers: list[HiSparseRuntime] = []
         self.swap_stats = torch.zeros(2, dtype=torch.uint64, device=device)
+        self.swap_stats_host = torch.empty(2, dtype=torch.uint64, pin_memory=True)
         self.stats_row_bytes = 0
 
 
