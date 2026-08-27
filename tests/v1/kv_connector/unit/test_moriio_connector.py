@@ -340,7 +340,7 @@ def test_write_mode_saves_local_block_ids():
     req_meta = kv_connector_metadata.reqs_to_save[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -395,7 +395,7 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
     req_meta = kv_connector_metadata.reqs_to_save[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -434,7 +434,9 @@ def test_read_mode_loads_remote_block_ids():
     ].req_to_blocks[request_id]
 
     # Set remote block ids to be fetched.
-    request.kv_transfer_params["remote_block_ids"] = block_list
+    request.kv_transfer_params["remote_block_ids"] = [
+        [block.block_id for block in block_list]
+    ]
 
     # Remote Prefill, triggers MoRIIOConnectorMetadata.
 
@@ -459,7 +461,7 @@ def test_read_mode_loads_remote_block_ids():
     req_meta = kv_connector_metadata.reqs_to_recv[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -906,6 +908,15 @@ def test_hybrid_write_mode_rejected():
 def test_worker_layer_to_group_routing(mock_parallel_groups):
     """The worker maps every layer to its KV cache group correctly."""
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    # Building the worker directly bypasses MoRIIOConnector._set_port_defaults,
+    # so provide the ports manually.
+    vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+        {
+            "http_port": 12346,
+            "handshake_port": 12347,
+            "notify_port": 12348,
+        }
+    )
     with set_current_vllm_config(vllm_config):
         worker = FakeMoRIIOConnectorWorker(
             vllm_config,
