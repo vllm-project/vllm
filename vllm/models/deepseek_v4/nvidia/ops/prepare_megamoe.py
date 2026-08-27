@@ -13,16 +13,18 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     zip_inputs,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 
 class PrepareMegaMoeInputsKernel(
-    VllmJitKernel["PrepareMegaMoeInputsKernel.CompileKey"]
+    VllmTritonJitKernel["PrepareMegaMoeInputsKernel.CompileKey"]
 ):
     def __init__(self) -> None:
         self.block_k = 128
@@ -198,9 +200,10 @@ class PrepareMegaMoeInputsKernel(
 
         hidden_size = vllm_config.model_config.hf_config.hidden_size
         top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-        has_shared_experts = getattr(
-            vllm_config.model_config.hf_config, "n_shared_experts", None
-        ) is not None
+        has_shared_experts = (
+            getattr(vllm_config.model_config.hf_config, "n_shared_experts", None)
+            is not None
+        )
         if hidden_size <= 0 or top_k <= 0:
             return []
 
@@ -222,67 +225,33 @@ class PrepareMegaMoeInputsKernel(
             has_padding=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         hidden_size = compile_key.hidden_size
         top_k = compile_key.top_k
-        block_k = self.block_k
-        group_k = self.group_k
-        # Scale groups are packed into one int32 per BLOCK_K-wide hidden block.
-        x_scale_width = hidden_size // block_k
-
-        hidden_ptr = TritonWarmupTensor(torch.bfloat16, shape=(1, hidden_size))
-        fp8_ptr = TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, hidden_size))
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        shared_scale_ptr = (
-            TritonWarmupTensor(torch.int32)
-            if compile_key.has_shared_x_sf
-            else None
-        )
-        topk_int32_ptr = TritonWarmupTensor(torch.int32, shape=(1, top_k))
-        topk_int64_ptr = TritonWarmupTensor(torch.int64, shape=(1, top_k))
-        topk_float32_ptr = TritonWarmupTensor(torch.float32, shape=(1, top_k))
-        padding_ptr = (
-            TritonWarmupTensor(torch.bool) if compile_key.has_padding else None
-        )
-
-        warmup(
-            hidden_ptr,
-            fp8_ptr,
-            int32_ptr,
-            shared_scale_ptr,
-            topk_int32_ptr,
-            topk_float32_ptr,
-            padding_ptr,
-            topk_int64_ptr,
-            topk_float32_ptr,
-            hidden_size,
-            1,
-            hidden_size,
-            1,
-            x_scale_width,
-            1,
-            1 if compile_key.has_shared_x_sf else 0,
-            1 if compile_key.has_shared_x_sf else 0,
-            top_k,
-            1,
-            top_k,
-            1,
-            1 if compile_key.has_padding else 0,
-            top_k,
-            1,
-            top_k,
-            1,
-            hidden_size,
-            top_k,
-            BLOCK_K=block_k,
-            GROUP_K=group_k,
-            BLOCK_TOPK=compile_key.block_topk,
-            SHARED_BLOCK_M=compile_key.shared_block_m,
-            num_warps=4,
-            grid=(1, triton.cdiv(hidden_size, block_k)),
+        x_scale_width = hidden_size // self.block_k
+        shared_rows = triton.cdiv(compile_key.shared_block_m, 128) * 128
+        return dict(
+            hidden_states=TritonWarmupTensor(torch.bfloat16, shape=(1, hidden_size)),
+            topk_weights=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
+            topk_ids=TritonWarmupTensor(torch.int32, shape=(1, top_k)),
+            x_fp8=TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, hidden_size)),
+            x_sf=TritonWarmupTensor(torch.int32, shape=(1, x_scale_width)),
+            topk_idx_out=TritonWarmupTensor(torch.int64, shape=(1, top_k)),
+            topk_weights_out=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
+            is_padding=(
+                TritonWarmupTensor(torch.bool) if compile_key.has_padding else None
+            ),
+            shared_x_sf=(
+                TritonWarmupTensor(
+                    torch.int32,
+                    shape=(shared_rows, x_scale_width),
+                )
+                if compile_key.has_shared_x_sf
+                else None
+            ),
+            shared_block_m=(
+                compile_key.shared_block_m if compile_key.has_shared_x_sf else None
+            ),
         )
 
     def __call__(
@@ -339,7 +308,8 @@ class PrepareMegaMoeInputsKernel(
         block_topk = triton.next_power_of_2(top_k)
         grid = (num_tokens, triton.cdiv(hidden_size, block_k))
         padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
-        self.kernel[grid](
+        self._launch(
+            grid,
             hidden_states,
             x_fp8,
             x_sf,

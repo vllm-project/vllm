@@ -5,22 +5,21 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any
-
-import math
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -127,7 +126,7 @@ def apply_expert_map(expert_id, expert_map):
 
 
 class DeepGemmEPScatterStartKernel(
-    VllmJitKernel["DeepGemmEPScatterStartKernel.CompileKey"]
+    VllmTritonJitKernel["DeepGemmEPScatterStartKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -245,20 +244,15 @@ class DeepGemmEPScatterStartKernel(
             max_align_m=max_align_m,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            num_experts=compile_key.num_experts,
-            BLOCK_E=compile_key.block_e,
-            BLOCK_EXPERT_NUM=compile_key.block_expert_num,
-            ALIGN_M=compile_key.align_m,
-            grid=(compile_key.num_experts,),
-            num_warps=8,
+        return dict(
+            num_recv_tokens_per_expert=TritonWarmupTensor(
+                torch.int32, shape=(compile_key.num_experts,)
+            ),
+            expert_start_loc=int32_ptr,
+            m_indices=int32_ptr,
+            align_m=compile_key.align_m,
         )
 
     def __call__(
@@ -274,7 +268,8 @@ class DeepGemmEPScatterStartKernel(
             num_experts=num_experts,
             align_m=align_m,
         )
-        self.kernel[(num_experts,)](
+        self._launch(
+            (num_experts,),
             num_recv_tokens_per_expert,
             expert_start_loc,
             m_indices,
@@ -287,7 +282,7 @@ class DeepGemmEPScatterStartKernel(
 
 
 class DeepGemmEPScatterCopyKernel(
-    VllmJitKernel["DeepGemmEPScatterCopyKernel.CompileKey"]
+    VllmTritonJitKernel["DeepGemmEPScatterCopyKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -471,56 +466,56 @@ class DeepGemmEPScatterCopyKernel(
             has_expert_map=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        fp8_ptr = TritonWarmupTensor(torch.float8_e4m3fn)
-        scale_ptr = TritonWarmupTensor(
-            torch.int32 if compile_key.pack_ue8m0 else torch.float32
-        )
+        scale_dtype = torch.int32 if compile_key.pack_ue8m0 else torch.float32
         expert_map = int32_ptr if compile_key.has_expert_map else None
         hidden_stride = triton_scalar_specialization_rep(compile_key.hidden_size)
-        scale_stride = triton_scalar_specialization_rep(
-            compile_key.scale_hidden_size
-        )
+        scale_stride = triton_scalar_specialization_rep(compile_key.scale_hidden_size)
         topk_stride = triton_scalar_specialization_rep(compile_key.topk_num)
         output_scale_stride0, output_scale_stride1 = (
             (1, 16) if compile_key.pack_ue8m0 else (scale_stride, 1)
         )
-        warmup(
-            compile_key.total_token_num,
-            int32_ptr,
-            fp8_ptr,
-            hidden_stride,
-            1,
-            scale_ptr,
-            scale_stride,
-            1,
-            int32_ptr,
-            topk_stride,
-            1,
-            fp8_ptr,
-            hidden_stride,
-            1,
-            scale_ptr,
-            output_scale_stride0,
-            output_scale_stride1,
-            int32_ptr,
-            topk_stride,
-            1,
-            topk_num=compile_key.topk_num,
+        block_size = (
+            32
+            if compile_key.pack_ue8m0
+            else compile_key.hidden_size // compile_key.scale_hidden_size
+        )
+        return dict(
+            recv_x=TritonWarmupTensor(
+                torch.float8_e4m3fn,
+                shape=(compile_key.total_token_num, compile_key.hidden_size),
+                strides=(hidden_stride, 1),
+            ),
+            recv_x_scale=TritonWarmupTensor(
+                scale_dtype,
+                shape=(compile_key.total_token_num, compile_key.scale_hidden_size),
+                strides=(scale_stride, 1),
+            ),
+            recv_topk=TritonWarmupTensor(
+                torch.int32,
+                shape=(compile_key.total_token_num, compile_key.topk_num),
+                strides=(topk_stride, 1),
+            ),
             expert_map=expert_map,
-            HAS_EXPERT_MAP=compile_key.has_expert_map,
-            HIDDEN_SIZE=compile_key.hidden_size,
-            HIDDEN_SIZE_PAD=compile_key.hidden_size_pad,
-            SCALE_HIDDEN_SIZE=compile_key.scale_hidden_size,
-            SCALE_HIDDEN_SIZE_PAD=compile_key.scale_hidden_size_pad,
-            PACK_UE8M0=compile_key.pack_ue8m0,
-            SCALE_PACKED_SIZE=compile_key.scale_packed_size,
-            SCALE_PACKED_SIZE_PAD=compile_key.scale_packed_size_pad,
-            grid=(1,),
-            num_warps=8,
+            expert_start_loc=int32_ptr,
+            output_tensor=TritonWarmupTensor(
+                torch.float8_e4m3fn,
+                shape=(compile_key.total_token_num, compile_key.hidden_size),
+                strides=(hidden_stride, 1),
+            ),
+            output_tensor_scale=TritonWarmupTensor(
+                scale_dtype,
+                shape=(compile_key.total_token_num, compile_key.scale_hidden_size),
+                strides=(output_scale_stride0, output_scale_stride1),
+            ),
+            output_index=TritonWarmupTensor(
+                torch.int32,
+                shape=(compile_key.total_token_num, compile_key.topk_num),
+                strides=(topk_stride, 1),
+            ),
+            block_size=block_size,
+            pack_ue8m0=compile_key.pack_ue8m0,
         )
 
     def __call__(
@@ -546,7 +541,8 @@ class DeepGemmEPScatterCopyKernel(
             block_size=block_size,
             pack_ue8m0=pack_ue8m0,
         )
-        self.kernel[(min(recv_topk.shape[0], 1024 * 8),)](
+        self._launch(
+            (min(recv_topk.shape[0], 1024 * 8),),
             recv_topk.shape[0],
             expert_start_loc,
             recv_x,
@@ -627,7 +623,7 @@ class DeepGemmEPScatter:
         )
 
 
-class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"]):
+class DeepGemmEPGatherKernel(VllmTritonJitKernel["DeepGemmEPGatherKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -737,35 +733,37 @@ class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"])
             has_expert_map=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-
-        value_ptr = TritonWarmupTensor(compile_key.dtype)
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            compile_key.total_token_num,
-            value_ptr,
-            compile_key.hidden_stride,
-            1,
-            int32_ptr,
-            compile_key.topk_stride,
-            1,
-            TritonWarmupTensor(torch.float32),
-            compile_key.topk_stride,
-            1,
-            int32_ptr,
-            compile_key.topk_stride,
-            1,
-            value_ptr,
-            compile_key.hidden_stride,
-            1,
-            topk_num=compile_key.topk_num,
-            expert_map=(int32_ptr if compile_key.has_expert_map else None),
-            HAS_EXPERT_MAP=compile_key.has_expert_map,
-            BLOCK_D=compile_key.block_d,
-            grid=(1, 1),
-            num_warps=2,
+        value_shape = (compile_key.total_token_num, compile_key.block_d)
+        topk_shape = (compile_key.total_token_num, compile_key.topk_num)
+        return dict(
+            input_tensor=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=value_shape,
+                strides=(compile_key.hidden_stride, 1),
+            ),
+            recv_topk_ids=TritonWarmupTensor(
+                torch.int32,
+                shape=topk_shape,
+                strides=(compile_key.topk_stride, 1),
+            ),
+            recv_topk_weight=TritonWarmupTensor(
+                torch.float32,
+                shape=topk_shape,
+                strides=(compile_key.topk_stride, 1),
+            ),
+            input_index=TritonWarmupTensor(
+                torch.int32,
+                shape=topk_shape,
+                strides=(compile_key.topk_stride, 1),
+            ),
+            expert_map=int32_ptr if compile_key.has_expert_map else None,
+            output_tensor=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=value_shape,
+                strides=(compile_key.hidden_stride, 1),
+            ),
         )
 
     def __call__(
@@ -784,7 +782,8 @@ class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"])
         assert hidden_size % block_d == 0
         grid = (triton.cdiv(hidden_size, block_d), min(num_tokens, 1024))
 
-        self.kernel[grid](
+        self._launch(
+            grid,
             num_tokens,
             input_tensor,
             input_tensor.stride(0),

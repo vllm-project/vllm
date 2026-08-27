@@ -3,19 +3,22 @@
 """Utility functions for sparse MLA backends."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.block_table import get_block_table_width
 
 
 def flat_kv_row_view(
@@ -39,11 +42,12 @@ def flat_kv_row_view(
     rows = kv_cache.as_strided((num_rows, head_dim), (head_dim, 1))
     return rows, block_stride_rows
 
+
 # Kernel with prefill workspace support and valid count tracking
 
 
 class ConvertReqIndexToGlobalIndexKernel(
-    VllmJitKernel["ConvertReqIndexToGlobalIndexKernel.CompileKey"]
+    VllmTritonJitKernel["ConvertReqIndexToGlobalIndexKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -58,6 +62,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_rank: int
         dcp_interleave: int
         num_warps: int
+        max_num_blocks_per_req: int
 
     @staticmethod
     @triton.jit
@@ -192,6 +197,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_SIZE: int,
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
+        max_num_blocks_per_req: int,
     ) -> CompileKey:
         single_tile = (
             COUNT_VALID and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
@@ -208,6 +214,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             dcp_rank=DCP_RANK,
             dcp_interleave=DCP_INTERLEAVE,
             num_warps=8 if single_tile else 4,
+            max_num_blocks_per_req=max_num_blocks_per_req,
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
@@ -215,6 +222,11 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         dcp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
+        max_num_blocks = cdiv(
+            vllm_config.model_config.max_model_len,
+            block_size * dcp_size,
+        )
+        max_num_blocks_per_req = get_block_table_width(max_num_blocks, block_size)
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
@@ -262,42 +274,48 @@ class ConvertReqIndexToGlobalIndexKernel(
             BLOCK_STRIDE_ROWS=block_size,
             BLOCK_N=128,
             NUM_TOPK_TOKENS=2048,
+            max_num_blocks_per_req=max_num_blocks_per_req,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        valid_count_ptr = int32_ptr if compile_key.count_valid else None
-        prefill_req_ptr = int32_ptr if compile_key.has_prefill_workspace else None
-        prefill_start_ptr = int32_ptr if compile_key.has_prefill_workspace else None
-        warmup(
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            valid_count_ptr,
-            prefill_req_ptr,
-            prefill_start_ptr,
-            1,
-            compile_key.block_size,
-            compile_key.block_stride_rows,
-            compile_key.block_n,
-            compile_key.has_prefill_workspace,
-            compile_key.count_valid,
-            compile_key.single_tile,
-            compile_key.compact_to_front,
-            compile_key.dcp_size,
-            compile_key.dcp_rank,
-            compile_key.dcp_interleave,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            grid=(1, 1),
-            num_warps=compile_key.num_warps,
+        num_topk_tokens = compile_key.block_n if compile_key.single_tile else 2048
+        token_shape = (1, num_topk_tokens)
+        token_strides = (16, 1)
+        return dict(
+            req_id=int32_ptr,
+            block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.max_num_blocks_per_req),
+            ),
+            token_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=token_shape,
+                strides=token_strides,
+            ),
+            out=TritonWarmupTensor(
+                torch.int32,
+                shape=token_shape,
+                strides=token_strides,
+            ),
+            valid_counts=int32_ptr if compile_key.count_valid else None,
+            prefill_workspace_request_ids=(
+                int32_ptr if compile_key.has_prefill_workspace else None
+            ),
+            prefill_workspace_starts=(
+                int32_ptr if compile_key.has_prefill_workspace else None
+            ),
+            max_num_blocks_per_req=compile_key.max_num_blocks_per_req,
+            BLOCK_SIZE=compile_key.block_size,
+            BLOCK_STRIDE_ROWS=compile_key.block_stride_rows,
+            BLOCK_N=compile_key.block_n,
+            NUM_TOPK_TOKENS=num_topk_tokens,
+            HAS_PREFILL_WORKSPACE=compile_key.has_prefill_workspace,
+            COUNT_VALID=compile_key.count_valid,
+            COMPACT_TO_FRONT=compile_key.compact_to_front,
+            DCP_SIZE=compile_key.dcp_size,
+            DCP_RANK=compile_key.dcp_rank,
+            DCP_INTERLEAVE=compile_key.dcp_interleave,
         )
 
     def __call__(
@@ -323,6 +341,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_INTERLEAVE: int,
     ) -> None:
         compile_key = self.dispatch(
+            max_num_blocks_per_req=max_num_blocks_per_req,
             BLOCK_SIZE=BLOCK_SIZE,
             BLOCK_STRIDE_ROWS=BLOCK_STRIDE_ROWS,
             BLOCK_N=BLOCK_N,
@@ -335,7 +354,8 @@ class ConvertReqIndexToGlobalIndexKernel(
             DCP_INTERLEAVE=DCP_INTERLEAVE,
         )
         tiles_per_row = token_indices.shape[1] // compile_key.block_n
-        self.kernel[(req_id.shape[0], tiles_per_row)](
+        self._launch(
+            (req_id.shape[0], tiles_per_row),
             req_id,
             block_table,
             token_indices,

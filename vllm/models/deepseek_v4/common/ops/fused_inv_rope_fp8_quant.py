@@ -12,12 +12,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
-    triton_scalar_specialization_rep,
+    VllmTritonJitKernel,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -25,7 +22,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class FusedInvRopeFP8QuantKernel(
-    VllmJitKernel["FusedInvRopeFP8QuantKernel.CompileKey"]
+    VllmTritonJitKernel["FusedInvRopeFP8QuantKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -251,44 +248,40 @@ class FusedInvRopeFP8QuantKernel(
             use_gdc=current_platform.is_arch_support_pdl(),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         head_dim = compile_key.chunks_per_head * compile_key.quant_group_size
         fp8_dim = compile_key.heads_per_group * head_dim
         scale_dtype = torch.int32 if compile_key.tma_aligned_scales else torch.float32
-        warmup(
-            TritonWarmupTensor(torch.bfloat16),
-            TritonWarmupTensor(torch.int64),
-            TritonWarmupTensor(torch.float32),
-            TritonWarmupTensor(torch.float8_e4m3fn),
-            TritonWarmupTensor(scale_dtype),
-            1,  # do not specialize num_tokens
+        return dict(
+            o=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.heads_per_group, head_dim),
+            ),
+            positions=TritonWarmupTensor(torch.int64),
+            cos_sin_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.half_rope * 2),
+            ),
+            fp8_buf=TritonWarmupTensor(
+                torch.float8_e4m3fn,
+                shape=(compile_key.heads_per_group, 1, fp8_dim),
+                strides=(fp8_dim, fp8_dim, 1),
+            ),
+            scale_buf=TritonWarmupTensor(
+                scale_dtype,
+                shape=(compile_key.heads_per_group, 1, 16),
+                strides=(16, 16, 16),
+            ),
+            num_tokens=1,
             heads_per_group=compile_key.heads_per_group,
-            o_stride_token=triton_scalar_specialization_rep(
-                head_dim * compile_key.heads_per_group
-            ),
-            o_stride_head=triton_scalar_specialization_rep(head_dim),
-            cache_stride_pos=triton_scalar_specialization_rep(
-                compile_key.half_rope * 2
-            ),
-            fp8_stride_group=triton_scalar_specialization_rep(fp8_dim),
-            fp8_stride_token=triton_scalar_specialization_rep(fp8_dim),
-            # Both scale strides are TMA aligned at runtime.
-            scale_stride_group=triton_scalar_specialization_rep(16),
-            scale_stride_k=triton_scalar_specialization_rep(16),
+            quant_group_size=compile_key.quant_group_size,
+            chunks_per_head=compile_key.chunks_per_head,
+            rope_start=compile_key.rope_start,
+            half_rope=compile_key.half_rope,
+            tma_aligned_scales=compile_key.tma_aligned_scales,
             fp8_max=compile_key.fp8_max,
-            eps=1e-10,
-            QUANT_GROUP_SIZE=compile_key.quant_group_size,
-            CHUNKS_PER_HEAD=compile_key.chunks_per_head,
-            ROPE_START=compile_key.rope_start,
-            HALF_ROPE=compile_key.half_rope,
-            TMA_ALIGNED_SCALES=compile_key.tma_aligned_scales,
-            USE_GDC=compile_key.use_gdc,
-            launch_pdl=compile_key.use_gdc,
+            use_gdc=compile_key.use_gdc,
             grid=(1, compile_key.heads_per_group),
-            num_stages=1,
-            num_warps=1,
         )
 
     def __call__(
@@ -310,7 +303,8 @@ class FusedInvRopeFP8QuantKernel(
         use_gdc: bool,
         grid: tuple[int, int],
     ) -> None:
-        self.kernel[grid](
+        self._launch(
+            grid,
             o,
             positions,
             cos_sin_cache,

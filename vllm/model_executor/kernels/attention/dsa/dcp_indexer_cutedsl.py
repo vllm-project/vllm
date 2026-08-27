@@ -16,7 +16,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
 )
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -69,7 +72,7 @@ def pack_dcp_topk_candidates_cutedsl(
 
 
 class PackDCPTopkCandidatesKernel(
-    VllmJitKernel["PackDCPTopkCandidatesKernel.CompileKey"]
+    VllmTritonJitKernel["PackDCPTopkCandidatesKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -185,32 +188,28 @@ class PackDCPTopkCandidatesKernel(
             block_size=512,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         fp32_ptr = TritonWarmupTensor(torch.float32)
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            fp32_ptr,
-            int32_ptr,
-            fp32_ptr,
-            int32_ptr,
-            1,  # do not specialize logits_stride0
-            1,  # do not specialize logits_stride1
-            1,  # do not specialize topk_stride0
-            1,  # do not specialize topk_stride1
-            1,  # do not specialize packed_stride0
-            1,  # do not specialize packed_stride1
-            1,  # do not specialize packed_stride2
-            1,  # do not specialize num_cols
-            DCP_RANK=compile_key.dcp_rank,
-            DCP_WORLD_SIZE=compile_key.dcp_world_size,
-            CP_INTERLEAVE=compile_key.cp_interleave,
-            HAS_ROW_STARTS=compile_key.has_row_starts,
-            TOPK=compile_key.topk,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1, 1),
-            num_warps=8,
+        return dict(
+            logits=fp32_ptr,
+            topk_indices=TritonWarmupTensor(torch.int32, shape=(1, compile_key.topk)),
+            packed=fp32_ptr,
+            row_starts_arg=int32_ptr,
+            logits_stride0=1,
+            logits_stride1=1,
+            topk_stride0=1,
+            topk_stride1=1,
+            packed_stride0=1,
+            packed_stride1=1,
+            packed_stride2=1,
+            num_cols=1,
+            dcp_rank=compile_key.dcp_rank,
+            dcp_world_size=compile_key.dcp_world_size,
+            cp_interleave=compile_key.cp_interleave,
+            has_row_starts=compile_key.has_row_starts,
+            topk=compile_key.topk,
+            block_size=compile_key.block_size,
         )
 
     def __call__(
@@ -236,7 +235,8 @@ class PackDCPTopkCandidatesKernel(
         block_size: int,
     ) -> None:
         grid = (topk_indices.shape[0], triton.cdiv(topk, block_size))
-        self.kernel[grid](
+        self._launch(
+            grid,
             logits,
             topk_indices,
             packed,

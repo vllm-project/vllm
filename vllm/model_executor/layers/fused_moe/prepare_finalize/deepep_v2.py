@@ -16,11 +16,12 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
@@ -452,7 +453,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
 
 class GlobalizeRecvTopkIdxKernel(
-    VllmJitKernel["GlobalizeRecvTopkIdxKernel.CompileKey"]
+    VllmTritonJitKernel["GlobalizeRecvTopkIdxKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -494,13 +495,15 @@ class GlobalizeRecvTopkIdxKernel(
         num_tokens: int,
         topk: int,
         P: int,
-        **compile_key_fields: int,
+        rank_expert_offset: int,
+        num_experts: int,
     ) -> CompileKey:
         return self.CompileKey(
-            **compile_key_fields,
-            n_elements=num_tokens * topk,
+            n_elements=triton_scalar_specialization_rep(num_tokens * topk),
             topk=topk,
-            p=P,
+            p=triton_scalar_specialization_rep(P),
+            rank_expert_offset=triton_scalar_specialization_rep(rank_expert_offset),
+            num_experts=triton_scalar_specialization_rep(num_experts),
             block=1024,
         )
 
@@ -517,26 +520,25 @@ class GlobalizeRecvTopkIdxKernel(
             return []
 
         return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, min(max_tokens, 1024) + 1),
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
             topk=topk,
             P=P,
-            rank_expert_offset=0,
+            rank_expert_offset=(0, 1, 2),
             num_experts=num_experts,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(torch.int64, shape=(compile_key.n_elements,)),
-            TritonWarmupTensor(torch.int32, shape=(compile_key.p,)),
-            compile_key.p,
-            compile_key.rank_expert_offset,
-            compile_key.num_experts,
-            compile_key.n_elements,
-            topk=compile_key.topk,
-            BLOCK=compile_key.block,
-            grid=(triton.cdiv(compile_key.n_elements, compile_key.block),),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            recv_topk_idx=TritonWarmupTensor(
+                torch.int64,
+                shape=(compile_key.n_elements // compile_key.topk, compile_key.topk),
+            ),
+            psum_recv_per_rank=TritonWarmupTensor(
+                torch.int32,
+                shape=(compile_key.p,),
+            ),
+            rank_expert_offset=compile_key.rank_expert_offset,
+            num_experts=compile_key.num_experts,
         )
 
     def __call__(
@@ -555,7 +557,8 @@ class GlobalizeRecvTopkIdxKernel(
             num_experts=num_experts,
         )
         grid = (triton.cdiv(compile_key.n_elements, compile_key.block),)
-        return self.kernel[grid](
+        return self._launch(
+            grid,
             recv_topk_idx,
             psum_recv_per_rank,
             compile_key.p,

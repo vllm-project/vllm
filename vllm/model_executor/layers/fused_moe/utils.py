@@ -43,11 +43,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -139,7 +139,7 @@ def is_model_fused_shared_expert_compatible(
 
 
 class CountExpertNumTokensKernel(
-    VllmJitKernel["CountExpertNumTokensKernel.CompileKey"]
+    VllmTritonJitKernel["CountExpertNumTokensKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -207,20 +207,19 @@ class CountExpertNumTokensKernel(
             has_expert_map=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        expert_map = int32_ptr if compile_key.has_expert_map else None
-        warmup(
-            int32_ptr,
-            int32_ptr,
-            compile_key.num_experts,
-            compile_key.topk_numel,
-            expert_map,
-            HAS_EXPERT_MAP=compile_key.has_expert_map,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1,),
+        return dict(
+            topk_ids=TritonWarmupTensor(
+                torch.int32,
+                shape=(compile_key.topk_numel,),
+            ),
+            expert_num_tokens=TritonWarmupTensor(
+                torch.int32,
+                shape=(compile_key.num_experts,),
+            ),
+            num_local_experts=compile_key.num_experts,
+            expert_map=int32_ptr if compile_key.has_expert_map else None,
         )
 
     def __call__(
@@ -232,7 +231,8 @@ class CountExpertNumTokensKernel(
     ) -> None:
         block_size = min(topk_ids.numel(), 1024)
         block_size = triton.next_power_of_2(block_size)
-        self.kernel[(num_local_experts,)](
+        self._launch(
+            (num_local_experts,),
             topk_ids,
             expert_num_tokens,
             num_local_experts,
@@ -549,7 +549,9 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
 
 
-class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKey"]):
+class PackTopkIdsWeightsKernel(
+    VllmTritonJitKernel["PackTopkIdsWeightsKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         block_size: int
@@ -601,18 +603,13 @@ class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKe
             use_gdc=use_gdc,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(torch.int32),
-            TritonWarmupTensor(torch.float32),
-            TritonWarmupTensor(torch.int32),
-            1,  # do not specialize n_elements
-            BLOCK_SIZE=compile_key.block_size,
-            USE_GDC=compile_key.use_gdc,
-            launch_pdl=compile_key.use_gdc,
-            grid=(1,),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            ids_flat=TritonWarmupTensor(torch.int32),
+            weights_flat=TritonWarmupTensor(torch.float32),
+            output=TritonWarmupTensor(torch.int32),
+            block_size=compile_key.block_size,
+            use_gdc=compile_key.use_gdc,
         )
 
     def __call__(
@@ -625,7 +622,8 @@ class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKe
         use_gdc: bool,
     ) -> None:
         grid = (triton.cdiv(ids_flat.numel(), block_size),)
-        self.kernel[grid](
+        self._launch(
+            grid,
             ids_flat,
             weights_flat,
             output,
@@ -679,7 +677,9 @@ def _swiglu_limit_torch(
     output.copy_(F.silu(gate) * up)
 
 
-class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.CompileKey"]):
+class SwigluLimitPadAwareKernel(
+    VllmTritonJitKernel["SwigluLimitPadAwareKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         num_tokens: int
@@ -772,25 +772,21 @@ class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.Compile
             block_size=1024,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        data_ptr = TritonWarmupTensor(torch.bfloat16)
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            data_ptr,
-            data_ptr,
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize hidden_size
-            1,  # do not specialize input_row_stride
-            compile_key.num_tokens,
-            1.0,  # do not specialize swiglu_limit
-            HAS_LIMIT=compile_key.has_limit,
-            HAS_EXPERT_MAP=compile_key.has_expert_map,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1, 1),
-            num_warps=4,
+        return dict(
+            output=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(compile_key.num_tokens, 1),
+            ),
+            input=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(compile_key.num_tokens, 2),
+                strides=(1, 1),
+            ),
+            topk_ids=int32_ptr,
+            swiglu_limit=1.0 if compile_key.has_limit else 0.0,
+            expert_map=int32_ptr if compile_key.has_expert_map else None,
         )
 
     def __call__(
@@ -805,7 +801,8 @@ class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.Compile
         hidden_size = gate_up_size // 2
         block_size = 1024
         grid = (min(num_tokens, 256), triton.cdiv(hidden_size, block_size))
-        self.kernel[grid](
+        self._launch(
+            grid,
             input,
             output,
             topk_ids,

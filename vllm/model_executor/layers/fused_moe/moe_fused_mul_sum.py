@@ -7,15 +7,17 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
-class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
+class MoeFusedMulSumKernel(VllmTritonJitKernel["MoeFusedMulSumKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -159,7 +161,7 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
         if size <= 0 or top_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, min(max_tokens, 1024) + 1),
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
             top_k=top_k,
             size=size,
             element_size=(2, 4),
@@ -171,28 +173,25 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
             ),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        data_ptr = TritonWarmupTensor(compile_key.dtype)
-        weight_ptr = TritonWarmupTensor(torch.float32)
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        num_tokens = {1: 1, 2: 5, 4: 129, 8: 1025, 16: 129}[compile_key.block_m]
+        data_ptr = TritonWarmupTensor(
+            compile_key.dtype,
+            shape=(num_tokens, compile_key.top_k, compile_key.size),
+        )
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            data_ptr,
-            weight_ptr,
-            data_ptr,
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize num_tokens
-            compile_key.top_k * compile_key.size,
-            compile_key.has_expert_map,
-            compile_key.top_k,
-            compile_key.size,
-            compile_key.block_m,
-            compile_key.block_k,
-            grid=(1, 1),
-            num_warps=compile_key.num_warps,
-            num_stages=compile_key.num_stages,
+        return dict(
+            inputs=data_ptr,
+            topk_weights=TritonWarmupTensor(
+                torch.float32,
+                shape=(num_tokens, compile_key.top_k),
+            ),
+            outputs=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(num_tokens, compile_key.size),
+            ),
+            topk_ids=int32_ptr if compile_key.has_expert_map else None,
+            expert_map=int32_ptr if compile_key.has_expert_map else None,
         )
 
     def __call__(
@@ -216,7 +215,8 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
             triton.cdiv(size, compile_key.block_k),
             triton.cdiv(num_tokens, compile_key.block_m),
         )
-        self.kernel[grid](
+        self._launch(
+            grid,
             inputs,
             topk_weights,
             outputs,

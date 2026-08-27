@@ -23,12 +23,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -229,7 +230,7 @@ def quantize_and_insert_k_cache(
 
 
 class DequantizeAndGatherKCacheKernel(
-    VllmJitKernel["DequantizeAndGatherKCacheKernel.CompileKey"]
+    VllmTritonJitKernel["DequantizeAndGatherKCacheKernel.CompileKey"]
 ):
     def __init__(self) -> None:
         self.num_workers = 128
@@ -242,6 +243,7 @@ class DequantizeAndGatherKCacheKernel(
         block_stride: int
         use_fnuz: bool
         has_gather_lens: bool
+        offset: int
 
     @staticmethod
     @triton.jit
@@ -368,6 +370,7 @@ class DequantizeAndGatherKCacheKernel(
         *,
         max_model_len: int,
         cache_block_size: int,
+        offset: int,
         **compile_key_fields: bool,
     ) -> CompileKey:
         token_stride = 576
@@ -380,6 +383,7 @@ class DequantizeAndGatherKCacheKernel(
             // cache_block_size,
             cache_block_size=cache_block_size,
             block_stride=block_stride,
+            offset=triton_scalar_specialization_rep(offset),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -401,35 +405,31 @@ class DequantizeAndGatherKCacheKernel(
             ),
             max_model_len=max_model_len,
             use_fnuz=False,
+            offset=(1, 2, 16),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        gather_lens_ptr = int32_ptr if compile_key.has_gather_lens else None
-        warmup(
-            TritonWarmupTensor(torch.bfloat16, shape=(1, 1, 512)),
-            512,
-            512,
-            TritonWarmupTensor(torch.uint8),
-            int32_ptr,
-            int32_ptr,
-            0,
-            gather_lens_ptr,
-            max_blocks_per_seq=compile_key.max_blocks_per_seq,
-            fp8_dim=448,
-            bf16_dim=64,
-            scale_dim=8,
-            quant_block=64,
-            cache_block_size=compile_key.cache_block_size,
-            token_data_size=576,
-            block_stride=compile_key.block_stride,
-            output_dim=512,
-            fp8_max=448.0,
-            n_quant_blocks=7,
+        return dict(
+            out=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, 1, 512),
+                strides=(512, 512, 1),
+            ),
+            k_cache=TritonWarmupTensor(
+                torch.uint8,
+                shape=(1, 1),
+                strides=(compile_key.block_stride, 1),
+            ),
+            seq_lens=int32_ptr,
+            gather_lens=(int32_ptr if compile_key.has_gather_lens else None),
+            block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.max_blocks_per_seq),
+            ),
+            block_size=compile_key.cache_block_size,
+            offset=compile_key.offset,
             use_fnuz=compile_key.use_fnuz,
-            grid=(1, self.num_workers),
         )
 
     def __call__(
@@ -445,7 +445,8 @@ class DequantizeAndGatherKCacheKernel(
         use_fnuz: bool = False,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        self.kernel[(num_reqs, self.num_workers)](
+        self._launch(
+            (num_reqs, self.num_workers),
             out,
             out.stride(0),
             out.stride(1),
@@ -550,7 +551,7 @@ def compute_global_topk_indices_and_lens(
 
 
 class ComputeGlobalTopkIndicesAndLensKernel(
-    VllmJitKernel["ComputeGlobalTopkIndicesAndLensKernel.CompileKey"]
+    VllmTritonJitKernel["ComputeGlobalTopkIndicesAndLensKernel.CompileKey"]
 ):
     def __init__(self) -> None:
         self.triton_block_size = 1024
@@ -568,15 +569,15 @@ class ComputeGlobalTopkIndicesAndLensKernel(
     @triton.jit
     def kernel(
         global_topk_indices_ptr,
-        global_topk_indices_stride,
+        global_topk_indices_stride: tl.constexpr,
         topk_lens_ptr,
         topk_indices_ptr,
-        topk_indices_stride,
-        topk,
+        topk_indices_stride: tl.constexpr,
+        topk: tl.constexpr,
         token_to_req_indices_ptr,
         block_table_ptr,
-        block_table_stride,
-        block_size,
+        block_table_stride: tl.constexpr,
+        block_size: tl.constexpr,
         is_valid_token_ptr,
         TRITON_BLOCK_SIZE: tl.constexpr,
     ):
@@ -646,24 +647,27 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             max_model_len=vllm_config.model_config.max_model_len,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            int32_ptr,
-            compile_key.global_topk_indices_stride,
-            int32_ptr,
-            int32_ptr,
-            compile_key.topk_indices_stride,
-            compile_key.topk,
-            int32_ptr,
-            int32_ptr,
-            compile_key.block_table_stride,
-            compile_key.block_size,
-            TritonWarmupTensor(torch.bool),
-            TRITON_BLOCK_SIZE=self.triton_block_size,
-            grid=(1,),
+        return dict(
+            global_topk_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.topk),
+                strides=(compile_key.global_topk_indices_stride, 1),
+            ),
+            topk_lens=int32_ptr,
+            topk_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.topk),
+                strides=(compile_key.topk_indices_stride, 1),
+            ),
+            token_to_req_indices=int32_ptr,
+            block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.block_table_stride),
+            ),
+            block_size=compile_key.block_size,
+            is_valid_token=TritonWarmupTensor(torch.bool),
         )
 
     def __call__(
@@ -677,7 +681,8 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         is_valid_token: torch.Tensor,
     ) -> None:
         num_tokens = topk_indices.shape[0]
-        self.kernel[(num_tokens,)](
+        self._launch(
+            (num_tokens,),
             global_topk_indices,
             global_topk_indices.stride(0),
             topk_lens,
@@ -749,7 +754,7 @@ def combine_topk_swa_indices(
 
 
 class CombineTopkSwaIndicesKernel(
-    VllmJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
+    VllmTritonJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
     def __init__(self) -> None:
         self.num_workers = 256
@@ -912,27 +917,29 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=window_size,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
         input_variant = compile_key.input_variant
-        warmup(
-            int32_ptr,
-            1,  # do not specialize combined_indices_stride
-            int32_ptr,
-            input_variant.pointer("topk_indices", torch.int32),
-            1,  # do not specialize topk_indices_stride
-            input_variant.pointer("query_start_loc", torch.int32),
-            input_variant.pointer("seq_lens", torch.int32),
-            input_variant.pointer("gather_lens", torch.int32),
-            1,  # do not specialize M
-            1,  # do not specialize N
+        return dict(
+            combined_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.padded_top_k),
+                strides=(1, 1),
+            ),
+            combined_lens=int32_ptr,
+            topk_indices=input_variant.pointer(
+                "topk_indices",
+                torch.int32,
+                shape=(1, compile_key.padded_top_k),
+            ),
+            query_start_loc=input_variant.pointer("query_start_loc", torch.int32),
+            seq_lens=input_variant.pointer("seq_lens", torch.int32),
+            gather_lens=input_variant.pointer("gather_lens", torch.int32),
+            M=1,
+            N=1,
             TOP_K=compile_key.top_k,
             COMPRESS_RATIO=compile_key.compress_ratio,
             WINDOW_SIZE=compile_key.window_size,
-            PADDED_TOP_K=compile_key.padded_top_k,
-            grid=(1, self.num_workers),
         )
 
     def __call__(
@@ -951,7 +958,8 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        self.kernel[(num_reqs, self.num_workers)](
+        self._launch(
+            (num_reqs, self.num_workers),
             combined_indices,
             combined_indices.stride(0),
             combined_lens,
@@ -1119,7 +1127,7 @@ def _remap_flashinfer_index(values, block_size, block_span):
 
 
 class BuildFlashinferMixedSparseIndicesKernel(
-    VllmJitKernel["BuildFlashinferMixedSparseIndicesKernel.CompileKey"]
+    VllmTritonJitKernel["BuildFlashinferMixedSparseIndicesKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -1440,58 +1448,50 @@ class BuildFlashinferMixedSparseIndicesKernel(
             swa_index_width=swa_index_width,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        bool_ptr = TritonWarmupTensor(torch.bool)
         max_block_size = max(
             compile_key.window_block_size,
             compile_key.topk_block_size,
         )
         num_warps = 4 if max_block_size >= 256 else 1
-        warmup(
-            int32_ptr,
-            1,  # do not specialize sparse_indices_stride
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize decode_swa_stride
-            int32_ptr,
-            1,  # do not specialize decode_compressed_stride
-            int32_ptr,
-            (
-                bool_ptr
-                if compile_key.decode_compressed_indices_are_local
-                else int32_ptr
+        return dict(
+            sparse_indices=TritonWarmupTensor(
+                torch.int32, shape=(1, compile_key.padded_top_k)
             ),
-            int32_ptr,
-            1,  # do not specialize prefill_topk_stride
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize swa_block_table_stride
-            compile_key.swa_block_size,
-            1,  # do not specialize swa_block_span
-            int32_ptr,
-            1,  # do not specialize compressed_block_table_stride
-            compile_key.compressed_block_size,
-            1,  # do not specialize compressed_block_span
-            1,  # do not specialize NUM_DECODE_TOKENS
-            WINDOW_SIZE=compile_key.window_size,
-            SWA_INDEX_WIDTH=compile_key.swa_index_width,
-            COMPRESS_RATIO=compile_key.compress_ratio,
-            TOP_K=compile_key.top_k,
-            PADDED_TOP_K=compile_key.padded_top_k,
-            PREFILL_TOPK_STRIDE=1,
-            DECODE_COMPRESSED_TOPK=compile_key.decode_compressed_topk,
-            DECODE_COMPRESSED_INDICES_ARE_LOCAL=(
+            sparse_topk_lens=int32_ptr,
+            decode_swa_indices=int32_ptr,
+            decode_compressed_indices=int32_ptr,
+            decode_compressed_topk_lens=int32_ptr,
+            decode_is_valid_token=TritonWarmupTensor(
+                torch.bool
+                if compile_key.decode_compressed_indices_are_local
+                else torch.int32
+            ),
+            prefill_topk_indices=int32_ptr,
+            query_start_loc=int32_ptr,
+            seq_lens=int32_ptr,
+            token_to_req_indices=int32_ptr,
+            swa_block_table=TritonWarmupTensor(torch.int32, shape=(1, 1)),
+            swa_block_size=compile_key.swa_block_size,
+            swa_block_span=1,
+            compressed_block_table=TritonWarmupTensor(torch.int32, shape=(1, 1)),
+            compressed_block_size=compile_key.compressed_block_size,
+            compressed_block_span=1,
+            num_decode_tokens=1,
+            window_size=compile_key.window_size,
+            swa_index_width=compile_key.swa_index_width,
+            compress_ratio=compile_key.compress_ratio,
+            topk=compile_key.top_k,
+            padded_topk=compile_key.padded_top_k,
+            prefill_topk_stride=1,
+            decode_compressed_topk=compile_key.decode_compressed_topk,
+            decode_compressed_indices_are_local=(
                 compile_key.decode_compressed_indices_are_local
             ),
-            HAS_DECODE_COMPRESSED_LENS=compile_key.has_decode_compressed_lens,
-            WINDOW_BLOCK_SIZE=compile_key.window_block_size,
-            TOPK_BLOCK_SIZE=compile_key.topk_block_size,
-            grid=(1,),
+            has_decode_compressed_lens=compile_key.has_decode_compressed_lens,
+            window_block_size=compile_key.window_block_size,
+            topk_block_size=compile_key.topk_block_size,
             num_warps=num_warps,
         )
 
@@ -1529,7 +1529,8 @@ class BuildFlashinferMixedSparseIndicesKernel(
         num_warps: int,
     ) -> None:
         num_tokens = sparse_indices.shape[0]
-        self.kernel[(num_tokens,)](
+        self._launch(
+            (num_tokens,),
             sparse_indices,
             sparse_indices.stride(0),
             sparse_topk_lens,

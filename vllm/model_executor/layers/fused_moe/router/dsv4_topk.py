@@ -6,10 +6,10 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -41,7 +41,7 @@ def can_use_dsv4_topk(
     )
 
 
-class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
+class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
     def __init__(self) -> None:
         self.topk = 6
         super().__init__()
@@ -155,21 +155,18 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        warmup(
-            fp32_ptr,
-            fp32_ptr,
-            fp32_ptr,
-            TritonWarmupTensor(compile_key.indices_dtype),
-            compile_key.routed_scaling_factor,
-            NUM_EXPERTS=compile_key.num_experts,
-            BLOCK_N=compile_key.block_n,
-            num_warps=1,
-            launch_pdl=compile_key.launch_pdl,
-            grid=(1,),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            gating_output=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.num_experts),
+            ),
+            correction_bias=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.num_experts,),
+            ),
+            indices_dtype=compile_key.indices_dtype,
+            routed_scaling_factor=compile_key.routed_scaling_factor,
         )
 
     def __call__(
@@ -192,7 +189,8 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
             routed_scaling_factor=routed_scaling_factor,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
-        self.kernel[(num_tokens,)](
+        self._launch(
+            (num_tokens,),
             gating_output,
             correction_bias,
             topk_weights,

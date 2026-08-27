@@ -6,10 +6,10 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
@@ -75,10 +75,11 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
 
 
 class FusedIndexerQRopeQuantTritonKernel(
-    VllmJitKernel["FusedIndexerQRopeQuantTritonKernel.CompileKey"]
+    VllmTritonJitKernel["FusedIndexerQRopeQuantTritonKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
+        num_heads: int
         index_q_half_rot_dim: int
         index_q_head_dim: int
         fp8_max: float
@@ -205,11 +206,13 @@ class FusedIndexerQRopeQuantTritonKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        num_heads: int,
         head_dim: int,
         rope_dim: int,
         use_fnuz: bool,
     ) -> CompileKey:
         return self.CompileKey(
+            num_heads=num_heads,
             index_q_half_rot_dim=rope_dim // 2,
             index_q_head_dim=head_dim,
             fp8_max=224.0 if use_fnuz else 448.0,
@@ -226,40 +229,43 @@ class FusedIndexerQRopeQuantTritonKernel(
             return []
 
         return self._trace_dispatch(self.dispatch)(
+            num_heads=num_heads,
             head_dim=head_dim,
             rope_dim=rope_dim,
             use_fnuz=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        q_stride0 = compile_key.index_q_head_dim
-        warmup(
-            int32_ptr,
-            TritonWarmupTensor(torch.bfloat16),
-            q_stride0,
-            compile_key.index_q_head_dim,
-            fp32_ptr,
-            compile_key.index_q_half_rot_dim * 2,
-            compile_key.index_q_half_rot_dim,
-            TritonWarmupTensor(current_platform.fp8_dtype()),
-            q_stride0,
-            compile_key.index_q_head_dim,
-            compile_key.index_q_head_dim,
-            fp32_ptr,
-            1,
-            1.0,
-            1.0,
-            fp32_ptr,
-            1,
-            FP8_MAX=compile_key.fp8_max,
-            USE_FNUZ=compile_key.use_fnuz,
-            USE_EXPLICIT_FMA=compile_key.use_explicit_fma,
-            grid=(1, 1),
-            num_warps=1,
+        q_stride0 = compile_key.num_heads * compile_key.index_q_head_dim
+        return dict(
+            positions=int32_ptr,
+            index_q=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),
+                strides=(q_stride0, compile_key.index_q_head_dim, 1),
+            ),
+            index_q_cos_sin_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.index_q_half_rot_dim * 2),
+            ),
+            index_weights=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.num_heads),
+            ),
+            index_weights_softmax_scale=1.0,
+            index_weights_head_scale=1.0,
+            index_q_fp8=TritonWarmupTensor(
+                current_platform.fp8_dtype(),
+                shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),
+                strides=(q_stride0, compile_key.index_q_head_dim, 1),
+            ),
+            index_weights_out=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.num_heads),
+            ),
+            fp8_max=compile_key.fp8_max,
+            use_fnuz=compile_key.use_fnuz,
         )
 
     def __call__(
@@ -278,7 +284,8 @@ class FusedIndexerQRopeQuantTritonKernel(
     ) -> None:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
-        self.kernel[(num_tokens, num_index_q_heads)](
+        self._launch(
+            (num_tokens, num_index_q_heads),
             positions,
             index_q,
             index_q.stride(0),
@@ -304,10 +311,11 @@ class FusedIndexerQRopeQuantTritonKernel(
 
 
 class FusedIndexerQRopeMxFp4TritonKernel(
-    VllmJitKernel["FusedIndexerQRopeMxFp4TritonKernel.CompileKey"]
+    VllmTritonJitKernel["FusedIndexerQRopeMxFp4TritonKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
+        num_heads: int
         index_q_half_rot_dim: int
         index_q_head_dim: int
         mxfp4_block: int
@@ -425,10 +433,12 @@ class FusedIndexerQRopeMxFp4TritonKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        num_heads: int,
         head_dim: int,
         rope_dim: int,
     ) -> CompileKey:
         return self.CompileKey(
+            num_heads=num_heads,
             index_q_half_rot_dim=rope_dim // 2,
             index_q_head_dim=head_dim,
             mxfp4_block=MXFP4_BLOCK_SIZE,
@@ -443,40 +453,45 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             return []
 
         return self._trace_dispatch(self.dispatch)(
+            num_heads=num_heads,
             head_dim=head_dim,
             rope_dim=rope_dim,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        q_stride0 = compile_key.index_q_head_dim
-        warmup(
-            int32_ptr,
-            TritonWarmupTensor(torch.bfloat16),
-            q_stride0,
-            compile_key.index_q_head_dim,
-            fp32_ptr,
-            compile_key.index_q_half_rot_dim * 2,
-            compile_key.index_q_half_rot_dim,
-            TritonWarmupTensor(torch.uint8),
-            compile_key.index_q_head_dim // 2,
-            compile_key.index_q_head_dim // 2,
-            TritonWarmupTensor(torch.uint8),
-            compile_key.index_q_head_dim // compile_key.mxfp4_block,
-            compile_key.index_q_head_dim // compile_key.mxfp4_block,
-            compile_key.index_q_head_dim,
-            compile_key.mxfp4_block,
-            fp32_ptr,
-            1,
-            1.0,
-            1.0,
-            fp32_ptr,
-            1,
-            grid=(1, 1),
-            num_warps=1,
+        q_stride0 = compile_key.num_heads * compile_key.index_q_head_dim
+        packed_head_dim = compile_key.index_q_head_dim // 2
+        scale_head_dim = compile_key.index_q_head_dim // compile_key.mxfp4_block
+        return dict(
+            positions=int32_ptr,
+            index_q=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),
+                strides=(q_stride0, compile_key.index_q_head_dim, 1),
+            ),
+            index_q_cos_sin_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.index_q_half_rot_dim * 2),
+            ),
+            index_weights=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.num_heads),
+            ),
+            index_weights_softmax_scale=1.0,
+            index_weights_head_scale=1.0,
+            index_q_packed=TritonWarmupTensor(
+                torch.uint8,
+                shape=(1, compile_key.num_heads, packed_head_dim),
+            ),
+            index_q_scale=TritonWarmupTensor(
+                torch.uint8,
+                shape=(1, compile_key.num_heads, scale_head_dim),
+            ),
+            index_weights_out=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.num_heads),
+            ),
         )
 
     def __call__(
@@ -493,7 +508,8 @@ class FusedIndexerQRopeMxFp4TritonKernel(
     ) -> None:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
-        self.kernel[(num_tokens, num_index_q_heads)](
+        self._launch(
+            (num_tokens, num_index_q_heads),
             positions,
             index_q,
             index_q.stride(0),

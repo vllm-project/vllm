@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
@@ -275,7 +277,7 @@ class DeepseekSparseSWAMetadata:
 
 
 class ComputePrefillMetadataKernel(
-    VllmJitKernel["ComputePrefillMetadataKernel.CompileKey"]
+    VllmTritonJitKernel["ComputePrefillMetadataKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -336,19 +338,15 @@ class ComputePrefillMetadataKernel(
             num_prefills=WarmupIntRange(1, max_prefills + 1),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            compile_key.block_size,
-            0,
-            1,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1,),
+        return dict(
+            prefill_gather_lens=int32_ptr,
+            seq_lens=int32_ptr,
+            query_start_loc=int32_ptr,
+            num_prefills=compile_key.block_size,
+            num_decodes=0,
+            window_size=1,
         )
 
     def __call__(
@@ -361,7 +359,8 @@ class ComputePrefillMetadataKernel(
         window_size: int,
     ) -> None:
         compile_key = self.dispatch(num_prefills=num_prefills)
-        self.kernel[(1,)](
+        self._launch(
+            (1,),
             prefill_gather_lens,
             seq_lens,
             query_start_loc,
@@ -764,7 +763,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
 
 class ComputeSWAIndicesAndLensKernel(
-    VllmJitKernel["ComputeSWAIndicesAndLensKernel.CompileKey"]
+    VllmTritonJitKernel["ComputeSWAIndicesAndLensKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -864,25 +863,20 @@ class ComputeSWAIndicesAndLensKernel(
             block_size=64,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            int32_ptr,
-            1,  # do not specialize swa_indices_stride
-            int32_ptr,
-            compile_key.window_size,
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            TritonWarmupTensor(torch.bool),
-            int32_ptr,
-            1,  # do not specialize block_table_stride
-            compile_key.block_size,
-            0,  # do not specialize token_offset
-            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
-            grid=(1,),
+        return dict(
+            swa_indices=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
+            swa_lens=int32_ptr,
+            window_size=compile_key.window_size,
+            query_start_loc=int32_ptr,
+            seq_lens=int32_ptr,
+            token_to_req_indices=int32_ptr,
+            is_valid_token=TritonWarmupTensor(torch.bool),
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
+            block_size=compile_key.block_size,
+            num_tokens=1,
+            token_offset=0,
         )
 
     def __call__(
@@ -900,7 +894,8 @@ class ComputeSWAIndicesAndLensKernel(
         num_tokens: int,
         token_offset: int,
     ) -> None:
-        self.kernel[(num_tokens,)](
+        self._launch(
+            (num_tokens,),
             swa_indices,
             swa_indices.stride(0),
             swa_lens,
@@ -918,7 +913,7 @@ class ComputeSWAIndicesAndLensKernel(
 
 
 class ComputeDSparkNoncausalSWAIndicesKernel(
-    VllmJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
+    VllmTritonJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -1036,26 +1031,21 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
             block_size=64,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            int32_ptr,
-            1,  # do not specialize swa_indices_stride
-            int32_ptr,
-            compile_key.window_size,
-            compile_key.index_width,
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            TritonWarmupTensor(torch.bool),
-            int32_ptr,
-            1,  # do not specialize block_table_stride
-            compile_key.block_size,
-            0,  # do not specialize token_offset
-            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
-            grid=(1,),
+        return dict(
+            swa_indices=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
+            swa_lens=int32_ptr,
+            window_size=compile_key.window_size,
+            index_width=compile_key.index_width,
+            query_start_loc=int32_ptr,
+            seq_lens=int32_ptr,
+            token_to_req_indices=int32_ptr,
+            is_valid_token=TritonWarmupTensor(torch.bool),
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
+            block_size=compile_key.block_size,
+            num_tokens=1,
+            token_offset=0,
         )
 
     def __call__(
@@ -1074,7 +1064,8 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         num_tokens: int,
         token_offset: int,
     ) -> None:
-        self.kernel[(num_tokens,)](
+        self._launch(
+            (num_tokens,),
             swa_indices,
             swa_indices.stride(0),
             swa_lens,

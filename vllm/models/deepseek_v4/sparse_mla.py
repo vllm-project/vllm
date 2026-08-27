@@ -9,10 +9,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -352,7 +352,7 @@ def build_c128a_topk_metadata(
 
 
 class BuildC128ATopkMetadataKernel(
-    VllmJitKernel["BuildC128ATopkMetadataKernel.CompileKey"]
+    VllmTritonJitKernel["BuildC128ATopkMetadataKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -465,29 +465,24 @@ class BuildC128ATopkMetadataKernel(
             triton_block_size=1024,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        warmup(
-            int32_ptr,
-            1,  # do not specialize global_decode_stride
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize prefill_local_stride
-            int64_ptr,
-            compile_key.compress_ratio,
-            compile_key.max_compressed_tokens,
-            0,  # do not specialize num_decode_tokens
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize block_table_stride
-            compile_key.block_size,
-            int64_ptr,
-            BLOCK_SIZE=compile_key.triton_block_size,
-            grid=(1,),
+        return dict(
+            global_decode_buffer=TritonWarmupTensor(
+                torch.int32, shape=(1, 1), strides=(1, 1)
+            ),
+            decode_lens_buffer=int32_ptr,
+            prefill_buffer=TritonWarmupTensor(
+                torch.int32, shape=(1, 1), strides=(1, 1)
+            ),
+            positions=TritonWarmupTensor(torch.int64),
+            compress_ratio=compile_key.compress_ratio,
+            max_compressed_tokens=compile_key.max_compressed_tokens,
+            num_decode_tokens=0,
+            token_to_req_indices=int32_ptr,
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
+            block_size=compile_key.block_size,
+            slot_mapping=TritonWarmupTensor(torch.int64),
         )
 
     def __call__(
@@ -504,7 +499,8 @@ class BuildC128ATopkMetadataKernel(
         block_size: int,
         slot_mapping: torch.Tensor,
     ) -> None:
-        self.kernel[(positions.shape[0],)](
+        self._launch(
+            (positions.shape[0],),
             global_decode_buffer,
             global_decode_buffer.stride(0),
             decode_lens_buffer,

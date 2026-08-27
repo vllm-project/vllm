@@ -22,10 +22,10 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
@@ -49,7 +49,7 @@ def _rmsnorm_row(
 
 
 class FusedMTPInputRMSNormKernel(
-    VllmJitKernel["FusedMTPInputRMSNormKernel.CompileKey"]
+    VllmTritonJitKernel["FusedMTPInputRMSNormKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -140,24 +140,27 @@ class FusedMTPInputRMSNormKernel(
             eps=float(hf_config.rms_norm_eps),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        bf16_ptr = TritonWarmupTensor(torch.bfloat16)
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        warmup(
-            bf16_ptr,
-            TritonWarmupTensor(torch.int64),
-            bf16_ptr,
-            fp32_ptr,
-            fp32_ptr,
-            bf16_ptr,
-            bf16_ptr,
-            compile_key.eps,
-            HIDDEN=compile_key.hidden,
-            HC_MULT=compile_key.hc_mult,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1, compile_key.hc_mult + 1),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            inputs_embeds=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.hidden),
+            ),
+            positions=TritonWarmupTensor(torch.int64),
+            previous_hidden_states=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.hc_mult, compile_key.hidden),
+            ),
+            enorm_weight=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.hidden,),
+            ),
+            hnorm_weight=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.hidden,),
+            ),
+            eps=compile_key.eps,
+            hc_mult=compile_key.hc_mult,
         )
 
     def __call__(
@@ -192,7 +195,8 @@ class FusedMTPInputRMSNormKernel(
             return enorm_out, hnorm_out
 
         compile_key = self.dispatch(hidden=hidden, hc_mult=hc_mult, eps=eps)
-        self.kernel[(num_tokens, hc_mult + 1)](
+        self._launch(
+            (num_tokens, hc_mult + 1),
             inputs_embeds,
             positions,
             previous_hidden_states,
@@ -209,7 +213,7 @@ class FusedMTPInputRMSNormKernel(
 
 
 class MTPSharedHeadRMSNormKernel(
-    VllmJitKernel["MTPSharedHeadRMSNormKernel.CompileKey"]
+    VllmTritonJitKernel["MTPSharedHeadRMSNormKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -263,18 +267,17 @@ class MTPSharedHeadRMSNormKernel(
             eps=float(hf_config.rms_norm_eps),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        bf16_ptr = TritonWarmupTensor(torch.bfloat16)
-        warmup(
-            bf16_ptr,
-            TritonWarmupTensor(torch.float32),
-            bf16_ptr,
-            compile_key.eps,
-            HIDDEN=compile_key.hidden,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1,),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            hidden_states=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.hidden),
+            ),
+            weight=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.hidden,),
+            ),
+            eps=compile_key.eps,
         )
 
     def __call__(
@@ -292,7 +295,8 @@ class MTPSharedHeadRMSNormKernel(
             return out
 
         compile_key = self.dispatch(hidden=hidden, eps=eps)
-        self.kernel[(num_tokens,)](
+        self._launch(
+            (num_tokens,),
             hidden_states,
             weight,
             out,

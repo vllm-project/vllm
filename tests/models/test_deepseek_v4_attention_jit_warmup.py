@@ -8,6 +8,9 @@ from typing import Any
 import pytest
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 
@@ -29,6 +32,9 @@ from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
 )
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     SavePartialStatesKernel,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    ConvertReqIndexToGlobalIndexKernel,
 )
 
 _HAS_CUTEDSL = has_cutedsl()
@@ -54,6 +60,46 @@ if _HAS_CUTEDSL:
         SparseAttnCompressNormRopeStoreFullC4Kernel,
         SparseAttnNormRopeStoreFullKernel,
         SparseAttnNormRopeStoreKernel,
+    )
+
+
+@pytest.mark.parametrize(
+    ("count_valid", "expected_block_n", "expected_single_tile", "expected_warps"),
+    [(False, 128, False, 4), (True, 2048, True, 8)],
+)
+def test_convert_req_index_dispatch_matches_legacy_meta(
+    count_valid: bool,
+    expected_block_n: int,
+    expected_single_tile: bool,
+    expected_warps: int,
+) -> None:
+    kernel = ConvertReqIndexToGlobalIndexKernel()
+
+    assert kernel.dispatch(
+        BLOCK_SIZE=64,
+        BLOCK_STRIDE_ROWS=72,
+        BLOCK_N=128,
+        NUM_TOPK_TOKENS=2048,
+        HAS_PREFILL_WORKSPACE=False,
+        COUNT_VALID=count_valid,
+        COMPACT_TO_FRONT=count_valid,
+        DCP_SIZE=4,
+        DCP_RANK=1,
+        DCP_INTERLEAVE=16,
+        max_num_blocks_per_req=257,
+    ) == kernel.CompileKey(
+        block_size=64,
+        block_stride_rows=72,
+        block_n=expected_block_n,
+        has_prefill_workspace=False,
+        count_valid=count_valid,
+        single_tile=expected_single_tile,
+        compact_to_front=count_valid,
+        dcp_size=4,
+        dcp_rank=1,
+        dcp_interleave=16,
+        num_warps=expected_warps,
+        max_num_blocks_per_req=257,
     )
 
 
@@ -203,7 +249,10 @@ def test_fused_inv_rope_warmup_uses_runtime_stride_classes(
         "scale_stride_group",
         "scale_stride_k",
     )
-    assert {warmup_kwargs[name] for name in stride_names} == {16}
+    assert {
+        triton_scalar_specialization_rep(warmup_kwargs[name])
+        for name in stride_names
+    } == {16}
 
 
 def test_save_partial_states_dispatch_matches_legacy_meta() -> None:

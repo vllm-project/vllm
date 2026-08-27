@@ -33,11 +33,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
     warn_if_moe_use_td_ineffective,
 )
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
     zip_inputs,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -304,13 +307,12 @@ def fused_moe_kernel_gptq_awq(
 
 # NOTE(zyongye): we can remove all the wna16 kernel
 # once we drop off sm75 support
-class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
+class FusedMoeTritonKernel(VllmTritonJitKernel["FusedMoeTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
         n: int
         k: int
-        a_rows: int
         em: int
         num_valid_tokens: int
         group_n: int
@@ -774,9 +776,8 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             dtype=dtype,
             n=launch_n,
             k=launch_k,
-            a_rows=a_rows,
-            em=em,
-            num_valid_tokens=num_valid_tokens,
+            em=triton_scalar_specialization_rep(em),
+            num_valid_tokens=triton_scalar_specialization_rep(num_valid_tokens),
             group_n=group_n,
             group_k=group_k,
             naive_block_assignment=naive_block_assignment,
@@ -812,7 +813,6 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         ):
             return []
 
-        max_tokens = min(max_tokens, 1024)
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
@@ -925,9 +925,9 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             use_td=resolve_moe_use_td(),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(
+        self, compile_key: CompileKey
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         if compile_key.group_k <= 0:
             a_scale_cols = 1
             b_scale_cols = 1
@@ -936,7 +936,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             b_scale_cols = triton.cdiv(compile_key.k, compile_key.group_k)
         data_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(compile_key.a_rows, compile_key.k),
+            shape=(1, compile_key.k),
         )
         b_ptr = TritonWarmupTensor(
             compile_key.dtype,
@@ -944,27 +944,32 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         )
         c_ptr = TritonWarmupTensor(
             torch.bfloat16,
-            shape=(compile_key.a_rows, compile_key.top_k, compile_key.n),
+            shape=(1, compile_key.top_k, compile_key.n),
         )
         float_ptr = TritonWarmupTensor(torch.float32)
         int32_ptr = TritonWarmupTensor(torch.int32)
         a_scale_ptr = TritonWarmupTensor(
             torch.float32,
-            shape=(compile_key.a_rows, a_scale_cols),
+            shape=(1, a_scale_cols),
         )
         b_scale_ptr = TritonWarmupTensor(
             torch.float32,
             shape=(1, compile_key.n, b_scale_cols),
         )
-        warmup(
+        uses_scales = (
+            compile_key.use_fp8_w8a8
+            or compile_key.use_int8_w8a8
+            or compile_key.use_int8_w8a16
+        )
+        args = (
             data_ptr,
             b_ptr,
             c_ptr,
-            float_ptr,
-            a_scale_ptr,
-            b_scale_ptr,
-            float_ptr,
-            int32_ptr,
+            float_ptr if compile_key.has_bias else None,
+            a_scale_ptr if uses_scales else None,
+            b_scale_ptr if uses_scales else None,
+            float_ptr if compile_key.mul_routed_weight else None,
+            int32_ptr if not compile_key.naive_block_assignment else None,
             int32_ptr,
             int32_ptr,
             compile_key.n,
@@ -987,7 +992,11 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             1 if compile_key.has_bias else 0,
             compile_key.group_n,
             compile_key.group_k,
-            compile_key.naive_block_assignment,
+        )
+        return args, dict(
+            dtype=compile_key.dtype,
+            A_ROWS=compile_key.num_valid_tokens,
+            naive_block_assignment=compile_key.naive_block_assignment,
             BLOCK_SIZE_M=compile_key.block_size_m,
             BLOCK_SIZE_N=compile_key.block_size_n,
             BLOCK_SIZE_K=compile_key.block_size_k,
@@ -1003,7 +1012,6 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             HAS_BIAS=compile_key.has_bias,
             SWAP_AB=compile_key.swap_ab,
             USE_TD=compile_key.use_td,
-            grid=(1,),
             num_warps=compile_key.num_warps,
             num_stages=compile_key.num_stages,
         )
@@ -1049,7 +1057,8 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             triton.cdiv(EM, META["BLOCK_SIZE_M"])
             * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
         )
-        return self.kernel[grid](
+        return self._launch(
+            grid,
             A,
             B,
             C,
@@ -1479,11 +1488,13 @@ def dispatch_fused_moe_kernel(
         )
 
 
-class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
+class ComputeIdentityKernel(VllmTritonJitKernel["ComputeIdentityKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         top_k: int
         hidden_dim: int
+        num_tokens: int
+        scales_stride: int
         block_size: int
 
     @staticmethod
@@ -1527,41 +1538,49 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
 
     def dispatch(  # type: ignore[override]
         self,
-        **compile_key_fields: int,
+        top_k: int,
+        hidden_dim: int,
+        num_tokens: int,
+        scales_stride: int,
     ) -> CompileKey:
         return self.CompileKey(
-            **compile_key_fields,
+            top_k=top_k,
+            hidden_dim=hidden_dim,
+            num_tokens=triton_scalar_specialization_rep(num_tokens),
+            scales_stride=triton_scalar_specialization_rep(scales_stride),
             block_size=256,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hidden_dim = vllm_config.model_config.hf_config.hidden_size
         top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-        if hidden_dim <= 0 or top_k <= 0:
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if hidden_dim <= 0 or top_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
             top_k=top_k,
             hidden_dim=hidden_dim,
+            num_tokens=WarmupIntRange(1, min(max_tokens, 16) + 1),
+            scales_stride=top_k,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         hidden_ptr = TritonWarmupTensor(
             torch.bfloat16,
-            shape=(1, compile_key.hidden_dim),
+            shape=(compile_key.num_tokens, compile_key.hidden_dim),
         )
-        scale_ptr = TritonWarmupTensor(torch.float32, shape=(1, compile_key.top_k))
-        warmup(
-            compile_key.top_k,
-            hidden_ptr,
-            scale_ptr,
-            1,
-            hidden_ptr,
-            compile_key.hidden_dim,
-            compile_key.top_k,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1,),
+        return dict(
+            top_k=compile_key.top_k,
+            hidden_states=hidden_ptr,
+            expert_scales=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.num_tokens, compile_key.top_k),
+                strides=(compile_key.scales_stride, 1),
+            ),
+            num_tokens=compile_key.num_tokens,
+            output=hidden_ptr,
+            hidden_dim=compile_key.hidden_dim,
+            scales_stride=compile_key.scales_stride,
         )
 
     def __call__(
@@ -1575,9 +1594,15 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
         hidden_dim: int,
         scales_stride: int,
     ) -> Any:
-        compile_key = self.dispatch(top_k=top_k, hidden_dim=hidden_dim)
+        compile_key = self.dispatch(
+            top_k=top_k,
+            hidden_dim=hidden_dim,
+            num_tokens=num_tokens,
+            scales_stride=scales_stride,
+        )
         grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
-        return self.kernel[grid](
+        return self._launch(
+            grid,
             top_k,
             hidden_states,
             expert_scales,

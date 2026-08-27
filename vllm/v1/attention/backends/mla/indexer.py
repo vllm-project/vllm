@@ -9,13 +9,11 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -65,7 +63,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
 
 
 class PrepareUniformDecodeKernel(
-    VllmJitKernel["PrepareUniformDecodeKernel.CompileKey"]
+    VllmTritonJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
     def __init__(self) -> None:
         self.block_size = 1024
@@ -74,6 +72,9 @@ class PrepareUniformDecodeKernel(
     @dataclass(frozen=True)
     class CompileKey:
         block_size: int
+        block_table_stride: int
+        expanded_bt_stride: int
+        max_decode_len: int
 
     @staticmethod
     @triton.jit
@@ -112,27 +113,45 @@ class PrepareUniformDecodeKernel(
         # All reqs now have decode_len = 1.
         tl.store(decode_lens_ptr + idx, 1)
 
-    def dispatch(self, *, block_size: int) -> CompileKey:  # type: ignore[override]
-        return self.CompileKey(block_size=block_size)
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        block_size: int,
+        block_table_stride: int,
+        expanded_bt_stride: int,
+        max_decode_len: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            block_size=block_size,
+            block_table_stride=triton_scalar_specialization_rep(block_table_stride),
+            expanded_bt_stride=triton_scalar_specialization_rep(expanded_bt_stride),
+            max_decode_len=triton_scalar_specialization_rep(max_decode_len),
+        )
 
     def get_warmup_keys(self) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(block_size=self.block_size)
+        return self._trace_dispatch(self.dispatch)(
+            block_size=self.block_size,
+            block_table_stride=(1, 2, 16),
+            expanded_bt_stride=(1, 2, 16),
+            max_decode_len=(1, 2, 16),
+        )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            1,
-            int32_ptr,
-            1,
-            int32_ptr,
-            1,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1,),
+        return dict(
+            seq_lens=int32_ptr,
+            decode_seq_lens=int32_ptr,
+            block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.block_table_stride),
+            ),
+            expanded_block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.expanded_bt_stride),
+            ),
+            decode_lens=int32_ptr,
+            num_decode_tokens=1,
+            max_decode_len=compile_key.max_decode_len,
         )
 
     def __call__(
@@ -142,10 +161,11 @@ class PrepareUniformDecodeKernel(
         block_table: torch.Tensor,
         expanded_block_table: torch.Tensor,
         decode_lens: torch.Tensor,
+        num_decode_tokens: int,
         max_decode_len: int,
     ) -> None:
-        num_decode_tokens = decode_seq_lens.shape[0]
-        self.kernel[(num_decode_tokens,)](
+        self._launch(
+            (num_decode_tokens,),
             seq_lens,
             decode_seq_lens,
             block_table,
@@ -274,7 +294,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
 
 
 class BuildPrefillChunkMetadataKernel(
-    VllmJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
+    VllmTritonJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
 ):
     def __init__(self) -> None:
         self.block_size = 1024
@@ -415,11 +435,11 @@ class BuildPrefillChunkMetadataKernel(
             ),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(
+        self, compile_key: CompileKey
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
+        args = (
             int32_ptr,
             compile_key.input_variant.pointer("uncompressed_seq_lens", torch.int32),
             int32_ptr,
@@ -432,10 +452,8 @@ class BuildPrefillChunkMetadataKernel(
             compile_key.dcp_rank,
             compile_key.dcp_world,
             compile_key.dcp_interleave,
-            BLOCK_SIZE=compile_key.block_size,
-            COMPRESS_RATIO=compile_key.compress_ratio,
-            grid=(1,),
         )
+        return args, dict(num_reqs=1, COMPRESS_RATIO=compile_key.compress_ratio)
 
     def __call__(
         self,
@@ -443,7 +461,8 @@ class BuildPrefillChunkMetadataKernel(
         num_reqs: int,
         COMPRESS_RATIO: int,
     ) -> None:
-        self.kernel[(num_reqs,)](
+        self._launch(
+            (num_reqs,),
             *args,
             BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=COMPRESS_RATIO,
@@ -730,6 +749,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     block_table,
                     self.expanded_block_table_buffer,
                     self.decode_lens_buffer,
+                    num_decode_tokens,
                     max_decode_len,
                 )
                 self.decode_seq_lens_buffer[num_decode_tokens:] = 0

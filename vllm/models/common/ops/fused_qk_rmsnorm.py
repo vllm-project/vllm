@@ -5,16 +5,16 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 
-class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
+class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         q_size: int
@@ -119,28 +119,27 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        bf16_ptr = TritonWarmupTensor(torch.bfloat16)
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        warmup(
-            bf16_ptr,
-            bf16_ptr,
-            fp32_ptr,
-            compile_key.q_in_stride,
-            compile_key.q_out_stride,
-            bf16_ptr,
-            bf16_ptr,
-            fp32_ptr,
-            compile_key.kv_in_stride,
-            compile_key.kv_out_stride,
-            compile_key.eps,
-            Q_SIZE=compile_key.q_size,
-            KV_SIZE=compile_key.kv_size,
-            BLOCK_SIZE=compile_key.block_size,
-            launch_pdl=compile_key.launch_pdl,
-            grid=(1, 2),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            qr=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.q_size),
+                strides=(compile_key.q_in_stride, 1),
+            ),
+            kv=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.kv_size),
+                strides=(compile_key.kv_in_stride, 1),
+            ),
+            q_weight=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.q_size,),
+            ),
+            kv_weight=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.kv_size,),
+            ),
+            eps=compile_key.eps,
         )
 
     def __call__(
@@ -176,7 +175,8 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             eps=eps,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
-        self.kernel[(num_tokens, 2)](
+        self._launch(
+            (num_tokens, 2),
             qr,
             qr_out,
             q_weight,

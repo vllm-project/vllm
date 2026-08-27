@@ -43,11 +43,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    VllmTritonJitKernel,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -55,7 +53,7 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 class TrtLlmLoraUnpermuteActivationKernel(
-    VllmJitKernel["TrtLlmLoraUnpermuteActivationKernel.CompileKey"]
+    VllmTritonJitKernel["TrtLlmLoraUnpermuteActivationKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -114,18 +112,18 @@ class TrtLlmLoraUnpermuteActivationKernel(
             intermediate_size=intermediate_size,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.num_cols)),
-            TritonWarmupTensor(torch.int64, shape=(1,)),
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.num_cols)),
-            compile_key.num_cols,
-            compile_key.num_cols,
-            compile_key.num_cols,
-            BLOCK_I=compile_key.block_i,
-            grid=(1, triton.cdiv(compile_key.num_cols, compile_key.block_i)),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            act_permuted=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.num_cols),
+            ),
+            idx_map=TritonWarmupTensor(torch.int64),
+            out=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.num_cols),
+            ),
+            intermediate_size=compile_key.num_cols,
         )
 
     def __call__(
@@ -143,7 +141,8 @@ class TrtLlmLoraUnpermuteActivationKernel(
             out.shape[0],
             triton.cdiv(intermediate_size, compile_key.block_i),
         )
-        return self.kernel[grid](
+        return self._launch(
+            grid,
             act_permuted,
             idx_map,
             out,
@@ -154,7 +153,9 @@ class TrtLlmLoraUnpermuteActivationKernel(
         )
 
 
-class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKey"]):
+class TrtLlmLoraFinalizeKernel(
+    VllmTritonJitKernel["TrtLlmLoraFinalizeKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -233,27 +234,30 @@ class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKe
             top_k=top_k,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.hidden_size)),
-            TritonWarmupTensor(torch.float32, shape=(compile_key.top_k,)),
-            TritonWarmupTensor(torch.int64, shape=(compile_key.top_k,)),
-            TritonWarmupTensor(
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            gemm2_permuted=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.hidden_size),
+            ),
+            expert_weights=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.top_k),
+            ),
+            idx_map=TritonWarmupTensor(
+                torch.int64,
+                shape=(compile_key.top_k,),
+            ),
+            w2_delta=TritonWarmupTensor(
                 compile_key.dtype,
                 shape=(1, compile_key.top_k, compile_key.hidden_size),
             ),
-            TritonWarmupTensor(compile_key.dtype, shape=(1, compile_key.hidden_size)),
-            compile_key.hidden_size,
-            compile_key.hidden_size,
-            compile_key.top_k * compile_key.hidden_size,
-            compile_key.hidden_size,
-            compile_key.hidden_size,
-            1.0,
-            TOP_K=compile_key.top_k,
-            BLOCK_K=compile_key.block_k,
-            grid=(1, triton.cdiv(compile_key.hidden_size, compile_key.block_k)),
+            output=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.hidden_size),
+            ),
+            top_k=compile_key.top_k,
+            scale=1.0,
         )
 
     def __call__(
@@ -277,7 +281,8 @@ class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKe
             output.shape[0],
             triton.cdiv(hidden_size, compile_key.block_k),
         )
-        return self.kernel[grid](
+        return self._launch(
+            grid,
             gemm2_permuted,
             expert_weights.reshape(-1),
             idx_map,

@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 __all__ = [
     "JitWarmupRegistry",
@@ -600,7 +600,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             predicate_only_names: frozenset[str] = frozenset()
             if predicate_trace is not None:
                 compile_key_fields = frozenset(
-                    field.name for field in fields(self.CompileKey)
+                    field.name for field in fields(cast(Any, self.CompileKey))
                 )
                 predicate_only_names = (
                     predicate_trace.input_names

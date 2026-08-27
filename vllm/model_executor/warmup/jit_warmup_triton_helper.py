@@ -2,14 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import inspect
+from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from math import prod
+from typing import Any, ClassVar, Generic, TypeVar, cast
+
+import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
     get_ast_full_name,
     get_function_source_node,
 )
+
+CompileKeyT = TypeVar("CompileKeyT")
+TritonWarmupInputs = dict[str, Any] | tuple[tuple[Any, ...], dict[str, Any]]
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -54,6 +62,11 @@ class TritonWarmupTensor:
     dtype: Any
     aligned: bool = True
     shape: tuple[int, ...] = (1,)
+    strides: tuple[int, ...] | None = None
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
@@ -61,13 +74,106 @@ class TritonWarmupTensor:
     def ptr_range(self) -> int:
         return 0
 
-    def stride(self) -> tuple[int, ...]:
-        strides: list[int] = []
-        stride = 1
-        for size in reversed(self.shape):
-            strides.append(stride)
-            stride *= size
-        return tuple(reversed(strides))
+    def stride(self, dim: int | None = None) -> int | tuple[int, ...]:
+        if self.strides is None:
+            strides: list[int] = []
+            stride = 1
+            for size in reversed(self.shape):
+                strides.append(stride)
+                stride *= size
+            result = tuple(reversed(strides))
+        else:
+            result = self.strides
+        return result if dim is None else result[dim]
+
+    def size(self, dim: int | None = None) -> int | tuple[int, ...]:
+        return self.shape if dim is None else self.shape[dim]
+
+    def numel(self) -> int:
+        return prod(self.shape)
+
+    def element_size(self) -> int:
+        return self.dtype.itemsize
+
+    def is_contiguous(self) -> bool:
+        return True
+
+    def reshape(self, *shape: int) -> "TritonWarmupTensor":
+        return TritonWarmupTensor(self.dtype, self.aligned, tuple(shape))
+
+    def new_empty(
+        self,
+        shape: tuple[int, ...],
+        *,
+        dtype: Any | None = None,
+    ) -> "TritonWarmupTensor":
+        return TritonWarmupTensor(dtype or self.dtype, self.aligned, shape)
+
+    def int(self) -> "TritonWarmupTensor":
+        return TritonWarmupTensor(
+            torch.int32,
+            self.aligned,
+            self.shape,
+            self.strides,
+        )
+
+    @classmethod
+    def __torch_function__(
+        cls,
+        func: Callable[..., Any],
+        types: tuple[type, ...],
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        if func is torch.empty_like:
+            tensor = args[0]
+            options = kwargs or {}
+            return cls(
+                options.get("dtype", tensor.dtype),
+                tensor.aligned,
+                tensor.shape,
+                tensor.strides,
+            )
+        return NotImplemented
+
+
+class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
+    """Triton owner whose runtime launch is reused for compile-only warmup."""
+
+    kernel: ClassVar[Any]
+    _warming = False
+
+    @abstractmethod
+    def warmup_inputs(self, compile_key: CompileKeyT) -> TritonWarmupInputs:
+        """Return runtime-shaped inputs that reproduce one compile key."""
+        raise NotImplementedError
+
+    def compile(self, compile_key: CompileKeyT) -> None:
+        inputs = self.warmup_inputs(compile_key)
+        self._warming = True
+        try:
+            call = cast(Callable[..., Any], self)
+            if isinstance(inputs, tuple):
+                call(*inputs[0], **inputs[1])
+            else:
+                call(**inputs)
+        finally:
+            self._warming = False
+
+    def _launch(
+        self,
+        grid: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        runtime_launcher = kwargs.pop("_runtime_launcher", None)
+        if self._warming:
+            warmup = getattr(self.kernel, "warmup", None)
+            assert warmup is not None
+            return warmup(*args, grid=(1,), **kwargs)
+        if runtime_launcher is not None:
+            return runtime_launcher(self.kernel, grid, *args, **kwargs)
+        return self.kernel[grid](*args, **kwargs)
 
 
 @dataclass(frozen=True)

@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
@@ -17,11 +17,11 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -74,7 +74,7 @@ def mask_dcp_empty_shards_(
 # AG + RS/AR implementation
 
 
-class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"]):
+class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         output_dtype: torch.dtype
@@ -267,27 +267,33 @@ class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"])
             is_base_e=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        output_ptr = TritonWarmupTensor(compile_key.output_dtype)
-        lse_ptr = TritonWarmupTensor(compile_key.lse_dtype)
-        warmup(
-            output_ptr,
-            output_ptr,
-            lse_ptr,
-            lse_ptr,
-            compile_key.outputs_stride_b,
-            compile_key.outputs_stride_h,
-            compile_key.outputs_stride_d,
-            compile_key.lses_stride_n,
-            compile_key.lses_stride_b,
-            compile_key.lses_stride_h,
-            compile_key.lse_idx,
-            HEAD_DIM=compile_key.head_dim,
-            N_ROUNDED=compile_key.n_rounded,
-            IS_BASE_E=compile_key.is_base_e,
-            grid=(1, 1, 1),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        output_ptr = TritonWarmupTensor(
+            compile_key.output_dtype,
+            shape=(1, 1, compile_key.head_dim),
+            strides=(
+                compile_key.outputs_stride_b,
+                compile_key.outputs_stride_h,
+                compile_key.outputs_stride_d,
+            ),
+        )
+        lse_ptr = TritonWarmupTensor(
+            compile_key.lse_dtype,
+            shape=(compile_key.n_rounded, 1, 1),
+            strides=(
+                compile_key.lses_stride_n,
+                compile_key.lses_stride_b,
+                compile_key.lses_stride_h,
+            ),
+        )
+        return dict(
+            outputs=output_ptr,
+            new_output=output_ptr,
+            lses=lse_ptr,
+            vlse=lse_ptr,
+            lse_idx=compile_key.lse_idx,
+            ctx=None,
+            is_base_e=compile_key.is_base_e,
         )
 
     def __call__(
@@ -306,8 +312,7 @@ class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"])
         outputs_stride_b, outputs_stride_h, outputs_stride_d = outputs.stride()
         lses_stride_n, lses_stride_b, lses_stride_h = lses.stride()
         grid = (num_tokens, num_heads, 1)
-        ctx.call_kernel(
-            self.kernel,
+        self._launch(
             grid,
             outputs,
             new_output,
@@ -323,6 +328,7 @@ class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"])
             HEAD_DIM=head_dim,
             N_ROUNDED=n_rounded,
             IS_BASE_E=is_base_e,
+            _runtime_launcher=None if self._warming else ctx.call_kernel,
         )
 
 
