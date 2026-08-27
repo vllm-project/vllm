@@ -783,26 +783,32 @@ class PrepareDflashInputsKernel(VllmJitKernel["PrepareDflashInputsKernel.Compile
         )
         if not input_block_tables:
             return []
-        block_table_stride = int(input_block_tables[0].stride(0))
 
-        return self._trace_dispatch(self.dispatch)(
-            SAMPLE_FROM_ANCHOR=speculator.sample_from_anchor,
-            PAD_SLOT_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=list(self._BLOCK_SIZES),
-            block_table_stride=block_table_stride,
-            parallel_drafting_token_id=speculator.parallel_drafting_token_id,
-            block_size=kernel_block_sizes[0],
-            num_query_per_req=speculator.num_query_per_req,
-            num_speculative_steps=speculator.num_speculative_steps,
-            max_num_reqs=speculator.max_num_reqs,
-            max_num_tokens=speculator.max_num_tokens,
-            max_model_len=speculator.max_model_len,
-            cp_rank=speculator.block_tables.cp_rank,
-            CP_SIZE=speculator.block_tables.cp_size,
-            CP_INTERLEAVE=speculator.block_tables.cp_interleave,
-            grid_num_reqs=list(self._GRID_NUM_REQS),
-            grid_num_blocks=list(self._GRID_NUM_BLOCKS),
-        )
+        keys: list[PrepareDflashInputsKernel.CompileKey] = []
+        for gid in speculator.draft_kv_cache_group_ids:
+            if gid >= len(input_block_tables) or gid >= len(kernel_block_sizes):
+                continue
+            keys.extend(
+                self._trace_dispatch(self.dispatch)(
+                    SAMPLE_FROM_ANCHOR=speculator.sample_from_anchor,
+                    PAD_SLOT_ID=PAD_SLOT_ID,
+                    BLOCK_SIZE=list(self._BLOCK_SIZES),
+                    block_table_stride=int(input_block_tables[gid].stride(0)),
+                    parallel_drafting_token_id=speculator.parallel_drafting_token_id,
+                    block_size=kernel_block_sizes[gid],
+                    num_query_per_req=speculator.num_query_per_req,
+                    num_speculative_steps=speculator.num_speculative_steps,
+                    max_num_reqs=speculator.max_num_reqs,
+                    max_num_tokens=speculator.max_num_tokens,
+                    max_model_len=speculator.max_model_len,
+                    cp_rank=speculator.block_tables.cp_rank,
+                    CP_SIZE=speculator.block_tables.cp_size,
+                    CP_INTERLEAVE=speculator.block_tables.cp_interleave,
+                    grid_num_reqs=list(self._GRID_NUM_REQS),
+                    grid_num_blocks=list(self._GRID_NUM_BLOCKS),
+                )
+            )
+        return keys
 
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
@@ -870,15 +876,15 @@ class PrepareDflashInputsKernel(VllmJitKernel["PrepareDflashInputsKernel.Compile
         input_seeds: torch.Tensor,
         block_table: torch.Tensor,
         block_size: int,
+        cp_rank: int,
+        cp_size: int,
+        cp_interleave: int,
         parallel_drafting_token_id: int,
         num_query_per_req: int,
         num_speculative_steps: int,
         max_num_reqs: int,
         max_num_tokens: int,
         max_model_len: int,
-        cp_rank: int,
-        cp_size: int,
-        cp_interleave: int,
         sample_from_anchor: bool = False,
     ) -> None:
         num_reqs = input_batch.num_reqs
