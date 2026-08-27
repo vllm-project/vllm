@@ -11,6 +11,7 @@ steps:
   - vllm/config/
   - vllm/engine/
   - vllm/entrypoints/logger.py
+  - vllm/env_override.py
   - vllm/envs.py
   - vllm/logger.py
   - vllm/logging_utils/
@@ -23,10 +24,11 @@ steps:
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
+  - tests/test_env_override_lifecycle.py
   - tests/jit_monitor/test_hooks.py
   - tests/jit_monitor/test_hooks_gpu.py
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_env_override_lifecycle.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
   mirror:
     amd:
       label: ":amd: (MI300) Engine Core"
