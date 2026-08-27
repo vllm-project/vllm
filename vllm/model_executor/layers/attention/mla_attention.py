@@ -827,28 +827,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_mha = True
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill = getattr(attn_metadata, "prefill", None)
-            use_dense_mha = getattr(prefill, "use_dense_mha", False)
-            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_masked_mha = (
-                self.prefill_backend is not None
-                and self.impl.masked_mha_available  # type: ignore[attr-defined]
-                and self.impl.dcp_world_size <= 1
-                and prefill is not None
-                and _use_masked_mha(
-                    backend_name=self.attn_backend.get_name(),
-                    tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
-                    qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    query_len=prefill.max_query_len,
-                    seq_len=prefill_max_seq_len,
-                    has_context=prefill.chunked_context is not None,
-                )
-                and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-            )
-            use_mha = (use_dense_mha or use_masked_mha) and not (
-                self._vllm_config.attention_config.sparse_mla_force_mqa
-            )
+            use_mha = self._use_sparse_mha(attn_metadata)
             if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
@@ -1065,6 +1044,31 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.use_pcp and output_padded.shape[0] > num_actual_toks:
             output_padded[num_actual_toks:].zero_()
         return output_padded
+
+    def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
+        prefill = attn_metadata.prefill
+        if prefill is None:
+            return False
+        use_masked_mha = (
+            self.prefill_backend is not None
+            and self.impl.masked_mha_available  # type: ignore[attr-defined]
+            and self.impl.dcp_world_size <= 1
+            and _use_masked_mha(
+                backend_name=self.attn_backend.get_name(),
+                tensor_parallel_size=(
+                    self._vllm_config.parallel_config.tensor_parallel_size
+                ),
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                query_len=prefill.max_query_len,
+                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
+                has_context=prefill.chunked_context is not None,
+            )
+            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
+        )
+        return (prefill.use_dense_mha or use_masked_mha) and not (
+            self._vllm_config.attention_config.sparse_mla_force_mqa
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Let per-backend impls do their own weight packing first (no-op

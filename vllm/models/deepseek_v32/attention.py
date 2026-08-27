@@ -119,8 +119,6 @@ class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
 
-    supports_dense_mha_prefill = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -311,6 +309,7 @@ class DeepseekV32Attention(MLAAttention):
         else:
             attn_metadata = attn_metadata_raw
         attn_metadata = cast("MLACommonMetadata | None", attn_metadata)
+        use_mha = attn_metadata is not None and self._use_sparse_mha(attn_metadata)
 
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
@@ -346,8 +345,8 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
-        kv_c_out = torch.empty_like(kv_c) if self.use_pcp else None
-        k_pe_out = torch.empty_like(k_pe) if self.use_pcp else None
+        kv_c_out = torch.empty_like(kv_c) if self.use_pcp or use_mha else None
+        k_pe_out = torch.empty_like(k_pe) if self.use_pcp or use_mha else None
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -402,6 +401,11 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
+        mha_q = None
+        if use_mha:
+            assert not self._fp8_query
+            mha_q = torch.cat((q_nope, mqa_q), dim=-1)
+
         self._sparse_indexer_and_attn(
             q_c,
             index_q_fp8,
@@ -411,6 +415,7 @@ class DeepseekV32Attention(MLAAttention):
             k_pe_out,
             ql_nope,
             mqa_q,
+            mha_q,
             output,
         )
         return self.o_proj(output)[0]
@@ -426,6 +431,7 @@ class DeepseekV32Attention(MLAAttention):
         k_pe: torch.Tensor | None,
         ql_nope: torch.Tensor,
         mqa_q: torch.Tensor,
+        mha_q: torch.Tensor | None,
         output: torch.Tensor,
     ) -> None:
         if self.indexer is not None and not self.skip_topk:
@@ -496,6 +502,18 @@ class DeepseekV32Attention(MLAAttention):
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         if num_actual == 0:
             output.zero_()
+            return
+
+        if mha_q is not None:
+            assert kv_c is not None and k_pe is not None
+            self.forward_impl(
+                mha_q,
+                kv_c,
+                k_pe.unsqueeze(1),
+                kv_cache,
+                attn_metadata,
+                output,
+            )
             return
 
         if self._fp8_kv_needs_view:
