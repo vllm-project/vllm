@@ -1388,14 +1388,30 @@ def test_validate_mamba_align_subblock_prefill():
     VllmConfig.validate_block_size(config)
 
 
-def test_mamba_cache_mode_all_falls_back_to_align_on_v2_model_runner():
-    """When Model Runner V2 is active, mamba_cache_mode='all' falls back
-    to 'align' and aligns mamba_block_size to block_size.
+@pytest.mark.parametrize(
+    ("architecture", "supports_prefix_caching", "use_v2_model_runner", "expected_mode"),
+    [
+        ("NemotronHForCausalLM", True, True, "align"),
+        ("NemotronHForCausalLM", True, False, "all"),
+        ("MambaForCausalLM", False, False, "align"),
+    ],
+    ids=[
+        "mrv2_falls_back",
+        "mrv1_supported_keeps_all",
+        "mrv1_unsupported_falls_back",
+    ],
+)
+def test_mamba_cache_mode_all_fallback(
+    architecture, supports_prefix_caching, use_v2_model_runner, expected_mode
+):
+    """Mamba cache mode 'all' falls back to 'align' unless Model Runner V1 is
+    paired with an architecture declaring Mamba prefix caching support. MRv2
+    only implements 'align' state tracking, so it always falls back.
     """
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            architecture="NemotronHForCausalLM",
-            supports_mamba_prefix_caching=True,
+            architecture=architecture,
+            supports_mamba_prefix_caching=supports_prefix_caching,
             max_model_len=4096,
         ),
         cache_config=SimpleNamespace(
@@ -1404,97 +1420,15 @@ def test_mamba_cache_mode_all_falls_back_to_align_on_v2_model_runner():
             mamba_block_size=None,
             block_size=16,
         ),
-        scheduler_config=SimpleNamespace(
-            enable_chunked_prefill=True,
-        ),
-        use_v2_model_runner=True,
+        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
+        use_v2_model_runner=use_v2_model_runner,
     )
-    MambaModelConfig.verify_and_update_config(vllm_config)
-    assert vllm_config.cache_config.mamba_cache_mode == "align"
-    assert vllm_config.cache_config.mamba_block_size == 16
 
-
-def test_mamba_cache_mode_verification_is_idempotent_on_repeated_runs():
-    """Running MambaModelConfig.verify_and_update_config multiple times
-    is strictly idempotent and produces identical configuration state.
-    """
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="NemotronHForCausalLM",
-            supports_mamba_prefix_caching=True,
-            max_model_len=4096,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=True,
-            mamba_cache_mode="all",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        scheduler_config=SimpleNamespace(
-            enable_chunked_prefill=True,
-        ),
-        use_v2_model_runner=True,
-    )
-    # First pass
-    MambaModelConfig.verify_and_update_config(vllm_config)
-    assert vllm_config.cache_config.mamba_cache_mode == "align"
-    assert vllm_config.cache_config.mamba_block_size == 16
-
-    # Second pass
-    MambaModelConfig.verify_and_update_config(vllm_config)
-    assert vllm_config.cache_config.mamba_cache_mode == "align"
-    assert vllm_config.cache_config.mamba_block_size == 16
-
-
-def test_mamba_cache_mode_all_is_preserved_on_v1_model_runner_when_supported():
-    """On Model Runner V1, architectures declaring supports_mamba_prefix_caching
-    preserve 'all' mode.
-    """
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="NemotronHForCausalLM",
-            supports_mamba_prefix_caching=True,
-            max_model_len=4096,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=True,
-            mamba_cache_mode="all",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        scheduler_config=SimpleNamespace(
-            enable_chunked_prefill=True,
-        ),
-        use_v2_model_runner=False,
-    )
-    MambaModelConfig.verify_and_update_config(vllm_config)
-    assert vllm_config.cache_config.mamba_cache_mode == "all"
-
-
-def test_mamba_cache_mode_all_falls_back_to_align_on_v1_when_unsupported():
-    """On Model Runner V1, architectures without supports_mamba_prefix_caching
-    fall back to 'align' mode.
-    """
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="MambaForCausalLM",
-            supports_mamba_prefix_caching=False,
-            max_model_len=4096,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=True,
-            mamba_cache_mode="all",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        scheduler_config=SimpleNamespace(
-            enable_chunked_prefill=True,
-        ),
-        use_v2_model_runner=False,
-    )
-    MambaModelConfig.verify_and_update_config(vllm_config)
-    assert vllm_config.cache_config.mamba_cache_mode == "align"
-    assert vllm_config.cache_config.mamba_block_size == 16
+    # Verification must be idempotent: repeated runs converge on the same state.
+    for _ in range(2):
+        MambaModelConfig.verify_and_update_config(vllm_config)
+        assert vllm_config.cache_config.mamba_cache_mode == expected_mode
+        assert vllm_config.cache_config.mamba_block_size == 16
 
 
 @pytest.mark.parametrize(
