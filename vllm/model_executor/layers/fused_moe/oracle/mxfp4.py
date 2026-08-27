@@ -452,8 +452,11 @@ def _check_explicit_backend_requirements(
     if not has_flashinfer_humming_moe():
         raise ValueError(
             f"moe_backend={runner_backend!r} needs the FlashInfer humming "
-            "MXFP4 x FP8 MoE kernel, which the installed FlashInfer does not "
-            "provide; it requires flashinfer-python>=0.6.16."
+            "MXFP4 x FP8 MoE kernel speaking the per-local-expert residual "
+            "contract from FlashInfer #4431, which the installed FlashInfer "
+            "does not provide; it requires flashinfer-python>=0.6.18. Note "
+            "that a build carrying the kernel without #4431 is also rejected: "
+            "it takes one residual scale per routed token instead."
         )
 
 

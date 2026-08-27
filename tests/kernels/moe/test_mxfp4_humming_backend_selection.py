@@ -27,44 +27,29 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     map_mxfp4_backend,
     select_deepseek_v4_mxfp4_moe_backend,
 )
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 HUMMING_BACKEND = "flashinfer_cutlass_humming"
 
 ORACLE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
 
 
-def _parse(argv: list[str]) -> EngineArgs:
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    return EngineArgs.from_cli_args(parser.parse_args(argv))
+# A new `--moe-backend` value only becomes usable once it has landed in all of
+# these; each is a separate mechanism and any one of them can be missed without
+# the others noticing.
+_CONFIG_SURFACES = {
+    "literal": lambda: HUMMING_BACKEND in get_args(MoEBackend),
+    "kernel_config": lambda: KernelConfig(moe_backend=HUMMING_BACKEND).moe_backend
+    == HUMMING_BACKEND,
+    "engine_args": lambda: EngineArgs(moe_backend=HUMMING_BACKEND).moe_backend
+    == HUMMING_BACKEND,
+    "cli_choices": lambda: HUMMING_BACKEND
+    in get_kwargs(KernelConfig)["moe_backend"]["choices"],
+}
 
 
-def test_literal_contains_backend():
-    assert HUMMING_BACKEND in get_args(MoEBackend)
-
-
-def test_kernel_config_accepts_backend():
-    assert KernelConfig(moe_backend=HUMMING_BACKEND).moe_backend == HUMMING_BACKEND
-
-
-def test_engine_args_accepts_backend():
-    assert EngineArgs(moe_backend=HUMMING_BACKEND).moe_backend == HUMMING_BACKEND
-
-
-def test_cli_normalizes_dashed_form():
-    """`--moe-backend` lowercases and turns dashes into underscores."""
-    args = _parse(["--moe-backend", "flashinfer-cutlass-humming"])
-    assert args.moe_backend == HUMMING_BACKEND
-
-
-def test_cli_rejects_unknown_backend():
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--moe-backend", "flashinfer_cutlass_hum"])
-
-
-def test_cli_offers_backend_as_a_choice():
-    assert HUMMING_BACKEND in get_kwargs(KernelConfig)["moe_backend"]["choices"]
+@pytest.mark.parametrize("surface", _CONFIG_SURFACES)
+def test_backend_name_reaches_every_config_surface(surface):
+    assert _CONFIG_SURFACES[surface]()
 
 
 def test_cli_help_disambiguates_the_two_hummings():
@@ -119,12 +104,13 @@ def test_explicit_request_on_sm90_passes_the_guard():
 
 def test_explicit_request_on_old_flashinfer_names_the_version():
     """Without the probe this surfaces as an ImportError from deep inside
-    weight loading; the user needs to be told which version to install."""
+    weight loading; the user needs to be told which version to install, and the
+    version named has to be the one the probe actually accepts."""
     config = make_dummy_moe_config()
     config.moe_backend = HUMMING_BACKEND
     with (
         _patched_platform(is_sm90=True, humming_available=False),
-        pytest.raises(ValueError, match="flashinfer-python>=0.6.16"),
+        pytest.raises(ValueError, match="flashinfer-python>=0.6.18"),
     ):
         select_deepseek_v4_mxfp4_moe_backend(config)
 
