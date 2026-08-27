@@ -329,6 +329,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     # Qwen2.5-VL style calculation
                     h, w = grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (h * w) // (merge_size**2)
@@ -340,6 +341,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     t, h, w = grid_thw[0].item(), grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (t * h * w) // (merge_size**2)
                 else:
@@ -607,7 +609,9 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return video_embeds.split(sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+        modalities: dict[
+            str, HCXVisionV2ImageInputs | HCXVisionV2VideoInputs | None
+        ] = {}
 
         for input_key in kwargs:
             if (
