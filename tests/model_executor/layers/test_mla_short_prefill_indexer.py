@@ -220,8 +220,10 @@ def test_skipped_k_cache_insert_accepts_no_k(
     assert torch.all(topk_indices == -1)
 
 
+@pytest.mark.parametrize("fp8_query", [False, True])
 def test_deepseek_v32_dispatches_selected_mha(
     monkeypatch: pytest.MonkeyPatch,
+    fp8_query: bool,
 ) -> None:
     attn_metadata = SimpleNamespace(num_actual_tokens=2)
     kv_cache = torch.empty(1)
@@ -241,24 +243,32 @@ def test_deepseek_v32_dispatches_selected_mha(
         skip_topk=False,
         layer_name=MLA_LAYER,
         use_pcp=False,
+        _fp8_query=fp8_query,
+        _use_sparse_mha=lambda _: True,
+        rotary_emb=lambda _positions, q: (q + 1, None),
         forward_impl=record_forward_impl,
     )
-    mha_q = torch.empty(2, 1, 4)
+    q_nope = torch.randn(2, 1, 2)
+    q_pe = torch.randn(2, 1, 2)
+    mqa_q = torch.randn(2, 1, 2)
+    mha_q = torch.cat((q_nope, q_pe + 1 if fp8_query else mqa_q), dim=-1)
     kv_c = torch.empty(2, 2)
     k_pe = torch.empty(2, 2)
     output = torch.empty(2, 2)
 
     DeepseekV32Attention._sparse_indexer_and_attn(
         layer,
+        torch.arange(2),
         torch.empty(2, 2),
+        q_nope,
+        q_pe,
         None,
         None,
         None,
         kv_c,
         k_pe,
         torch.empty(2, 1, 2),
-        torch.empty(2, 1, 2),
-        mha_q,
+        mqa_q,
         output,
     )
 
@@ -270,12 +280,13 @@ def test_deepseek_v32_dispatches_selected_mha(
         output,
     )
     actual_args = observed["args"]
+    torch.testing.assert_close(actual_args[0], mha_q)
     assert actual_args[2].shape == (2, 1, 2)
     assert actual_args[2].data_ptr() == k_pe.data_ptr()
     assert all(
         actual is expected
         for actual, expected in zip(
-            actual_args[:2] + actual_args[3:],
-            expected_args,
+            actual_args[1:2] + actual_args[3:],
+            expected_args[1:],
         )
     )
