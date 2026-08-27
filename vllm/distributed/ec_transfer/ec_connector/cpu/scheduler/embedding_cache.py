@@ -67,6 +67,15 @@ class EmbeddingCache:
         with self._lock:
             return self._entries.get(key)
 
+    def has_held_entries(self) -> bool:
+        """True if any entry is not-ready or pinned (an in-flight transfer).
+
+        Held entries are exactly those absent from the eviction free list, so
+        they represent saves awaiting mark_ready or loads awaiting unpin.
+        """
+        with self._lock:
+            return len(self._entries) != len(self._entries_free_list)
+
     def alloc(self, key: str, n_blocks: int) -> CacheEntry | None:
         """Allocate *n_blocks* for *key*, evicting as needed.
 
@@ -84,7 +93,10 @@ class EmbeddingCache:
             if len(self._free_blocks) + self._evictable_block_count < n_blocks:
                 return None
             self._evict_until(n_blocks)
-            block_ids = tuple(self._free_blocks.pop() for _ in range(n_blocks))
+            # Canonical ascending order: keeps a freed entry's blocks contiguous
+            # in the free list when it is evicted, and lets consumers detect
+            # which of an entry's blocks are adjacent.
+            block_ids = tuple(sorted(self._free_blocks.pop() for _ in range(n_blocks)))
             entry = CacheEntry(block_ids)
             self._entries[key] = entry
             return entry
