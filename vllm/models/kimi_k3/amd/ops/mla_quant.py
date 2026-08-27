@@ -31,7 +31,7 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     mxfp4_layout_for_oproj,
     wrap_kda_mxfp4,
 )
-from vllm.triton_utils import HAS_TRITON
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 MXFP4_GROUP_SIZE = 32
 
@@ -79,8 +79,6 @@ def _get_kernel():
     mxfp4_quant_op = _load_mxfp4_quant_op()
     if mxfp4_quant_op is None:
         return None
-
-    from vllm.triton_utils import tl, triton
 
     @triton.jit
     def _swizzled_scale_offset(row, col, SCALE_N: tl.constexpr):
@@ -200,8 +198,6 @@ def fused_sigmoid_gate_mxfp4_quant(
     if block_k & (block_k - 1):
         raise ValueError("block_k must be a power of two")
 
-    from vllm.triton_utils import triton as triton_mod
-
     x = x.contiguous()
     g = g.contiguous()
     out_fp4, out_scale = alloc_kda_mxfp4(t, k, scale_layout, x.device)
@@ -218,7 +214,7 @@ def fused_sigmoid_gate_mxfp4_quant(
     else:
         raise ValueError(f"unknown MXFP4 layout {scale_layout!r}")
 
-    kernel[(triton_mod.cdiv(t, block_t), k // block_k)](
+    kernel[(triton.cdiv(t, block_t), k // block_k)](
         x,
         g,
         out_fp4,
