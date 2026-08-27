@@ -434,9 +434,7 @@ def test_read_mode_loads_remote_block_ids():
     ].req_to_blocks[request_id]
 
     # Set remote block ids to be fetched.
-    request.kv_transfer_params["remote_block_ids"] = [
-        [block.block_id for block in block_list]
-    ]
+    request.kv_transfer_params["remote_block_ids"] = [block_list]
 
     # Remote Prefill, triggers MoRIIOConnectorMetadata.
 
