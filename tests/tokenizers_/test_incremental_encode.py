@@ -7,6 +7,8 @@ dependency-free by design, so it is loaded directly from its file when a
 full vLLM installation is not available.
 """
 
+import hashlib
+import json
 import random
 
 import pytest
@@ -90,6 +92,21 @@ def _build_turns(num_turns: int, seed: int = 0) -> list[str]:
     return turns
 
 
+def _shared_prefix_requests(num_requests: int, seed: int = 7) -> list[str]:
+    """The shared-prefix serving shape: one long common prefix, then a
+    unique tail per request — no request is a strict prefix of another."""
+    rng = random.Random(seed)
+    shared = "".join(_build_turns(num_turns=6, seed=seed))
+    requests = []
+    for i in range(num_requests):
+        snippet = TURN_SNIPPETS[i % len(TURN_SNIPPETS)]
+        requests.append(
+            f"{shared}<|im_start|>user\nRequest {i}: {snippet} "
+            f"{rng.getrandbits(64):x}<|im_end|>\n<|im_start|>assistant\n"
+        )
+    return requests
+
+
 @pytest.mark.parametrize("add_special_tokens", [True, False])
 def test_multi_turn_token_exact(tokenizer, add_special_tokens: bool):
     """Growing conversation: every turn must be token-exact vs full encode."""
@@ -106,6 +123,78 @@ def test_multi_turn_token_exact(tokenizer, add_special_tokens: bool):
     # The growth pattern must actually exercise the splice path.
     assert cache.stats.hits >= 4
     assert cache.stats.misses == 1
+
+
+@pytest.mark.parametrize("add_special_tokens", [True, False])
+def test_common_prefix_divergent_suffixes(tokenizer, add_special_tokens: bool):
+    """Requests sharing a long prefix but diverging afterwards (none a
+    strict prefix of another) must be token-exact — sha256 over the id
+    stream identical to an uncached full encode — and must actually take
+    the splice path, not just fall back."""
+
+    def digest(ids):
+        return hashlib.sha256(json.dumps(list(ids)).encode()).hexdigest()
+
+    cache = IncrementalEncodeCache(**CACHE_KWARGS)
+    for text in _shared_prefix_requests(13):
+        actual = cache.encode(tokenizer, text, add_special_tokens=add_special_tokens)
+        expected = tokenizer(text, add_special_tokens=add_special_tokens)["input_ids"]
+        assert digest(actual) == digest(expected)
+    assert cache.stats.misses == 1
+    assert cache.stats.hits >= 10
+
+
+@pytest.mark.parametrize("add_special_tokens", [True, False])
+def test_divergence_in_adversarial_material(tokenizer, add_special_tokens: bool):
+    """Divergence points landing in CJK/emoji/special-token-literal/
+    whitespace-run material must splice exactly or fall back — never
+    corrupt the output."""
+    cache = IncrementalEncodeCache(**CACHE_KWARGS)
+    base = "".join(_build_turns(num_turns=5, seed=3))
+    for snippet in TURN_SNIPPETS:
+        for tail in ("", " continued", "\n<|im_start|>assistant\n", "。続き", "🇯🇵!"):
+            text = base + snippet + tail
+            actual = cache.encode(
+                tokenizer, text, add_special_tokens=add_special_tokens
+            )
+            expected = tokenizer(text, add_special_tokens=add_special_tokens)[
+                "input_ids"
+            ]
+            assert actual == expected, f"mismatch for tail {tail!r}"
+
+
+def test_shorter_prompt_reuses_longer_entry(tokenizer):
+    """A prompt that is a prefix of (or diverges before the end of) a
+    cached longer prompt must still be served exactly."""
+    cache = IncrementalEncodeCache(**CACHE_KWARGS)
+    turns = _build_turns(num_turns=6)
+    full = "".join(turns)
+    cache.encode(tokenizer, full)
+    truncated = full[:-700]
+    assert cache.encode(tokenizer, truncated) == tokenizer(truncated)["input_ids"]
+    rewound = "".join(turns[:-1]) + "<|im_start|>assistant\nOK."
+    assert cache.encode(tokenizer, rewound) == tokenizer(rewound)["input_ids"]
+    assert cache.stats.misses == 1
+
+
+def test_single_char_flip_deep_in_prompt(tokenizer):
+    cache = IncrementalEncodeCache(**CACHE_KWARGS)
+    a = "".join(_build_turns(num_turns=6))
+    cache.encode(tokenizer, a)
+    b = a[:-300] + "Z" + a[-299:]
+    assert cache.encode(tokenizer, b) == tokenizer(b)["input_ids"]
+    assert cache.stats.misses == 1
+
+
+def test_short_common_prefix_is_a_miss(tokenizer):
+    """Common prefixes below min_chars are not worth splicing."""
+    cache = IncrementalEncodeCache(**CACHE_KWARGS)
+    a = "".join(_build_turns(num_turns=5, seed=1))
+    cache.encode(tokenizer, a)
+    b = a[:1000] + "\x00divergence\x00" + a[1000:]
+    assert cache.encode(tokenizer, b) == tokenizer(b)["input_ids"]
+    assert cache.stats.misses == 2
+    assert cache.stats.hits == 0
 
 
 def test_identical_prompt_is_served_from_cache(tokenizer):

@@ -110,14 +110,16 @@ class BaseRenderer(ABC, Generic[_T]):
         # avoid running warmup_mm a second time.
         self._mm_warmup_done: bool = False
 
-        # Opt-in exact prefix reuse for long multi-turn prompts. Shared
-        # across requests (renderer-level, above the tokenizer pool);
-        # requests it cannot serve exactly fall through to the regular
-        # encode path, so it is silently inert for tokenizers without an
-        # HF fast backend. Stub model configs may predate the field.
-        if tokenizer is not None and (
-            getattr(config.model_config, "enable_incremental_encoding", False)
-            or envs.VLLM_INCREMENTAL_ENCODING
+        # Exact common-prefix reuse for long prompts (on by default above
+        # the module's size threshold). Shared across requests
+        # (renderer-level, above the tokenizer pool); requests it cannot
+        # serve exactly fall through to the regular encode path, so it is
+        # silently inert for tokenizers without an HF fast backend. Stub
+        # model configs may predate the field.
+        if (
+            tokenizer is not None
+            and getattr(config.model_config, "enable_incremental_encoding", False)
+            and envs.VLLM_INCREMENTAL_ENCODING
         ):
             self._incremental_encoder = IncrementalEncodeCache()
         # Thread pool executor for blocking tokenizer operations.  The
