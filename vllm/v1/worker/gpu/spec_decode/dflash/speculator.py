@@ -49,6 +49,33 @@ def all_draft_builders_skip_safe(attn_groups: list[list[AttentionGroup]]) -> boo
     )
 
 
+def context_kv_capture_supported(
+    model: nn.Module,
+    cudagraph_mode: CUDAGraphMode,
+    cp_size: int,
+    num_query_per_req: int,
+    num_speculative_steps: int,
+) -> bool:
+    """Whether the context-KV precompute may run inside the captured FULL
+    draft graph instead of eagerly before every replay.
+
+    Fail-closed: the drafter model must declare its precompute capture-safe
+    (``context_kv_capture_safe``), FULL decode graphs must be active, DCP
+    must be off (its slot layout is only exercised eagerly today), and the
+    drafter must use one of the two known query layouts. Both keep the
+    uniform-decode context row count a pure function of the graph's own
+    dispatch key: the 1+N layout's context rows equal its query tokens,
+    and the anchor layout (DSpark, N query rows per request over a 1+N
+    target batch) adds one context row per request.
+    """
+    return (
+        cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        and getattr(model, "context_kv_capture_safe", False)
+        and cp_size == 1
+        and num_query_per_req in (num_speculative_steps, 1 + num_speculative_steps)
+    )
+
+
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
@@ -91,10 +118,15 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # Context positions for the K/V precompute. Populated by
         # prepare_dflash_inputs, and processed by the model's
-        # precompute_and_store_context_kv method. NOT captured by CUDA graphs.
+        # precompute_and_store_context_kv method. Read by the captured FULL
+        # graph when _context_kv_in_graph is set; eager-only otherwise.
         self.context_positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
+
+        # Whether precompute_and_store_context_kv is captured inside the FULL
+        # draft graph. Fail-closed default; set in init_cudagraph_manager.
+        self._context_kv_in_graph = False
 
         # Per-mask-token sampling buffers. Flattened from (num_reqs, num_spec_tokens).
         max_num_sampled_tokens = self.max_num_reqs * self.num_speculative_steps
@@ -148,6 +180,17 @@ class DFlashSpeculator(DraftModelSpeculator):
         else:
             cudagraph_mode = CUDAGraphMode.NONE
 
+        # At uniform decode the context row count is a pure function of the
+        # graph's own padded shape, so the eager per-cycle precompute launch
+        # cost can be folded into the captured graph.
+        self._context_kv_in_graph = context_kv_capture_supported(
+            self.model,
+            cudagraph_mode,
+            self.block_tables.cp_size,
+            self.num_query_per_req,
+            self.num_speculative_steps,
+        )
+
         self.query_cudagraph_manager = DFlashCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -161,9 +204,16 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_indices.zero_()
         self.sample_pos.zero_()
         self.sample_idx_mapping.fill_(-1)
+        if self._context_kv_in_graph:
+            # The capture-time precompute pass must write no KV and read only
+            # in-range RoPE positions.
+            self._context_slot_mappings.fill_(PAD_SLOT_ID)
+            self.context_positions.zero_()
         assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
-            self._generate_draft,
+            self._precompute_and_generate_draft
+            if self._context_kv_in_graph
+            else self._generate_draft,
             self.input_buffers,
             self.block_tables,
             self.attn_groups,
@@ -304,6 +354,57 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
+    def _context_kv_slots(
+        self, num_tokens: int
+    ) -> torch.Tensor | list[torch.Tensor | None]:
+        if self._layer_group_idx is not None:
+            return [
+                self._context_slot_mappings[gidx][:num_tokens]
+                for gidx in self._layer_group_idx
+            ]
+        return self._context_slot_mappings[0][:num_tokens]
+
+    def _num_context_rows(self, num_reqs: int, num_tokens: int) -> int:
+        """Context rows covered for a graph/batch of the given shape.
+
+        The anchor layout (DSpark) queries N rows per request while the
+        uniform-decode target batch carries 1+N context rows; the 1+N
+        layout's context rows equal its query tokens.
+        """
+        rows = num_tokens + num_reqs if self.sample_from_anchor else num_tokens
+        return min(rows, self.max_num_tokens)
+
+    def _precompute_and_generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> None:
+        """FULL-graph body: context-KV precompute, then the query forward.
+
+        Every precompute input is a persistent buffer sliced to the graph's
+        context row count (a pure function of its padded shape);
+        prepare_dflash_inputs keeps rows past the live batch at PAD_SLOT_ID
+        (no KV write) with position 0.
+        """
+        num_ctx_rows = self._num_context_rows(num_reqs, num_tokens_padded)
+        self.model.precompute_and_store_context_kv(
+            self.hidden_states[:num_ctx_rows],
+            self.context_positions[:num_ctx_rows],
+            self._context_kv_slots(num_ctx_rows),
+        )
+        self._generate_draft(
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+        )
+
     def _build_draft_attn_metadata(
         self,
         num_reqs: int,
@@ -438,25 +539,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
             )
 
-        # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
-        # because the context shape varies per step. During dummy runs the block tables
-        # are placeholders, so we skip the cache write to avoid clobbering real entries.
-        # Each layer uses the context slots of its own kv-cache group.
-        if dummy_run:
-            context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
-        elif self._layer_group_idx is not None:
-            context_slots = [
-                self._context_slot_mappings[gidx][:num_target_tokens]
-                for gidx in self._layer_group_idx
-            ]
-        else:
-            context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
-            context_slots,
-        )
-
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
@@ -465,7 +547,16 @@ class DFlashSpeculator(DraftModelSpeculator):
             uniform_token_count=self.num_query_per_req,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=is_profile,
+            # A captured graph precomputes exactly its own shape's context
+            # rows, which covers a real batch only at uniform decode.
+            # Dummy batches stay replayable: their slots are PAD-filled below.
+            need_eager=is_profile
+            or (
+                self._context_kv_in_graph
+                and not dummy_run
+                and num_target_tokens
+                != num_query_tokens + (num_reqs if self.sample_from_anchor else 0)
+            ),
         )
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
@@ -474,11 +565,48 @@ class DFlashSpeculator(DraftModelSpeculator):
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
 
+        precompute_in_graph = (
+            self._context_kv_in_graph and batch_desc.cg_mode == CUDAGraphMode.FULL
+        )
+
+        # Pre-insert context K/V into the cache. Runs inside the captured FULL
+        # graph when the drafter opted in (at uniform decode the context row
+        # count is a pure function of the graph's shape); eagerly otherwise, because
+        # the context shape varies per step. During dummy runs the block tables
+        # are placeholders, so we skip the cache write to avoid clobbering real
+        # entries. Each layer uses the context slots of its own kv-cache group.
+        if dummy_run:
+            if precompute_in_graph:
+                # Replay reads the persistent slot buffers, which hold live
+                # slots from the last real step; a dummy batch must write no KV.
+                self._context_slot_mappings.fill_(PAD_SLOT_ID)
+            else:
+                self.model.precompute_and_store_context_kv(
+                    self.hidden_states[:num_target_tokens],
+                    self.context_positions[:num_target_tokens],
+                    None,
+                )
+        elif not precompute_in_graph:
+            self.model.precompute_and_store_context_kv(
+                self.hidden_states[:num_target_tokens],
+                self.context_positions[:num_target_tokens],
+                self._context_kv_slots(num_target_tokens),
+            )
+
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # The captured precompute covers the graph shape's context rows;
+            # prepare_dflash_inputs PAD-fills every row past the live batch
+            # (dummy batches are all-PAD and write nothing).
+            assert (
+                not precompute_in_graph
+                or dummy_run
+                or num_target_tokens
+                <= self._num_context_rows(num_reqs_padded, num_tokens_padded)
+            )
             # The built metadata / slot-mapping dict would be discarded here
             # (the captured graph reads only persistent input buffers), so
             # skip the rebuild when every builder declared it side-effect
@@ -717,6 +845,15 @@ def _prepare_dflash_inputs_kernel(
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_tokens
                 tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
+            # Pad context rows past the batch (this thread's ctx_end is the
+            # last request's, i.e. the batch total) with PAD slots (no K/V
+            # write) and position 0, so a context-KV precompute captured at a
+            # padded token count reads only initialized, in-range values.
+            for i in range(ctx_end, max_num_tokens, BLOCK_SIZE):
+                block = i + tl.arange(0, BLOCK_SIZE)
+                mask = block < max_num_tokens
+                tl.store(out_context_positions_ptr + block, 0, mask=mask)
+                tl.store(out_context_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
 
 
 def prepare_dflash_inputs(
