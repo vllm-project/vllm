@@ -2132,7 +2132,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     main_indptr_ptr,
     extra_cache_ptr,
     extra_indices_ptr,
-    extra_indptr_ptr,
+    extra_offsets_ptr,
     part_m_ptr,
     part_l_ptr,
     part_acc_ptr,
@@ -2140,6 +2140,8 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     q_stride1: tl.constexpr,
     main_cache_stride0: tl.constexpr,
     extra_cache_stride0: tl.constexpr,
+    extra_indices_stride: tl.constexpr,
+    extra_indices_width: tl.constexpr,
     main_num_rows,
     extra_num_rows,
     MAIN_BLOCK_SIZE: tl.constexpr,
@@ -2147,6 +2149,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     scale: tl.constexpr,
     num_heads: tl.constexpr,
     HAS_EXTRA: tl.constexpr,
+    EXTRA_DENSE: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     IS_FNUZ_MAIN: tl.constexpr,
@@ -2178,9 +2181,14 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         main_end = tl.load(main_indptr_ptr + query_idx + 1)
         main_len = main_end - main_start
         if HAS_EXTRA:
-            extra_start = tl.load(extra_indptr_ptr + query_idx)
-            extra_end = tl.load(extra_indptr_ptr + query_idx + 1)
-            extra_len = extra_end - extra_start
+            if EXTRA_DENSE:
+                extra_start = query_idx * extra_indices_stride
+                extra_len = tl.load(extra_offsets_ptr + query_idx)
+                extra_len = tl.maximum(0, tl.minimum(extra_len, extra_indices_width))
+            else:
+                extra_start = tl.load(extra_offsets_ptr + query_idx)
+                extra_end = tl.load(extra_offsets_ptr + query_idx + 1)
+                extra_len = extra_end - extra_start
         else:
             extra_start = 0
             extra_len = 0
@@ -2279,9 +2287,14 @@ def _sparse_attn_decode_gfx950_partial_kernel(
 
     if HAS_EXTRA:
         if not ADAPTIVE_SPLITS:
-            extra_start = tl.load(extra_indptr_ptr + query_idx)
-            extra_end = tl.load(extra_indptr_ptr + query_idx + 1)
-            extra_len = extra_end - extra_start
+            if EXTRA_DENSE:
+                extra_start = query_idx * extra_indices_stride
+                extra_len = tl.load(extra_offsets_ptr + query_idx)
+                extra_len = tl.maximum(0, tl.minimum(extra_len, extra_indices_width))
+            else:
+                extra_start = tl.load(extra_offsets_ptr + query_idx)
+                extra_end = tl.load(extra_offsets_ptr + query_idx + 1)
+                extra_len = extra_end - extra_start
         extra_chunk = (extra_len + work_splits - 1) // work_splits
         extra_lo = split_id * extra_chunk
         extra_hi = tl.minimum(extra_lo + extra_chunk, extra_len)
@@ -2792,6 +2805,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     extra_cache: torch.Tensor | None = None,
     extra_indices: torch.Tensor | None = None,
     extra_indptr: torch.Tensor | None = None,
+    extra_dense_lengths: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
     extra_cache_nan_free: bool = False,
     adaptive_splits: bool = False,
@@ -2830,10 +2844,23 @@ def _rocm_sparse_attn_decode_ragged_triton(
         "_rocm_sparse_attn_decode_ragged_triton",
     )
 
+    has_dense_extra_metadata = extra_dense_lengths is not None
+    if has_dense_extra_metadata:
+        assert _ON_GFX950, "dense extra metadata is only supported on gfx950"
+        assert extra_cache is not None and extra_indices is not None, (
+            "dense extra metadata requires extra_cache and extra_indices"
+        )
+        assert extra_indptr is None, (
+            "dense extra metadata cannot also provide a ragged indptr"
+        )
+    elif any(value is not None for value in (extra_cache, extra_indices, extra_indptr)):
+        assert all(
+            value is not None for value in (extra_cache, extra_indices, extra_indptr)
+        ), "ragged extra metadata requires cache, indices, and indptr"
     has_extra = (
         extra_cache is not None
         and extra_indices is not None
-        and extra_indptr is not None
+        and (has_dense_extra_metadata or extra_indptr is not None)
     )
     assert not extra_cache_nan_free or (_ON_GFX950 and has_extra), (
         "extra_cache_nan_free requires a gfx950 compressed cache with trusted "
@@ -2842,22 +2869,49 @@ def _rocm_sparse_attn_decode_ragged_triton(
     if has_extra:
         assert extra_cache is not None
         assert extra_indices is not None
-        assert extra_indptr is not None
-        assert extra_indices.ndim == 1, (
-            f"expected extra_indices=[nnz], got {extra_indices.shape}"
-        )
-        assert extra_indptr.ndim == 1, (
-            f"expected extra_indptr=[b+1], got {extra_indptr.shape}"
-        )
-        extra_indices = _as_int32_contiguous_1d(extra_indices)
-        extra_indptr = _as_int32_contiguous_1d(extra_indptr)
-        assert extra_indptr.numel() == num_queries + 1, (
-            f"expected extra_indptr shape [{num_queries + 1}], got {extra_indptr.shape}"
-        )
+        if has_dense_extra_metadata:
+            assert extra_dense_lengths is not None
+            assert extra_indices.ndim == 2 and extra_indices.shape[0] == num_queries, (
+                f"expected dense extra_indices=[b,width], got {extra_indices.shape}"
+            )
+            assert (
+                extra_indices.dtype == torch.int32 and extra_indices.is_contiguous()
+            ), "dense extra_indices must be contiguous int32 metadata"
+            assert (
+                extra_dense_lengths.dtype == torch.int32
+                and extra_dense_lengths.ndim == 1
+                and extra_dense_lengths.is_contiguous()
+                and extra_dense_lengths.numel() == num_queries
+            ), (
+                "dense extra lengths must be a contiguous int32 vector with "
+                f"{num_queries} entries, got {extra_dense_lengths.shape}"
+            )
+            extra_offsets = extra_dense_lengths
+            extra_indices_stride = extra_indices.stride(0)
+            extra_indices_width = extra_indices.shape[1]
+        else:
+            assert extra_indptr is not None
+            assert extra_indices.ndim == 1, (
+                f"expected extra_indices=[nnz], got {extra_indices.shape}"
+            )
+            assert extra_indptr.ndim == 1, (
+                f"expected extra_indptr=[b+1], got {extra_indptr.shape}"
+            )
+            extra_indices = _as_int32_contiguous_1d(extra_indices)
+            extra_indptr = _as_int32_contiguous_1d(extra_indptr)
+            assert extra_indptr.numel() == num_queries + 1, (
+                "expected extra_indptr shape "
+                f"[{num_queries + 1}], got {extra_indptr.shape}"
+            )
+            extra_offsets = extra_indptr
+            extra_indices_stride = 0
+            extra_indices_width = 0
     else:
         extra_cache = main_cache
         extra_indices = torch.empty(0, device=q.device, dtype=torch.int32)
-        extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
+        extra_offsets = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
+        extra_indices_stride = 0
+        extra_indices_width = 0
 
     block_h = 16
     if out is None:
@@ -2884,7 +2938,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             main_indptr,
             extra_cache,
             extra_indices,
-            extra_indptr,
+            extra_offsets,
             attn_sink,
             out,
             q.stride(0),
@@ -2964,7 +3018,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             main_indptr,
             extra_cache,
             extra_indices,
-            extra_indptr,
+            extra_offsets,
             part_m,
             part_l,
             part_acc,
@@ -2972,6 +3026,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             q.stride(1),
             main_cache.stride(0),
             extra_cache.stride(0),
+            extra_indices_stride,
+            extra_indices_width,
             main_cache.shape[0] * main_cache.shape[1],
             extra_cache.shape[0] * extra_cache.shape[1],
             main_cache.shape[1],
@@ -2979,6 +3035,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             scale,
             num_heads,
             HAS_EXTRA=has_extra,
+            EXTRA_DENSE=has_dense_extra_metadata,
             NOPE_DIM=nope_head_dim,
             ROPE_DIM=rope_head_dim,
             IS_FNUZ_MAIN=is_fnuz,
@@ -3001,7 +3058,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             main_indptr,
             extra_cache,
             extra_indices,
-            extra_indptr,
+            extra_offsets,
             part_m,
             part_l,
             part_acc,
@@ -3081,6 +3138,7 @@ def _rocm_sparse_attn_decode_triton(
     out: torch.Tensor | None = None,
     extra_cache_nan_free: bool = False,
     adaptive_splits: bool = False,
+    use_dense_extra_metadata: bool = False,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -3091,7 +3149,12 @@ def _rocm_sparse_attn_decode_triton(
             num_rows=main_cache.shape[0] * main_cache.shape[1],
         )
 
-    if (
+    if use_dense_extra_metadata:
+        assert _ON_GFX950, "dense extra metadata is only supported on gfx950"
+        assert extra_cache is not None and extra_indices is not None
+        assert extra_lengths is not None
+        assert extra_ragged_indices is None and extra_ragged_indptr is None
+    elif (
         (extra_ragged_indices is None or extra_ragged_indptr is None)
         and extra_cache is not None
         and extra_indices is not None
@@ -3114,8 +3177,11 @@ def _rocm_sparse_attn_decode_triton(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         extra_cache=extra_cache,
-        extra_indices=extra_ragged_indices,
-        extra_indptr=extra_ragged_indptr,
+        extra_indices=(
+            extra_indices if use_dense_extra_metadata else extra_ragged_indices
+        ),
+        extra_indptr=None if use_dense_extra_metadata else extra_ragged_indptr,
+        extra_dense_lengths=extra_lengths if use_dense_extra_metadata else None,
         out=out,
         extra_cache_nan_free=extra_cache_nan_free,
         adaptive_splits=adaptive_splits,
@@ -3192,6 +3258,7 @@ def rocm_sparse_attn_decode(
     output: torch.Tensor,
     extra_cache_nan_free: bool = False,
     adaptive_splits: bool = False,
+    use_dense_topk_metadata: bool = False,
 ) -> None:
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
@@ -3203,6 +3270,14 @@ def rocm_sparse_attn_decode(
         rope_head_dim,
         "rocm_sparse_attn_decode",
     )
+    if use_dense_topk_metadata:
+        assert not swa_only, "dense topk metadata requires the compressed cache"
+        assert topk_indices is not None and topk_lens is not None, (
+            "dense topk metadata requires indices and lengths"
+        )
+        assert topk_ragged_indices is None and topk_ragged_indptr is None, (
+            "dense topk metadata cannot also provide ragged metadata"
+        )
 
     main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
 
@@ -3241,6 +3316,7 @@ def rocm_sparse_attn_decode(
         out=direct_out,
         extra_cache_nan_free=extra_cache_nan_free,
         adaptive_splits=adaptive_splits,
+        use_dense_extra_metadata=use_dense_topk_metadata,
     )
     if direct_out is None:
         output.copy_(attn_out.to(output.dtype))

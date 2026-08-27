@@ -495,7 +495,7 @@ def _compute_global_topk_indices_and_lens_kernel(
             mask=mask,
             other=-1,
         )
-        is_valid = local_idx >= 0
+        is_valid = (local_idx >= 0) & is_valid_token
 
         block_indices = local_idx // block_size
         block_numbers = tl.load(
@@ -513,8 +513,7 @@ def _compute_global_topk_indices_and_lens_kernel(
         )
         count += tl.sum(is_valid.to(tl.int32), axis=0)
 
-    # Zero out length for padding tokens.
-    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+    tl.store(topk_lens_ptr + token_idx, count)
 
 
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see

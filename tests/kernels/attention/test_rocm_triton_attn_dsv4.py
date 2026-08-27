@@ -64,15 +64,40 @@ def _ref_global_topk_ragged(
     indptr = torch.zeros(lens.shape[0] + 1, dtype=torch.int32, device=topk.device)
     torch.cumsum(lens, dim=0, out=indptr[1:])
 
-    safe_topk = torch.clamp(topk, min=0)
+    safe_topk = torch.where(valid, torch.clamp(topk, min=0), 0)
     block_indices = safe_topk // block_size
     block_offsets = safe_topk % block_size
-    req_indices = token_to_req_indices[:, None].expand_as(topk)
+    safe_req_indices = torch.where(
+        is_valid_token, token_to_req_indices, torch.zeros_like(token_to_req_indices)
+    )
+    req_indices = safe_req_indices[:, None].expand_as(topk)
     slot_ids = block_table[req_indices, block_indices] * block_size + block_offsets
 
     offsets = torch.arange(topk.shape[1], dtype=torch.int32, device=topk.device)
     positions = indptr[:-1, None] + offsets[None, :]
     return slot_ids[valid], positions[valid].to(torch.long), indptr, lens
+
+
+def _ref_global_topk_dense(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    topk = topk_indices.reshape(topk_indices.shape[0], -1)
+    valid = (topk >= 0) & is_valid_token[:, None]
+    lens = valid.sum(dim=1, dtype=torch.int32)
+
+    safe_topk = torch.where(valid, torch.clamp(topk, min=0), 0)
+    block_indices = safe_topk // block_size
+    block_offsets = safe_topk % block_size
+    safe_req_indices = torch.where(
+        is_valid_token, token_to_req_indices, torch.zeros_like(token_to_req_indices)
+    )
+    req_indices = safe_req_indices[:, None].expand_as(topk)
+    slot_ids = block_table[req_indices, block_indices] * block_size + block_offsets
+    return torch.where(valid, slot_ids, -1).view_as(topk_indices), lens
 
 
 def _ref_sparse_prefill_ragged(
@@ -244,6 +269,18 @@ def _ragged_from_rows(
     )
 
 
+def _dense_from_rows(
+    rows: list[list[int]], width: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    indices = torch.full((len(rows), width), -1, dtype=torch.int32, device=device)
+    for row_idx, row in enumerate(rows):
+        indices[row_idx, : len(row)] = torch.tensor(
+            row, dtype=torch.int32, device=device
+        )
+    lengths = torch.tensor([len(row) for row in rows], dtype=torch.int32, device=device)
+    return indices, lengths
+
+
 def _launch_sparse_decode_reduce(
     part_m: torch.Tensor,
     part_l: torch.Tensor,
@@ -357,13 +394,13 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
     topk_indices = torch.tensor(
         [
             [0, 3, 4, -1],
-            [5, 8, -1, -1],
+            [torch.iinfo(torch.int32).max, 8, -1, -1],
             [2, 7, 9, -1],
         ],
         dtype=torch.int32,
         device=device,
     )
-    token_to_req_indices = torch.tensor([0, 1, 1], dtype=torch.int32, device=device)
+    token_to_req_indices = torch.tensor([0, -123, 1], dtype=torch.int32, device=device)
     block_table = torch.tensor(
         [
             [10, 11, 12],
@@ -395,6 +432,53 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
 
     torch.testing.assert_close(actual_ragged[expected_positions], expected_values)
     torch.testing.assert_close(actual_indptr, expected_indptr)
+    torch.testing.assert_close(actual_lens, expected_lens)
+
+
+@torch.inference_mode()
+def test_compute_global_topk_dense_indices_and_lens() -> None:
+    from vllm.models.deepseek_v4.common.ops import (
+        compute_global_topk_indices_and_lens,
+    )
+
+    device = torch.device("cuda")
+    block_size = 4
+    topk_indices = torch.tensor(
+        [
+            [0, 3, 4, -1],
+            [torch.iinfo(torch.int32).max, 8, -1, -1],
+            [2, 7, 9, -1],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req_indices = torch.tensor([0, -123, 1], dtype=torch.int32, device=device)
+    block_table = torch.tensor(
+        [
+            [10, 11, 12],
+            [20, 21, 22],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    is_valid_token = torch.tensor([True, False, True], dtype=torch.bool, device=device)
+
+    actual_indices, actual_lens = compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+    expected_indices, expected_lens = _ref_global_topk_dense(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+
+    torch.testing.assert_close(actual_indices, expected_indices)
     torch.testing.assert_close(actual_lens, expected_lens)
 
 
@@ -727,6 +811,80 @@ def test_sparse_attn_decode_split_k_kernel(
 
 
 @requires_gfx950
+@pytest.mark.parametrize("num_heads", [8, 16, 32])
+@torch.inference_mode()
+def test_sparse_attn_decode_gfx950_dense_extra_skips_ragged_pack(
+    monkeypatch, num_heads: int
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(11)
+    block_size = 4
+    extra_lengths_list = [0, 1, 31, 32, 33, 63, 64, 65]
+    extra_rows = [list(range(length)) for length in extra_lengths_list]
+    stored_extra_rows = [*extra_rows, list(range(65)), list(range(65))]
+    expected_extra_rows = [*extra_rows, [], list(range(65))]
+    num_queries = len(stored_extra_rows)
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+    main_ragged_indices = torch.empty(0, dtype=torch.int32, device=device)
+    main_ragged_indptr = torch.zeros(num_queries + 1, dtype=torch.int32, device=device)
+    extra_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(65, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125,
+        block_size,
+        use_fnuz=False,
+    )
+    extra_indices, extra_lengths = _dense_from_rows(stored_extra_rows, 1024, device)
+    extra_lengths[-2] = -7
+    extra_lengths[-1] = 2048
+    out = torch.empty_like(q)
+
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 4)
+    monkeypatch.setattr(
+        mod,
+        "build_ragged_indices_from_dense",
+        lambda *args, **kwargs: pytest.fail("dense extra metadata was repacked"),
+    )
+    actual = mod._rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=torch.empty(num_queries, 0, dtype=torch.int32, device=device),
+        main_lengths=torch.zeros(num_queries, dtype=torch.int32, device=device),
+        main_ragged_indices=main_ragged_indices,
+        main_ragged_indptr=main_ragged_indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_lengths=extra_lengths,
+        use_dense_extra_metadata=True,
+        out=out,
+        extra_cache_nan_free=True,
+    )
+    expected = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=main_cache,
+        main_rows=[[] for _ in range(num_queries)],
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        block_size=block_size,
+        extra_cache=extra_cache,
+        extra_rows=expected_extra_rows,
+    )
+
+    assert actual.data_ptr() == out.data_ptr()
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
     device = torch.device("cuda")
@@ -821,8 +979,9 @@ def test_sparse_attn_decode_gfx950_outer64_boundaries(
 
 
 @requires_gfx950
+@pytest.mark.parametrize("extra_dense", [False, True])
 @torch.inference_mode()
-def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
+def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch, extra_dense: bool) -> None:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     device = torch.device("cuda")
@@ -866,16 +1025,20 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     ]
     main_indices, main_indptr = _ragged_from_rows(main_rows, device)
     short_extra_rows = [row[:64] for row in extra_rows]
-    long_indices, long_indptr = _ragged_from_rows(extra_rows, device)
-    short_indices, short_indptr = _ragged_from_rows(short_extra_rows, device)
-    extra_indices = torch.full(
-        (num_queries * max_extra_per_query,),
-        -1,
-        dtype=torch.int32,
-        device=device,
-    )
-    extra_indices[: long_indices.numel()].copy_(long_indices)
-    extra_indptr = long_indptr.clone()
+    if extra_dense:
+        extra_indices, extra_offsets = _dense_from_rows(
+            extra_rows, max_extra_per_query, device
+        )
+    else:
+        long_indices, long_indptr = _ragged_from_rows(extra_rows, device)
+        extra_indices = torch.full(
+            (num_queries * max_extra_per_query,),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+        extra_indices[: long_indices.numel()].copy_(long_indices)
+        extra_offsets = long_indptr.clone()
     extra_indices_ptr = extra_indices.data_ptr()
     attn_sink = torch.linspace(-0.1, 0.1, num_heads, dtype=torch.float32, device=device)
     out = torch.empty_like(q)
@@ -894,7 +1057,8 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
             rope_head_dim=ROPE_HEAD_DIM,
             extra_cache=extra_cache,
             extra_indices=extra_indices,
-            extra_indptr=extra_indptr,
+            extra_indptr=None if extra_dense else extra_offsets,
+            extra_dense_lengths=extra_offsets if extra_dense else None,
             out=out,
             extra_cache_nan_free=True,
             adaptive_splits=True,
@@ -919,8 +1083,18 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     )
     torch.testing.assert_close(captured_long, expected_long, atol=2e-2, rtol=2e-2)
 
-    extra_indices[: short_indices.numel()].copy_(short_indices)
-    extra_indptr.copy_(short_indptr)
+    if extra_dense:
+        extra_offsets.copy_(
+            torch.tensor(
+                [len(row) for row in short_extra_rows],
+                dtype=torch.int32,
+                device=device,
+            )
+        )
+    else:
+        short_indices, short_indptr = _ragged_from_rows(short_extra_rows, device)
+        extra_indices[: short_indices.numel()].copy_(short_indices)
+        extra_offsets.copy_(short_indptr)
     graph.replay()
     torch.accelerator.synchronize()
     short_out = out.clone()
@@ -941,8 +1115,17 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     assert not torch.equal(short_out, captured_long)
     torch.testing.assert_close(short_out, expected_short, atol=2e-2, rtol=2e-2)
 
-    extra_indices[: long_indices.numel()].copy_(long_indices)
-    extra_indptr.copy_(long_indptr)
+    if extra_dense:
+        extra_offsets.copy_(
+            torch.tensor(
+                [len(row) for row in extra_rows],
+                dtype=torch.int32,
+                device=device,
+            )
+        )
+    else:
+        extra_indices[: long_indices.numel()].copy_(long_indices)
+        extra_offsets.copy_(long_indptr)
     graph.replay()
     torch.accelerator.synchronize()
     torch.testing.assert_close(out, expected_long, atol=2e-2, rtol=2e-2)

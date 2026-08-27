@@ -14,7 +14,10 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
-from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.common.ops import (
+    compute_global_topk_indices_and_lens,
+    dequantize_and_gather_k_cache,
+)
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
@@ -831,6 +834,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         topk_lens = None
         topk_ragged_indices = None
         topk_ragged_indptr = None
+        use_dense_topk_metadata = False
         if not swa_only:
             assert attn_metadata is not None
             assert swa_metadata.is_valid_token is not None
@@ -838,17 +842,27 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
             if self.compress_ratio == 4:
                 assert self.topk_indices_buffer is not None
-                (
-                    topk_ragged_indices,
-                    topk_ragged_indptr,
-                    topk_lens,
-                ) = compute_global_topk_ragged_indices_and_indptr(
-                    self.topk_indices_buffer[:num_decode_tokens],
-                    swa_metadata.token_to_req_indices,
-                    attn_metadata.block_table[:num_decodes],
-                    block_size,
-                    is_valid,
-                )
+                if _ON_GFX950:
+                    topk_indices, topk_lens = compute_global_topk_indices_and_lens(
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                    )
+                    use_dense_topk_metadata = True
+                else:
+                    (
+                        topk_ragged_indices,
+                        topk_ragged_indptr,
+                        topk_lens,
+                    ) = compute_global_topk_ragged_indices_and_indptr(
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                    )
             else:
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
                 topk_lens = attn_metadata.c128a_decode_topk_lens
@@ -875,6 +889,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             rope_head_dim=self.rope_head_dim,
             output=output,
             adaptive_splits=adaptive_splits,
+            use_dense_topk_metadata=use_dense_topk_metadata,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
