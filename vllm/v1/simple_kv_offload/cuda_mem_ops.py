@@ -3,6 +3,7 @@
 """Low-level CUDA/HIP memory helpers: pinning and batch DMA transfers."""
 
 import ctypes
+import mmap
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -14,6 +15,8 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+HOST_REGISTER_CHUNK_BYTES = 256 * 2**30
+
 # CUmemcpySrcAccessOrder values (CUDA driver API). STREAM(1): source read in
 # stream order, safe when the source may still be written. ANY(3): source may
 # be read early, only safe for a stable source (e.g. pinned host memory).
@@ -21,16 +24,51 @@ CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
 
 
-def pin_tensor(tensor: torch.Tensor) -> None:
+def pin_tensor(
+    tensor: torch.Tensor, *, max_chunk_bytes: int | None = None
+) -> list[int]:
     """Pin a CPU tensor via cudaHostRegister.
 
     This bypasses PyTorch's CUDACachingHostAllocator which rounds
     every ``pin_memory=True`` allocation up to the next power of 2
     (e.g. 100 GB becomes 128 GB).
+
+    Large registrations can exceed the NVIDIA driver's maximum practical
+    allocation for per-page bookkeeping. ``max_chunk_bytes`` bounds each
+    registration while preserving one contiguous tensor.
     """
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
+    if tensor.nbytes == 0:
+        return []
+    validate_chunk_alignment = max_chunk_bytes is not None
+    if max_chunk_bytes is None:
+        max_chunk_bytes = tensor.nbytes
+    if max_chunk_bytes <= 0:
+        raise ValueError("max_chunk_bytes must be positive")
+    if validate_chunk_alignment and max_chunk_bytes % mmap.PAGESIZE:
+        raise ValueError("max_chunk_bytes must be page-aligned")
+
+    cudart = torch.cuda.cudart()
+    base_address = tensor.data_ptr()
+    registered_addresses: list[int] = []
+    for offset in range(0, tensor.nbytes, max_chunk_bytes):
+        address = base_address + offset
+        size = min(max_chunk_bytes, tensor.nbytes - offset)
+        err = cudart.cudaHostRegister(address, size, 0)
+        if err.value == 0:
+            registered_addresses.append(address)
+            continue
+
+        for registered_address in reversed(registered_addresses):
+            rollback_err = cudart.cudaHostUnregister(registered_address)
+            if rollback_err.value != 0:
+                logger.warning(
+                    "cudaHostUnregister rollback failed for address=%#x (code=%d)",
+                    registered_address,
+                    rollback_err.value,
+                )
         raise RuntimeError(f"cudaHostRegister failed: {err}")
+
+    return registered_addresses
 
 
 class _CUmemLocation(ctypes.Structure):

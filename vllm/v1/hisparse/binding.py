@@ -120,27 +120,32 @@ def init_hisparse_kv_cache(
     block_tables: "BlockTables",
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
-    host_pool = HiSparseHostPool()
-    kv_caches = allocate_hisparse_kv_caches(
-        kv_cache_config,
-        device,
-        vllm_config.cache_config.get_resolved_kv_cache_layout(),
-        kernel_block_sizes,
-        host_pool,
-    )
-    cache_handles = bind_hisparse_kv_caches(
-        forward_context=forward_context,
-        kv_cache_config=kv_cache_config,
-        kv_caches=kv_caches,
-        block_tables=block_tables,
-        host_pool=host_pool,
-    )
-    initialize_hisparse_runtime_buffers(
-        cache_handles,
-        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-    )
-    return kv_caches
+    host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
+    try:
+        kv_caches = allocate_hisparse_kv_caches(
+            kv_cache_config,
+            device,
+            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
+            host_pool,
+        )
+        cache_handles = bind_hisparse_kv_caches(
+            forward_context=forward_context,
+            kv_cache_config=kv_cache_config,
+            kv_caches=kv_caches,
+            block_tables=block_tables,
+            host_pool=host_pool,
+        )
+        initialize_hisparse_runtime_buffers(
+            cache_handles,
+            max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+        return kv_caches
+    except Exception:
+        if host_pool.shared_region is not None:
+            host_pool.shared_region.cleanup()
+        raise
 
 
 def _get_hisparse_cache(
@@ -166,13 +171,24 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
     if not runtimes:
         return
 
-    registered_pools = list(
-        {
-            runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
-            for runtime in runtimes.values()
-        }.values()
+    shared_regions = {
+        id(runtime.shared_host_region): runtime.shared_host_region
+        for runtime in runtimes.values()
+        if runtime.shared_host_region is not None
+    }
+    assert len(shared_regions) <= 1
+    shared_region = next(iter(shared_regions.values()), None)
+    registered_pools = (
+        []
+        if shared_region is not None
+        else list(
+            {
+                runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
+                for runtime in runtimes.values()
+            }.values()
+        )
     )
-    release_pinned_state(list(runtimes.values()), registered_pools)
+    release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
     for cache in cache_handles:
         cache.mirror_staging_cache = None
         cache.mirror_staging_slots = None
@@ -257,6 +273,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,
