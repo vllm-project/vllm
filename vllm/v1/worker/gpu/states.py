@@ -60,6 +60,8 @@ class RequestState:
         )
         # Optimistic CPU mirror of num_computed_tokens (upper bound on GPU value).
         self.num_computed_tokens_np = np.zeros(self.max_num_reqs, dtype=np.int32)
+        # Draft width from the request's prior scheduled step.
+        self.prev_num_draft_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
@@ -113,6 +115,7 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
+        self.prev_num_draft_tokens[req_idx] = 0
 
         self.draft_tokens[req_idx].zero_()
 

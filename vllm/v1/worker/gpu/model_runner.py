@@ -1155,6 +1155,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
+        prev_num_draft_tokens_per_req = None
+        if self.use_pp:
+            prev_num_draft_tokens_per_req = self.req_states.prev_num_draft_tokens[
+                idx_mapping_np
+            ].copy()
+            self.req_states.prev_num_draft_tokens[idx_mapping_np] = (
+                num_draft_tokens_per_req if num_draft_tokens_per_req is not None else 0
+            )
+
         adaptive_verification = (
             self.adaptive_verification if num_draft_tokens_per_req is not None else None
         )
@@ -1301,6 +1310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if adaptive_verification is not None
                 else None
             ),
+            prev_num_draft_tokens_per_req=prev_num_draft_tokens_per_req,
         )
         return pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 

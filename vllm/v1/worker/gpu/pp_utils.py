@@ -46,11 +46,11 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     assert max_seq_len is not None  # always populated under PP
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
-    # Discount drafts: scheduler advances num_computed by full width before
-    # PP peers consume the sample broadcast.
+    # Discount drafts from the prior step: scheduler advances num_computed by
+    # full width before PP peers consume that step's sample broadcast.
     finish_computed = old_computed
-    if input_batch.num_draft_tokens_per_req is not None:
-        finish_computed = old_computed - input_batch.num_draft_tokens_per_req
+    if input_batch.prev_num_draft_tokens_per_req is not None:
+        finish_computed = old_computed - input_batch.prev_num_draft_tokens_per_req
     not_finishing = np.maximum(finish_computed, prefill_len) + 1 < max_seq_len
     need_sampled_mask = produces_sample & not_finishing
     return need_sampled_mask if need_sampled_mask.any() else None
