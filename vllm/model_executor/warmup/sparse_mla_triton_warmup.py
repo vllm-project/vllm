@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warm up sparse-MLA Triton metadata kernels."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+import torch
 
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2GPUModelRunner
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -28,8 +31,6 @@ _GENERIC_SPARSE_MLA_BACKENDS = frozenset(
         "FLASHINFER_MLA_SPARSE_SM120",
     }
 )
-_INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
-
 _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
 
 
@@ -85,6 +86,72 @@ def _compile_combine_topk_swa_indices_kernel(
     _COMBINE_TOPK_SWA_INDICES_KERNEL.warmup(vllm_config)
 
 
+def _warmup_hisparse_index_conversion(runner: "V2GPUModelRunner") -> None:
+    from vllm.v1.attention.backends.mla.sparse_utils import (
+        triton_convert_req_index_to_global_index,
+    )
+
+    topk_tokens = runner.vllm_config.model_config.hf_config.index_topk
+    req_ids = torch.zeros(1, dtype=torch.int32, device=runner.device)
+    topk_indices = torch.full(
+        (1, topk_tokens),
+        -1,
+        dtype=torch.int32,
+        device=runner.device,
+    )
+    prefill_request_ids = torch.zeros_like(req_ids)
+    prefill_workspace_starts = torch.zeros_like(req_ids)
+
+    attention_strides: dict[int, set[int]] = {}
+    for layer in runner.vllm_config.compilation_config.static_forward_context.values():
+        impl = getattr(layer, "impl", None)
+        cache = getattr(impl, "hisparse_cache", None)
+        if cache is None:
+            continue
+        hot = cache.runtime.hot
+        attention_strides.setdefault(hot.block_size, set()).add(
+            hot.attention_block_stride
+        )
+
+    for block_table, block_size in zip(
+        runner.block_tables.input_block_tables,
+        runner.kernel_block_sizes,
+        strict=True,
+    ):
+        # Real tensors preserve the block-table width and stride
+        # specializations used by Triton's runtime cache.
+        block_strides = attention_strides.get(block_size, set()) | {block_size}
+        for block_stride in block_strides:
+            kwargs = dict(
+                BLOCK_SIZE=block_size,
+                BLOCK_STRIDE_ROWS=block_stride,
+                NUM_TOPK_TOKENS=topk_tokens,
+            )
+            triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table[:1],
+                topk_indices,
+                **kwargs,
+            )
+            triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table[:1],
+                topk_indices,
+                return_valid_counts=True,
+                **kwargs,
+            )
+            triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table[:1],
+                topk_indices,
+                HAS_PREFILL_WORKSPACE=True,
+                prefill_workspace_request_ids=prefill_request_ids,
+                prefill_workspace_starts=prefill_workspace_starts,
+                return_valid_counts=True,
+                **kwargs,
+            )
+
+
 def sparse_mla_triton_warmup(worker: "Worker") -> None:
     runner = worker.model_runner
     if runner.is_pooling_model:
@@ -96,6 +163,8 @@ def sparse_mla_triton_warmup(worker: "Worker") -> None:
         return
 
     vllm_config = runner.vllm_config
+    if vllm_config.attention_config.hisparse_config is not None:
+        _warmup_hisparse_index_conversion(cast("V2GPUModelRunner", runner))
     try:
         if _has_attention_backend(runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS):
             _compile_sparse_swa_prefill_metadata_kernel(vllm_config)

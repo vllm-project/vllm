@@ -28,6 +28,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+    autotune_hisparse_flashinfer_attention,
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
@@ -261,25 +262,18 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return (max_tokens,)
 
 
-def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
-    max_attention_tokens = runner.get_max_attention_profile_tokens()
+def _run_flashinfer_autotune_dummy_runs(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
     for num_tokens in _flashinfer_autotune_token_counts(runner):
-        attention_tokens = min(num_tokens, max_attention_tokens)
-        logger.info("Running FlashInfer autotune with %d tokens.", attention_tokens)
+        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
         runner._dummy_run(
-            num_tokens=attention_tokens,
+            num_tokens=num_tokens,
+            skip_attn=skip_attn,
             skip_eplb=True,
             is_profile=True,
             randomize_inputs=True,
         )
-        if attention_tokens < num_tokens:
-            runner._dummy_run(
-                num_tokens=num_tokens,
-                skip_attn=True,
-                skip_eplb=True,
-                is_profile=True,
-                randomize_inputs=True,
-            )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -341,7 +335,16 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            _run_flashinfer_autotune_dummy_runs(runner)
+            hisparse_enabled = (
+                runner.vllm_config.attention_config.hisparse_config is not None
+            )
+            if hisparse_enabled:
+                # HiSparse hot-buffer attention is bounded by decode batch
+                # size, not the prefill-sized batch used for the full model.
+                autotune_hisparse_flashinfer_attention(runner)
+            _run_flashinfer_autotune_dummy_runs(
+                runner, skip_attn=hisparse_enabled
+            )
     finally:
         set_autotune_process_group(None)
 

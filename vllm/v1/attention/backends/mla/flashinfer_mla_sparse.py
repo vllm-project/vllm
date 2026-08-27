@@ -353,17 +353,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q.device)
-
-        if self.bmm1_scale is None:
-            self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-        if self.bmm2_scale is None:
-            self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm2_scale *= layer._k_scale_float
+        self._prepare_mqa_kernel(layer, q.device)
 
         if self.hisparse_cache is not None:
             return self._forward_hisparse_mqa(
@@ -402,6 +392,56 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             topk_indices_physical,
             seq_lens,
         )
+
+    def _prepare_mqa_kernel(
+        self,
+        layer: AttentionLayer,
+        device: torch.device,
+    ) -> None:
+        if self._workspace_buffer is None:
+            self._workspace_buffer = _get_workspace_buffer(device)
+
+        if self.bmm1_scale is None:
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+        if self.bmm2_scale is None:
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._k_scale_float
+
+    def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
+        """Autotune the largest legal HiSparse decode batch."""
+        assert self.hisparse_cache is not None
+        assert self.topk_indices_buffer is not None
+
+        runtime = self.hisparse_cache.runtime
+        kv_cache = runtime.hot.attention_cache
+        num_tokens = runtime.max_num_reqs
+        topk_tokens = self.topk_indices_buffer.shape[1]
+        self._prepare_mqa_kernel(layer, kv_cache.device)
+
+        q = torch.zeros(
+            (num_tokens, self.num_heads, self.qk_head_dim),
+            dtype=kv_cache.dtype,
+            device=kv_cache.device,
+        )
+        topk_indices = (
+            torch.arange(
+                topk_tokens,
+                dtype=torch.int32,
+                device=kv_cache.device,
+            )
+            .expand(num_tokens, -1)
+            .contiguous()
+        )
+        seq_lens = torch.full(
+            (num_tokens,),
+            topk_tokens,
+            dtype=torch.int32,
+            device=kv_cache.device,
+        )
+        self._run_mqa_kernel(q, kv_cache, topk_indices, seq_lens)
 
     def _run_mqa_kernel(
         self,

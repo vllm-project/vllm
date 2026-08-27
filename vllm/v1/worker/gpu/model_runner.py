@@ -826,19 +826,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
-    def get_max_attention_profile_tokens(self) -> int:
-        max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        max_profile_tokens = max_num_tokens
-        for groups in self.attn_groups:
-            for group in groups:
-                backend_limit = group.get_metadata_builder().get_max_profile_tokens(
-                    max_num_tokens,
-                    self.max_num_reqs,
-                    self.decode_query_len,
-                )
-                max_profile_tokens = min(max_profile_tokens, backend_limit)
-        return max_profile_tokens
-
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
