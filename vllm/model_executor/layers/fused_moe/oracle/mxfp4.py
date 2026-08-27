@@ -115,6 +115,10 @@ class Mxfp4MoeBackend(Enum):
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
+    # vLLM CUTLASS (true W4A4: MXFP4 weights + MXFP4 activations)
+    VLLM_CUTLASS_MXFP4_MXFP4 = "VLLM_CUTLASS_MXFP4_MXFP4"
+    # ROCm AITER backends
+    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
     # ROCm AITER backends
     AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
     # Keep the legacy name as an alias while the ROCm split backend rename settles.
@@ -216,7 +220,13 @@ def backend_to_kernel_cls(
             HummingGroupedExperts,
             HummingIndexedExperts,
         ]
+    elif backend == Mxfp4MoeBackend.VLLM_CUTLASS_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassExpertsMxfp4,
+        )
 
+        return [CutlassExpertsMxfp4]
+    
     elif backend == Mxfp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
@@ -298,6 +308,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "triton": [Mxfp4MoeBackend.TRITON],
         "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
         "humming": [Mxfp4MoeBackend.HUMMING],
+        "cutlass": [Mxfp4MoeBackend.VLLM_CUTLASS_MXFP4_MXFP4],
         "marlin": [Mxfp4MoeBackend.MARLIN],
         "aiter": [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
@@ -379,6 +390,8 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         return kFp8StaticTensorSym
+    if backend == Mxfp4MoeBackend.VLLM_CUTLASS_MXFP4_MXFP4:
+        return kMxfp4Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         return kMxfp4Dynamic
     return None  # BF16 activation
@@ -1711,6 +1724,55 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.VLLM_CUTLASS_MXFP4_MXFP4:
+        # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
+        # to the CUTLASS tiled layout expected by CutlassExpertsMxfp4.
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            swizzle_mxfp4_scales,
+        )
+
+        E = w13_weight_scale.shape[0]
+        w13_N = w13_weight_scale.shape[1]
+        w13_scale_K = w13_weight_scale.shape[2]
+        w13_K = w13_scale_K * 32
+
+        w2_M = w2_weight_scale.shape[1]
+        w2_scale_N = w2_weight_scale.shape[2]
+        w2_N = w2_scale_N * 32
+
+        swizzled_w13 = []
+        swizzled_w2 = []
+        for e_idx in range(E):
+            s13 = w13_weight_scale[e_idx]
+            sw13 = swizzle_mxfp4_scales(s13, w13_N, w13_K)
+            swizzled_w13.append(sw13.reshape(w13_N, w13_scale_K))
+            s2 = w2_weight_scale[e_idx]
+            sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
+            swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
+
+        return (
+            w13_weight.data,
+            w2_weight.data,
+            torch.stack(swizzled_w13),
+            torch.stack(swizzled_w2),
+            w13_bias,
+            w2_bias,
+        )
+
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
+    ):
+        # No additional transformation is needed: XPU consumes the checkpoint
+        # layout directly, while emulation dequantizes that layout at runtime.
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
@@ -1827,7 +1889,10 @@ def make_mxfp4_moe_quant_config(
             block_shape=None,
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.VLLM_CUTLASS_MXFP4_MXFP4,
+    ):
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
             w1_bias=w1_bias,
