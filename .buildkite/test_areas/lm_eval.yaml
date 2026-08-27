@@ -8,6 +8,7 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
@@ -51,6 +52,7 @@ steps:
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   commands:
     - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
@@ -63,6 +65,7 @@ steps:
   optional: true
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
@@ -91,6 +94,7 @@ steps:
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
@@ -132,6 +136,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
@@ -317,6 +322,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
@@ -331,6 +337,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
