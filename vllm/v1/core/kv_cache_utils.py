@@ -21,7 +21,11 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import select_common_block_size_from_constraints
-from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
+from vllm.v1.hisparse.runtime import (
+    ResolvedHiSparseConfig,
+    get_hisparse_host_block_stride,
+    use_shared_hisparse_host_pool,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -1848,7 +1852,11 @@ def _get_hisparse_hma_config(
     )
     gpu_stride = round_up(gpu_stride, hot_page_alignment)
     host_page = sum(spec.page_size_bytes for spec in host_specs.values())
-    host_num_blocks = host_budget // host_page
+    shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
+    host_block_stride = get_hisparse_host_block_stride(
+        host_page, use_shared_host_pool=shared_host_pool
+    )
+    host_num_blocks = host_budget // host_block_stride
     gpu_num_blocks = available_memory // gpu_stride
     override = vllm_config.cache_config.num_gpu_blocks_override
     if override is not None:
@@ -1884,10 +1892,15 @@ def _get_hisparse_hma_config(
     )
     if log_layout:
         logger.info(
-            "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
-            "GPU indexer/resident/hot pool (%d blocks, %d resident/hot groups).",
+            "HiSparse HMA: %s host pool, %.1f GiB logical, "
+            "%.1f GiB physical per pool (%d blocks, %d-byte stride); "
+            "%.1f GiB shared GPU indexer/resident/hot pool (%d blocks, "
+            "%d resident/hot groups).",
+            "shared" if shared_host_pool else "private",
             host_num_blocks * host_page / 2**30,
+            host_num_blocks * host_block_stride / 2**30,
             host_num_blocks,
+            host_block_stride,
             gpu_num_blocks * gpu_stride / 2**30,
             gpu_num_blocks,
             len(hot_groups),
@@ -1904,6 +1917,8 @@ def _get_hisparse_hma_config(
             *gpu_other_regular_groups,
         ],
         hisparse_host_num_blocks=host_num_blocks,
+        hisparse_host_block_stride=host_block_stride,
+        hisparse_shared_host_pool=shared_host_pool,
         prefix_cache_retention_interval=getattr(
             vllm_config.cache_config, "prefix_cache_retention_interval", None
         ),
@@ -2656,6 +2671,14 @@ def generate_scheduler_kv_cache_config(
     )
     assert all(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
+        for cfg in kv_cache_configs
+    )
+    assert all(
+        cfg.hisparse_host_block_stride == kv_cache_configs[0].hisparse_host_block_stride
+        for cfg in kv_cache_configs
+    )
+    assert all(
+        cfg.hisparse_shared_host_pool == kv_cache_configs[0].hisparse_shared_host_pool
         for cfg in kv_cache_configs
     )
     # All workers have the same kv_cache_config except layer names, so use

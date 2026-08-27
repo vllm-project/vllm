@@ -10,11 +10,12 @@ import os
 import threading
 import time
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -183,6 +184,30 @@ def _mp_race_construct_and_write(
         region.cleanup()
     except Exception as e:
         done_queue.put({"rank": rank, "error": repr(e)})
+
+
+def _mp_read_replicated_slot(engine_id: str, result_queue) -> None:
+    try:
+        region = SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=3,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+        view = region.create_next_canonical_view(PAGE_SIZE)
+        assert region.fd is not None
+        result_queue.put(
+            {
+                "inode": os.fstat(region.fd).st_ino,
+                "contents_match": view[2].tolist() == [37] * PAGE_SIZE,
+                "error": None,
+            }
+        )
+        del view
+        region.cleanup()
+    except Exception as e:
+        result_queue.put({"inode": None, "contents_match": False, "error": repr(e)})
 
 
 def _mp_barrier_construct_and_hold(
@@ -645,6 +670,57 @@ def test_multi_worker_race_shared_memory_visible(iid):
         _cleanup_file(regions[0].mmap_path)
 
 
+def test_replicated_workers_share_the_same_slot(iid):
+    creator = _make_region(iid, rank=0)
+    joiner = _make_region(iid, rank=0)
+    creator_view = creator.create_next_canonical_view(PAGE_SIZE)
+    joiner_view = joiner.create_next_canonical_view(PAGE_SIZE)
+    try:
+        creator_view[2].fill_(37)
+
+        assert joiner_view[2].tolist() == [37] * PAGE_SIZE
+    finally:
+        del creator_view, joiner_view
+        joiner.cleanup()
+        creator.cleanup()
+        _cleanup_file(creator.mmap_path)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_replicated_workers_share_the_same_slot_across_processes(iid):
+    creator = _make_region(iid, num_blocks=3, rank=0)
+    creator_view = creator.create_next_canonical_view(PAGE_SIZE)
+    creator_view[2].fill_(37)
+    assert creator.fd is not None
+    creator_inode = os.fstat(creator.fd).st_ino
+
+    ctx = get_mp_context()
+    result_queue = ctx.Queue()
+    reader = ctx.Process(
+        target=_mp_read_replicated_slot,
+        args=(iid, result_queue),
+    )
+    reader.start()
+    try:
+        reader_result = result_queue.get(timeout=30)
+        assert reader_result["error"] is None
+        assert reader_result["inode"] == creator_inode
+        assert reader_result["contents_match"]
+    finally:
+        reader.join(timeout=10)
+        if reader.is_alive():
+            reader.terminate()
+            reader.join(timeout=10)
+        del creator_view
+        creator.cleanup()
+        _cleanup_file(creator.mmap_path)
+        result_queue.close()
+        result_queue.join_thread()
+
+    assert reader.exitcode == 0
+
+
 def test_multiprocess_race_construct_and_write(iid):
     """N processes race to construct the same SharedOffloadRegion, each writes
     fill_value = rank+1 into their slot; parent verifies interleaved layout."""
@@ -750,6 +826,26 @@ def test_cleanup_idempotent(iid):
     r.cleanup()  # must be a no-op
 
 
+def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
+    """cleanup() must release every chunk from a split host registration."""
+    r = _make_region(iid)
+    cudart = MagicMock()
+    cudart.cudaHostUnregister.return_value = MagicMock(value=0)
+    monkeypatch.setattr(region_module, "current_platform", MagicMock())
+    region_module.current_platform.is_cuda_alike.return_value = True
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
+    r.pinned_addresses = [0x100000, 0x200000, 0x300000]
+    r.is_pinned = True
+
+    r.cleanup()
+
+    assert cudart.cudaHostUnregister.call_args_list == [
+        call(0x300000),
+        call(0x200000),
+        call(0x100000),
+    ]
+
+
 def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
     """cleanup() must close the mmap even after create_next_worker_view was called.
     create_next_worker_view returns a view that shares storage with _base; both must be
@@ -809,9 +905,51 @@ def test_wait_for_file_size_timeout(tmp_path):
         os.close(fd)
 
 
+@pytest.mark.skip_global_cleanup
+def test_wait_for_file_size_rejects_unlinked_file(tmp_path):
+    path = tmp_path / "unlinked.mmap"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.unlink(path)
+        with pytest.raises(RuntimeError, match="creator failed"):
+            _wait_for_file_size(fd, PAGE_SIZE, timeout=1.0)
+    finally:
+        os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Constructor — capacity validation
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_creator_memory_check_runs_only_for_creator(iid):
+    checked_sizes: list[int] = []
+    creator = SharedOffloadRegion(
+        engine_id=iid,
+        num_blocks=4,
+        rank=0,
+        kv_bytes_per_block=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        creator_memory_check=checked_sizes.append,
+    )
+    joiner: SharedOffloadRegion | None = None
+    try:
+        joiner = SharedOffloadRegion(
+            engine_id=iid,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            creator_memory_check=checked_sizes.append,
+        )
+        assert checked_sizes == [4 * PAGE_SIZE]
+    finally:
+        if joiner is not None:
+            joiner.cleanup()
+        creator.cleanup()
+        _cleanup_file(creator.mmap_path)
 
 
 def test_insufficient_space_raises_clear_error(monkeypatch):
