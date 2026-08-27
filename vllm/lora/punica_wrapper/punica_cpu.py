@@ -13,7 +13,6 @@ from vllm.lora.ops.torch_ops import (
     sgmv_expand_slice,
     sgmv_shrink,
 )
-from vllm.platforms import current_platform
 
 from .punica_base import PunicaWrapperBase
 
@@ -358,7 +357,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         weight_stacked: torch.Tensor,
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
-    ) -> torch.Tensor | None:
+    ) -> None:
         indices = self.sampler_indices
         adapter_y = torch.zeros(
             (x.size(0), weight_stacked.size(-2)),
@@ -369,7 +368,4 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         result = self._select_full_linear_output(
             y, adapter_y, bias_stacked, module_enabled
         )
-        if current_platform.can_update_inplace():
-            y.copy_(result)
-            return None
-        return result
+        y.copy_(result)
