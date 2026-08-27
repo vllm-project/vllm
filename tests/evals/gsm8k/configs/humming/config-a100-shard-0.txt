@@ -1,0 +1,4 @@
+Qwen3.5-35B-A3B-experts-int8-humming.yaml
+gpt-oss-20b-humming.yaml
+Qwen3-30B-A3B-GPTQ-Int4-humming.yaml
+Qwen3-30B-A3B-FP8-block-humming.yaml

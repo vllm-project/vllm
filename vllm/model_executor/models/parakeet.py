@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
 
 logger = init_logger(__name__)
@@ -186,7 +187,7 @@ class ParakeetExtractor:
         )
         return self._apply_mel_filters(stft, mel_filters)
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _apply_mel_filters(
         self, stft_output: torch.Tensor, mel_filters: torch.Tensor
     ) -> torch.Tensor:
@@ -195,7 +196,7 @@ class ParakeetExtractor:
         mel_spec = torch.log(mel_spec + LOG_ZERO_GUARD_VALUE)
         return mel_spec.permute(0, 2, 1)
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _apply_preemphasis(
         self, input_features: torch.Tensor, audio_lengths: torch.Tensor
     ) -> torch.Tensor:
@@ -213,7 +214,7 @@ class ParakeetExtractor:
         input_features = input_features.masked_fill(~timemask, 0.0)
         return input_features
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _normalize_mel_features(
         self, mel_features: torch.Tensor, audio_lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:

@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test prefetch offloading correctness with Llama model."""
 
-import pytest
-
 from ..utils import compare_two_settings
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_prefetch_offload_llama(use_v2_model_runner):
+def test_prefetch_offload_llama():
     """Test prefetch CPU offloading with Llama-3.2-1B-Instruct.
 
     Compares outputs between:
@@ -33,6 +30,4 @@ def test_prefetch_offload_llama(use_v2_model_runner):
             "down_proj",
         ],
         [],  # Baseline: no offloading
-        env1={"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2_model_runner))},
-        env2={"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2_model_runner))},
     )

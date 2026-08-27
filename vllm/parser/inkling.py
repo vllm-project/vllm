@@ -189,26 +189,33 @@ def inkling_config() -> ParserEngineConfig:
             ParserState.MESSAGE_HEADER,
             (),
         ),
+        # Opening a block that renders as visible content proves no reasoning
+        # is still open. Confirming that here is what lets DelegatingParser
+        # hand the following blocks to the tool pass: the reasoning pass only
+        # leaves its reasoning phase on an explicit reasoning-end event, and a
+        # response with no thinking block never emits one otherwise.
         (ParserState.CONTENT, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.CONTENT, "THINK_START"): Transition(
             ParserState.REASONING,
             (EventType.REASONING_START,),
         ),
+        # A tool block confirms the same boundary, and is the one opener that
+        # can start a turn with no visible block ahead of it.
         (ParserState.CONTENT, "TOOL_START"): Transition(
             ParserState.TOOL_ARGS,
-            (EventType.TOOL_CALL_START,),
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
         # Raw / error tool blocks render as visible text.
         (ParserState.CONTENT, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.CONTENT, "TOOL_ERROR"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         # The optional function name between the model-role and content-kind
         # markers is metadata, not visible assistant content.
@@ -218,7 +225,7 @@ def inkling_config() -> ParserEngineConfig:
         ),
         (ParserState.MESSAGE_HEADER, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.MESSAGE_HEADER, "THINK_START"): Transition(
             ParserState.REASONING,
@@ -226,15 +233,15 @@ def inkling_config() -> ParserEngineConfig:
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_START"): Transition(
             ParserState.TOOL_ARGS,
-            (EventType.TOOL_CALL_START,),
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_ERROR"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         # ── Inside a thinking block ───────────────────────────────────
         (ParserState.REASONING, "THINK_START"): Transition(

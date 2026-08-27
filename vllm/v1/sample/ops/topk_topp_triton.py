@@ -12,6 +12,7 @@ using Pivot-based Truncation and Selection" By Park et al.
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
 
@@ -919,24 +920,31 @@ def apply_top_k_top_p_triton(
     # Cache lookup table entries on each device.
     tables = _TRITON_TABLE_CACHE.get(logits.device)
     if tables is None:
-        normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
-        percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
-        _TRITON_TABLE_CACHE[logits.device] = (
-            normal_cdf_to_sigma_table,
-            percentile_to_std_table,
-        )
+        with gpu_sync_allowed():
+            normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
+            percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
+            _TRITON_TABLE_CACHE[logits.device] = (
+                normal_cdf_to_sigma_table,
+                percentile_to_std_table,
+            )
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 
     # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
     # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
     # approximation; use smaller tiles for accurate top-p results.
+    launch_kwargs = {}
     if logits.device.type == "cpu":
         block_size, block_size_trunc = 256, 128
     elif logits.device.type == "xpu":
         block_size, block_size_trunc = 4096, 2048
     else:
         block_size, block_size_trunc = 8192, 4096
+        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
+        # per-tile latency bounds kernel latency, and Triton's default of 4
+        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
+        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+        launch_kwargs["num_warps"] = 8
 
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
@@ -953,6 +961,7 @@ def apply_top_k_top_p_triton(
         BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
+        **launch_kwargs,
     )
 
     return logits

@@ -155,6 +155,7 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUUnquantizedExperts,
             CPUUnquantizedExperts,
+            PowerCPUUnquantizedExperts,
             X86CPUUnquantizedExperts,
         )
 
@@ -162,6 +163,7 @@ def backend_to_kernel_cls(
         return [
             X86CPUUnquantizedExperts,
             ArmCPUUnquantizedExperts,
+            PowerCPUUnquantizedExperts,
             CPUUnquantizedExperts,
         ]
 
