@@ -2759,6 +2759,40 @@ steps:
   commands:
   - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":amd: (MI300) ROCm AITER MLA Prefill" # Issue #53944
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  env:
+    VLLM_ROCM_USE_AITER: "1"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - tests/v1/attention/test_mla_backends.py
+  commands:
+  - pytest -v -s v1/attention/test_mla_backends.py -k 'test_backend_correctness or test_chunked_context_backend_correctness'
+
+- label: ":amd: (MI355) ROCm AITER MLA Prefill" # Issue #53944
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  env:
+    VLLM_ROCM_USE_AITER: "1"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - tests/v1/attention/test_mla_backends.py
+  commands:
+  - pytest -v -s v1/attention/test_mla_backends.py -k 'test_backend_correctness or test_chunked_context_backend_correctness'
+
 - label: ":amd: (MI300) V1 Core + KV + Metrics" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
