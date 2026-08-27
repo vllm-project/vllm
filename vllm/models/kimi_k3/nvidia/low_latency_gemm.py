@@ -18,7 +18,7 @@ merged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import torch
@@ -40,7 +40,7 @@ from vllm.platforms import current_platform
 Backend = Literal["cute", "dsv3_fused_a"]
 # A resolved per-token-count call: the backend plus its CuTe config (None for
 # dsv3, which needs no config).
-ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]
+ResolvedCall = tuple[Backend, SkinnyGemmConfig | None, bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,9 +523,17 @@ def _build_plan(spec: ProjectionSpec) -> dict[int, ResolvedCall]:
     for num_tokens in range(1, 17):
         backend = _backend_for(spec, num_tokens, has_residual=False)
         if backend == "cute":
-            plan[num_tokens] = ("cute", spec.cute_config(num_tokens))
+            config = spec.cute_config(num_tokens)
+            if num_tokens == 1 and spec.name in {"in_proj_qkvgfab", "o_proj"}:
+                assert config is not None
+                config = replace(config, early_pdl_trigger=True)
+            plan[num_tokens] = ("cute", config, False)
         elif backend == "dsv3_fused_a":
-            plan[num_tokens] = ("dsv3_fused_a", None)
+            early_trigger = num_tokens == 1 and spec.name in {
+                "f_b_proj",
+                "fused_qkv_a_proj",
+            }
+            plan[num_tokens] = ("dsv3_fused_a", None, early_trigger)
     return plan
 
 
@@ -550,9 +558,15 @@ def _is_packed_row_major(tensor: torch.Tensor) -> bool:
     return tensor.dim() == 2 and tensor.stride() == (tensor.shape[1], 1)
 
 
-def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
+def _runtime_ok(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> bool:
     return (
-        _is_packed_row_major(x)
+        (
+            _is_packed_row_major(x)
+            or (x.dim() == 2 and x.shape[0] == 1 and x.stride(1) == 1)
+        )
         and _is_packed_row_major(weight)
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -580,7 +594,7 @@ def _run_plan(
     entry = plan.get(x.shape[0])
     if entry is None:
         return None
-    backend, config = entry
+    backend, config, early_pdl_trigger = entry
     if backend == "cute":
         if not shape_dynamic_skinny_gemm.is_available():
             return None
@@ -588,7 +602,13 @@ def _run_plan(
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         return None
     output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
-    ops.dsv3_fused_a_gemm(output, x, weight.t(), enable_pdl=True)
+    ops.dsv3_fused_a_gemm(
+        output,
+        x,
+        weight.t(),
+        enable_pdl=True,
+        early_pdl_trigger=early_pdl_trigger,
+    )
     return output
 
 
@@ -725,13 +745,19 @@ def enable_kimi_k3_low_latency_gemm(
             continue
         if is_linear:
             child.quant_method = KimiK3LowLatencyLinearMethod(
-                _build_plan(spec), _build_residual_plan(spec)
+                _build_plan(spec),
+                _build_residual_plan(spec),
             )
         else:
             child.quant_method = KimiK3LowLatencyEmbeddingMethod(_build_plan(spec))
         # Warm up only the configs measured for this module's local (N, K) so a
         # TP8 deployment does not compile TP4 configs and vice versa.
-        warmup_configs.update(config for _, config in spec.cute_configs)
+        plan = _build_plan(spec)
+        warmup_configs.update(
+            config
+            for backend, config, _ in plan.values()
+            if backend == "cute" and config is not None
+        )
         residual_warmup_configs.update(config for _, config in spec.residual_configs)
 
     if shape_dynamic_skinny_gemm.is_available():

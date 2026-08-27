@@ -296,7 +296,10 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
   int bos;
   int slot;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  cudaGridDependencySynchronize();
+  if (B != 1) {
+    // Preserve the upstream entry wait outside the conservative C=1 scope.
+    cudaGridDependencySynchronize();
+  }
 #endif
   if constexpr (kUseStaticDecodeLayout) {
     if constexpr (kUseHeadGrid) {
@@ -349,23 +352,27 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
   __shared__ float s_beta;
   float pre_onorm_gate = 0.0f;
   float pre_onorm_weight = 0.0f;
+  float q_acc = 0.0f;
+  float k_acc = 0.0f;
+  float v_acc = 0.0f;
+  float exp_a = 0.0f;
+  __nv_bfloat16 q_shift0 = __float2bfloat16(0.0f);
+  __nv_bfloat16 q_shift1 = __float2bfloat16(0.0f);
+  __nv_bfloat16 k_shift0 = __float2bfloat16(0.0f);
+  __nv_bfloat16 k_shift1 = __float2bfloat16(0.0f);
+  __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
+  __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
 
   cp_async_state_chunk(&s_state[0][0][0], state_for_slot, 0, i_hv, hv_count, 0);
 
-  if constexpr (kUpdateConvState) {
-    if (tid < kDimK) {
-      const int k = tid;
-      const int hk = hk_off + k;
-      const int64_t xq_idx = bos * strides.x_row + i_h * kDimK + k;
-      const float exp_a =
-          __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+  if (tid < kDimK) {
+    const int k = tid;
+    const int hk = hk_off + k;
+    exp_a = __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
+    q_acc = bias_q == nullptr ? 0.0f : bf16_load(bias_q, hk);
+    k_acc = bias_k == nullptr ? 0.0f : bf16_load(bias_k, hk);
 
-      float q_acc = bias_q == nullptr ? 0.0f : bf16_load(bias_q, hk);
-      float k_acc = bias_k == nullptr ? 0.0f : bf16_load(bias_k, hk);
-      __nv_bfloat16 q_shift0 = __float2bfloat16(0.0f);
-      __nv_bfloat16 q_shift1 = __float2bfloat16(0.0f);
-      __nv_bfloat16 k_shift0 = __float2bfloat16(0.0f);
-      __nv_bfloat16 k_shift1 = __float2bfloat16(0.0f);
+    if constexpr (kUpdateConvState) {
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
         const __nv_bfloat16 q_state = cs_q_for_slot[hk + w * kPackedDim];
@@ -382,6 +389,61 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
           k_shift1 = k_state;
         }
       }
+    } else {
+#pragma unroll
+      for (int w = 0; w < kConvStateWidth; ++w) {
+        const int cs_idx = hk + w * kPackedDim;
+        q_acc += bf16_load(cs_q_for_slot, cs_idx) *
+                 conv_weight_load<kLocalDim>(w_q_t, hk, w);
+        k_acc += bf16_load(cs_k_for_slot, cs_idx) *
+                 conv_weight_load<kLocalDim>(w_k_t, hk, w);
+      }
+    }
+  }
+
+  if (tid < kDimV) {
+    const int v = tid;
+    const int hvv = hv_off + v;
+    v_acc = bias_v == nullptr ? 0.0f : bf16_load(bias_v, hvv);
+    if constexpr (kUpdateConvState) {
+#pragma unroll
+      for (int w = 0; w < kConvStateWidth; ++w) {
+        const __nv_bfloat16 v_state = cs_v_for_slot[hvv + w * kPackedDim];
+        v_acc += __bfloat162float(v_state) *
+                 conv_weight_load<kLocalDim>(w_v_t, hvv, w);
+        if (w == 1) {
+          v_shift0 = v_state;
+        } else if (w == 2) {
+          v_shift1 = v_state;
+        }
+      }
+    } else {
+#pragma unroll
+      for (int w = 0; w < kConvStateWidth; ++w) {
+        const int cs_idx = hvv + w * kPackedDim;
+        v_acc += bf16_load(cs_v_for_slot, cs_idx) *
+                 conv_weight_load<kLocalDim>(w_v_t, hvv, w);
+      }
+    }
+    if constexpr (kApplyOnorm && kPreloadOnormParams) {
+      pre_onorm_weight = onorm_weight[v];
+    }
+  }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // Current-token activations are the first inputs produced by the upstream
+  // projection. State, prior conv slots, and weights above are independent.
+  if (B == 1) {
+    cudaGridDependencySynchronize();
+  }
+#endif
+
+  if (tid < kDimK) {
+    const int k = tid;
+    const int hk = hk_off + k;
+    const int64_t xq_idx = bos * strides.x_row + i_h * kDimK + k;
+
+    if constexpr (kUpdateConvState) {
       const __nv_bfloat16 q_new = x_q[xq_idx];
       const __nv_bfloat16 k_new = x_k[xq_idx];
       q_acc += __bfloat162float(q_new) *
@@ -395,108 +457,47 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       cs_k_for_slot[hk] = k_shift0;
       cs_k_for_slot[hk + kPackedDim] = k_shift1;
       cs_k_for_slot[hk + 2 * kPackedDim] = k_new;
-
-      s_q[k] = silu_fast(q_acc);
-      s_k[k] = silu_fast(k_acc);
-
-      const int64_t gate_idx = bos * kLocalDim + i_hv * kDimK + k;
-      const float g_raw = bf16_load(g, gate_idx) + dt_bias[hk];
-      if constexpr (kUseLowerBound) {
-        s_decay[k] = __expf(lower_bound * sigmoid_fast(exp_a * g_raw));
-      } else {
-        s_decay[k] = __expf(-exp_a * softplus_fast(g_raw));
-      }
-    }
-  } else {
-    if (tid < kDimK) {
-      const int k = tid;
-      const int hk = hk_off + k;
-      const float exp_a =
-          __shfl_sync(0xffffffffu, lane == 0 ? __expf(a_log[i_h]) : 0.0f, 0);
-
-      float q_acc = bias_q == nullptr ? 0.0f : bf16_load(bias_q, hk);
-      float k_acc = bias_k == nullptr ? 0.0f : bf16_load(bias_k, hk);
-#pragma unroll
-      for (int w = 0; w < kConvStateWidth; ++w) {
-        const int cs_idx = hk + w * kPackedDim;
-        q_acc += bf16_load(cs_q_for_slot, cs_idx) *
-                 conv_weight_load<kLocalDim>(w_q_t, hk, w);
-        k_acc += bf16_load(cs_k_for_slot, cs_idx) *
-                 conv_weight_load<kLocalDim>(w_k_t, hk, w);
-      }
+    } else {
       q_acc += bf16_load(x_q, bos * strides.x_row + i_h * kDimK + k) *
                conv_weight_load<kLocalDim>(w_q_t, hk, kKernelWidth - 1);
       k_acc += bf16_load(x_k, bos * strides.x_row + i_h * kDimK + k) *
                conv_weight_load<kLocalDim>(w_k_t, hk, kKernelWidth - 1);
+    }
 
-      s_q[k] = silu_fast(q_acc);
-      s_k[k] = silu_fast(k_acc);
+    s_q[k] = silu_fast(q_acc);
+    s_k[k] = silu_fast(k_acc);
 
-      const int64_t gate_idx = bos * kLocalDim + i_hv * kDimK + k;
-      const float g_raw = bf16_load(g, gate_idx) + dt_bias[hk];
-      if constexpr (kUseLowerBound) {
-        s_decay[k] = __expf(lower_bound * sigmoid_fast(exp_a * g_raw));
-      } else {
-        s_decay[k] = __expf(-exp_a * softplus_fast(g_raw));
-      }
+    const int64_t gate_idx = bos * kLocalDim + i_hv * kDimK + k;
+    const float g_raw = bf16_load(g, gate_idx) + dt_bias[hk];
+    if constexpr (kUseLowerBound) {
+      s_decay[k] = __expf(lower_bound * sigmoid_fast(exp_a * g_raw));
+    } else {
+      s_decay[k] = __expf(-exp_a * softplus_fast(g_raw));
     }
   }
 
-  if constexpr (kUpdateConvState) {
-    if (tid < kDimV) {
-      const int v = tid;
-      const int hvv = hv_off + v;
-      const int64_t xv_idx = bos * strides.x_row + i_hv * kDimV + v;
+  if (tid < kDimV) {
+    const int v = tid;
+    const int hvv = hv_off + v;
+    const int64_t xv_idx = bos * strides.x_row + i_hv * kDimV + v;
 
-      float v_acc = bias_v == nullptr ? 0.0f : bf16_load(bias_v, hvv);
-      __nv_bfloat16 v_shift0 = __float2bfloat16(0.0f);
-      __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
-#pragma unroll
-      for (int w = 0; w < kConvStateWidth; ++w) {
-        const __nv_bfloat16 v_state = cs_v_for_slot[hvv + w * kPackedDim];
-        v_acc += __bfloat162float(v_state) *
-                 conv_weight_load<kLocalDim>(w_v_t, hvv, w);
-        if (w == 1) {
-          v_shift0 = v_state;
-        } else if (w == 2) {
-          v_shift1 = v_state;
-        }
-      }
+    if constexpr (kUpdateConvState) {
       const __nv_bfloat16 v_new = x_v[xv_idx];
       v_acc += __bfloat162float(v_new) *
                conv_weight_load<kLocalDim>(w_v_t, hvv, kKernelWidth - 1);
       cs_v_for_slot[hvv] = v_shift0;
       cs_v_for_slot[hvv + kPackedDim] = v_shift1;
       cs_v_for_slot[hvv + 2 * kPackedDim] = v_new;
-      s_v[v] = silu_fast(v_acc);
-
-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
-        const int64_t gate_idx = i_n * strides.onorm_row + i_hv * kDimV + v;
-        pre_onorm_gate = sigmoid_fast(bf16_load(onorm_g, gate_idx));
-        pre_onorm_weight = onorm_weight[v];
-      }
     }
-  } else {
-    if (tid < kDimV) {
-      const int v = tid;
-      const int hvv = hv_off + v;
-
-      float v_acc = bias_v == nullptr ? 0.0f : bf16_load(bias_v, hvv);
-#pragma unroll
-      for (int w = 0; w < kConvStateWidth; ++w) {
-        const int cs_idx = hvv + w * kPackedDim;
-        v_acc += bf16_load(cs_v_for_slot, cs_idx) *
-                 conv_weight_load<kLocalDim>(w_v_t, hvv, w);
-      }
+    if constexpr (!kUpdateConvState) {
       v_acc += bf16_load(x_v, bos * strides.x_row + i_hv * kDimV + v) *
                conv_weight_load<kLocalDim>(w_v_t, hvv, kKernelWidth - 1);
-      s_v[v] = silu_fast(v_acc);
+    }
+    s_v[v] = silu_fast(v_acc);
 
-      if constexpr (kApplyOnorm && kPreloadOnormParams) {
-        const int64_t gate_idx = i_n * strides.onorm_row + i_hv * kDimV + v;
-        pre_onorm_gate = sigmoid_fast(bf16_load(onorm_g, gate_idx));
-        pre_onorm_weight = onorm_weight[v];
-      }
+    if constexpr (kApplyOnorm && kPreloadOnormParams) {
+      const int64_t gate_idx = i_n * strides.onorm_row + i_hv * kDimV + v;
+      pre_onorm_gate = sigmoid_fast(bf16_load(onorm_g, gate_idx));
     }
   }
 

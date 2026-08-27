@@ -11,6 +11,7 @@ import regex as re
 import torch
 from torch import nn
 
+import vllm._custom_ops as ops
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
@@ -499,6 +500,43 @@ def test_low_latency_table_capability_routing(
     assert k3_gemm._low_latency_table() is None
 
 
+def test_c1_pdl_plan_is_automatic_and_single_token_only() -> None:
+    c1_skinny: set[tuple[int, int, int]] = set()
+    c1_dsv3: set[tuple[int, int, int]] = set()
+    for spec in k3_gemm.KIMI_K3_PROJECTIONS.values():
+        for m, (backend, config, early_dsv3) in k3_gemm._build_plan(spec).items():
+            if backend == "cute" and config is not None and config.early_pdl_trigger:
+                c1_skinny.add((spec.n, spec.k, m))
+            if early_dsv3:
+                c1_dsv3.add((spec.n, spec.k, m))
+
+    assert c1_skinny
+    assert c1_dsv3
+    assert {m for _, _, m in c1_skinny | c1_dsv3} == {1}
+    assert {k3_gemm.KIMI_K3_PROJECTIONS[(n, k)].name for n, k, _ in c1_skinny} == {
+        "in_proj_qkvgfab",
+        "o_proj",
+    }
+    assert {k3_gemm.KIMI_K3_PROJECTIONS[(n, k)].name for n, k, _ in c1_dsv3} == {
+        "f_b_proj",
+        "fused_qkv_a_proj",
+    }
+
+
+def test_single_row_stride_is_accepted_only_for_c1() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    x_storage = torch.empty(1, 144, device="cuda", dtype=torch.bfloat16)
+    x = x_storage[:, :128]
+    weight = torch.empty(1536, 128, device="cuda", dtype=torch.bfloat16)
+    assert x.stride() == (144, 1)
+    assert k3_gemm._runtime_ok(x, weight)
+
+    multi_storage = torch.empty(2, 144, device="cuda", dtype=torch.bfloat16)
+    multi = multi_storage[:, :128]
+    assert not k3_gemm._runtime_ok(multi, weight)
+
+
 def test_installation_is_shape_specific_and_unquantized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -559,7 +597,10 @@ def test_installation_is_shape_specific_and_unquantized(
     assert warmup_configs == {
         config
         for key in ((6288, 7168), (7168, 3584), (20480, 7168))
-        for _, config in k3_gemm.KIMI_K3_PROJECTIONS[key].cute_configs
+        for backend, config, _ in k3_gemm._build_plan(
+            k3_gemm.KIMI_K3_PROJECTIONS[key]
+        ).values()
+        if backend == "cute" and config is not None
     }
     assert residual_warmup_configs == {
         config
@@ -744,6 +785,39 @@ def test_dsv3_selected_shapes(num_tokens: int, n: int, k: int) -> None:
     assert cosine > 0.999
 
 
+def test_dsv3_c1_early_pdl_trigger_matches_default() -> None:
+    """Exercise the native C=1 early-trigger specialization directly."""
+    _require_sm103_and_dsv3()
+    torch.manual_seed(42)
+    n, k = 1536, 128
+    x = torch.randn(1, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    output_default = torch.empty(1, n, dtype=torch.bfloat16, device="cuda")
+    output_pdl = torch.empty_like(output_default)
+
+    ops.dsv3_fused_a_gemm(
+        output_default,
+        x,
+        weight.t(),
+        enable_pdl=True,
+        early_pdl_trigger=False,
+    )
+    ops.dsv3_fused_a_gemm(
+        output_pdl,
+        x,
+        weight.t(),
+        enable_pdl=True,
+        early_pdl_trigger=True,
+    )
+
+    torch.testing.assert_close(output_pdl, output_default, rtol=0, atol=0)
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output_pdl.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
 @pytest.mark.parametrize("num_tokens,spec", GLM_DSV3_CASES)
 def test_glm_dsv3_selected_shapes(
     num_tokens: int,
@@ -764,7 +838,7 @@ def test_glm_dsv3_selected_shapes(
     assert cosine > 0.999
 
 
-def test_nonpacked_single_token_dsv3_falls_back() -> None:
+def test_nonpacked_single_token_dsv3_uses_c1_plan() -> None:
     _require_sm103_and_dsv3()
     n, k = 1536, 128
     storage = torch.randn(1, k + 16, dtype=torch.bfloat16, device="cuda")
@@ -777,7 +851,7 @@ def test_nonpacked_single_token_dsv3_falls_back() -> None:
 
     assert x.is_contiguous()
     assert x.stride() == (k + 16, 1)
-    assert not k3_gemm._runtime_ok(x, weight)  # strict guard rejects the view
+    assert k3_gemm._runtime_ok(x, weight)
     output = method.apply(SimpleNamespace(weight=weight), x)
 
     reference = torch.nn.functional.linear(x, weight)
@@ -931,10 +1005,9 @@ def test_latent_moe_production_layout_residual(
 ) -> None:
     """The real Latent-MoE residual is a non-packed slice of a cat buffer.
 
-    The strict packed-row-major guard rejects such a slice at every token count
-    (a size-1 leading dim reads as contiguous but its stride is not packed), so
-    the CuTe residual epilogue never fires for this production layout and the
-    method falls back to addmm. Output is correct regardless of the path.
+    A size-1 leading dimension has no inter-row access, so automatic C1 accepts
+    its non-packed leading stride. Multi-token slices still fail the strict
+    packed-row-major guard and fall back to addmm.
     """
     _require_sm103_and_cute()
     latent_dim, shared_dim = 3584, 7168  # routed_expert_up_proj K, N
@@ -961,9 +1034,7 @@ def test_latent_moe_production_layout_residual(
         output.float().flatten(), reference.flatten(), dim=0
     ).item()
     assert cosine > 0.999  # correct regardless of the path taken
-    assert not spy.calls, (
-        "non-packed buf-slice residual must fall back to addmm at every M"
-    )
+    assert spy.calls == ([1] if num_tokens == 1 else [])
 
 
 def test_residual_dispatch_falls_back_to_addmm(
