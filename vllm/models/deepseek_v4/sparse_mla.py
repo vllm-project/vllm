@@ -312,11 +312,6 @@ def build_c128a_topk_metadata(
 
     Writes into pre-allocated buffers for CUDA graph address stability.
     Returns views of the buffers.
-
-    The decode view keeps the full buffer width on SM120: full-width row
-    slices are contiguous, which the FlashInfer SM120 kernel requires of
-    eidx, and decode reads are bounded by the per-token lens. The prefill
-    view always stays narrowed to the active width.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
