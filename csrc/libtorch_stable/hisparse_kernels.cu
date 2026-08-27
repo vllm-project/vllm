@@ -703,6 +703,35 @@ __global__ void hisparse_backup_kernel(
   }
 }
 
+__global__ void hisparse_invalidate_written_slots_kernel(
+    int32_t* __restrict__ device_global_indices,
+    const int32_t* __restrict__ request_state_indices,
+    const int32_t* __restrict__ req_id_per_token,
+    const int64_t* __restrict__ written_slots, const int64_t num_tokens,
+    const int64_t num_request_ids, const int64_t num_state_rows,
+    const int64_t region_stride) {
+  const int64_t token_idx = blockIdx.x;
+  if (token_idx >= num_tokens) {
+    return;
+  }
+  const int32_t req_idx = req_id_per_token[token_idx];
+  if (req_idx < 0 || req_idx >= num_request_ids) {
+    return;
+  }
+  const int32_t state_idx = request_state_indices[req_idx];
+  const int64_t written_slot = written_slots[token_idx];
+  if (state_idx < 0 || state_idx >= num_state_rows || written_slot < 0) {
+    return;
+  }
+  int32_t* row = device_global_indices + state_idx * region_stride;
+  for (int64_t offset = threadIdx.x; offset < region_stride;
+       offset += blockDim.x) {
+    if (row[offset] == written_slot) {
+      row[offset] = -1;
+    }
+  }
+}
+
 // One warp per (layer, item): scatter the current decode row from every hot
 // cache layer into its pinned host source. Layer metadata is immutable and
 // uploaded once at initialization, so the decode hot path needs one launch and
@@ -754,6 +783,69 @@ int64_t check_2d_rows(const torch::stable::Tensor& t, const char* name,
 }
 
 }  // namespace
+
+void hisparse_invalidate_written_slots(
+    torch::stable::Tensor& device_global_indices,
+    torch::stable::Tensor const& request_state_indices,
+    torch::stable::Tensor const& req_id_per_token,
+    torch::stable::Tensor const& written_slots) {
+  STD_TORCH_CHECK(device_global_indices.is_cuda() &&
+                      request_state_indices.is_cuda() &&
+                      req_id_per_token.is_cuda() && written_slots.is_cuda(),
+                  "HiSparse invalidation tensors must be on CUDA");
+  STD_TORCH_CHECK(
+      device_global_indices.scalar_type() ==
+              torch::headeronly::ScalarType::Int &&
+          device_global_indices.dim() == 2 &&
+          device_global_indices.is_contiguous(),
+      "device_global_indices must be a contiguous 2D int32 CUDA tensor");
+  STD_TORCH_CHECK(
+      request_state_indices.scalar_type() ==
+              torch::headeronly::ScalarType::Int &&
+          request_state_indices.dim() == 1 &&
+          request_state_indices.is_contiguous(),
+      "request_state_indices must be a contiguous 1D int32 CUDA tensor");
+  STD_TORCH_CHECK(
+      req_id_per_token.scalar_type() == torch::headeronly::ScalarType::Int &&
+          req_id_per_token.dim() == 1 && req_id_per_token.is_contiguous(),
+      "req_id_per_token must be a contiguous 1D int32 CUDA tensor");
+  STD_TORCH_CHECK(
+      written_slots.scalar_type() == torch::headeronly::ScalarType::Long &&
+          written_slots.dim() == 1 && written_slots.is_contiguous(),
+      "written_slots must be a contiguous 1D int64 CUDA tensor");
+  STD_TORCH_CHECK(req_id_per_token.numel() == written_slots.numel(),
+                  "req_id_per_token and written_slots must have equal length");
+  const int device_index = device_global_indices.get_device_index();
+  STD_TORCH_CHECK(
+      request_state_indices.get_device_index() == device_index &&
+          req_id_per_token.get_device_index() == device_index &&
+          written_slots.get_device_index() == device_index,
+      "HiSparse invalidation tensors must be on the same CUDA device");
+
+  const int64_t num_tokens = written_slots.numel();
+  const int64_t num_state_rows = device_global_indices.size(0);
+  const int64_t region_stride = device_global_indices.size(1);
+  if (num_tokens == 0 || num_state_rows == 0 || region_stride == 0) {
+    return;
+  }
+  STD_TORCH_CHECK(num_tokens <= INT32_MAX,
+                  "HiSparse invalidation grid exceeds CUDA limits");
+
+  constexpr int kBlockSize = 256;
+  const torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  const cudaStream_t stream = get_current_cuda_stream();
+  hisparse_invalidate_written_slots_kernel<<<static_cast<int>(num_tokens),
+                                             kBlockSize, 0, stream>>>(
+      device_global_indices.mutable_data_ptr<int32_t>(),
+      request_state_indices.const_data_ptr<int32_t>(),
+      req_id_per_token.const_data_ptr<int32_t>(),
+      written_slots.const_data_ptr<int64_t>(), num_tokens,
+      request_state_indices.numel(), num_state_rows, region_stride);
+  const cudaError_t launch_error = cudaGetLastError();
+  STD_TORCH_CHECK(launch_error == cudaSuccess,
+                  "HiSparse invalidation kernel launch failed: ",
+                  cudaGetErrorString(launch_error));
+}
 
 void hisparse_swap_in(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,

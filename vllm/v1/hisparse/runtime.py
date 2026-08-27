@@ -14,7 +14,6 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
@@ -25,26 +24,6 @@ FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult = (
     tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 )
-
-
-@triton.jit
-def _invalidate_written_slots_kernel(
-    device_global_indices,
-    request_state_indices,
-    req_id_per_token,
-    written_slots,
-    region_stride: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    req_idx = tl.load(req_id_per_token + token_idx)
-    state_idx = tl.load(request_state_indices + req_idx)
-    written_slot = tl.load(written_slots + token_idx)
-    offsets = tl.arange(0, BLOCK_SIZE)
-    valid = (state_idx >= 0) & (written_slot >= 0) & (offsets < region_stride)
-    indices = device_global_indices + state_idx * region_stride + offsets
-    cached_slots = tl.load(indices, mask=valid, other=-1)
-    tl.store(indices, -1, mask=valid & (cached_slots == written_slot))
 
 
 @dataclass(frozen=True)
@@ -263,6 +242,7 @@ def _has_hisparse_ops() -> bool:
         return False
     return (
         hasattr(torch.ops._C_cache_ops, "hisparse_swap_in")
+        and hasattr(torch.ops._C_cache_ops, "hisparse_invalidate_written_slots")
         and hasattr(torch.ops._C_cache_ops, "hisparse_gather_plan")
         and hasattr(torch.ops._C_cache_ops, "hisparse_gather_compact")
         and hasattr(torch.ops._C_cache_ops, "hisparse_backup")
@@ -521,13 +501,11 @@ class HiSparseRuntime:
         if num_tokens == 0:
             return
         assert self.request_state_indices is not None
-        _invalidate_written_slots_kernel[(num_tokens,)](
+        torch.ops._C_cache_ops.hisparse_invalidate_written_slots(
             self.index_group.device_global_indices,
             self.request_state_indices,
-            req_id_per_token,
-            written_slots,
-            region_stride=self.region_stride,
-            BLOCK_SIZE=triton.next_power_of_2(self.region_stride),
+            req_id_per_token[:num_tokens],
+            written_slots[:num_tokens],
         )
 
     def backup_rows(

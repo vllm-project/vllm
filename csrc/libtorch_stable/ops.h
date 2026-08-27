@@ -648,6 +648,12 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& resident_block_table,
     int64_t resident_block_size, int64_t resident_null_block);
 
+void hisparse_invalidate_written_slots(
+    torch::stable::Tensor& device_global_indices,
+    torch::stable::Tensor const& request_state_indices,
+    torch::stable::Tensor const& req_id_per_token,
+    torch::stable::Tensor const& written_slots);
+
 void hisparse_gather_plan(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& global_indices,
