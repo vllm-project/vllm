@@ -31,8 +31,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    MooncakeLookupResult,
     PoolKey,
     ReqMeta,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -150,6 +152,7 @@ def _make_load_req(
     *,
     token_len: int,
     vllm_cached_tokens: int = 0,
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = (),
 ) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
@@ -161,6 +164,7 @@ def _make_load_req(
             kvpool_cached_tokens=token_len,
             can_load=True,
             token_len=token_len,
+            tail_key_boundaries=tail_key_boundaries,
         ),
     )
 
@@ -305,15 +309,16 @@ def _patch_worker_runtime(
     local_ip: str = "10.0.0.7",
     tp_rank: int = 0,
     tp_size: int = 1,
+    pcp_size: int = 1,
     dcp_size: int = 1,
 ) -> None:
-    single_rank_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    pcp_group = SimpleNamespace(world_size=pcp_size, rank_in_group=0)
     # DCP groups are contiguous splits of the TP group (see
     # parallel_state.py), so dcp_rank == tp_rank % dcp_size.
     dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=tp_rank % dcp_size)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_rank", lambda: tp_rank)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_world_size", lambda: tp_size)
-    monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
+    monkeypatch.setattr(worker, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
@@ -447,6 +452,49 @@ def test_store_sending_thread_records_mooncake_metrics():
     assert len(stats.data["save_put"]) == 1
     assert stats.data["save_put"][0]["num_bytes"] == 512
     assert stats.data["save_put"][0]["status"] == "ok"
+
+
+def test_store_sending_thread_splits_large_put_into_bounded_waves(monkeypatch):
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.side_effect = [[256], [256]]
+    thread = _make_store_sending_thread(store)
+    monkeypatch.setattr(worker, "_MOONCAKE_SAVE_BATCH_BYTES", 300)
+
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 2
+    put_keys = [
+        call.args[0] for call in store.batch_put_from_multi_buffers.call_args_list
+    ]
+    assert put_keys == [
+        ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130"],
+        ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131"],
+    ]
+
+
+def test_store_sending_thread_emits_events_for_successful_waves_on_retry(
+    monkeypatch,
+):
+    store = MagicMock()
+    store.batch_is_exist.side_effect = [[0, 0], [1, 0]]
+    store.batch_put_from_multi_buffers.side_effect = [[256], [-200], [256]]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+    monkeypatch.setattr(worker, "_MOONCAKE_SAVE_BATCH_BYTES", 300)
+
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+    first_event = thread.get_kv_events()[0]
+
+    assert first_event.block_hashes == [maybe_convert_block_hash(BlockHash(b"a0"))]
+    assert first_event.parent_block_hash is None
+
+    thread._clear_store_pressure()
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+    second_event = thread.get_kv_events()[0]
+
+    assert second_event.block_hashes == [maybe_convert_block_hash(BlockHash(b"a1"))]
+    assert second_event.parent_block_hash == maybe_convert_block_hash(BlockHash(b"a0"))
 
 
 def test_process_tokens_uses_mask_num_as_start_chunk():
@@ -642,10 +690,15 @@ def _make_partial_tail_send_thread(
     enable_group_semantics=False,
     supports_group_ids=False,
 ):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     coord = SimpleNamespace(
         enable_partial_hash_hits=True,
         hash_block_size=4,
         lcm_block_size=16,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+        eagle_group_ids=set(),
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -673,6 +726,93 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
         can_save=True,
         partial_tail_offloads=[(1, 7, 12)],
     )
+
+
+def test_partial_tail_waits_for_durable_mamba_source():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    def put_sizes(keys, addrs, sizes, config):
+        return [sum(size) for size in sizes]
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = put_sizes
+
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+    full_db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+        hash_block_size=4,
+    )
+    full_db.set_kv_caches_base_addr([0x1000])
+    full_db.set_block_len([256])
+    mamba_db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+        hash_block_size=4,
+    )
+    mamba_db.set_kv_caches_base_addr([0x2000])
+    mamba_db.set_block_len([512])
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[full_db, mamba_db],
+    )
+    block_hashes = [b"a0", b"a1", b"a2"]
+
+    # Step A exposes the append-only full-attention block before Mamba has
+    # created its durable CoW source. Nothing may be stored under the shared
+    # boundary key yet, because the live Mamba block remains writable.
+    assert thread._maybe_offload_partial_tail(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=0,
+            block_ids=([1], [2]),
+            block_hashes=block_hashes,
+            can_save=True,
+            partial_tail_offloads=[(0, 1, 12)],
+        )
+    )
+    store.batch_is_exist.assert_not_called()
+    store.batch_put_from_multi_buffers.assert_not_called()
+
+    # Step B supplies Mamba's CoW target. The full-attention request block is
+    # append-only and safe to read, while Mamba must use the explicit CoW block.
+    assert thread._maybe_offload_partial_tail(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=0,
+            block_ids=([1], [2]),
+            block_hashes=block_hashes,
+            can_save=True,
+            partial_tail_offloads=[(1, 7, 12)],
+        )
+    )
+
+    keys, addrs, _sizes, _config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6132",
+    ]
+    assert addrs == [[0x1000 + 256], [0x2000 + 7 * 512]]
 
 
 def test_partial_tail_offload_skips_null_source_blocks():
@@ -756,6 +896,24 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
     assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
 
 
+def test_partial_tail_offload_allows_single_key_larger_than_batch_target(
+    monkeypatch,
+):
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = [[256], [256], [256]]
+    thread = _make_partial_tail_send_thread(store)
+    monkeypatch.setattr(worker, "_MOONCAKE_SAVE_BATCH_BYTES", 128)
+
+    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([1, 2, 3]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 3
+    assert all(
+        len(call.args[0]) == 1
+        for call in store.batch_put_from_multi_buffers.call_args_list
+    )
+
+
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
     store = MagicMock()
     store.batch_is_exist.return_value = [1, 0, 0]
@@ -782,6 +940,53 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
     ]
 
 
+def test_eagle_partial_tail_marker_does_not_alias_complete_block_data():
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 1]
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    coord = SimpleNamespace(
+        enable_partial_hash_hits=True,
+        hash_block_size=4,
+        lcm_block_size=16,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+        eagle_group_ids={0},
+    )
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        block_size=16,
+        hash_block_size=4,
+    )
+    db.set_kv_caches_base_addr([0x1000])
+    db.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db],
+        block_size=16,
+    )
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2],),
+        block_hashes=[b"a0", b"a1", b"a2", b"a3", b"a4"],
+        can_save=True,
+        partial_tail_offloads=[(0, 2, 20)],
+    )
+
+    assert thread._maybe_offload_partial_tail(req)
+
+    keys, addrs, sizes, _config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6133",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6134",
+    ]
+    assert addrs == [[0x1000 + 256], [0x1000 + 2 * 256]]
+    assert sizes == [[256], [1]]
+
+
 def test_partial_tail_offload_honors_active_pressure_gate():
     store = MagicMock()
     thread = _make_partial_tail_send_thread(store)
@@ -797,7 +1002,11 @@ def test_partial_tail_offload_honors_active_pressure_gate():
 def test_partial_tail_put_failure_activates_pressure_gate():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
+    # One status per key, all reporting store pressure, so the retries are
+    # exhausted and the gate closes.
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a, **k: (
+        [worker.MOONCAKE_NO_AVAILABLE_HANDLE] * len(keys)
+    )
     thread = _make_partial_tail_send_thread(store)
 
     _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
@@ -806,8 +1015,52 @@ def test_partial_tail_put_failure_activates_pressure_gate():
     assert thread._skip_store_requests == {"req-a"}
     assert thread._saved_offset.get("req-a", 0) == 0
 
+    calls_after_first = store.batch_put_from_multi_buffers.call_count
+    assert calls_after_first == worker._MOONCAKE_SAVE_PRESSURE_RETRIES + 1
+
+    # The gate keeps the next job off the store entirely.
     _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    assert store.batch_put_from_multi_buffers.call_count == calls_after_first
+
+
+def test_partial_tail_put_rejects_mismatched_status_count():
+    """A response that is not one status per key cannot be read positionally.
+
+    Without this the pressure retry narrows the batch to the failed keys and
+    then indexes the next response by the same positions, which raises
+    IndexError inside the KV send thread.
+    """
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    # One status too many for the wave, on the very first put.
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a, **k: (
+        [256] * (len(keys) + 1)
+    )
+    thread = _make_partial_tail_send_thread(store)
+
+    req = _make_partial_tail_req([1, 2, 3])
+    assert thread._maybe_offload_partial_tail(req) is False
     assert store.batch_put_from_multi_buffers.call_count == 1
+    assert thread._store_pressure_active is False
+
+
+def test_partial_tail_pressure_retry_survives_mismatched_status_count():
+    """The retry narrows the batch, so a stale-length response must not index
+    past it."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    # Length matches the first wave, then stays stale after the retry narrows
+    # the batch to the single failed key.
+    store.batch_put_from_multi_buffers.return_value = [
+        256,
+        worker.MOONCAKE_NO_AVAILABLE_HANDLE,
+        256,
+    ]
+    thread = _make_partial_tail_send_thread(store)
+
+    req = _make_partial_tail_req([1, 2, 3])
+    assert thread._maybe_offload_partial_tail(req) is False
+    assert store.batch_put_from_multi_buffers.call_count == 2
 
 
 def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
@@ -1433,6 +1686,29 @@ def test_recv_thread_uses_single_batch_when_no_disk_offload_budget(monkeypatch):
     store.batch_get_replica_desc.assert_not_called()
 
 
+def test_recv_thread_keys_chunk_by_lookup_selected_boundary():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, 256]
+    thread = _make_store_recving_thread(store)
+
+    # 32-token hit over 16-token chunks: chunk 1 would default to the hash at
+    # the 32-token boundary (a1); the lookup matched the 48-token one (a2).
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=32,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=48),),
+    )
+
+    thread._handle_request(req)
+
+    keys = store.batch_get_into_multi_buffers.call_args.args[0]
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+    ]
+
+
 def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_TIER_LOG", "1")
     caplog_vllm.set_level(logging.INFO, logger=worker.logger.name)
@@ -1591,7 +1867,54 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 1
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+
+
+def test_recv_thread_invalidates_unattempted_blocks_after_rotated_failure():
+    store = MagicMock()
+    # tp_rank=2 rotates [block0, block1, block2] to [block2, block0, block1].
+    # The first two-key batch loads block0 but fails block2; block1 is never
+    # attempted and must also be invalidated.
+    store.batch_get_into_multi_buffers.return_value = [-10, 256]
+    thread = _make_store_recving_thread(
+        store,
+        tp_rank=2,
+        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+    )
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=48,
+    )
+
+    thread._handle_request(req)
+
+    assert store.batch_get_into_multi_buffers.call_count == 1
+    assert store.batch_get_into_multi_buffers.call_args.args[0] == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+    ]
+    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2}
+
+
+def test_recv_thread_invalidates_unattempted_blocks_after_split_exception():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = RuntimeError("boom")
+    thread = _make_store_recving_thread(
+        store,
+        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+    )
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=48,
+    )
+
+    thread._handle_request(req)
+
+    assert store.batch_get_into_multi_buffers.call_count == 1
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():
@@ -2072,8 +2395,8 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = (
-        lambda keys, addrs, sizes, *_args: ([256] * len(keys))
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *_args: (
+        [256] * len(keys)
     )
 
     full_spec = FullAttentionSpec(
@@ -2668,12 +2991,12 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     # 33 tokens for two 16-token blocks: the hit stops below the request end,
     # so the full-hit re-derivation stays out of the shard accounting.
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(33, [b"h0", b"h1"]) == 32
+    assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(33, [b"h0", b"h1"]) == 0
+    assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 0
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
@@ -2684,7 +3007,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
 
-    assert worker.lookup(16, [b"a0"]) == 0
+    assert worker.lookup(16, [b"a0"]).hit_length == 0
     assert worker.store.batch_is_exist.call_args.args[0] == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
@@ -2696,7 +3019,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]
-    assert worker.lookup(48, [b"a0", b"a1", b"a2"]) == 32
+    assert worker.lookup(48, [b"a0", b"a1", b"a2"]).hit_length == 32
 
 
 def test_lookup_partial_tail_uses_hash_alignment():
@@ -2736,7 +3059,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
 
-    assert worker.lookup(13, [b"h0", b"h1", b"h2"]) == 12
+    assert worker.lookup(13, [b"h0", b"h1", b"h2"]).hit_length == 12
 
 
 def test_lookup_full_hit_reuses_existing_boundary():
@@ -2744,7 +3067,10 @@ def test_lookup_full_hit_reuses_existing_boundary():
     worker = _make_bare_worker(block_size=16)
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    assert worker.lookup(32, [b"h0", b"h1"]) == 16
+    assert worker.lookup(32, [b"h0", b"h1"]) == MooncakeLookupResult(
+        hit_length=16,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=16),),
+    )
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2765,8 +3091,142 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
     # gives 48; a spurious re-derivation (anchored at 48) would pop again
     # and return 32.
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 48
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 48
     assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        use_eagle=True,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(6)]
+    present = {
+        (0, bytes(hashes[3])),
+        (0, bytes(hashes[5])),
+        (1, bytes(hashes[4])),
+        # A later Mamba state also exists, but its exact hit-boundary hash
+        # must win and therefore needs no override.
+        (1, bytes(hashes[5])),
+    }
+
+    def exists(keys):
+        return [
+            int(
+                any(
+                    f"@group:{group_id}@{block_hash.hex()}" in key
+                    for group_id, block_hash in present
+                )
+            )
+            for key in keys
+        ]
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    result = worker.lookup(25, hashes)
+
+    # The eagle drop trims the hit to 20 tokens, but the block that survives
+    # truncation is the one keyed at the 24-token boundary (hashes[5]), which
+    # the load path cannot derive from hit_length.
+    assert result.hit_length == 20
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=24),
+        TailKeyBoundary(group_id=1, num_tokens=20),
+    )
+
+
+def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(12)]
+    present = {
+        (0, bytes(hashes[3])),
+        (0, bytes(hashes[7])),
+        (0, bytes(hashes[11])),
+        (1, bytes(hashes[4])),
+    }
+
+    def exists(keys):
+        return [
+            int(
+                any(
+                    f"@group:{group_id}@{block_hash.hex()}" in key
+                    for group_id, block_hash in present
+                )
+            )
+            for key in keys
+        ]
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    result = worker.lookup(49, hashes)
+
+    assert result.hit_length == 20
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=32),
+        TailKeyBoundary(group_id=1, num_tokens=20),
+    )
 
 
 def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
@@ -2790,7 +3250,7 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
 
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 0
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 0
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2811,7 +3271,7 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
         hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
-    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]) == 64
+    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 64
 
 
 def test_lookup_checks_all_potential_swa_hit_boundaries():
@@ -2865,7 +3325,7 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
         [f"h{i}".encode() for i in range(12)],
     )
 
-    assert result == 32
+    assert result.hit_length == 32
     keys = worker.store.batch_is_exist.call_args.args[0]
     assert len(keys) == 6
     swa_keys = [key for key in keys if "@group:1@" in key]
@@ -3008,6 +3468,18 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
         assert db.kv_caches_base_addr == [raw.data_ptr()]
         assert db.block_len == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+def test_register_kv_caches_refuses_unregistered_region():
+    """A region the engine cannot register would make every transfer touching
+    it fail while the engine still looked healthy, so startup must refuse."""
+    num_blocks = 10
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    worker.store.register_buffer.return_value = -600
+
+    tensor = torch.zeros(num_blocks, 64, dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="max_mr_size"):
+        _register_with_mocked_threads(worker, {"layer0": tensor})
 
 
 def test_register_kv_caches_separate_head_groups():
@@ -3385,7 +3857,7 @@ def test_lookup_records_mooncake_metrics():
     result = worker.lookup(33, [b"a0", b"a1"])
     stats = worker.get_kv_connector_stats()
 
-    assert result == 32
+    assert result.hit_length == 32
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2

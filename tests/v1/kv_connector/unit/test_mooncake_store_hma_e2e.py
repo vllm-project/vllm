@@ -254,10 +254,10 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     worker.store = store
 
     # Both groups stored all 4 blocks -> full hit.
-    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     # Exact-multiple prompt: the full hit is re-derived one block lower,
     # where both groups' stored blocks still cover the SWA window.
-    assert worker.lookup(num_tokens=64, block_hashes=hs) == 48
+    assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 48
 
     # Evict SWA's first two blocks (outside its window of 32 tokens = 2 blocks).
     swa_keys_outside_window = [
@@ -270,12 +270,12 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # SWA window=32 -> only last 2 blocks must be present in SWA group.
     # Full has all 4. Coordinator should still return 64.
-    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     # Exact-multiple prompt after eviction: the boundary one block lower
     # needs SWA block 1, which is gone — no usable stored boundary remains
     # (the pre-fix arithmetic clamp would have returned 48 and livelocked
     # on load failure -> recompute -> same lookup).
-    assert worker.lookup(num_tokens=64, block_hashes=hs) == 0
+    assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 0
 
 
 def test_recv_skips_swa_blocks_before_window():
@@ -433,8 +433,23 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     # The surrounding metadata may describe a longer resumed replay, but the
     # handoff identifies the exact state boundary to persist.
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    # DCP can expose the append-only full-attention boundary one step before
+    # Mamba creates its CoW block. That first handoff must not store anything
+    # under the shared boundary hash from Mamba's still-mutable request block.
+    step_a = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=20,
+        partial_tail_offloads=[(0, 1, 12)],
+    )
+    assert send._maybe_offload_partial_tail(step_a)
+    assert store.puts == {}
+
     mamba_cow_block = 7
-    req = ReqMeta(
+    step_b = ReqMeta(
         req_id="r0",
         token_len_chunk=0,
         block_ids=([1], [2]),
@@ -444,7 +459,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         partial_tail_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    assert send._maybe_offload_partial_tail(step_b)
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]

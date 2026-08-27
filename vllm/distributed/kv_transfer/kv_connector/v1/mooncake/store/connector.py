@@ -93,12 +93,22 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def _validate_kv_cache_config(
         vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
     ) -> None:
-        from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+            unwrap_kv_cache_spec,
+        )
+        from vllm.v1.kv_cache_interface import (
+            CrossAttentionSpec,
+            FullAttentionSpec,
+            MambaSpec,
+        )
 
         unsupported: list[str] = []
         cache_block_size = vllm_config.cache_config.block_size
+        pcp = vllm_config.parallel_config.prefill_context_parallel_size
+        dcp = vllm_config.parallel_config.decode_context_parallel_size
+        is_hybrid = len(kv_cache_config.kv_cache_groups) > 1
         for g_idx, g in enumerate(kv_cache_config.kv_cache_groups):
-            spec = g.kv_cache_spec
+            spec = unwrap_kv_cache_spec(g.kv_cache_spec)
             if isinstance(spec, CrossAttentionSpec):
                 unsupported.append(f"group {g_idx}: CrossAttentionSpec")
             # Enforce Mamba align mode
@@ -108,12 +118,16 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     f"{spec.block_size} != cache_config.block_size="
                     f"{cache_block_size} (mamba_cache_mode != 'align')"
                 )
-        pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
-            unsupported.append(
-                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
-            )
+            # DCP only shards full attention and replicates Mamba; no other
+            # spec has DCP-aware external block geometry.
+            if (
+                is_hybrid
+                and dcp > 1
+                and not isinstance(spec, (FullAttentionSpec, MambaSpec))
+            ):
+                unsupported.append(f"group {g_idx}: {type(spec).__name__} with DCP > 1")
+        if is_hybrid and pcp > 1:
+            unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
                 "MooncakeStoreConnector does not support: " + "; ".join(unsupported)

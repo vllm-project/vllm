@@ -5,6 +5,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import torch
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -19,7 +21,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -29,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -69,6 +74,32 @@ def _make_block_stored() -> BlockStored:
         lora_id=None,
         medium="cpu",
         lora_name=None,
+    )
+
+
+def test_validate_accepts_dcp_hybrid_full_attention_and_mamba():
+    vllm_config = MagicMock()
+    vllm_config.cache_config.block_size = 1536
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    vllm_config.parallel_config.decode_context_parallel_size = 8
+    full_spec = FullAttentionSpec(
+        block_size=192, num_kv_heads=8, head_size=64, dtype=None
+    )
+    mamba_spec = MambaSpec(
+        block_size=1536,
+        shapes=((2, 512), (3, 32, 32)),
+        dtypes=(torch.float32, torch.float32),
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    kv_cache_config = MagicMock()
+    kv_cache_config.kv_cache_groups = [
+        KVCacheGroupSpec(["attention"], full_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+
+    mooncake_store_connector.MooncakeStoreConnector._validate_kv_cache_config(
+        vllm_config, kv_cache_config
     )
 
 
@@ -359,7 +390,9 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
+    result = client.lookup("req0", num_tokens=128, block_hashes=[])
+    assert result is not None
+    assert result.hit_length == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -394,7 +427,7 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
     while time.monotonic() < deadline:
         result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
         if result is not None:
-            return result
+            return result.hit_length
         time.sleep(0.005)
     return None
 
@@ -502,11 +535,13 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
 
     # Lookup ready with a hit -> report need_to_allocate + async-load flag.
     hit = 3 * block_size
-    mock_client.lookup.return_value = hit
+    boundary = TailKeyBoundary(group_id=0, num_tokens=4 * block_size)
+    mock_client.lookup.return_value = MooncakeLookupResult(hit, (boundary,))
     need, load_async = sched.get_num_new_matched_tokens(request, 0)
     assert need == hit
     assert load_async == sched.load_async
     assert sched.load_specs["r1"].kvpool_cached_tokens == hit
+    assert sched.load_specs["r1"].tail_key_boundaries == (boundary,)
 
 
 def test_protocol_tags_are_distinct_and_non_empty():
@@ -517,6 +552,20 @@ def test_protocol_tags_are_distinct_and_non_empty():
         assert isinstance(tag, bytes)
         assert len(tag) > 0
     assert protocol.RESP_OK != protocol.RESP_ERR
+
+
+def test_lookup_response_round_trip_preserves_tail_keys():
+    result = MooncakeLookupResult(
+        hit_length=20,
+        tail_key_boundaries=(
+            TailKeyBoundary(group_id=0, num_tokens=24),
+            TailKeyBoundary(group_id=1, num_tokens=20),
+        ),
+    )
+
+    assert protocol.decode_lookup_response(protocol.encode_lookup_response(result)) == (
+        result
+    )
 
 
 def test_scheduler_reset_connector_cache_invokes_connector_reset():

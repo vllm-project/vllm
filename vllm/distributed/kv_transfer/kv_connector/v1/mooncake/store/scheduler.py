@@ -74,8 +74,11 @@ class MooncakeStoreScheduler:
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_config.kv_cache_groups, self._hash_block_size
+            kv_cache_config.kv_cache_groups,
+            self._hash_block_size,
+            dcp_world_size,
         )
 
         # Per-request state
@@ -114,15 +117,16 @@ class MooncakeStoreScheduler:
         if request.num_tokens < align:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(
+        lookup_result = self.client.lookup(
             request.request_id,
             request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
-        if num_external_hit_tokens is None:
+        if lookup_result is None:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
+        num_external_hit_tokens = lookup_result.hit_length
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -144,6 +148,7 @@ class MooncakeStoreScheduler:
             vllm_cached_tokens=num_computed_tokens,
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=False,
+            tail_key_boundaries=lookup_result.tail_key_boundaries,
         )
 
         return need_to_allocate, self.load_async
@@ -373,11 +378,12 @@ class MooncakeStoreScheduler:
                 if req_meta is not None:
                     meta.add_request(req_meta)
 
-        # Flush partial-tail offloads in the step they arrive: the CoW copy is
-        # enqueued before the connector event records, so this step's event
-        # fences the cow block. Ride the request's save meta when present, else
-        # emit an offload-only ReqMeta (token_len_chunk=0 skips the normal
-        # save; can_save=True takes the normal enqueue path).
+        # Flush partial-tail handoffs in the step they arrive. When a handoff
+        # references a CoW block, its copy is enqueued before the connector
+        # event records, so this step's event fences that block. Ride the
+        # request's save meta when present, else emit an offload-only ReqMeta
+        # (token_len_chunk=0 skips the normal save; can_save=True takes the
+        # normal enqueue path).
         step_partial_tails = getattr(scheduler_output, "partial_tail_offloads", None)
         if step_partial_tails and not is_consumer:
             pending = dict(step_partial_tails)

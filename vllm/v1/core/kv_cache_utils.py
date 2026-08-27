@@ -647,6 +647,33 @@ def hash_block_tokens(
     )
 
 
+def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
+    """Return the DCP size that owns this group's block geometry.
+
+    Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
+    hashing and manager ``block_size`` use the process DCP size. Other specs
+    keep replicated per-rank state (Mamba, sliding window, chunked-local) and
+    must keep ``dcp_world_size=1`` even when the process runs with DCP > 1.
+
+    Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
+    ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
+    draft group would need a different spec, not this helper.
+    """
+    if dcp_world_size <= 1:
+        return 1
+    inner = spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        inner = next(iter(spec.kv_cache_specs.values()))
+    if isinstance(inner, FullAttentionSpec):
+        return dcp_world_size
+    return 1
+
+
+def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
+    """Return the token span of a cache block under DCP."""
+    return spec.block_size * dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -674,10 +701,7 @@ def resolve_kv_cache_block_sizes(
         return bs, bs
 
     group_block_sizes = [
-        g.kv_cache_spec.block_size * dcp
-        if isinstance(g.kv_cache_spec, AttentionSpec)
-        else g.kv_cache_spec.block_size
-        for g in groups
+        resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups
     ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
