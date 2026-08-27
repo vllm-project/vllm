@@ -2121,11 +2121,16 @@ void fused_kda_chunk(
     STD_TORCH_CHECK(
         checkpoint_state->is_cuda() &&
             checkpoint_state->scalar_type() == ScalarType::Float &&
-            checkpoint_state->is_contiguous() && checkpoint_state->dim() == 4 &&
+            checkpoint_state->dim() == 4 &&
             checkpoint_state->size(1) == num_heads &&
-            checkpoint_state->size(2) == kV && checkpoint_state->size(3) == kK,
-        "checkpoint_state must be a contiguous fp32 [rows, H, 128, 128] "
-        "tensor");
+            checkpoint_state->size(2) == kV &&
+            checkpoint_state->size(3) == kK &&
+            checkpoint_state->stride(3) == 1 &&
+            checkpoint_state->stride(2) == kK &&
+            checkpoint_state->stride(1) == kV * kK,
+        "checkpoint_state must be an fp32 [rows, H, 128, 128] tensor whose "
+        "rows are dense; stride(0) may be padded, as the paged state cache "
+        "it usually is");
     STD_TORCH_CHECK(checkpoint_offsets->is_cuda() &&
                         checkpoint_offsets->is_contiguous() &&
                         checkpoint_offsets->scalar_type() == ScalarType::Int &&

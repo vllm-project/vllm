@@ -802,3 +802,58 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
     assert torch.equal(raw[idx.long(), row:], before[idx.long(), row:]), (
         "the kernel wrote into the inter-row padding"
     )
+
+
+def test_padded_checkpoint_stride_is_honoured() -> None:
+    """The checkpoint destination is the paged cache, which pads stride(0).
+
+    Every other checkpoint case here builds a contiguous buffer, so none of
+    them would catch a kernel that assumes a packed ``H * V * K`` row stride
+    and writes the snapshot into a neighbouring block.
+    """
+    _requires_kernel()
+    seqlens = [1024]
+    inp = _inputs(seqlens, seed=31)
+    row = NUM_HEADS * HEAD_DIM * HEAD_DIM
+    slots, pad = 16, 512
+    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=torch.float32)
+    cache = raw.as_strided(
+        (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
+        (row + pad, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
+    )
+    assert not cache.is_contiguous()
+
+    state_rows = [11]
+    idx = torch.tensor(state_rows, device="cuda", dtype=torch.int32)
+    warm = torch.ones(1, dtype=torch.bool, device="cuda")
+    cache[state_rows[0]] = inp["h0"][0]
+    ck_rows = [4]
+    before = raw.clone()
+
+    prefix = _prefix_inputs(inp, 0, 512)
+    _, ck_ref = _run(prefix, use_fused=True)
+    o_ref, ht_ref = _run(inp, use_fused=True)
+
+    o_got, _ = _run_paged(
+        inp,
+        cache,
+        idx,
+        warm,
+        use_fused=True,
+        checkpoint_state=cache,
+        checkpoint_offsets=torch.tensor([512], device="cuda", dtype=torch.int32),
+        checkpoint_state_indices=torch.tensor(
+            ck_rows, device="cuda", dtype=torch.int32
+        ),
+    )
+
+    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[ck_rows[0]], ck_ref[0], rtol=5e-3, atol=5e-3)
+
+    touched = torch.zeros(slots, dtype=torch.bool, device="cuda")
+    touched[state_rows + ck_rows] = True
+    assert torch.equal(raw[~touched], before[~touched])
+    assert torch.equal(raw[touched, row:], before[touched, row:]), (
+        "the kernel wrote into the inter-row padding"
+    )
