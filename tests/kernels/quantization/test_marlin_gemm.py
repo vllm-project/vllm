@@ -524,6 +524,74 @@ def test_marlin_gemm(
     assert max_diff < 0.04
 
 
+SMALL_M_WAVE_SHAPES = [
+    # b_type, group_size, size_k, size_n -- decode-shaped GEMMs whose
+    # n-slice count exceeds one wave of thread blocks (n / thread_n > sms),
+    # traversing the small-M two-blocks-per-SM launch on CC >= 10.0.
+    (scalar_types.float8_e4m3fn, -1, 2688, 10304),
+    (scalar_types.float4_e2m1f, 16, 2688, 32768),
+]
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("b_type_gs_k_n", SMALL_M_WAVE_SHAPES)
+@pytest.mark.parametrize("size_m", [1, 3, 4, 8])
+@pytest.mark.parametrize("use_fp32_reduce", [True, False])
+@pytest.mark.parametrize("workspace_blocks_per_sm", [1, 2])
+def test_marlin_gemm_small_m_wave_quantization(
+    b_type_gs_k_n, size_m, use_fp32_reduce, workspace_blocks_per_sm
+):
+    """Small-M correctness on shapes eligible for the two-wave boost.
+
+    workspace_blocks_per_sm=1 pins the pre-existing single-wave launch
+    (the boost fails closed on a one-wave workspace), so both grid
+    layouts of the same GEMM are checked against the reference.
+    """
+    b_type, group_size, size_k, size_n = b_type_gs_k_n
+
+    a_input = rand_data((size_m, size_k), dtype=torch.bfloat16)
+    b_weight = rand_data((size_k, size_n), dtype=torch.bfloat16)
+
+    if b_type == scalar_types.float4_e2m1f:
+        w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_nvfp4_like(
+            b_weight.T, group_size
+        )
+    else:
+        w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(b_weight.T, group_size)
+        marlin_s2 = None
+
+    workspace = marlin_make_workspace_new(w_ref.device, workspace_blocks_per_sm)
+
+    output = ops.marlin_gemm(
+        a_input,
+        None,
+        marlin_q_w,
+        None,
+        marlin_s,
+        None,
+        marlin_s2,
+        None,
+        None,
+        None,
+        workspace,
+        b_type,
+        size_m,
+        size_n,
+        size_k,
+        is_k_full=True,
+        use_atomic_add=False,
+        use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
+    )
+    output_ref = torch.matmul(a_input, w_ref)
+
+    max_diff = compute_max_diff(output, output_ref)
+    assert max_diff < 0.04
+
+
 def test_marlin_gemm_subset_input():
     quant_type = scalar_types.uint4b8
     group_size = 128
