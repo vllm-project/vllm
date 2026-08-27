@@ -41,9 +41,7 @@ logger = init_logger(__name__)
 
 
 def kda_attention(
-    q_proj_states: torch.Tensor,
-    k_proj_states: torch.Tensor,
-    v_proj_states: torch.Tensor,
+    qkv: torch.Tensor,
     g1: torch.Tensor,
     beta: torch.Tensor,
     core_attn_out: torch.Tensor,
@@ -52,9 +50,7 @@ def kda_attention(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self._forward(
-        q_proj_states=q_proj_states,
-        k_proj_states=k_proj_states,
-        v_proj_states=v_proj_states,
+        qkv=qkv,
         g1=g1,
         beta=beta,
         core_attn_out=core_attn_out,
@@ -62,9 +58,7 @@ def kda_attention(
 
 
 def kda_attention_fake(
-    q_proj_states: torch.Tensor,
-    k_proj_states: torch.Tensor,
-    v_proj_states: torch.Tensor,
+    qkv: torch.Tensor,
     g1: torch.Tensor,
     beta: torch.Tensor,
     core_attn_out: torch.Tensor,
@@ -240,6 +234,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         q = self.q_proj(hidden_states)[0]
         k = self.k_proj(hidden_states)[0]
         v = self.v_proj(hidden_states)[0]
+        qkv = torch.cat((q, k, v), dim=-1)
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid()
         g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
@@ -255,9 +250,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
         torch.ops.vllm.kda_attention(
-            q,
-            k,
-            v,
+            qkv,
             g1,
             beta,
             core_attn_out,
@@ -269,9 +262,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def _forward(
         self,
-        q_proj_states: torch.Tensor,
-        k_proj_states: torch.Tensor,
-        v_proj_states: torch.Tensor,
+        qkv: torch.Tensor,
         g1: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
@@ -294,9 +285,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
         constant_caches = self.kv_cache
 
-        q_proj_states = q_proj_states[:num_actual_tokens]
-        k_proj_states = k_proj_states[:num_actual_tokens]
-        v_proj_states = v_proj_states[:num_actual_tokens]
+        qkv = qkv[:num_actual_tokens]
+        q_proj_states, k_proj_states, v_proj_states = qkv.chunk(3, dim=-1)
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
