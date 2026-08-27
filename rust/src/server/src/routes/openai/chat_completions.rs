@@ -63,7 +63,8 @@ pub async fn chat_completions(
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
     let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
@@ -196,7 +197,6 @@ async fn collect_chat_completion(
         Some(prompt_logprobs_to_maps(
             prompt_logprobs.as_ref(),
             &prompt_token_ids,
-            return_tokens_as_token_ids,
         )?)
     } else {
         None

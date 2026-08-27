@@ -433,6 +433,7 @@ mod tests {
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
     use serde_json::json;
+    use validator::Validate;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
@@ -466,7 +467,7 @@ mod tests {
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
+            model: Some("Qwen/Qwen1.5-0.5B-Chat".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Text("hello".to_string()),
                 name: None,
@@ -474,6 +475,120 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn chat_http_request_defaults_missing_or_null_model() {
+        for model in [None, Some(serde_json::Value::Null)] {
+            let mut value = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+            });
+            if let Some(model) = model {
+                value
+                    .as_object_mut()
+                    .expect("request object")
+                    .insert("model".to_string(), model);
+            }
+
+            let request: ChatCompletionRequest =
+                serde_json::from_value(value).expect("parse request without model");
+            assert!(request.model.is_none());
+        }
+
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "model": "",
+        }))
+        .expect("parse empty model");
+        assert_eq!(request.model.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn prepare_chat_request_normalizes_top_k_sentinels() {
+        for (top_k, expected) in [
+            (serde_json::Value::Null, None),
+            (json!(-1), Some(0)),
+            (json!(0), Some(0)),
+            (json!(20), Some(20)),
+        ] {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+                "top_k": top_k,
+            }))
+            .expect("parse top_k");
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("prepare top_k");
+
+            assert_eq!(prepared.chat_request.sampling_params.top_k, expected);
+        }
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_zero_min_tokens() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "min_tokens": 0,
+        }))
+        .expect("parse zero min_tokens");
+        request.validate().expect("validate zero min_tokens");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare zero min_tokens");
+
+        assert_eq!(prepared.chat_request.sampling_params.min_tokens, Some(0));
+        assert_eq!(prepared.chat_request.decode_options.min_tokens, 0);
+    }
+
+    #[test]
+    fn prepare_chat_request_defaults_function_tool_fields() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"function": {"name": "lookup"}}],
+        }))
+        .expect("parse tool defaults");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare tool defaults");
+
+        assert_eq!(
+            prepared.chat_request.tools(),
+            &[VllmChatTool {
+                name: "lookup".to_string(),
+                description: None,
+                parameters: serde_json::Value::Null,
+                strict: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn chat_http_request_rejects_empty_cache_salt() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "cache_salt": "",
+        }))
+        .expect("parse cache_salt");
+
+        assert!(request.validate().is_err());
     }
 
     #[test]
@@ -506,7 +621,7 @@ mod tests {
     #[test]
     fn prepare_chat_request_passes_response_format_to_kimi_k3_renderer() {
         let mut request = base_request();
-        request.model = "moonshotai/Kimi-K3".to_string();
+        request.model = Some("moonshotai/Kimi-K3".to_string());
         let response_format = ResponseFormat::JsonSchema {
             json_schema: JsonSchemaFormat {
                 name: "answer".to_string(),
@@ -913,7 +1028,7 @@ mod tests {
     #[test]
     fn prepare_chat_request_accepts_audio_content_parts() {
         let request = ChatCompletionRequest {
-            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
+            model: Some("Qwen/Qwen3-ASR-1.7B".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![
                     ContentPart::InputAudio {
