@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from dataclasses import dataclass
 from typing import cast
 
@@ -58,6 +59,36 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
+
+
+def apply_pre_quantized_block_scaled_mm(
+    linear: torch.nn.Module,
+    x_fp8: torch.Tensor,
+    x_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Block-scaled fp8 GEMM on pre-quantized activations.
+
+    The fused q/kv norm kernel writes fp8 qr + per-1x128 scales; this
+    drives the linear's block-scaled GEMM directly with them, bypassing
+    apply_weights which would re-quantize the fp8 input. Only valid for
+    the wq_b-style column/replicated linears: their output is the local
+    TP shard, so no all-reduce is needed.
+    """
+    from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+        FP8BlockParams,
+    )
+
+    params = FP8BlockParams.from_layer(linear)
+    weight_scale = (
+        params.weight_scale
+        if params.weight_scale_inv is None
+        else params.weight_scale_inv
+    )
+    kernel = linear.quant_method.fp8_linear
+    out = kernel.apply_block_scaled_mm(
+        A=x_fp8, B=params.weight, As=x_scale, Bs=weight_scale
+    )
+    return out.to(dtype=kernel.config.out_dtype)
 
 
 # ROCm sparse prefill keeps this dense combine local so AMD-specific SWA changes
@@ -620,6 +651,71 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
         indexer_weights, _ = indexer.weights_proj(hidden_states)
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
+
+    @functools.cached_property
+    def _wq_b_uses_aiter_block_scaled(self) -> bool:
+        """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
+
+        Cached: the linear kernels and the aiter env gates are fixed once
+        the model is built, so this is evaluated at the first forward
+        only.
+
+        The fused norm+quant path is only valid if the quant and GEMM it
+        replaces are exactly the aiter ones; otherwise fall back to the
+        shared path.
+        """
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.kernels.linear.scaled_mm import (
+            Fp8BlockScaledMMLinearKernel,
+        )
+
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return False
+
+        linears = [self.wq_b]
+        if self.indexer is not None:
+            linears.append(self.indexer.wq_b)
+        for linear in linears:
+            kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
+            if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
+                return False
+        return True
+
+    def _split_qkv_and_norm(
+        self, qr_kv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Fuse q/kv RMSNorm + per-1x128 fp8 q quant into one aiter kernel.
+
+        The shared path norms q and kv in one triton kernel and the wq_b
+        linears then re-read the bf16 qr to quantize it. The aiter kernel
+        computes both RMSNorms (fp32 accumulate) and the fp8 group quant
+        in a single pass, writing fp8 qr + group scales directly; both
+        wq_b GEMMs (attention and indexer) then consume that pair and
+        skip their own input quant. kv stays bf16: the fused insert
+        kernel RoPE/quantizes it itself. Falls back to the shared path
+        when the aiter linear path is not active.
+        """
+        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        if not (
+            qr.dim() == 2
+            and qr.shape[0] > 0
+            and self.q_lora_rank % 128 == 0
+            and self._wq_b_uses_aiter_block_scaled
+        ):
+            return super()._split_qkv_and_norm(qr_kv)
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return rocm_aiter_ops.fused_qk_rmsnorm_group_quant(
+            q=qr,
+            q_weight=self.q_norm.weight.data,
+            q_epsilon=self.eps,
+            kv=kv,
+            kv_weight=self.kv_norm.weight.data,
+            kv_epsilon=self.eps,
+            group_size=128,
+            transpose_scale=False,
+        )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
