@@ -14,9 +14,9 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StreamResponseEnvelope, StringOrArray,
-    Tool, ToolCall, ToolCallDelta, ToolChoice, UNKNOWN_MODEL_ID, Usage, default_true,
-    validate_messages, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope,
+    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage, default_true,
+    deserialize_request_top_k, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -34,8 +34,7 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
 
     /// ID of the model to use
-    #[serde(default = "default_model")]
-    pub model: String,
+    pub model: Option<String>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
     /// on their existing frequency in the text so far
@@ -121,6 +120,7 @@ pub struct ChatCompletionRequest {
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
@@ -146,7 +146,6 @@ pub struct ChatCompletionRequest {
     pub ignore_eos: bool,
 
     /// Minimum number of tokens to generate
-    #[validate(range(min = 1))]
     pub min_tokens: Option<u32>,
 
     /// Skip special tokens during detokenization
@@ -234,6 +233,7 @@ pub struct ChatCompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
+    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving
@@ -255,7 +255,7 @@ impl Default for ChatCompletionRequest {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            model: default_model(),
+            model: None,
             frequency_penalty: None,
             logit_bias: None,
             logprobs: false,
@@ -342,7 +342,7 @@ pub(super) struct ChatCompletionResponse {
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -423,10 +423,6 @@ pub(super) struct ChatMessageDelta {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning: Option<String>,
-}
-
-fn default_model() -> String {
-    UNKNOWN_MODEL_ID.to_string()
 }
 
 /// Schema-level validation for cross-field dependencies
