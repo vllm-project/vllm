@@ -342,9 +342,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            _run_flashinfer_autotune_dummy_runs(
-                runner, skip_attn=hisparse_enabled
-            )
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
     finally:
         set_autotune_process_group(None)
 
