@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM103/SM100 selectors."""
+"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM90/SM100/SM103 selectors."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +39,7 @@ EXPECTED_SELECTIONS = {
     (7168, 8448): (set(range(1, 4)), set()),
     (8448, 7168): ({1, 2}, set()),
     (16896, 7168): ({1, 2}, set()),
+    (7168, 14336): ({1, 2}, set()),
     (20480, 7168): (set(range(1, 5)), set()),
     (40960, 7168): (set(range(1, 5)), set()),
     # TP16.
@@ -51,9 +52,16 @@ EXPECTED_SELECTIONS = {
     (10240, 7168): (set(range(1, 5)), set()),
 }
 
+K3ProjectionTable = dict[tuple[int, int], k3_gemm.ProjectionSpec]
+K3_GPU_TABLES = (
+    ((10, 3), k3_gemm.KIMI_K3_PROJECTIONS),
+    ((9, 0), k3_gemm.KIMI_K3_PROJECTIONS_SM90),
+)
+
 CUTE_CASES = [
-    (spec.n, spec.k, num_tokens)
-    for spec in k3_gemm.KIMI_K3_PROJECTIONS.values()
+    (capability, spec.n, spec.k, num_tokens)
+    for capability, table in K3_GPU_TABLES
+    for spec in table.values()
     for num_tokens, _ in spec.cute_configs
 ]
 
@@ -96,6 +104,8 @@ EXPECTED_CUTE_CONFIGS = {
     (8448, 7168, 2): (32, 4, 4, 8),
     (16896, 7168, 1): (224, 6, 4, 8),
     (16896, 7168, 2): (32, 4, 4, 8),
+    (7168, 14336, 1): (256, 2, 1, 4),
+    (7168, 14336, 2): (224, 4, 2, 8),
     (20480, 7168, 1): (224, 4, 2, 8),
     (20480, 7168, 2): (64, 4, 2, 8),
     (20480, 7168, 3): (64, 2, 2, 8),
@@ -183,6 +193,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
     specs = [
         *KIMI_K3_PROJECTIONS.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM100.values(),
+        *k3_gemm.KIMI_K3_PROJECTIONS_SM90.values(),
         glm52_gemm.GLM52_QKV_A_PROJECTION,
         glm52_gemm.GLM52_Q_B_PROJECTION,
     ]
@@ -218,7 +229,12 @@ def test_cute_configs_match_measured_table() -> None:
         for n, k, num_tokens, config in configs
     }
     assert actual == EXPECTED_CUTE_CONFIGS
-    assert all(config.static_k is None for *_, config in configs)
+    static_k_configs = {
+        (n, k, num_tokens, config.static_k)
+        for n, k, num_tokens, config in configs
+        if config.static_k is not None
+    }
+    assert static_k_configs == {(7168, 14336, 1, 14336)}
 
 
 def test_residual_cute_configs_match_measured_table() -> None:
@@ -440,8 +456,12 @@ EXPECTED_SELECTIONS_SM100 = {
 }
 
 
-def test_sm100_table_is_keyed_by_shape() -> None:
-    for (n, k), spec in k3_gemm.KIMI_K3_PROJECTIONS_SM100.items():
+@pytest.mark.parametrize(
+    "table",
+    [k3_gemm.KIMI_K3_PROJECTIONS_SM100, k3_gemm.KIMI_K3_PROJECTIONS_SM90],
+)
+def test_device_table_is_keyed_by_shape(table: K3ProjectionTable) -> None:
+    for (n, k), spec in table.items():
         assert (spec.n, spec.k) == (n, k)
 
 
@@ -460,8 +480,12 @@ def test_sm100_selector_table(key: tuple[int, int]) -> None:
             assert backend is None
 
 
-def test_sm100_build_plan_matches_table() -> None:
-    for spec in k3_gemm.KIMI_K3_PROJECTIONS_SM100.values():
+@pytest.mark.parametrize(
+    "table",
+    [k3_gemm.KIMI_K3_PROJECTIONS_SM100, k3_gemm.KIMI_K3_PROJECTIONS_SM90],
+)
+def test_device_build_plan_matches_table(table: K3ProjectionTable) -> None:
+    for spec in table.values():
         plan = k3_gemm._build_plan(spec)
         for num_tokens in range(1, 17):
             backend = k3_gemm._backend_for(spec, num_tokens, has_residual=False)
@@ -469,6 +493,12 @@ def test_sm100_build_plan_matches_table() -> None:
                 assert num_tokens not in plan
             else:
                 assert plan[num_tokens][0] == backend
+
+
+def test_sm90_table_covers_measured_points() -> None:
+    specs = k3_gemm.KIMI_K3_PROJECTIONS_SM90.values()
+    assert len(k3_gemm.KIMI_K3_PROJECTIONS_SM90) == 18
+    assert sum(len(spec.cute_configs) + len(spec.dsv3_tokens) for spec in specs) == 90
 
 
 def test_low_latency_table_capability_routing(
@@ -484,6 +514,13 @@ def test_low_latency_table_capability_routing(
         lambda cc: cc == (10, 0),
     )
     assert k3_gemm._low_latency_table() is k3_gemm.KIMI_K3_PROJECTIONS_SM100
+
+    monkeypatch.setattr(
+        k3_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == (9, 0),
+    )
+    assert k3_gemm._low_latency_table() is k3_gemm.KIMI_K3_PROJECTIONS_SM90
 
     monkeypatch.setattr(
         k3_gemm.current_platform, "is_device_capability", lambda cc: False
@@ -591,18 +628,32 @@ def test_installation_requires_bf16_sm103(
     assert type(root.projection.quant_method) is k3_gemm.UnquantizedLinearMethod
 
 
-def _require_sm103_and_dsv3() -> None:
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
-        pytest.skip("Kimi-K3 production selection requires SM103")
+def _require_capability_and_dsv3(capability: tuple[int, int]) -> None:
+    if (
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() != capability
+    ):
+        pytest.skip(f"Kimi-K3 selection requires SM{capability[0]}{capability[1]}")
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         pytest.skip("dsv3_fused_a_gemm was not built")
 
 
-def _require_sm103_and_cute() -> None:
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
-        pytest.skip("Kimi-K3 production selection requires SM103")
+def _require_capability_and_cute(capability: tuple[int, int]) -> None:
+    if (
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() != capability
+    ):
+        pytest.skip(f"Kimi-K3 selection requires SM{capability[0]}{capability[1]}")
     if not k3_gemm.shape_dynamic_skinny_gemm.is_available():
         pytest.skip("CuTe DSL is not available")
+
+
+def _require_sm103_and_dsv3() -> None:
+    _require_capability_and_dsv3((10, 3))
+
+
+def _require_sm103_and_cute() -> None:
+    _require_capability_and_cute((10, 3))
 
 
 @pytest.mark.parametrize("spec,config", GLM_CUTE_CASES)
@@ -675,9 +726,11 @@ def test_glm_cute_selected_shapes_cuda_graph_capture(
     torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
 
 
-@pytest.mark.parametrize("n,k,num_tokens", CUTE_CASES)
-def test_cute_selected_shapes(n: int, k: int, num_tokens: int) -> None:
-    _require_sm103_and_cute()
+@pytest.mark.parametrize("capability,n,k,num_tokens", CUTE_CASES)
+def test_cute_selected_shapes(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
+) -> None:
+    _require_capability_and_cute(capability)
     torch.manual_seed(42)
     x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
@@ -702,8 +755,9 @@ def _dsv3_probe_tokens(tokens: frozenset[int]) -> set[int]:
 # Derived from the table rather than hand-listed, so a shape routed to dsv3
 # cannot be added without being exercised here.
 DSV3_CASES = sorted(
-    (num_tokens, spec.n, spec.k)
-    for spec in KIMI_K3_PROJECTIONS.values()
+    (capability, num_tokens, spec.n, spec.k)
+    for capability, table in K3_GPU_TABLES
+    for spec in table.values()
     for num_tokens in _dsv3_probe_tokens(spec.dsv3_tokens)
 )
 
@@ -717,11 +771,11 @@ GLM_DSV3_CASES = [
 ]
 
 
-@pytest.mark.parametrize("num_tokens,n,k", DSV3_CASES)
-def test_dsv3_selected_shapes(num_tokens: int, n: int, k: int) -> None:
-    _require_sm103_and_dsv3()
-    spec = k3_gemm.KIMI_K3_PROJECTIONS[(n, k)]
-    assert num_tokens in spec.dsv3_tokens
+@pytest.mark.parametrize("capability,num_tokens,n,k", DSV3_CASES)
+def test_dsv3_selected_shapes(
+    capability: tuple[int, int], num_tokens: int, n: int, k: int
+) -> None:
+    _require_capability_and_dsv3(capability)
     torch.manual_seed(42)
     x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
@@ -776,11 +830,14 @@ def test_nonpacked_single_token_dsv3_falls_back() -> None:
     torch.testing.assert_close(output, reference)
 
 
-def test_selected_kernels_cuda_graph_capture() -> None:
-    _require_sm103_and_cute()
-    _require_sm103_and_dsv3()
-    cute_spec = k3_gemm.KIMI_K3_PROJECTIONS[(6288, 7168)]
-    dsv3_spec = k3_gemm.KIMI_K3_PROJECTIONS[(1536, 128)]
+@pytest.mark.parametrize("capability,table", K3_GPU_TABLES)
+def test_selected_kernels_cuda_graph_capture(
+    capability: tuple[int, int], table: K3ProjectionTable
+) -> None:
+    _require_capability_and_cute(capability)
+    _require_capability_and_dsv3(capability)
+    cute_spec = table[(6288, 7168)]
+    dsv3_spec = table[(1536, 128)]
     cute_x = torch.randn(1, cute_spec.k, dtype=torch.bfloat16, device="cuda")
     cute_weight = torch.randn(
         cute_spec.n, cute_spec.k, dtype=torch.bfloat16, device="cuda"
