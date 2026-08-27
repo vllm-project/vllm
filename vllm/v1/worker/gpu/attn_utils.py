@@ -20,6 +20,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     allocate_pinned_host_pool,
     check_hisparse_host_memory,
+    release_pinned_state,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -292,6 +293,25 @@ def _get_hisparse_cache(
     hisparse_cache = attention_layer.hisparse_cache
     assert hisparse_cache is not None
     return hisparse_cache
+
+
+def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
+    runtimes = {
+        id(cache.runtime): cache.runtime
+        for layer in forward_context.values()
+        if (cache := getattr(layer, "hisparse_cache", None)) is not None
+        and hasattr(cache.runtime, "_host_cache")
+    }
+    if not runtimes:
+        return
+
+    registered_pools = list(
+        {
+            runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
+            for runtime in runtimes.values()
+        }.values()
+    )
+    release_pinned_state(list(runtimes.values()), registered_pools)
 
 
 def _bind_hisparse_kv_caches(
