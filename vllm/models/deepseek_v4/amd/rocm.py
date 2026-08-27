@@ -11,6 +11,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -19,6 +20,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -34,6 +36,21 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
+
+logger = init_logger(__name__)
+
+
+def _trust_dsv4_extra_cache_nan_free(
+    kv_cache_dtype: str,
+    has_kv_transfer: bool,
+    has_extra_cache: bool,
+) -> bool:
+    return (
+        _ON_GFX950
+        and kv_cache_dtype == "fp8_ds_mla"
+        and not has_kv_transfer
+        and has_extra_cache
+    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -294,9 +311,13 @@ def _copy_ragged_to_graph_buffers(
 
     max_entries = max(num_rows * max_entries_per_row, 1)
     ragged_out = ragged_indices_buffer[:max_entries]
-    nnz = ragged_indices.numel()
-    if nnz > 0:
-        ragged_out[:nnz].copy_(ragged_indices, non_blocking=True)
+    source_entries = ragged_indices.numel()
+    if source_entries > 0:
+        ragged_out[:source_entries].copy_(ragged_indices, non_blocking=True)
+    if _ON_GFX950:
+        # Preserve the graph-stable base pointer while exposing source capacity
+        # to the sync-free split selector; indptr still carries the true NNZ.
+        ragged_out = ragged_out[: max(source_entries, 1)]
     return ragged_out, indptr_out
 
 
@@ -306,6 +327,7 @@ class DeepseekV4ROCMAiterMLASparseMetadata(DeepseekV4FlashMLAMetadata):
 
     c128a_decode_topk_ragged_indices: torch.Tensor | None = None
     c128a_decode_topk_ragged_indptr: torch.Tensor | None = None
+    for_cudagraph_capture: bool = False
 
 
 @dataclass
@@ -370,6 +392,16 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
             c128a_decode_topk_ragged_indptr=ragged_indptr,
         )
 
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> DeepseekV4ROCMAiterMLASparseMetadata:
+        metadata = cast(
+            DeepseekV4ROCMAiterMLASparseMetadata,
+            super().build_for_cudagraph_capture(common_attn_metadata),
+        )
+        metadata.for_cudagraph_capture = _ON_GFX950
+        return metadata
+
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
@@ -414,7 +446,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             and base.decode_swa_lens is not None
         ):
             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
-                base.decode_swa_indices.reshape(base.num_decode_tokens, -1),
+                base.decode_swa_indices.reshape(
+                    base.num_decode_tokens, base.decode_swa_width
+                ),
                 base.decode_swa_lens,
             )
             ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
@@ -423,9 +457,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                # Actual dense width for this build: window_size (causal) or
-                # noncausal_index_width (DSpark non-causal draft).
-                base.decode_swa_indices.shape[-1],
+                base.decode_swa_width,
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
@@ -451,10 +483,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
     def __init__(self, *args, **kwargs):
+        vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
+        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._fused_compressor_weight: torch.Tensor | None
+        self.register_buffer("_fused_compressor_weight", None, persistent=False)
+        self._fused_compressor_split_sizes: tuple[int, int] | None = None
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -493,6 +530,46 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
 
+    def prepare_compressor_gemm_fusion(self) -> bool:
+        if self._fused_compressor_weight is not None:
+            return False
+
+        from vllm.model_executor.offloader import NoopOffloader, get_offloader
+
+        if not isinstance(get_offloader(), NoopOffloader):
+            logger.warning_once(
+                "DeepSeek V4 compressor GEMM fusion is incompatible with "
+                "weight offloading and will remain disabled."
+            )
+            return False
+
+        compressor = self.compressor
+        indexer = self.indexer
+        if compressor is None or indexer is None:
+            return False
+
+        main_weight = compressor.fused_wkv_wgate.weight
+        indexer_weight = indexer.compressor.fused_wkv_wgate.weight
+        if main_weight.ndim != 2 or indexer_weight.ndim != 2:
+            raise ValueError("DeepSeek V4 compressor weights must be matrices")
+        if main_weight.shape[1] != indexer_weight.shape[1]:
+            raise ValueError("DeepSeek V4 compressor weights must share K")
+        if main_weight.dtype != indexer_weight.dtype:
+            raise ValueError("DeepSeek V4 compressor weights must share dtype")
+        if main_weight.device != indexer_weight.device:
+            raise ValueError("DeepSeek V4 compressor weights must share device")
+
+        main_size = main_weight.shape[0]
+        indexer_size = indexer_weight.shape[0]
+        fused_weight = torch.cat((main_weight, indexer_weight), dim=0)
+        with torch.no_grad():
+            main_weight.set_(fused_weight[:main_size])
+            indexer_weight.set_(fused_weight[main_size:])
+
+        self._fused_compressor_weight = fused_weight
+        self._fused_compressor_split_sizes = (main_size, indexer_size)
+        return True
+
     def _bpre_attn_gemm(
         self,
         weight: torch.Tensor,
@@ -516,6 +593,33 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
             )
         return super()._fused_wqa_wkv_gemm(hidden_states)
+
+    def _run_parallel_input_projections(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        fused_weight = self._fused_compressor_weight
+        split_sizes = self._fused_compressor_split_sizes
+        if fused_weight is None or split_sizes is None:
+            return super()._run_parallel_input_projections(hidden_states)
+
+        indexer = self.indexer
+        if indexer is None:
+            raise RuntimeError("Fused compressor weight requires a C4 indexer")
+
+        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+        fused_scores = torch.mm(
+            hidden_states,
+            fused_weight.T,
+            out_dtype=torch.float32,
+        )
+        kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
+        indexer_weights, _ = indexer.weights_proj(hidden_states)
+        return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
@@ -605,6 +709,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
+                adaptive_splits=(
+                    _ON_GFX950
+                    and not swa_only
+                    and self.compress_ratio == 128
+                    and rocm_metadata is not None
+                    and rocm_metadata.for_cudagraph_capture
+                ),
             )
 
     def _forward_decode(
@@ -615,6 +726,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
+        adaptive_splits: bool,
     ) -> None:
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -666,6 +778,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            adaptive_splits=adaptive_splits,
+            extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
+                self.kv_cache_dtype,
+                self._has_kv_transfer,
+                not swa_only and kv_cache is not None,
+            ),
         )
 
     def _forward_prefill(
