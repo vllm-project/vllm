@@ -269,7 +269,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     mod = getattr(mod, attr)
 
             candidate: object = mod
-            if candidate is not self_module and is_vllm_model(candidate):
+            if candidate is not self_module and isinstance(candidate, VllmModel):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
