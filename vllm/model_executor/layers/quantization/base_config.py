@@ -243,9 +243,32 @@ class QuantizationConfig(ABC):
             The layer name as the checkpoint's quantization config refers to it.
         """
         root = self.model_root_prefix
-        if root and prefix.startswith(f"{root}."):
+        if not root:
+            return prefix
+        if prefix == root:
+            return ""
+        if prefix.startswith(f"{root}."):
             return prefix[len(root) + 1 :]
         return prefix
+
+    def resolve_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        """Select the quant method for a layer, by its checkpoint-relative name.
+
+        This is the entry point layers should use. `get_quant_method` matches
+        against a quantization config whose targets name layers relative to the
+        checkpoint, so the runtime `model_root_prefix` is stripped first.
+
+        Args:
+            layer: The layer for the quant method.
+            prefix: The layer's runtime name, rooted at `model_root_prefix`.
+
+        Returns:
+            The quantize method. None if the given layer doesn't support quant
+            method.
+        """
+        return self.get_quant_method(layer, prefix=self.strip_model_root_prefix(prefix))
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"

@@ -287,7 +287,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
         if quant_method is None and quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            quant_method = quant_config.resolve_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
 

@@ -690,7 +690,7 @@ def _make_draft_linear() -> Mock:
     "target",
     ["model.layers.0.mlp.down_proj", r"re:model\.layers\.\d+\.mlp\.down_proj"],
 )
-def test_get_quant_method_matches_targets_under_model_root_prefix(target):
+def test_resolve_quant_method_matches_targets_under_model_root_prefix(target):
     """Layer-name targets must match when the model loads under a root prefix.
 
     Speculative drafters load under a synthetic `draft_model` root, but their
@@ -701,27 +701,41 @@ def test_get_quant_method_matches_targets_under_model_root_prefix(target):
     config = _make_ct_config(target=target)
     config.model_root_prefix = "draft_model"
 
-    method = config.get_quant_method(
+    method = config.resolve_quant_method(
         _make_draft_linear(), prefix="draft_model.model.layers.0.mlp.down_proj"
     )
 
     assert isinstance(method, CompressedTensorsLinearMethod)
 
 
-def test_get_quant_method_honors_ignore_under_model_root_prefix():
+def test_strip_model_root_prefix_only_strips_a_whole_root_segment():
+    """A root strip must not truncate names that merely share its spelling."""
+    config = _make_ct_config(target="Linear")
+    config.model_root_prefix = "draft_model"
+
+    assert config.strip_model_root_prefix("draft_model.mlp.gate") == "mlp.gate"
+    assert config.strip_model_root_prefix("draft_model") == ""
+    assert config.strip_model_root_prefix("draft_modelish.x") == "draft_modelish.x"
+    assert config.strip_model_root_prefix("other.x") == "other.x"
+
+    unrooted = _make_ct_config(target="Linear")
+    assert unrooted.strip_model_root_prefix("draft_model.x") == "draft_model.x"
+
+
+def test_resolve_quant_method_honors_ignore_under_model_root_prefix():
     """The ignore list is checkpoint-relative too, so it must survive the root."""
     config = _make_ct_config(target="Linear")
     config.ignore = ["model.layers.0.mlp.down_proj"]
     config.model_root_prefix = "draft_model"
 
-    method = config.get_quant_method(
+    method = config.resolve_quant_method(
         _make_draft_linear(), prefix="draft_model.model.layers.0.mlp.down_proj"
     )
 
     assert isinstance(method, UnquantizedLinearMethod)
 
 
-def test_get_quant_method_selects_per_group_scheme_under_model_root_prefix():
+def test_resolve_quant_method_selects_per_group_scheme_under_model_root_prefix():
     """Mixed config_groups must keep per-layer scheme selection under the root.
 
     The #49893 checkpoint quantizes different layer ranges at different
@@ -755,7 +769,7 @@ def test_get_quant_method_selects_per_group_scheme_under_model_root_prefix():
 
     for layer_idx, num_bits in ((0, 4), (1, 8)):
         layer = _make_draft_linear()
-        method = config.get_quant_method(
+        method = config.resolve_quant_method(
             layer, prefix=f"draft_model.model.layers.{layer_idx}.mlp.down_proj"
         )
         assert isinstance(method, CompressedTensorsLinearMethod)
