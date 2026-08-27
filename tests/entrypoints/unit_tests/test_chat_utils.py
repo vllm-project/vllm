@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import warnings
 from collections.abc import Mapping
 from typing import Literal
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -13,11 +15,14 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MEDIA_CONNECTOR_REGISTRY,
+    AsyncMultiModalItemTracker,
     ConversationMessage,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -703,6 +708,29 @@ def test_parse_chat_messages_empty_system(
         {"role": "system", "content": [{"type": "text", "text": ""}]},
         {"role": "user", "content": [{"type": "text", "text": "Who are you?"}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_only_chat_does_not_initialize_media_connector(
+    mistral_model_config,
+    monkeypatch,
+):
+    load_connector = MagicMock()
+    monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
+    messages = [{"role": "user", "content": "Who are you?"}]
+
+    parse_chat_messages(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+    await parse_chat_messages_async(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+
+    load_connector.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1501,7 +1529,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -1537,7 +1565,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -2064,7 +2092,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     image_url,
 ):
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match=r"Found more '<|image_1|>' placeholders in input prompt "
         "than actual multimodal data items.",
     ):
@@ -2742,3 +2770,156 @@ def test_postprocess_messages_null_arguments_string():
     tool_calls = messages[0]["tool_calls"]
     assert tool_calls is not None
     assert tool_calls[0]["function"]["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
+    """Regression test: one failing media fetch must not abandon the other
+    still-in-flight fetches in the same modality batch.
+
+    Before the fix, `resolve_items` gathered per-modality fetches with plain
+    `asyncio.gather`, so the first exception propagated immediately while
+    sibling fetches (real network/thread-pool work in production) kept
+    running detached, with nothing left to await or cancel them.
+    """
+
+    async def _fetch(should_fail: bool, delay: float):
+        if should_fail:
+            await asyncio.sleep(0.01)
+            raise ValueError("simulated fetch failure")
+        await asyncio.sleep(delay)
+        return ("decoded", None)
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._items_by_modality["image"] = [
+        lambda: _fetch(True, 0),
+        lambda: _fetch(False, 0.2),
+        lambda: _fetch(False, 0.2),
+    ]
+
+    tasks_before = asyncio.all_tasks()
+    with pytest.raises(ValueError, match="simulated fetch failure"):
+        await tracker.resolve_items()
+
+    leaked_tasks = asyncio.all_tasks() - tasks_before
+    assert not leaked_tasks, (
+        f"resolve_items left {len(leaked_tasks)} task(s) running after "
+        f"raising: {leaked_tasks}"
+    )
+
+
+def _assistant_tool_call(arguments, name="write"):
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            ],
+        }
+    ]
+
+
+def _assistant_tool_calls(calls):
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": calls,
+        }
+    ]
+
+
+def test_tool_call_arguments_dict_passthrough(caplog):
+    messages = _assistant_tool_call({"a": 1})
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_valid_object_string(caplog):
+    messages = _assistant_tool_call('{"a": 1}')
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_malformed_json_small(caplog):
+    bad = '{"cmd": "mkdir -p /tmp/mmadtest && cat > /tmp/mmadtest'
+    messages = _assistant_tool_call(bad, name="exec")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    assert len(caplog.records) == 1
+    assert "exec" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
+
+
+def test_tool_call_arguments_malformed_json_large(caplog):
+    bad = '{"filepath": "src/main.py", "contents": "' + ("x" * 18000)
+    messages = _assistant_tool_call(bad, name="write")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    assert len(caplog.records) == 1
+    assert "write" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("non_obj", ["[]", "42", "true", '"hello"', "null"])
+def test_tool_call_arguments_valid_json_non_object(caplog, non_obj):
+    messages = _assistant_tool_call(non_obj, name="bad_tool")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    if non_obj == "null":
+        # null parses to None, so no warning is emitted according to requirements
+        assert not caplog.records
+    else:
+        assert len(caplog.records) == 1
+        assert "bad_tool" in caplog.records[0].message
+        assert "not a JSON object" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_tool_call_arguments_missing_or_empty(caplog, missing):
+    messages = _assistant_tool_call(missing)
+    if missing is None:
+        del messages[0]["tool_calls"][0]["function"]["arguments"]
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_multiple_independent(caplog):
+    calls = [
+        {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "good", "arguments": '{"a": 1}'},
+        },
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bad", "arguments": '{"cmd": "'},
+        },
+    ]
+    messages = _assistant_tool_calls(calls)
+    _postprocess_messages(messages)
+
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls[0]["function"]["arguments"] == {"a": 1}
+    assert tool_calls[1]["function"]["arguments"] == {}
+
+    assert len(caplog.records) == 1
+    assert "bad" in caplog.records[0].message

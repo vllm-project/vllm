@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -31,6 +34,23 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
     assert_eq!(
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
+    );
+}
+
+#[test]
+fn factory_distinguishes_qwen_model_families() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/QwQ-32B"),
+        Some(names::DEEPSEEK_R1)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-8B"),
+        Some(names::QWEN3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen2.5-0.5B-Instruct"),
+        None
     );
 }
 

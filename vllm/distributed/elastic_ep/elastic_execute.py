@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -29,13 +29,15 @@ from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
     get_standby_ep_group,
+    get_standby_eplb_group,
     pop_standby_groups,
 )
-from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.eplb_communicator import (
+    EplbCommunicator,
+)
 from vllm.distributed.parallel_state import (
+    GroupCoordinator,
     _replace_active_groups,
-    get_eplb_group,
-    prepare_communication_buffer_for_model,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -43,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
     make_eep_staged_quant_method,
 )
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -84,16 +87,20 @@ def batch_transfer_weights(
     assert len(all_params) > 0
     p2p_ops = []
     for param in all_params:
+        # PyNccl transfers flat memory and does not honor tensor strides.
+        transfer_param = param.contiguous()
         op = object.__new__(P2POp)
-        if is_sender:
-            op.op = torch.distributed.isend
-            op.tensor = param
-        else:
-            op.op = torch.distributed.irecv
-            op.tensor = param
+        op.op = torch.distributed.isend if is_sender else torch.distributed.irecv
+        op.tensor = transfer_param
         op.group_peer = peer_rank
         p2p_ops.append(op)
-    device_comm.batch_isend_irecv(p2p_ops)
+        if transfer_param is not param:
+            device_comm.batch_isend_irecv(p2p_ops)
+            p2p_ops.clear()
+            if not is_sender:
+                param.copy_(transfer_param)
+    if p2p_ops:
+        device_comm.batch_isend_irecv(p2p_ops)
 
 
 def broadcast_expert_mapping(
@@ -145,6 +152,12 @@ class ElasticEPScalingExecutor:
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
         self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
+        self._prepared_eplb_communicator: EplbCommunicator | None = None
+        self._async_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="ElasticEPAsync"
+        )
+        self._async_future: Future[None] | None = None
+        self._group_cleanup_future: Future[None] | None = None
 
     @property
     def worker(self):
@@ -159,59 +172,108 @@ class ElasticEPScalingExecutor:
             raise ValueError(f"Unknown execute method: {execute_method}")
         return method(*args, **kwargs)
 
-    def _set_eplb_suppressed(self, suppressed: bool) -> None:
-        self.worker.model_runner.eep_eplb_suppressed = suppressed
-        ep_group = get_standby_ep_group() or get_ep_group()
-        if ep_group.rank == 0:
-            logger.info(
-                "[Elastic EP] EPLB %s elastic scaling transition",
-                "disabled during" if suppressed else "re-enabled after",
-            )
+    def start_async(self, execute_method: str, *args, **kwargs) -> str:
+        if self._async_future is not None:
+            raise RuntimeError("Another Elastic EP async method is active")
+        if args and isinstance(args[0], ReconfigureDistributedRequest):
+            self.reconfig_request = args[0]
+        dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
+        done_key = f"eep_async/{execute_method}/{dp_rank}/{self.worker.rank}"
+        self._async_future = self._async_executor.submit(
+            self._run_async, execute_method, *args, **kwargs
+        )
+        self._async_future.add_done_callback(lambda _: self._mark_async_done(done_key))
+        return done_key
+
+    def _run_async(self, execute_method: str, *args, **kwargs) -> None:
+        from vllm.platforms import current_platform
+
+        self.worker.vllm_config.enable_trace_function_call_for_thread()
+        assert hasattr(self.worker, "device")
+        current_platform.set_device(self.worker.device)
+        with set_current_vllm_config(self.worker.vllm_config):
+            self.execute(execute_method, *args, **kwargs)
+
+    def _mark_async_done(self, done_key: str) -> None:
+        from vllm.distributed.utils import get_cached_tcp_store_client
+
+        assert self.reconfig_request is not None
+        get_cached_tcp_store_client(
+            self.reconfig_request.new_data_parallel_master_ip,
+            self.reconfig_request.coord_store_port,
+        ).set(done_key, b"1")
+
+    def clear_async(self) -> None:
+        future = self._async_future
+        if future is None:
+            raise RuntimeError("No Elastic EP async method is active")
+        if not future.done():
+            raise RuntimeError("Elastic EP async method is not done")
+        self._async_future = None
+        future.result()
+
+    def _destroy_retired_groups(
+        self, groups: tuple[GroupCoordinator | None, ...]
+    ) -> None:
+        from vllm.platforms import current_platform
+
+        current_platform.set_device(self.worker.device)
+        for group in groups:
+            if group is not None:
+                group.destroy()
+
+    def _start_group_cleanup(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
+        assert self._group_cleanup_future is None
+        self._group_cleanup_future = self._async_executor.submit(
+            self._destroy_retired_groups, groups
+        )
+
+    def _wait_for_group_cleanup(self) -> None:
+        if (future := self._group_cleanup_future) is not None:
+            self._group_cleanup_future = None
+            future.result()
+
+    def shutdown(self) -> None:
+        try:
+            self._wait_for_group_cleanup()
+        finally:
+            self._async_executor.shutdown()
 
     def load_model(self) -> None:
-        (
-            expanded_physical_to_logical,
-            num_logical_experts,
-            old_num_physical_experts,
-        ) = self.receive_expert_mapping()
-        num_physical_experts = expanded_physical_to_logical.shape[1]
-        self.worker.parallel_config.eplb_config.num_redundant_experts = (
-            num_physical_experts - num_logical_experts
-        )
         self.worker.load_model(load_dummy_weights=True)
-        self.worker.model_runner.setup_eplb_from_mapping(
-            expanded_physical_to_logical, old_num_physical_experts
-        )
-        self._set_eplb_suppressed(True)
 
-    def create_standby_groups(
-        self, reconfig_request: ReconfigureDistributedRequest
+    def prepare_reconfiguration(
+        self, reconfig_request: ReconfigureDistributedRequest, use_all2all: bool
     ) -> None:
+        self._wait_for_group_cleanup()
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
         old_dp_size = get_dp_group().world_size
-        world_size = self.worker.vllm_config.parallel_config.world_size
+        parallel_config = self.worker.vllm_config.parallel_config
+        world_size = parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
-        updated_config = copy.copy(self.worker.vllm_config)
-        updated_config.parallel_config = copy.deepcopy(
-            self.worker.vllm_config.parallel_config
+        create_standby_groups(
+            new_dp_size=new_dp_size,
+            new_world_size_across_dp=new_world_size_across_dp,
+            master_ip=reconfig_request.new_data_parallel_master_ip,
+            coord_store_port=reconfig_request.coord_store_port,
+            use_all2all=use_all2all,
+            enable_eplb=parallel_config.enable_eplb,
         )
-        updated_config.parallel_config.data_parallel_size = new_dp_size
-        with set_current_vllm_config(updated_config):
-            create_standby_groups(
-                new_dp_size=new_dp_size,
-                new_world_size_across_dp=new_world_size_across_dp,
-                master_ip=reconfig_request.new_data_parallel_master_ip,
-                coord_store_port=reconfig_request.coord_store_port,
-                enable_eplb=updated_config.parallel_config.enable_eplb,
-            )
+        self.stage_standby_moe_quant_methods()
+        self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
-            self._set_eplb_suppressed(True)
-            eplb_state = self.worker.model_runner.eplb_state
-            if eplb_state is not None:
-                eplb_state.drain_async()
-        elif new_dp_size < old_dp_size:
-            self._stage_standby_moe_quant_methods()
+            self.transfer_weights(old_dp_size, new_dp_size)
+        self._warm_target_groups(get_standby_dp_group(), get_standby_ep_group())
+
+    def _prepare_eplb_communicator(self, eplb_group) -> None:
+        assert eplb_group is not None
+        model_runner = self.worker.model_runner
+        eplb_state = model_runner.eplb_state
+        assert eplb_state is not None
+        self._prepared_eplb_communicator = eplb_state.create_communicator(
+            model_runner.model_config, eplb_group
+        )
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -259,12 +321,22 @@ class ElasticEPScalingExecutor:
             )
         torch.accelerator.synchronize()
 
+    def _warm_target_groups(self, dp_group, ep_group) -> None:
+        assert dp_group is not None and ep_group is not None
+        stream = torch.Stream(device=dp_group.device)
+        with stream:
+            tensor = torch.zeros(1, dtype=torch.int32, device=dp_group.device)
+            for group in (dp_group, ep_group):
+                torch.distributed.all_reduce(tensor, group=group.device_group)
+                stream.synchronize()
+
     def broadcast_expert_mapping(self) -> None:
         standby_dp_group = get_standby_dp_group()
         assert standby_dp_group is not None
         model_config = self.worker.model_runner.model_config
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
+        eplb_state.drain_async()
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         physical_to_logical = eplb_model_state.physical_to_logical_map
         num_physical_experts = physical_to_logical.shape[1]
@@ -278,10 +350,6 @@ class ElasticEPScalingExecutor:
             src_rank=0,
             device=self.worker.device,
         )
-        # New workers enter load_model after receiving the expert mapping.
-        # Stage replacement MoE kernels before returning to the state machine
-        # so existing ranks can participate in collective EP comm creation.
-        self._stage_standby_moe_quant_methods()
 
     def _make_eep_moe_config(self, module, dp_group, ep_group):
         parallel_config = self.worker.vllm_config.parallel_config
@@ -300,7 +368,7 @@ class ElasticEPScalingExecutor:
             moe_parallel_config=moe_parallel_config,
         )
 
-    def _stage_standby_moe_quant_methods(self) -> None:
+    def stage_standby_moe_quant_methods(self) -> None:
         standby_dp_group = get_standby_dp_group()
         standby_ep_group = get_standby_ep_group()
         model = self.worker.model_runner.get_model()
@@ -348,15 +416,22 @@ class ElasticEPScalingExecutor:
         torch.accelerator.empty_cache()
 
     def switch_and_remove(self) -> None:
+        # Removing ranks skipped preparation, so wait for prior cleanup here.
+        self._wait_for_group_cleanup()
         self._release_cuda_graphs()
-        _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
+        retired_groups = _replace_active_groups(
+            world=None, dp=None, ep=None, eplb=None, node_count=None
+        )
+        self._start_group_cleanup(retired_groups)
+        # Finish collective cleanup before this worker is shut down.
+        self._wait_for_group_cleanup()
 
-    def switch_and_prepare(self) -> None:
+    def switch_and_prepare(self) -> tuple[GroupCoordinator | None, ...]:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
         self._release_cuda_graphs()
-        _replace_active_groups(**pop_standby_groups())
+        retired_groups = _replace_active_groups(**pop_standby_groups())
 
         parallel_config = self.worker.vllm_config.parallel_config
         reconfig_request = self.reconfig_request
@@ -439,7 +514,6 @@ class ElasticEPScalingExecutor:
             )
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
-            eplb_state.num_valid_physical_experts = old_num_physical_experts
         else:
             assert pad_size < 0
             eplb_model_state.expert_load_pass = eplb_model_state.expert_load_pass[
@@ -448,7 +522,6 @@ class ElasticEPScalingExecutor:
             eplb_model_state.expert_load_window = eplb_model_state.expert_load_window[
                 :, :, :num_physical_experts
             ]
-            eplb_state.num_valid_physical_experts = num_physical_experts
 
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
@@ -470,20 +543,10 @@ class ElasticEPScalingExecutor:
             for module in moe_modules:
                 if getattr(module._quant_method, "wraps_legacy_quant_method", False):
                     module._replace_quant_method(module._quant_method.old_quant_method)
-            prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
-        eplb_model_state.expert_buffer = [
-            torch.empty_like(w) for w in model.expert_weights[0]
-        ]
-        assert parallel_config.eplb_config.communicator is not None, (
-            "EPLB communicator backend must be set by ParallelConfig"
-        )
-        eplb_model_state.communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
-            backend=parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights,
-            expert_buffer=eplb_model_state.expert_buffer,
-        )
+        assert self._prepared_eplb_communicator is not None
+        eplb_state.update_communicator(model_config, self._prepared_eplb_communicator)
+        self._prepared_eplb_communicator = None
 
         if (
             self.worker.vllm_config.compilation_config.mode
@@ -500,28 +563,12 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
-        multi_block_table = self.worker.model_runner.input_batch.block_table
-        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for bt in multi_block_table.block_tables:
-            saved_block_tables.append(
-                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
-            )
-        multi_block_table.clear()
-
-        unlock_workspace()
-        self.worker.compile_or_warm_up_model()
-        lock_workspace()
-
-        for bt, (saved_gpu, saved_cpu) in zip(
-            multi_block_table.block_tables, saved_block_tables
-        ):
-            bt.block_table.gpu.copy_(saved_gpu)
-            bt.block_table.cpu.copy_(saved_cpu)
-        if new_dp_size < old_dp_size:
-            self._set_eplb_suppressed(False)
+        return retired_groups
 
     def _perform_eplb_reshuffle(
-        self, rank_mapping: dict[int, int] | None = None
+        self,
+        rank_mapping: dict[int, int] | None = None,
+        async_op: bool = False,
     ) -> None:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
@@ -529,21 +576,19 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
 
-        model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         is_async_enabled = eplb_state.is_async
-        eplb_state.is_async = False
+        run_async = async_op and is_async_enabled
+        eplb_state.is_async = run_async
         if rank_mapping is None:
             eplb_state.rearrange()
         else:
             eplb_state.rearrange(rank_mapping=rank_mapping)
-        # NOTE(yongji): check whether we need to synchronize here
-        torch.accelerator.synchronize()
+        if not run_async:
+            # Wait for non-blocking expert resharding copies before continuing
+            # the Elastic EP reconfiguration.
+            torch.accelerator.synchronize()
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
-        eplb_state.num_valid_physical_experts = (
-            eplb_model_state.physical_to_logical_map.shape[1]
-        )
         eplb_state.is_async = is_async_enabled
         # Start the async worker thread if it doesn't exist yet (idempotent).
         # This is needed for new workers after scale-up: they create EplbState
@@ -551,14 +596,33 @@ class ElasticEPScalingExecutor:
         # groups aren't ready yet.
         eplb_state.start_async_loop()
         if get_ep_group().rank == 0:
-            logger.info("[Elastic EP] Expert resharding completed")
+            logger.info(
+                "[Elastic EP] Expert resharding %s",
+                "scheduled" if run_async else "completed",
+            )
 
-    def perform_eplb_reshuffle(self) -> None:
-        self._perform_eplb_reshuffle()
-        self._set_eplb_suppressed(False)
+    def commit_scale_up(self, is_existing_worker: bool) -> None:
+        if is_existing_worker:
+            self.broadcast_expert_mapping()
+            retired_groups = self.switch_and_prepare()
+        else:
+            mapping = self.receive_expert_mapping()
+            self.worker.model_runner.setup_eplb_from_mapping(mapping)
+        self.warm_and_capture()
+        self._perform_eplb_reshuffle(async_op=True)
+        if is_existing_worker:
+            self._start_group_cleanup(retired_groups)
+
+    def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
+        self.perform_scale_down_eplb_reshuffle(new_dp_size)
+        if removing:
+            self.switch_and_remove()
+        else:
+            retired_groups = self.switch_and_prepare()
+            self.warm_and_capture()
+            self._start_group_cleanup(retired_groups)
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
-        self._set_eplb_suppressed(True)
         eplb_state = self.worker.model_runner.eplb_state
         if eplb_state is not None:
             eplb_state.drain_async()
@@ -572,7 +636,7 @@ class ElasticEPScalingExecutor:
         }
         self._perform_eplb_reshuffle(rank_mapping=rank_mapping)
 
-    def receive_weights(self) -> None:
+    def prepare_new_worker(self) -> None:
         dp_group = get_dp_group()
         assert isinstance(dp_group, StatelessGroupCoordinator)
         new_dp_size = dp_group.world_size
@@ -599,27 +663,31 @@ class ElasticEPScalingExecutor:
             )
 
         model = self.worker.model_runner.get_model()
+        expert_weights = [
+            module.get_expert_weights()
+            for module in model.modules()
+            if is_moe_layer(module)
+        ]
         batch_transfer_weights(
             model=model,
             is_sender=False,
             peer_rank=sender_rank,
             dp_group=dp_group,
-            expert_weights=model.expert_weights,
+            expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
+        self._warm_target_groups(get_dp_group(), get_ep_group())
 
-    def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
+    def receive_expert_mapping(self) -> torch.Tensor:
         dp_group = get_dp_group()
         assert isinstance(dp_group, StatelessGroupCoordinator)
-        physical_to_logical, num_local_physical_experts, num_logical_experts = (
-            broadcast_expert_mapping(
-                physical_to_logical=None,
-                num_local_physical_experts=None,
-                num_logical_experts=None,
-                dp_group=dp_group,
-                src_rank=0,
-                device=self.worker.device,
-            )
+        physical_to_logical, num_local_physical_experts, _ = broadcast_expert_mapping(
+            physical_to_logical=None,
+            num_local_physical_experts=None,
+            num_logical_experts=None,
+            dp_group=dp_group,
+            src_rank=0,
+            device=self.worker.device,
         )
         num_moe_layers = physical_to_logical.shape[0]
         new_dp_size = get_dp_group().world_size
@@ -631,26 +699,22 @@ class ElasticEPScalingExecutor:
             dtype=physical_to_logical.dtype,
             device=physical_to_logical.device,
         )
-        old_num_physical_experts = physical_to_logical.shape[1]
-        expanded_physical_to_logical[:, :old_num_physical_experts] = physical_to_logical
-        return (
-            expanded_physical_to_logical,
-            num_logical_experts,
-            old_num_physical_experts,
+        expanded_physical_to_logical[:, : physical_to_logical.shape[1]] = (
+            physical_to_logical
         )
+        return expanded_physical_to_logical
 
-    def prepare_new_worker(self) -> None:
+    def warmup_local_kernels(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
-            prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
+            kernel_warmup(self.worker, process_local_only=True)
 
-    def rewarm_workspace(self) -> None:
+    def warm_and_capture(self) -> None:
         # Must run on every DP sibling in lockstep: _dummy_run calls
         # coordinate_batch_across_dp whenever data_parallel_size > 1
         # (gpu_model_runner.py:3663), which deadlocks if any rank skips it.
 
-        # Save and clear block tables so profile_run/compile_or_warm_up_model
-        # don't write dummy slot mappings into real KV-cache blocks (mirrors
-        # switch_and_prepare's pattern).
+        # Save and clear block tables so the dummy MoE forward doesn't
+        # write dummy slot mappings into real KV-cache blocks.
         multi_block_table = self.worker.model_runner.input_batch.block_table
         saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
         for bt in multi_block_table.block_tables:
@@ -660,19 +724,16 @@ class ElasticEPScalingExecutor:
         multi_block_table.clear()
 
         # _ensure_workspace_size allocates a fresh tensor on grow, leaving
-        # captured CUDA graphs with stale data pointers; drop graphs before
-        # re-warm so captures realign with the resized buffer.
+        # any captured CUDA graph with a stale data pointer; drop graphs
+        # before re-warm so captures realign with the resized buffer.
         self._release_cuda_graphs()
         unlock_workspace()
 
-        # Grow the MoE workspace at max_num_tokens.
-        # compile_or_warm_up_model alone only exercises cudagraph-capture
-        # sizes (≤64 tokens for this test) and leaves the workspace at
-        # ~10-14 MB; the post-all-to-all per-rank token count under real
-        # post-reshuffle routing needs hundreds of MB. Use _dummy_run
-        # directly (rather than profile_run) with skip_eplb=True so dummy
-        # routing doesn't pollute the just-rebalanced EPLB stats — same
-        # convention compile_or_warm_up_model itself uses.
+        # Grow the MoE workspace at max_num_tokens. compile_or_warm_up_model
+        # alone only exercises cudagraph-capture sizes and can leave the
+        # workspace too small for post-reshuffle routing. Use _dummy_run
+        # directly with skip_eplb=True so dummy routing doesn't pollute the
+        # just-rebalanced EPLB stats.
         runner = self.worker.model_runner
         runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
         self.worker.compile_or_warm_up_model()

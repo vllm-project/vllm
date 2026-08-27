@@ -243,15 +243,29 @@ class TestThinkingModeConfig:
         cfg = deepseek_v4_config(thinking=False)
         assert cfg.initial_state.name == "CONTENT"
 
-    def test_enable_thinking_kwarg(self, mock_tokenizer):
-        p = DeepSeekV4Parser(
-            mock_tokenizer, chat_template_kwargs={"enable_thinking": True}
+    @pytest.mark.parametrize(
+        ("chat_template_kwargs", "expected_state"),
+        [
+            ({}, "REASONING"),
+            ({"thinking": True}, "REASONING"),
+            ({"enable_thinking": True}, "REASONING"),
+            ({"reasoning_effort": "high"}, "REASONING"),
+            ({"thinking": False}, "CONTENT"),
+            ({"enable_thinking": False}, "CONTENT"),
+            (
+                {"enable_thinking": True, "reasoning_effort": "none"},
+                "CONTENT",
+            ),
+        ],
+    )
+    def test_parser_thinking_mode_matches_tokenizer_default(
+        self, mock_tokenizer, chat_template_kwargs, expected_state
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer,
+            chat_template_kwargs=chat_template_kwargs,
         )
-        assert p.parser_engine_config.initial_state.name == "REASONING"
-
-    def test_no_thinking_kwarg_defaults_to_content(self, mock_tokenizer):
-        p = DeepSeekV4Parser(mock_tokenizer)
-        assert p.parser_engine_config.initial_state.name == "CONTENT"
+        assert parser.parser_engine_config.initial_state.name == expected_state
 
     def test_thinking_mode_reasoning_without_tags(self, mock_tokenizer):
         parser = DeepSeekV4Parser(
@@ -838,6 +852,35 @@ class TestDelegatingParserLargeDelta:
         args = json.loads(output.tool_calls[0]["arguments"])
         assert args == {"location": "Berlin", "units": "celsius"}
 
+    def test_default_thinking_extracts_tool_call_without_think_end(self, dsv4_tokens):
+        tokens = [
+            token
+            for token in dsv4_tokens
+            if token[0] != _DSV4_FULL_VOCAB[DSML_THINK_END]
+        ]
+        tokenizer = MockTokenizer(
+            vocab=dict(_DSV4_FULL_VOCAB),
+            tokens=tokens,
+        )
+        parser = _DeepSeekV4Delegating(tokenizer)
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=1,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[_DSV4_FULL_VOCAB[DSML_THINK_START]],
+        )
+        output = collect_output(deltas)
+
+        assert "The user wants" in output.reasoning
+        assert output.content == ""
+        assert len(output.tool_calls) == 1
+        assert output.tool_calls[0]["name"] == "get_weather"
+        args = json.loads(output.tool_calls[0]["arguments"])
+        assert args == {"location": "Berlin", "units": "celsius"}
+
     def test_eos_drop_token_does_not_swallow_tool_calls(self):
         """Tool calls must survive when an EOS DROP token's ID is in
         delta_token_ids but its text is absent from delta_text.
@@ -920,3 +963,45 @@ class TestDelegatingParserLargeDelta:
         assert output.tool_calls[0]["name"] == "get_weather"
         args = json.loads(output.tool_calls[0]["arguments"])
         assert args == {"location": "Berlin"}
+
+    @pytest.mark.parametrize(
+        "chunk_size",
+        [1, 2, 3, 5, None],
+        ids=lambda c: f"chunk={c}",
+    )
+    def test_eos_not_leaked_when_reasoning_never_ends(self, chunk_size):
+        """EOS must not leak into reasoning_content when the model never
+        emits </think> (generation ends while still in REASONING state)."""
+        eos_text = "<｜end▁of▁sentence｜>"
+        eos_id = 128801
+        vocab = {
+            **_DSV4_FULL_VOCAB,
+            eos_text: eos_id,
+        }
+
+        reasoning_text = "Good morning! How can I help you today?"
+        tokens: list[tuple[int, str]] = []
+        tid = 100
+        for word in reasoning_text.split(" "):
+            prefix = " " if tokens else ""
+            tokens.append((tid, prefix + word))
+            tid += 1
+        tokens.append((eos_id, eos_text))
+
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer,
+            chat_template_kwargs={"thinking": True},
+        )
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+        )
+        output = collect_output(deltas)
+
+        assert reasoning_text in output.reasoning
+        assert eos_text not in output.reasoning
+        assert output.content == ""
+        assert output.tool_calls == []

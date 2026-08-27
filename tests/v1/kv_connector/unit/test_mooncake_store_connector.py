@@ -48,7 +48,14 @@ def _make_kv_cache_config() -> KVCacheConfig:
     spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return KVCacheConfig(
         num_blocks=4,
-        kv_cache_tensors=[KVCacheTensor(size=8192, shared_by=["layer0"])],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192,
+                layers=["layer0"],
+                layer_stride=8192,
+                block_stride=2048,
+            )
+        ],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
     )
 
@@ -210,64 +217,6 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     assert kv_events.get_all_events() == [event]
 
 
-def test_prefer_cross_layer_blocks_from_config():
-    # Default: disabled
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-    assert connector.prefer_cross_layer_blocks is False
-
-    # Enabled via config
-    vllm_config_enabled = create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"enable_cross_layers_blocks": "true"},
-    )
-    with (
-        set_current_vllm_config(vllm_config_enabled),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector_enabled = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config_enabled, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-    assert connector_enabled.prefer_cross_layer_blocks is True
-
-
-def test_register_cross_layers_kv_cache_delegates_to_worker():
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreWorker"
-        ) as mock_worker_cls,
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER, kv_cache_config
-        )
-
-    fake_tensor = MagicMock()
-    fake_backend = MagicMock()
-    connector.register_cross_layers_kv_cache(fake_tensor, fake_backend)
-
-    worker = mock_worker_cls.return_value
-    worker.register_cross_layers_kv_caches.assert_called_once_with(fake_tensor)
-
-
 def test_update_connector_output_and_take_events():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
@@ -410,7 +359,7 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", token_len=128, block_hashes=[]) == 5
+    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -439,11 +388,11 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     assert client.reset() is False
 
 
-def _poll_lookup(client, req_id, token_len=128, block_hashes=(), timeout=5.0):
+def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
     """Drive non-blocking lookup until the executor completes it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = client.lookup(req_id, token_len, list(block_hashes), non_block=True)
+        result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
         if result is not None:
             return result
         time.sleep(0.005)

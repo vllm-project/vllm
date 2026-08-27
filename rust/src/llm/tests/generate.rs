@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
@@ -44,17 +47,9 @@ fn request_output_with_events(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
         events,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -70,15 +65,8 @@ fn request_output_with_logprobs(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -89,21 +77,17 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     prompt_logprobs: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
         kv_transfer_params,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ec_transfer_params,
+        ..Default::default()
     }
 }
 
@@ -181,6 +165,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         trace_headers: None,
         priority: 0,
         data_parallel_rank: None,
+        session_id: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
     }
@@ -356,6 +341,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                 Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
                                 None,
                                 Some(serde_json::json!({"connector": "x"})),
+                                None,
                             ),
                         ],
                         ..Default::default()

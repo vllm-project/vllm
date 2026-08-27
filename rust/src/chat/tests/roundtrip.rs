@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Roundtrip tests for the real chat-template and output-processor pairing.
 //!
 //! The invariant under test is that a structured assistant message rendered as history can be
@@ -13,9 +16,9 @@ use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
-    GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
-    RendererSelection, load_model_backends,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, FinishReason, GenerationPromptMode,
+    LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection, RendererSelection,
+    load_model_backends,
 };
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
@@ -52,6 +55,12 @@ enum ThinkingBehavior {
     Toggleable { default: bool },
     /// The chat template always behaves as `value` for this fixture.
     Always { value: bool },
+    /// The chat template selects thinking mode through `reasoning_effort`.
+    ReasoningEffort {
+        default: bool,
+        enabled: &'static str,
+        disabled: &'static str,
+    },
 }
 
 impl ThinkingBehavior {
@@ -59,6 +68,7 @@ impl ThinkingBehavior {
         match self {
             Self::Toggleable { default } => default,
             Self::Always { value } => value,
+            Self::ReasoningEffort { default, .. } => default,
         }
     }
 
@@ -73,6 +83,33 @@ impl ThinkingBehavior {
                 Some(value), // explicitly request the supported thinking behavior
                 None,        // use default template behavior
             ],
+            Self::ReasoningEffort { .. } => vec![
+                Some(true),  // explicitly enable thinking
+                Some(false), // explicitly disable thinking
+                None,        // use default template behavior
+            ],
+        }
+    }
+
+    fn apply(self, request: &mut ChatRequest, thinking: Option<bool>) {
+        let Some(thinking) = thinking else {
+            return;
+        };
+
+        match self {
+            Self::Toggleable { .. } | Self::Always { .. } => {
+                for key in ["thinking", "enable_thinking"] {
+                    request.chat_options.template_kwargs.insert(key.to_string(), thinking.into());
+                }
+            }
+            Self::ReasoningEffort {
+                enabled, disabled, ..
+            } => {
+                request.chat_options.template_kwargs.insert(
+                    "reasoning_effort".to_string(),
+                    if thinking { enabled } else { disabled }.into(),
+                );
+            }
         }
     }
 }
@@ -117,6 +154,19 @@ impl RoundtripCase {
         }
     }
 
+    /// MiniMax M3 invoke format with `<mm:think>` reasoning tags.
+    fn minimax_m3() -> Self {
+        Self {
+            model_id: "MiniMaxAI/MiniMax-M3",
+            assistant_stop_suffix: "[e~[\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// DeepSeek V4 DSML tool-call format.
     fn deepseek_v4() -> Self {
         Self {
@@ -143,10 +193,36 @@ impl RoundtripCase {
         }
     }
 
+    /// GLM-4.5 XML-like argument format with `<think>` reasoning tags.
+    fn glm45() -> Self {
+        Self {
+            model_id: "zai-org/GLM-4.5",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// GLM-4.7 XML-like argument format with `<think>` reasoning tags.
     fn glm47() -> Self {
         Self {
             model_id: "zai-org/GLM-4.7-Flash",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// GLM-5.2 XML-like argument format with `<think>` reasoning tags.
+    fn glm52() -> Self {
+        Self {
+            model_id: "zai-org/GLM-5.2-FP8",
             assistant_stop_suffix: "",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -183,6 +259,40 @@ impl RoundtripCase {
         }
     }
 
+    /// Kimi K3 XTML tool/reasoning channels (native renderer + unified parser).
+    ///
+    /// Needs HF tokenizer files under `HF_HOME` (`tiktoken.model` +
+    /// `tokenizer_config.json`). Weights are not required for this text-level
+    /// roundtrip.
+    fn kimi_k3() -> Self {
+        Self {
+            model_id: "moonshotai/Kimi-K3",
+            assistant_stop_suffix: "<|end_of_msg|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// HY3 suffixed reasoning/tool markers discovered from tokenizer added vocab.
+    fn hy_v3() -> Self {
+        Self {
+            model_id: "tencent/Hy3",
+            assistant_stop_suffix: "<｜hy_eos:opensource｜>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::ReasoningEffort {
+                default: false,
+                enabled: "high",
+                disabled: "no_think",
+            },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
     fn seed_oss() -> Self {
         Self {
@@ -209,11 +319,11 @@ impl RoundtripCase {
         }
     }
 
-    /// GPT-OSS Harmony token-id renderer and native Harmony output processor.
-    fn gpt_oss() -> Self {
+    /// Nemotron V3 with `<think>` / `</think>` reasoning tags.
+    fn nemotron_v3() -> Self {
         Self {
-            model_id: "openai/gpt-oss-20b",
-            assistant_stop_suffix: "", // not applicable for token-id cases
+            model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            assistant_stop_suffix: "<|im_end|>\n",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
@@ -221,19 +331,45 @@ impl RoundtripCase {
             sort_json_keys: false,
         }
     }
+
+    /// GPT-OSS Harmony token-id renderer and native Harmony output processor.
+    fn gpt_oss() -> Self {
+        Self {
+            model_id: "openai/gpt-oss-20b",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// Inkling typed content blocks with native token-id rendering.
+    fn inkling() -> Self {
+        Self {
+            model_id: "thinkingmachines/Inkling",
+            assistant_stop_suffix: "<|content_model_end_sampling|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: true,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
-    ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
+    ($($case:ident => $(#[$case_attr:meta])* [$($fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
                 #[tokio::test]
                 #[file_serial([<hf_ $case>])]
+                $(#[$case_attr])*
                 async fn [<roundtrip_ $case>]() -> Result<()> {
                     let case = RoundtripCase::$case();
                     let backends = load_roundtrip_backends(&case).await?;
                     $(
-                        $(#[$fixture_attr])*
                         [<run_roundtrip_ $fixture>](&case, &backends).await?;
                     )*
                     Ok(())
@@ -247,14 +383,24 @@ roundtrip_tests! {
     qwen3 => [reasoning_and_content, tool_call_mix],
     qwen35 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
+    minimax_m3 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     deepseek_v32 => [tool_call_mix],
+    glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
-    seed_oss => [reasoning_and_content],
+    glm52 => [reasoning_and_content, tool_call_mix],
+    seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
+    nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
+    // K3 drops plain-assistant reasoning in history; tool-call turns keep it.
+    kimi_k3 => [tool_call_mix],
+    // HY3's final plain-assistant history omits EOS; tool-call history keeps it
+    // and exercises both stages of the tokenizer-derived unified parser.
+    hy_v3 => [tool_call_mix],
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
+    inkling => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -278,6 +424,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
         Vec::new(),
         thinking,
+        case.thinking_behavior,
     );
     let expected_reasoning = "Need compute 2 + 2 directly.";
     let expected_text = "The answer is 4.";
@@ -325,6 +472,7 @@ async fn run_roundtrip_tool_call_mix(
         )],
         test_tools(),
         Some(true), // always enable thinking in this fixture
+        case.thinking_behavior,
     );
     let expected_reasoning = "Need call the weather and add tools.";
     let expected_text = "I will call the tools.";
@@ -611,14 +759,23 @@ fn decoded_completion_stream(
                 .collect()
         }
         Prompt::TokenIds(token_ids) => {
-            ensure!(
-                assistant_stop_suffix.is_empty(),
-                "token-id roundtrip cases do not support text stop suffixes"
-            );
+            let body = if assistant_stop_suffix.is_empty() {
+                token_ids.as_slice()
+            } else {
+                let stop_token_ids = tokenizer
+                    .encode(assistant_stop_suffix, false)
+                    .context("failed to encode token-id completion stop suffix")?;
+                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
+                    format!(
+                        "token-id completion did not end with {:?}: {:?}",
+                        assistant_stop_suffix, token_ids
+                    )
+                })?
+            };
             incremental_decode_chunks(
                 tokenizer,
                 &prompt_token_ids,
-                token_ids,
+                body,
                 TOKEN_COMPLETION_CHUNK_TOKENS,
             )?
         }
@@ -634,6 +791,7 @@ fn decoded_completion_stream(
                     usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }
         });
@@ -644,6 +802,7 @@ fn decoded_completion_stream(
                 usage: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 delta: chunk.delta,
@@ -735,26 +894,20 @@ fn roundtrip_request(
     messages: Vec<ChatMessage>,
     tools: Vec<ChatTool>,
     thinking: Option<bool>,
+    thinking_behavior: ThinkingBehavior,
 ) -> ChatRequest {
+    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, None, true)
+        .expect("tool context should resolve");
     let mut request = ChatRequest {
         request_id: request_id.into(),
         messages,
-        tool_choice: if tools.is_empty() {
-            ChatToolChoice::None
-        } else {
-            ChatToolChoice::Auto
-        },
-        tools,
+        tool_context,
         ..ChatRequest::for_test()
     };
 
-    // Explicitly enable or disable thinking so that rendering and parsing the reasoning block is
-    // exercised or skipped in the roundtrip. If unspecified, use the default template behavior.
-    if let Some(thinking) = thinking {
-        for key in ["thinking", "enable_thinking"] {
-            request.chat_options.template_kwargs.insert(key.to_string(), thinking.into());
-        }
-    }
+    // Explicitly enable or disable thinking using the controls understood by
+    // this model's template. If unspecified, use the template default.
+    thinking_behavior.apply(&mut request, thinking);
 
     request
 }

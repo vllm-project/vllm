@@ -28,7 +28,8 @@ class HummingLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_linear_layer_to_humming_standard,
-            prepare_humming_layer,
+            get_humming_linear_compute_config,
+            prepare_humming_linear_layer_config,
         )
 
         name_map = {"weight": self.w_q_name, "weight_scale": self.w_s_name}
@@ -45,7 +46,12 @@ class HummingLinearKernel(MPLinearKernel):
             quant_config["has_zero_point"] = True
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        prepare_humming_layer(layer, quant_config)
+        input_quant_config = getattr(layer, "_humming_input_quant_config", None)
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer, quant_config, input_quant_config=input_quant_config
+        )
+        self.compute_config = get_humming_linear_compute_config()
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply_weights(
         self,
@@ -53,12 +59,14 @@ class HummingLinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.utils.humming import HummingMethod
-
-        flatten_inputs = x.view(-1, x.size(-1))
-        output = HummingMethod.forward_layer(
-            layer=layer,
-            inputs=flatten_inputs,
-            compute_config=layer.compute_config,
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            apply_humming_linear,
         )
-        return output.view(*x.shape[:-1], output.size(-1))
+
+        return apply_humming_linear(
+            layer,
+            x,
+            layer_config=self.layer_config,
+            compute_config=self.compute_config,
+            locks=self.locks,
+        )

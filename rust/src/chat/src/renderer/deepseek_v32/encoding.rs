@@ -1,4 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! DeepSeek V3.2 prompt renderer.
+//!
+//! Official Python reference:
+//! <https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/main/encoding/encoding_dsv32.py>
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -45,15 +51,20 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         request.messages.last().map(ChatMessage::role),
         Some(ChatRole::User | ChatRole::Developer)
     );
-    let render_offset = isize::from(request.tool_parsing_enabled());
+    let initial_tools = if request.tool_parsing_enabled() {
+        request.initial_tools()
+    } else {
+        &[]
+    };
+    let render_offset = isize::from(!initial_tools.is_empty());
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), render_offset);
     let last_user_actual_index = find_last_user_actual_index(request.messages.as_slice());
     let continue_final_message = request.chat_options.continue_final_message();
     let mut prompt = String::from(BOS_TOKEN);
 
-    if request.tool_parsing_enabled() {
-        render_system_message(&mut prompt, None, &request.tools)?;
+    if !initial_tools.is_empty() {
+        render_system_message(&mut prompt, None, initial_tools)?;
     }
 
     for (message_index, message) in request.messages.iter().enumerate() {
