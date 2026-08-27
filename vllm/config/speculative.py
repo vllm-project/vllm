@@ -401,6 +401,10 @@ class SpeculativeConfig:
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
+    mtp_share_lm_head: bool = True
+    """Share the target model LM head with an MTP draft model. Disable this
+    only when the MTP checkpoint owns a separate LM head, for example when the
+    target and draft heads use different quantization schemes."""
     moe_backend: MoEBackend | None = None
     """MoE backend to use for the draft model. When `None`, the draft model
     inherits the target model's `--moe-backend` setting. Useful when the
@@ -599,6 +603,7 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
+        factors.append(self.mtp_share_lm_head)
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -1713,7 +1718,12 @@ class SpeculativeConfig:
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
+        
+        if not self.mtp_share_lm_head and self.method != "mtp":
+            raise ValueError("mtp_share_lm_head=False is only supported for MTP.")
+
         return self
+        
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (

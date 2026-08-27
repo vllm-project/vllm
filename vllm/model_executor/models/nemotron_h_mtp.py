@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -22,7 +23,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
@@ -35,6 +39,8 @@ from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
 )
+
+logger = init_logger(__name__)
 
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
@@ -216,7 +222,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config.get_text_config()
+        config = vllm_config.model_config.hf_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -322,7 +328,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config.get_text_config()
+        config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = vllm_config.quant_config
@@ -342,12 +348,37 @@ class NemotronHMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        # LM head for generating logits
+        speculative_config = vllm_config.speculative_config
+        self.use_private_lm_head = (
+            speculative_config is not None
+            and speculative_config.method == "mtp"
+            and not speculative_config.mtp_share_lm_head
+        )
+        parallel_config = vllm_config.parallel_config
+        self.share_target_embeddings = (
+            parallel_config is None or parallel_config.pipeline_parallel_size == 1
+        )
+        lm_head_quant_config = self.quant_config if self.use_private_lm_head else None
+
+        # The proposer replaces a shared temporary head with the target head.
+        # A private head stays draft-owned and must therefore be constructed
+        # from the draft checkpoint's quantization configuration.
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
+            quant_config=lm_head_quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
+        if self.use_private_lm_head:
+            quant_name = (
+                self.quant_config.get_name()
+                if self.quant_config is not None
+                else "unquantized"
+            )
+            logger.info(
+                "Constructed Nemotron MTP draft-owned lm_head with %s quantization.",
+                quant_name,
+            )
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
@@ -412,14 +443,26 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        loaded_stacked_shards: dict[str, set[str]] = {}
+        loaded_expert_slices: dict[str, set[int]] = {}
 
         for name, loaded_weight in weights:
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
-
+            # Full checkpoints contain an lm_head even when MTP will share the
+            # already-loaded target head. Skip that representation unless this
+            # draft explicitly owns a private head.
+            if "lm_head" in name and not self.use_private_lm_head:
+                continue
             # Only process MTP weights - skip all non-MTP weights
-            if not name.startswith("mtp.") and "embeddings" not in name:
+            if (
+                not name.startswith("mtp.")
+                and "embeddings" not in name
+                and not (
+                    self.use_private_lm_head and name.startswith("lm_head.")
+                )
+            ):
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
@@ -431,6 +474,13 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 name = name.replace("embeddings", "embed_tokens")
                 if name.startswith("backbone."):
                     name = name.replace("backbone.", "model.")
+
+            if "scale" in name or "zero_point" in name:
+                # ModelOpt serializes KV-cache scales next to k_proj/v_proj,
+                # while vLLM registers them on the Attention module.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             # Handle stacked parameters (qkv_proj) for attention layers
             is_stacked = False
@@ -456,6 +506,9 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 if weight_loader is not None:
                     weight_loader(param, loaded_weight, shard_id)
                     loaded_params.add(stacked_name)
+                    loaded_stacked_shards.setdefault(stacked_name, set()).add(
+                        shard_id
+                    )
                 break
 
             if is_stacked:
@@ -489,6 +542,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 )
                 if success:
                     loaded_params.add(name_mapped)
+                    loaded_expert_slices.setdefault(name_mapped, set()).add(expert_id)
                 break
 
             if is_expert_weight:
@@ -504,5 +558,87 @@ class NemotronHMTP(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        if self.use_private_lm_head:
+            loaded_lm_head_params = {
+                name for name in loaded_params if name.startswith("lm_head.")
+            }
+            if not loaded_lm_head_params:
+                raise ValueError(
+                    "mtp_share_lm_head=False requires lm_head weights in the "
+                    "external MTP checkpoint."
+                )
+            logger.info(
+                "Loaded %d private MTP lm_head tensors from the draft checkpoint.",
+                len(loaded_lm_head_params),
+            )
+        else:
+            # These temporary parameters are replaced by the target head after
+            # draft loading and may be absent from an MTP-only checkpoint.
+            loaded_params.update(
+                name for name in params_dict if name.startswith("lm_head.")
+            )
+
+        if self.share_target_embeddings:
+            # At PP=1 the target embedding replaces the draft embedding, so
+            # both full and MTP-only checkpoint layouts are valid.
+            loaded_params.update(
+                name
+                for name in params_dict
+                if name.startswith("model.embed_tokens.")
+            )
+
+        # Quantized model loading disables the generic missing-weight check
+        # because some quantizers synthesize parameters. These ModelOpt MTP
+        # checkpoints serialize every model-owned parameter, so enforce the
+        # stronger invariant here to catch missed name mappings.
+        missing_params = set(params_dict) - loaded_params
+        runtime_owned_params = {
+            name
+            for name in missing_params
+            if name.endswith((".attn.q_scale", ".attn.prob_scale"))
+            or name == "lm_head.input_scale"
+        }
+        missing_params -= runtime_owned_params
+        if missing_params:
+            missing_preview = ", ".join(sorted(missing_params)[:20])
+            raise ValueError(
+                "Nemotron MTP checkpoint did not initialize "
+                f"{len(missing_params)} parameter(s): {missing_preview}"
+            )
+
+        incomplete_stacked_params = [
+            f"{name} ({','.join(sorted(shards))}/k,q,v shards)"
+            for name, shards in sorted(loaded_stacked_shards.items())
+            if shards != {"q", "k", "v"}
+        ]
+        if incomplete_stacked_params:
+            raise ValueError(
+                "Nemotron MTP checkpoint incompletely initialized fused QKV "
+                "parameters: " + ", ".join(incomplete_stacked_params)
+            )
+
+        incomplete_expert_params: list[str] = []
+        for name, expert_ids in sorted(loaded_expert_slices.items()):
+            expected_slices = params_dict[name].shape[0]
+            if len(expert_ids) != expected_slices:
+                incomplete_expert_params.append(
+                    f"{name} ({len(expert_ids)}/{expected_slices} expert slices)"
+                )
+        if incomplete_expert_params:
+            raise ValueError(
+                "Nemotron MTP checkpoint incompletely initialized fused MoE "
+                "parameters: " + ", ".join(incomplete_expert_params)
+            )
+        if loaded_expert_slices:
+            logger.info(
+                "Verified complete expert-slice loading for %d fused MTP "
+                "parameter(s).",
+                len(loaded_expert_slices),
+            )
+        logger.info(
+            "Verified initialization of all %d Nemotron MTP parameters.",
+            len(params_dict),
+        )
 
         return loaded_params
