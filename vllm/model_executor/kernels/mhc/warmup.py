@@ -152,6 +152,77 @@ def _compile_mhc_post(hidden_size: int, hc_mult: int) -> None:
     _compile_and_cache(_mhc_post_kernel, a, b, c_t, d, x, hc_mult, hidden_size)
 
 
+def _compile_hc_prenorm_gemm(hidden_size: int, hc_mult: int) -> None:
+    """Compile the non-DeepGEMM prenorm GEMM specializations.
+
+    ``_tilelang_hc_prenorm_gemm`` selects between two regular-kernel
+    configurations and one block-M configuration based on the token count.
+    Their token dimension is dynamic, so one representative shape per static
+    configuration covers the complete runtime key space.
+    """
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        hc_prenorm_gemm_block_m_tilelang,
+        hc_prenorm_gemm_tilelang,
+    )
+
+    hc_hidden_size = hc_mult * hidden_size
+    n_out = hc_mult * 2 + hc_mult * hc_mult
+    fn = _fake(torch.float32, n_out, hc_hidden_size)
+
+    def compile_regular(num_tokens: int, n_thr: int, tile_n: int) -> None:
+        x = _fake(torch.bfloat16, num_tokens, hc_hidden_size)
+        out = _fake(torch.float32, 1, num_tokens, n_out)
+        sqrsum = _fake(torch.float32, 1, num_tokens)
+        _compile_and_cache(
+            hc_prenorm_gemm_tilelang,
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+            n_out,
+            n_thr,
+            tile_n,
+            1,
+        )
+
+    def compile_block_m(num_tokens: int) -> None:
+        x = _fake(torch.bfloat16, num_tokens, hc_hidden_size)
+        out = _fake(torch.float32, 1, num_tokens, n_out)
+        sqrsum = _fake(torch.float32, 1, num_tokens)
+        _compile_and_cache(
+            hc_prenorm_gemm_block_m_tilelang,
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+            n_out,
+            512,
+            12,
+            2,
+        )
+
+    if hc_hidden_size % 1024 == 0:
+        compile_regular(
+            num_tokens=1,  # dynamic dim; smallest valid value
+            n_thr=1024,
+            tile_n=4,
+        )
+
+    compile_regular(
+        num_tokens=128,  # dynamic dim; smallest valid value
+        n_thr=512,
+        tile_n=12,
+    )
+
+    compile_block_m(
+        num_tokens=1024,  # dynamic dim; smallest valid value
+    )
+
+
 # =============================================================================
 # 1. MhcPreKernel — first-layer path (mhc_pre + mhc_post)
 # =============================================================================
@@ -343,6 +414,8 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
 
         # mhc_post: cache_key depends only on (hc_mult, hidden_size).
         _compile_mhc_post(hidden_size, hc_mult)
+        if not compile_key.use_deep_gemm:
+            _compile_hc_prenorm_gemm(hidden_size, hc_mult)
 
 
 # =============================================================================
