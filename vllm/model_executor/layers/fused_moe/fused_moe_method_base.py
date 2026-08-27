@@ -46,6 +46,43 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
 
+    @property
+    def mk_fuses_shared_experts(self) -> bool:
+        """Whether one kernel returns the combined routed and shared output."""
+        return False
+
+    @property
+    def supports_dbo(self) -> bool:
+        """Whether the method supports concurrent DBO microbatches."""
+        return True
+
+    @property
+    def requires_moe_quant_config(self) -> bool:
+        """Whether the runner must lazily build a modular quant config."""
+        return True
+
+    @property
+    def output_is_reduced(self) -> bool:
+        """Whether the method returns the final cross-rank expert result."""
+        return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
+
+    def bind_shared_experts(
+        self,
+        shared_experts: torch.nn.Module | None,
+        *,
+        routed_output_transform: torch.nn.Module | None = None,
+    ) -> None:
+        """Bind shared experts for methods that transform them after loading."""
+        return
+
+    def bind_routed_scaling_factor(self, routed_scaling_factor: float) -> None:
+        """Bind the routed-output scale for methods that add shared output."""
+        if self.mk_fuses_shared_experts and routed_scaling_factor != 1.0:
+            raise NotImplementedError(
+                f"{type(self).__name__} fuses shared experts but does not "
+                "consume routed_scaling_factor."
+            )
+
     @abstractmethod
     def create_weights(
         self,

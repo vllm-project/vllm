@@ -271,6 +271,7 @@ class MoERunner(MoERunnerInterface):
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
+        self._raw_shared_experts = shared_experts
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
@@ -290,6 +291,8 @@ class MoERunner(MoERunnerInterface):
                 mk_can_overlap_shared_experts=can_overlap,
             )
 
+        self._bind_quant_method()
+
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
 
@@ -304,17 +307,34 @@ class MoERunner(MoERunnerInterface):
         return self.routed_experts.load_weights(weights)
 
     def _select_forward(self) -> Callable:
+        has_separate_shared_output = (
+            self._shared_experts is not None
+            and not self._quant_method.mk_fuses_shared_experts
+        )
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
-            return _moe_forward if self._shared_experts is None else _moe_forward_shared
+            return (
+                _moe_forward if not has_separate_shared_output else _moe_forward_shared
+            )
 
         return (
             torch.ops.vllm.moe_forward
-            if self._shared_experts is None
+            if not has_separate_shared_output
             else torch.ops.vllm.moe_forward_shared
         )
+
+    def _bind_quant_method(self) -> None:
+        self._quant_method.bind_shared_experts(
+            self._raw_shared_experts,
+            routed_output_transform=self.routed_output_transform,
+        )
+        self._quant_method.bind_routed_scaling_factor(self.routed_scaling_factor)
+        if self.enable_dbo and not self._quant_method.supports_dbo:
+            raise NotImplementedError(
+                f"{type(self._quant_method).__name__} does not support DBO."
+            )
 
     @property
     def shared_experts(self) -> SharedExperts | None:
@@ -323,6 +343,8 @@ class MoERunner(MoERunnerInterface):
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.routed_experts._replace_quant_method(quant_method)
+        self._bind_quant_method()
+        self._forward_entry = self._select_forward()
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
@@ -402,7 +424,10 @@ class MoERunner(MoERunnerInterface):
         avoid overflow by dividing shared_output by the scale instead
         (the decoder layer compensates with matching divisions).
         """
-        if self.routed_scaling_factor != 1.0:
+        if (
+            self.routed_scaling_factor != 1.0
+            and not self._quant_method.mk_fuses_shared_experts
+        ):
             if fused_output.dtype != torch.float16 or shared_output is None:
                 fused_output *= self.routed_scaling_factor
             elif shared_output is not None:
@@ -411,10 +436,7 @@ class MoERunner(MoERunnerInterface):
 
     @property
     def _fused_output_is_reduced(self) -> bool:
-        return (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
+        return self._quant_method.output_is_reduced
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -572,7 +594,10 @@ class MoERunner(MoERunnerInterface):
         shared_experts_input: torch.Tensor | None,
         order: SharedExpertsOrder,
     ):
-        if self._shared_experts is not None:
+        if (
+            self._shared_experts is not None
+            and not self._quant_method.mk_fuses_shared_experts
+        ):
             assert shared_experts_input is not None
             self._shared_experts(shared_experts_input, order)
 
@@ -622,6 +647,8 @@ class MoERunner(MoERunnerInterface):
             SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
 
+        if self._quant_method.mk_fuses_shared_experts:
+            return None, fused_out
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
@@ -650,7 +677,10 @@ class MoERunner(MoERunnerInterface):
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the RoutedExperts via
         #        separate cuda stream)
-        if self._shared_experts is not None:
+        if (
+            self._shared_experts is not None
+            and not self._quant_method.mk_fuses_shared_experts
+        ):
             assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
@@ -845,7 +875,10 @@ class MoERunner(MoERunnerInterface):
                 )
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
-        if self.shared_experts is not None:
+        if (
+            self.shared_experts is not None
+            and not self._quant_method.mk_fuses_shared_experts
+        ):
             assert shared_output is not None
             return shared_output, hidden_states
         else:

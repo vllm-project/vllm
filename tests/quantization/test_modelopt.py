@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -19,6 +20,8 @@ from vllm.model_executor.kernels.linear import (
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
@@ -28,6 +31,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4MegaMoE,
     ModelOptNvFp4W4A16LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -69,6 +73,36 @@ def _mock_lm_head() -> Mock:
     lm_head = Mock(spec=ParallelLMHead)
     lm_head.__class__ = ParallelLMHead
     return lm_head
+
+
+def _mock_routed_experts() -> RoutedExperts:
+    layer = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(layer)
+    layer.moe_config = MagicMock()
+    layer.apply_router_weight_on_input = False
+    return layer
+
+
+def _compatible_shared_experts() -> SimpleNamespace:
+    gate_up = SimpleNamespace(
+        weight=torch.empty((4, 4), dtype=torch.bfloat16),
+        bias=None,
+        quant_method=UnquantizedLinearMethod(),
+        tp_size=1,
+    )
+    down = SimpleNamespace(
+        weight=torch.empty((4, 2), dtype=torch.bfloat16),
+        bias=None,
+        quant_method=UnquantizedLinearMethod(),
+        tp_size=1,
+    )
+    return SimpleNamespace(
+        gate_up_proj=gate_up,
+        down_proj=down,
+        act_fn=object.__new__(SiluAndMul),
+        expert_gate=None,
+        shard_sequence_parallel=False,
+    )
 
 
 def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
@@ -114,6 +148,263 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_nvfp4_selects_deep_gemm_mega_moe():
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = _mock_routed_experts()
+    layer.moe_config.moe_backend = "deep_gemm_mega_moe"
+    expected = MagicMock(spec=ModelOptNvFp4MegaMoE)
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4MegaMoE",
+        return_value=expected,
+    ) as mega_moe_cls:
+        method = config.get_quant_method(layer, prefix="model.layers.3.mlp.experts")
+
+    assert method is expected
+    mega_moe_cls.assert_called_once_with(
+        quant_config=config,
+        moe_config=layer.moe_config,
+    )
+
+
+def test_modelopt_nvfp4_excludes_deep_gemm_mega_moe():
+    prefix = "model.layers.3.mlp.experts"
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[prefix],
+    )
+    layer = _mock_routed_experts()
+    layer.moe_config.moe_backend = "deep_gemm_mega_moe"
+
+    assert config.get_quant_method(layer, prefix=prefix) is None
+
+
+def test_modelopt_nvfp4_mega_moe_rejects_router_weight_on_input():
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = _mock_routed_experts()
+    layer.moe_config.moe_backend = "deep_gemm_mega_moe"
+    layer.apply_router_weight_on_input = True
+
+    with pytest.raises(NotImplementedError, match="apply_router_weight_on_input"):
+        config.get_quant_method(layer, prefix="model.layers.3.mlp.experts")
+
+
+def test_modelopt_nvfp4_mega_moe_does_not_fuse_shared_before_output_transform():
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    method.moe = SimpleNamespace(hidden_dim=4, intermediate_size=2)
+    shared_experts = _compatible_shared_experts()
+
+    method.bind_shared_experts(shared_experts)
+    assert method._shared_experts_layer is shared_experts
+
+    method.bind_shared_experts(
+        shared_experts,
+        routed_output_transform=MagicMock(),
+    )
+    assert method._shared_experts_layer is None
+
+
+@pytest.mark.parametrize(
+    "attribute,value",
+    [
+        ("expert_gate", object()),
+        ("shard_sequence_parallel", True),
+    ],
+)
+def test_modelopt_nvfp4_mega_moe_falls_back_for_incompatible_shared_experts(
+    attribute: str,
+    value: object,
+):
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    method.moe = SimpleNamespace(hidden_dim=4, intermediate_size=2)
+    shared_experts = _compatible_shared_experts()
+    setattr(shared_experts, attribute, value)
+
+    method.bind_shared_experts(shared_experts)
+
+    assert method._shared_experts_layer is None
+
+
+@pytest.mark.parametrize("projection", ["gate_up_proj", "down_proj"])
+def test_modelopt_nvfp4_mega_moe_does_not_fuse_tp_sharded_shared_experts(
+    projection: str,
+):
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    method.moe = SimpleNamespace(hidden_dim=4, intermediate_size=2)
+    shared_experts = _compatible_shared_experts()
+    getattr(shared_experts, projection).tp_size = 2
+
+    method.bind_shared_experts(shared_experts)
+
+    assert method._shared_experts_layer is None
+
+
+def test_modelopt_w4a16_rejects_deep_gemm_mega_moe():
+    config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = _mock_routed_experts()
+    layer.moe_config.moe_backend = "deep_gemm_mega_moe"
+
+    with pytest.raises(ValueError, match="requires NVFP4 W4A4"):
+        config.get_quant_method(layer, prefix="model.layers.3.mlp.experts")
+
+
+def test_modelopt_nvfp4_mega_moe_uses_cached_inverse_activation_global_scale():
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    method.moe = SimpleNamespace(max_num_tokens=2)
+    method._shared_experts_layer = None
+    method._routed_scaling_factor = 1.0
+    method._symm_buffer = SimpleNamespace(
+        x=torch.empty((2, 4), dtype=torch.uint8),
+        x_sf=torch.empty((2, 1), dtype=torch.int32),
+        topk_idx=torch.empty((2, 1), dtype=torch.int64),
+        topk_weights=torch.empty((2, 1)),
+    )
+    method._deep_gemm = MagicMock()
+    gscale = torch.tensor(8.0)
+    layer = SimpleNamespace(
+        _deep_gemm_mega_a1_scale=torch.tensor(0.125),
+        _deep_gemm_mega_a1_gscale=gscale,
+        _deep_gemm_mega_l1_weights=MagicMock(),
+        _deep_gemm_mega_l2_weights=MagicMock(),
+        _deep_gemm_mega_l1_alphas=MagicMock(),
+        _deep_gemm_mega_l2_alphas=MagicMock(),
+        _deep_gemm_mega_a2_scales=MagicMock(),
+        swiglu_limit=None,
+    )
+    x = torch.zeros((2, 4), dtype=torch.bfloat16)
+    topk_weights = torch.zeros((2, 1))
+    topk_ids = torch.zeros((2, 1), dtype=torch.int32)
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.prepare_nvfp4_megamoe_inputs"
+    ) as prepare:
+        method.apply(layer, x, topk_weights, topk_ids, None, None)
+
+    assert prepare.call_args.args[1] is gscale
+    assert prepare.call_args.args[4] is method._symm_buffer.x
+    assert prepare.call_args.args[5] is method._symm_buffer.x_sf
+
+
+def test_modelopt_nvfp4_mega_moe_initializes_runtime_on_ep_group():
+    ep_group = SimpleNamespace(device_group=MagicMock())
+    deep_gemm = MagicMock()
+    symm_buffer = object()
+    deep_gemm.get_symm_buffer_for_mega_moe.return_value = symm_buffer
+
+    def make_method():
+        method = object.__new__(ModelOptNvFp4MegaMoE)
+        method.moe = SimpleNamespace(
+            num_experts=8,
+            max_num_tokens=16,
+            experts_per_token=2,
+            hidden_dim=64,
+            intermediate_size=32,
+        )
+        method._num_shared_experts = 1
+        return method
+
+    with (
+        patch("vllm.distributed.get_ep_group", return_value=ep_group),
+        patch("torch.accelerator.current_device_index", return_value=0),
+    ):
+        first = make_method()
+        second = make_method()
+        first._initialize_runtime(deep_gemm)
+        second._initialize_runtime(deep_gemm)
+
+    deep_gemm.get_symm_buffer_for_mega_moe.assert_called_once()
+    assert first._symm_buffer is symm_buffer
+    assert second._symm_buffer is symm_buffer
+    assert ep_group._modelopt_nvfp4_mega_moe_buffers
+
+
+def test_modelopt_nvfp4_mega_moe_finishes_replacement_setup():
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    method._shared_experts_layer = None
+    method._transform_shared_weights = MagicMock()
+    method._initialize_runtime = MagicMock()
+    layer = SimpleNamespace(
+        _deep_gemm_mega_l1_weights=object(),
+        _deep_gemm_mega_a1_gscale=object(),
+    )
+    deep_gemm = MagicMock()
+
+    with (
+        patch(
+            "vllm.utils.deep_gemm._import_deep_gemm",
+            return_value=deep_gemm,
+        ),
+        patch.object(
+            current_platform,
+            "is_device_capability_family",
+            return_value=True,
+        ),
+    ):
+        method.process_weights_after_loading(layer)
+
+    method._transform_shared_weights.assert_called_once_with(deep_gemm)
+    method._initialize_runtime.assert_called_once_with(deep_gemm)
+
+
+def test_modelopt_nvfp4_mega_moe_reuses_and_releases_shared_weights():
+    shared_experts = torch.nn.Module()
+    shared_experts.gate_up_proj = torch.nn.Linear(
+        4,
+        4,
+        bias=False,
+        dtype=torch.bfloat16,
+    )
+    shared_experts.down_proj = torch.nn.Linear(
+        2,
+        4,
+        bias=False,
+        dtype=torch.bfloat16,
+    )
+    deep_gemm = MagicMock()
+    transformed_l1 = torch.empty((4, 4), dtype=torch.bfloat16)
+    transformed_l2 = shared_experts.down_proj.weight.data
+    deep_gemm.transform_weights_for_mega_moe.return_value = (
+        transformed_l1,
+        transformed_l2,
+    )
+
+    def make_method():
+        method = object.__new__(ModelOptNvFp4MegaMoE)
+        method.moe = SimpleNamespace(hidden_dim=4, intermediate_size=2)
+        method._shared_experts_layer = shared_experts
+        method._shared_l1_weights = None
+        method._shared_l2_weights = None
+        method._num_shared_experts = 0
+        return method
+
+    first = make_method()
+    first._transform_shared_weights(deep_gemm)
+    second = make_method()
+    second._transform_shared_weights(deep_gemm)
+
+    deep_gemm.transform_weights_for_mega_moe.assert_called_once()
+    assert first._shared_l1_weights is transformed_l1
+    assert second._shared_l1_weights is transformed_l1
+    assert first._shared_l2_weights is transformed_l2
+    assert second._shared_l2_weights is transformed_l2
+    assert shared_experts.gate_up_proj.weight is None
+    assert shared_experts.down_proj.weight is None
 
 
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
