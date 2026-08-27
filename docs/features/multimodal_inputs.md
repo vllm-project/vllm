@@ -868,7 +868,7 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 **TorchCodec-specific parameters:**
 
-The following parameters only apply to the `torchcodec` backend:
+The following parameters apply to the `torchcodec` backend:
 
 - `num_ffmpeg_threads`: Number of FFmpeg decoding threads. `0` (default) relies
   on the FFmpeg default, which is `min(cpu_count + 1, 16)`. This allows you to
@@ -882,6 +882,24 @@ The following parameters only apply to the `torchcodec` backend:
 # Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
+
+**PyAV-specific parameters:**
+
+The following parameters apply to the `pyav` backend:
+
+- `num_ffmpeg_threads`: Number of FFmpeg decoding threads — the same option as
+  `torchcodec`, but defaulting to `4` here to bound the per-request
+  slice-thread pool. With the FFmpeg default sizing (`0`,
+  `min(cpu_count + 1, 16)` workers per open codec), concurrent requests
+  multiply into far more decode threads than cores under serving load, which
+  can oversubscribe the host until decodes hang. Pass `0` to restore the
+  FFmpeg default sizing.
+
+```bash
+# Example: PyAV with a stricter 2-thread decode bound
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pyav", "num_ffmpeg_threads": 2}}'
 ```
 
 **PyNvVideoCodec-specific parameters:**

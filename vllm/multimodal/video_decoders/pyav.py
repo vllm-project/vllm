@@ -25,6 +25,8 @@ def decode_pyav(
     data: bytes,
     target: VideoTargetMetadata,
     sampling_kwargs: dict,
+    *,
+    num_ffmpeg_threads: int = 4,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
     with av.open(BytesIO(data)) as container:
         stream = container.streams.video[0]
@@ -36,7 +38,11 @@ def decode_pyav(
             source=source, target=target, **sampling_kwargs
         )
         frames, valid = PyAVVideoBackendMixin.decode_frames(
-            container, frame_idx, source.original_fps, source.duration
+            container,
+            frame_idx,
+            source.original_fps,
+            source.duration,
+            num_ffmpeg_threads=num_ffmpeg_threads,
         )
     return frames, source, frame_idx, valid
 
@@ -78,12 +84,18 @@ class PyAVVideoBackendMixin:
         frame_indices: list[int],
         fps: float,
         duration: float,
+        *,
+        num_ffmpeg_threads: int = 4,
     ) -> tuple[npt.NDArray, list[int]]:
         """Decode target frames via per-frame seek + forward decode to PTS."""
         stream = container.streams.video[0]
         # SLICE parallelizes within a single frame without the
         # one-frame-per-thread latency penalty of FRAME threading.
         stream.thread_type = "SLICE"
+        # FFmpeg auto sizing (0) allocates min(cpu_count + 1, 16) workers
+        # per open codec, which multiplies across concurrent requests and
+        # deadlocks under serving load (#53973).
+        stream.thread_count = num_ffmpeg_threads
         time_base = stream.time_base
 
         frames_list: list[npt.NDArray] = []

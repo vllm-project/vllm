@@ -18,7 +18,9 @@ VideoDecoderBackend = Literal[
 
 _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
     "opencv": {},
-    "pyav": {},
+    "pyav": {
+        "num_ffmpeg_threads": 4,
+    },
     "torchcodec": {
         "num_ffmpeg_threads": 0,
         "seek_mode": "exact",

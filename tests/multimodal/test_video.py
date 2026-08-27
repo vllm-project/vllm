@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 from contextlib import ExitStack, contextmanager
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ from vllm.multimodal.video import (
     get_video_loader_backend_for_processor,
 )
 from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders.pyav import PyAVVideoBackendMixin
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PyNvVideoCodecDecoderSlot,
@@ -181,6 +183,19 @@ def test_decode_video_imports_only_selected_backend(
             {"max_frames": 16},
             {"pool_size": 3, "timeout_sec": 10.0},
         ),
+        (
+            "pyav",
+            {"min_frames": 4, "num_ffmpeg_threads": 2},
+            {"min_frames": 4},
+            {"num_ffmpeg_threads": 2},
+        ),
+        # PyAV must default to a bounded thread count, not FFmpeg auto (#53973).
+        (
+            "pyav",
+            {"min_frames": 4},
+            {"min_frames": 4},
+            {"num_ffmpeg_threads": 4},
+        ),
     ],
 )
 def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
@@ -199,9 +214,15 @@ def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
 
 def test_video_backend_rejects_options_for_another_decoder():
     with pytest.raises(
-        ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
+        ValueError, match="seek_mode is not supported by the 'pyav' backend"
     ):
-        resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
+        resolve_video_backend_kwargs("pyav", {"seek_mode": "exact"})
+
+    with pytest.raises(
+        ValueError,
+        match="num_ffmpeg_threads is not supported by the 'opencv' backend",
+    ):
+        resolve_video_backend_kwargs("opencv", {"num_ffmpeg_threads": 2})
 
 
 @pytest.mark.parametrize(
@@ -1150,7 +1171,9 @@ def test_pyav_backend_loads_frames(dummy_video_path, monkeypatch: pytest.MonkeyP
             video_data = f.read()
 
         loader = VIDEO_LOADER_REGISTRY.load("opencv")
-        frames, metadata = loader.load_bytes(video_data, num_frames=8, backend="pyav")
+        frames, metadata = loader.load_bytes(
+            video_data, num_frames=8, backend="pyav", num_ffmpeg_threads=2
+        )
 
         assert frames.ndim == 4
         assert frames.shape[3] == 3  # RGB
@@ -1225,6 +1248,39 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
             f"Frame mismatch: requested index {want_idx}, "
             f"got marker {marker} (tolerance ±10)"
         )
+
+
+@pytest.mark.parametrize("num_ffmpeg_threads", [2, 0])
+def test_pyav_backend_bounds_decode_threads(num_ffmpeg_threads: int):
+    """Regression test for #53973: PyAV must bound the FFmpeg slice-thread pool.
+
+    Left at FFmpeg's auto sizing, every open codec allocates roughly one
+    worker per host CPU, which multiplies across concurrent decodes and
+    hangs decode threads under serving load. ``0`` remains the documented
+    escape hatch back to FFmpeg auto sizing.
+    """
+    import av
+
+    video_bytes = create_long_gop_video(num_frames=30)
+
+    with av.open(BytesIO(video_bytes)) as container:
+        source = PyAVVideoBackendMixin.get_metadata(container)
+        frames, valid = PyAVVideoBackendMixin.decode_frames(
+            container,
+            [0, 15],
+            source.original_fps,
+            source.duration,
+            num_ffmpeg_threads=num_ffmpeg_threads,
+        )
+        thread_count = container.streams.video[0].codec_context.thread_count
+        if num_ffmpeg_threads > 0:
+            assert thread_count == num_ffmpeg_threads
+        else:
+            # FFmpeg resolves auto sizing to a host-dependent count >= 1.
+            assert thread_count >= 1
+
+    assert valid == [0, 15]
+    assert frames.shape[0] == 2
 
 
 # ============================================================================

@@ -237,11 +237,12 @@ class VideoBackend(VideoLoader):
             kwargs: Codec-specific options, validated against and forwarded to
                 ``backend``:
 
-                - ``num_ffmpeg_threads`` (TorchCodec): number of FFmpeg
-                  decoding threads; ``0`` (default) relies on the FFmpeg
-                  default value which is ``min(cpu_count + 1, 16)``.
-                  OpenCV will always use ``min(cpu_count, 16)`` while pyav
-                  will always use ``min(cpu_count, (height + 15) / 16)``.
+                - ``num_ffmpeg_threads`` (TorchCodec, PyAV): number of FFmpeg
+                  decoding threads; ``0`` relies on the FFmpeg default value
+                  which is ``min(cpu_count + 1, 16)``. TorchCodec defaults to
+                  ``0`` while PyAV defaults to ``4`` to bound the per-decode
+                  slice-thread pool under concurrent serving load. OpenCV
+                  will always use ``min(cpu_count, 16)``.
                 - ``seek_mode`` (TorchCodec): ``"exact"`` (default) guarantees
                   frame-accurate sampling by scanning the file on creation,
                   while ``"approximate"`` skips that scan for faster decoder
