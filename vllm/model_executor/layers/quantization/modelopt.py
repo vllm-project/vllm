@@ -1005,6 +1005,8 @@ def _make_modelopt_nvfp4_moe_method(
     layer: RoutedExperts,
 ) -> FusedMoEMethodBase:
     if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
+        # DeepSeek V4's model-level MegaMoE path constructs its own experts
+        # directly, so it never reaches this RoutedExperts quant-method path.
         if quant_config.quant_method != "NVFP4":
             raise ValueError("deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16.")
         if layer.apply_router_weight_on_input:
@@ -1710,7 +1712,9 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
     ) -> None:
         # Deliberately bypass ModelOptNvFp4FusedMoE.__init__: the regular NVFP4
         # oracle selects a GEMM-only Experts implementation, while MegaMoE is a
-        # cooperative communication + compute kernel.
+        # cooperative communication + compute kernel.  The inherited weight
+        # loader uses only quant_config, use_a16, and use_global_sf; experts_cls
+        # must remain unset because its presence marks the method monolithic.
         FusedMoEMethodBase.__init__(self, moe_config)
         self.quant_config = quant_config
         self.use_a16 = False
