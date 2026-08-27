@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -53,6 +56,9 @@ class StructuredOutputsWorker:
         )
         self.device = device
         self.copy_stream = torch.cuda.Stream()
+        # SYCL command graphs reject cross-queue event dependencies, so XPU
+        # keeps the grammar-bitmask copies on the current stream instead.
+        self.use_copy_stream = not current_platform.is_xpu()
         self.mask_stride = mask_stride
         self.num_bonus_tokens = num_bonus_tokens
 
@@ -66,8 +72,14 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
+        copy_ctx = (
+            torch.cuda.stream(self.copy_stream)
+            if self.use_copy_stream
+            else contextlib.nullcontext()
+        )
+
         # Asynchronously copy the bitmask to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with copy_ctx:
             bitmask = async_copy_to_gpu(
                 grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
             )
@@ -86,7 +98,7 @@ class StructuredOutputsWorker:
         )
 
         # Asynchronously copy the mapping to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with copy_ctx:
             logits_indices = torch.tensor(
                 mapping, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
             )
@@ -96,7 +108,8 @@ class StructuredOutputsWorker:
 
         # Ensure all async copies are complete before launching the kernel.
         current_stream = torch.cuda.current_stream()
-        current_stream.wait_stream(self.copy_stream)
+        if self.use_copy_stream:
+            current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
@@ -117,7 +130,8 @@ class StructuredOutputsWorker:
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them
-        self.copy_stream.wait_stream(current_stream)
+        if self.use_copy_stream:
+            self.copy_stream.wait_stream(current_stream)
 
 
 # Adapted from
