@@ -15,6 +15,24 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsPara
 use crate::error::{Error, Result};
 use crate::output::TextDecodeOptions;
 
+/// Normalize vLLM's signed `top_k` domain into [`SamplingParams::top_k`].
+///
+/// vLLM uses both `-1` and `0` to disable top-k sampling. The text sampling
+/// model represents that state as `None` and preserves positive limits as
+/// `Some(k)`. Values below `-1` and values above `u32::MAX` are rejected.
+///
+/// Callers that need to distinguish an omitted value from an explicit disable
+/// should preserve that request-level distinction around this normalization.
+pub fn normalize_top_k(value: i64) -> std::result::Result<Option<u32>, String> {
+    match value {
+        -1 | 0 => Ok(None),
+        value if value > 0 => u32::try_from(value).map(Some).map_err(|error| error.to_string()),
+        value => Err(format!(
+            "top_k must be -1, 0, or a positive integer, got {value}"
+        )),
+    }
+}
+
 /// One raw text-generation prompt.
 ///
 /// This supports either ordinary text that still needs tokenization or
