@@ -190,12 +190,10 @@ class LoRAModel:
                 weight=weight,
                 bias=parameters.get("bias"),
             )
-        # score.weight and classifier.weight cannot exist at the same time.
-        if "score" in modules_to_save and "classifier" in modules_to_save:
+        if len(modules_to_save) > 1:
             raise ValueError(
-                "Both 'score' and 'classifier' modules "
-                "are present in the LoRA checkpoint. "
-                "Only one of them should be present."
+                "Only one full classification module is supported per "
+                f"adapter, received {sorted(modules_to_save)}."
             )
 
         return cls(lora_model_id, peft_helper.r, loras, modules_to_save=modules_to_save)

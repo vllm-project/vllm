@@ -359,7 +359,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
     ) -> torch.Tensor | None:
-        indices = self._full_linear_indices(y)
+        indices = self.sampler_indices
         adapter_y = torch.zeros(
             (x.size(0), weight_stacked.size(-2)),
             dtype=torch.float32,
