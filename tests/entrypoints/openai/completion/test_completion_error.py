@@ -6,7 +6,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -18,12 +17,13 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
@@ -194,6 +194,114 @@ def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
         RequestResponseMetadata(request_id="cmpl-test-id"),
     )
     assert response.metrics is None
+
+
+def _spec_decode_metrics() -> RequestSpecDecodeMetrics:
+    # Two verify steps: accept 3 drafts, then 1 -> histogram [0, 1, 0, 1].
+    m = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
+    m.observe(num_draft_tokens=3, num_accepted=3)
+    m.observe(num_draft_tokens=3, num_accepted=1)
+    return m
+
+
+def _make_spec_decode_request_output(
+    num_seqs: int = 1, with_metrics: bool = True
+) -> RequestOutput:
+    outputs = [
+        CompletionOutput(
+            index=i,
+            text="Hello",
+            token_ids=[100, 101],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            spec_decode_metrics=_spec_decode_metrics() if with_metrics else None,
+        )
+        for i in range(num_seqs)
+    ]
+    return RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=outputs,
+        finished=True,
+        metrics=None,
+    )
+
+
+def _completion_response(serving, request, request_output):
+    return serving.request_output_to_completion_response(
+        [request_output],
+        request,
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+
+
+def test_completion_spec_decode_metrics_present_for_single_sequence():
+    # Timing off, but the sequence carries acceptance metrics -> the metrics
+    # object is created just to hold metrics.speculative_decoding.
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
+    response = _completion_response(
+        serving,
+        CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10),
+        _make_spec_decode_request_output(num_seqs=1),
+    )
+    assert response.metrics is not None
+    assert response.metrics.time_to_first_token_ms is None  # timing not requested
+    spec = response.metrics.speculative_decoding
+    assert spec is not None
+    assert spec.acceptance_histogram == [0, 1, 0, 1]  # dense, index j
+    assert spec.num_spec_steps == 2
+    assert spec.num_spec_tokens == 3
+    assert spec.mean_acceptance_length == pytest.approx(3.0)  # 1 + (3 + 1) / 2
+
+
+def test_completion_spec_decode_metrics_suppressed_for_n_gt_1():
+    # Per-request metrics can't be attributed to one of the n sequences.
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
+    response = _completion_response(
+        serving,
+        CompletionRequest(model=MODEL_NAME, prompt="Test prompt", n=2, max_tokens=10),
+        _make_spec_decode_request_output(num_seqs=2),
+    )
+    assert response.metrics is None
+
+
+def test_completion_spec_decode_metrics_absent_when_not_collected():
+    # Flag off -> the sequence carries no acceptance metrics -> no metrics object.
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
+    response = _completion_response(
+        serving,
+        CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10),
+        _make_spec_decode_request_output(num_seqs=1, with_metrics=False),
+    )
+    assert response.metrics is None
+
+
+def test_completion_metrics_carries_both_timing_and_spec_decode():
+    serving = _build_minimal_metrics_serving_completion(enable_per_request_metrics=True)
+    request_output = _make_spec_decode_request_output(num_seqs=1)
+    request_output.metrics = _PER_REQUEST_STATS  # timing source
+    response = _completion_response(
+        serving,
+        CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10),
+        request_output,
+    )
+    assert response.metrics is not None
+    assert response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert response.metrics.speculative_decoding is not None
+    assert response.metrics.speculative_decoding.num_spec_steps == 2
 
 
 @pytest.mark.asyncio
@@ -430,7 +538,7 @@ def test_json_schema_response_format_missing_schema():
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid response_format structural_tag",
     ):
         CompletionRequest(
@@ -445,7 +553,7 @@ def test_structural_tag_response_format_invalid(format_value):
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid structured_outputs structural_tag",
     ):
         CompletionRequest(
@@ -473,6 +581,30 @@ def test_negative_prompt_token_ids_flat():
             model=MODEL_NAME,
             prompt=[-1],
             max_tokens=10,
+        )
+
+
+def test_logprobs_minus_one_allowed():
+    """logprobs=-1 means "return all logprobs". The sampling layer and the chat
+    top_logprobs / prompt_logprobs validators all accept -1, so the completion
+    logprobs validator must accept it too instead of rejecting it as negative."""
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        logprobs=-1,
+    )
+    assert request.logprobs == -1
+
+
+def test_logprobs_below_minus_one_rejected():
+    """Values more negative than -1 stay invalid."""
+    with pytest.raises(Exception, match="must be a positive value or -1"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            logprobs=-2,
         )
 
 
@@ -610,3 +742,16 @@ class TestCompletionPromptListLimit:
             max_tokens=1,
         )
         assert len(request.prompt_embeds) == 5
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
+def test_non_numeric_logprobs_rejected(field_name):
+    """A non-numeric logprobs value must be a clean 400 validation error, not a
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            **{field_name: "2"},
+        )

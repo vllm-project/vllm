@@ -7,7 +7,11 @@ from torch._higher_order_ops import auto_functionalized
 
 import vllm.config
 from tests.compile.backend import TestBackend
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    dense_kv_cache_views,
+)
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion import rope_kvcache_fusion
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
@@ -29,6 +33,7 @@ from vllm.config import (
 from vllm.config.utils import Range
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import attention as attention_module
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name
@@ -37,10 +42,45 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+)
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def test_kv_cache_update_ops_fake_tensor_metadata(monkeypatch: pytest.MonkeyPatch):
+    query = torch.empty(1, dtype=torch.bfloat16)
+    kv_cache = torch.empty(1, dtype=torch.uint8)
+    context = (None, None, kv_cache, None)
+    monkeypatch.setattr(attention_module, "get_attention_context", lambda _: context)
+    monkeypatch.setattr(rope_kvcache_fusion, "get_attention_context", lambda _: context)
+
+    runtime_output = attention_module.unified_kv_cache_update(query, query, "layer")
+    fake_output = attention_module.unified_kv_cache_update_fake(query, query, "layer")
+    assert runtime_output.shape == fake_output.shape
+    assert runtime_output.dtype == fake_output.dtype
+    assert runtime_output.device == fake_output.device
+
+    args = (
+        query,
+        query,
+        query,
+        torch.empty(1, dtype=torch.int64),
+        torch.empty(1),
+        True,
+        "layer",
+    )
+    runtime_output = rope_kvcache_fusion.fused_rope_and_unified_kv_cache_update_impl(
+        *args
+    )
+    fake_output = rope_kvcache_fusion.fused_rope_and_unified_kv_cache_update_fake(*args)
+    assert runtime_output.shape == fake_output.shape
+    assert runtime_output.dtype == fake_output.dtype
+    assert runtime_output.device == fake_output.device
 
 
 def test_rope_kvcache_fusion_default_keeps_large_ranges_unfused():
@@ -117,9 +157,20 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             FP8_DTYPE if kv_cache_dtype_str.startswith("fp8") else self.dtype
         )
 
+        # Mirror the worker spec-collection loop: the backend publishes its
+        # packing (e.g. ROCM_ATTN's separate K/V head groups).
+        self.kv_cache_spec = self.attn_backend.customize_spec(
+            FullAttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_dtype,
+            )
+        )
+
         # Initialize attn MetadataBuilder
         self.builder = self.attn_backend.get_builder_cls()(
-            kv_cache_spec=self.attn.get_kv_cache_spec(vllm_config),
+            kv_cache_spec=self.kv_cache_spec,
             layer_names=[self.attn.layer_name],
             vllm_config=vllm_config,
             device=device,
@@ -136,30 +187,25 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # Fetch the attention backend and kv cache shape and stride order
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size
-        )
-        try:
-            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        # A backend's preferred supported layout wins over the default, mirroring
+        # selector-time resolution (e.g. ROCM_ATTN's head groups force LHBNC).
+        layout = KVCacheLayout.LBNHC
+        supported = self.attn_backend.supported_kv_cache_layouts()
+        if supported:
+            layout = supported[0]
 
-        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-
-        # Create dummy KV cache
         raw_tensor = torch.zeros(
-            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
-            dtype=self.kv_cache_dtype,
+            num_blocks * self.kv_cache_spec.page_size_bytes,
+            dtype=torch.int8,
             device=self.device,
         )
-        raw_tensor = raw_tensor.view(kv_cache_shape)
-        kv_cache = raw_tensor.permute(*inv_order)
-
-        self.attn.kv_cache = kv_cache
+        self.attn.kv_cache = dense_kv_cache_views(
+            raw_tensor,
+            self.kv_cache_spec,
+            num_blocks,
+            num_layers=1,
+            layout=layout,
+        )[0]
 
         # Build attn metadata
         attn_metadata = self.builder.build(

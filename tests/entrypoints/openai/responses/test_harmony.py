@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import InternalServerError, NotFoundError, OpenAI
+from openai import NotFoundError, OpenAI
 from openai_harmony import Message
 
 from tests.utils import RemoteOpenAIServer
@@ -368,8 +368,12 @@ async def test_streaming_types(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
 async def test_function_calling_with_streaming_types(
-    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+    pairs_of_event_types: dict[str, str],
+    client: OpenAI,
+    model_name: str,
+    tool_choice: str,
 ):
     """Streaming event nesting for function-calling responses."""
 
@@ -382,6 +386,7 @@ async def test_function_calling_with_streaming_types(
         validate_events=_has_function_events,
         input=[{"role": "user", "content": "What's the weather like in Paris today?"}],
         tools=[GET_WEATHER_SCHEMA],
+        tool_choice=tool_choice,
         temperature=0.0,
     )
 
@@ -558,7 +563,8 @@ async def test_reasoning_item(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling(client: OpenAI, model_name: str):
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+async def test_function_calling(client: OpenAI, model_name: str, tool_choice: str):
     tools = [GET_WEATHER_SCHEMA]
 
     response = await retry_for_tool_call(
@@ -567,8 +573,9 @@ async def test_function_calling(client: OpenAI, model_name: str):
         expected_tool_type="function_call",
         input="What's the weather like in Paris today?",
         tools=tools,
+        tool_choice=tool_choice,
         temperature=0.0,
-        extra_body={"request_id": "test_function_calling_non_resp"},
+        extra_body={"request_id": f"test_function_calling_non_resp_{tool_choice}"},
     )
     assert response.status == "completed"
     assert has_output_type(response, "function_call"), (
@@ -610,7 +617,10 @@ async def test_function_calling(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+async def test_function_calling_multi_turn(
+    client: OpenAI, model_name: str, tool_choice: str
+):
     """Multi-tool, multi-turn function calling with retry at API level."""
     tools = [
         {
@@ -635,6 +645,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
         expected_tool_type="function_call",
         input="Help me plan a trip to a random place. And tell me the weather there.",
         tools=tools,
+        tool_choice=tool_choice,
         temperature=0.0,
     )
     assert response.status == "completed"
@@ -659,6 +670,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
             }
         ],
         tools=tools,
+        tool_choice=tool_choice,
         previous_response_id=response.id,
         temperature=0.0,
     )
@@ -697,20 +709,6 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling_required(client: OpenAI, model_name: str):
-    tools = [GET_WEATHER_SCHEMA]
-
-    with pytest.raises(InternalServerError):
-        await client.responses.create(
-            model=model_name,
-            input="What's the weather like in Paris today?",
-            tools=tools,
-            tool_choice="required",
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_system_message_with_tools(client: OpenAI, model_name: str):
     from vllm.entrypoints.openai.parser.harmony_utils import get_system_message
 
@@ -726,7 +724,10 @@ async def test_system_message_with_tools(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling_full_history(client: OpenAI, model_name: str):
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+async def test_function_calling_full_history(
+    client: OpenAI, model_name: str, tool_choice: str
+):
     tools = [GET_WEATHER_SCHEMA]
 
     input_messages = [
@@ -739,6 +740,7 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
         expected_tool_type="function_call",
         input=input_messages,
         tools=tools,
+        tool_choice=tool_choice,
         temperature=0.0,
     )
     assert response.status == "completed"
@@ -772,7 +774,10 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling_with_stream(client: OpenAI, model_name: str):
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+async def test_function_calling_with_stream(
+    client: OpenAI, model_name: str, tool_choice: str
+):
     """Function calling via streaming, with retry for non-determinism."""
     tools = [GET_WEATHER_SCHEMA]
     input_list = [
@@ -792,6 +797,7 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
         validate_events=_has_function_call,
         input=input_list,
         tools=tools,
+        tool_choice=tool_choice,
         temperature=0.0,
     )
 
@@ -853,8 +859,9 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
 async def test_function_calling_no_code_interpreter_events(
-    client: OpenAI, model_name: str
+    client: OpenAI, model_name: str, tool_choice: str
 ):
     """Verify that function calls don't trigger code_interpreter events.
 
@@ -880,6 +887,7 @@ async def test_function_calling_no_code_interpreter_events(
         validate_events=_has_function_call,
         input=input_list,
         tools=tools,
+        tool_choice=tool_choice,
         temperature=0.0,
     )
 
@@ -1048,8 +1056,9 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
 async def test_function_call_with_previous_input_messages(
-    client: OpenAI, model_name: str
+    client: OpenAI, model_name: str, tool_choice: str
 ):
     """Multi-turn function calling using previous_input_messages."""
     tools = [
@@ -1074,6 +1083,7 @@ async def test_function_call_with_previous_input_messages(
         expected_tool_type="function_call",
         input="What is the horoscope for Aquarius today?",
         tools=tools,
+        tool_choice=tool_choice,
         temperature=0.0,
         extra_body={"enable_response_messages": True},
         max_output_tokens=1000,

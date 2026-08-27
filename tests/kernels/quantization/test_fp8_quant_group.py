@@ -73,6 +73,21 @@ def test_quantfp8_group_functionality(
     if is_divisible:
         x_quant_cuda, scales_cuda = quant_op.forward_cuda(x.clone())
         assert x_quant_cuda.shape == x.shape
+
+        if scales_cuda.dtype == torch.int32:
+            # DeepGEMM UE8M0 fast path (group_size == 128 on Blackwell with
+            # the UE8M0 oracle): scales are packed 4-per-int32 in a
+            # TMA-aligned layout. Unpack and compare against native.
+            assert use_ue8m0 and group_size == 128
+            packed_groups = (expected_num_groups + 3) // 4
+            assert scales_cuda.shape == (batch_size, packed_groups)
+            unpacked = (
+                scales_cuda.contiguous()
+                .view(torch.uint8)
+                .reshape(batch_size, -1)[:, :expected_num_groups]
+            )
+            scales_cuda = torch.pow(2.0, unpacked.float() - 127)
+
         assert scales_cuda.shape == (batch_size, expected_num_groups)
 
         # Verify CUDA/native consistency

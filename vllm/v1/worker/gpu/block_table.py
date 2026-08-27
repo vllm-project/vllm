@@ -88,9 +88,9 @@ class BlockTables:
     def init_block_table_layout_tensors(self) -> None:
         # Called at init and after a CuMem kv_cache wake-up. The ptr tensors
         # cache raw data_ptr() values that go stale once the underlying tensors
-        # are reallocated on wake; block_sizes_tensor needs re-populating
-        # because its storage lives under the kv_cache pool tag and comes back
-        # with undefined contents.
+        # are reallocated on wake; the size tensors need re-populating because
+        # their storage lives under the kv_cache pool tag and comes back with
+        # undefined contents.
         self.block_table_ptrs = self._make_ptr_tensor(
             [b.gpu for b in self.block_tables]
         )
@@ -100,6 +100,9 @@ class BlockTables:
             device=self.device,
         )
         self.block_sizes_tensor = torch.tensor(
+            self.block_sizes, dtype=torch.int32, device=self.device
+        )
+        self.kernel_block_sizes_tensor = torch.tensor(
             self.kernel_block_sizes, dtype=torch.int32, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
@@ -116,14 +119,23 @@ class BlockTables:
             bpk = self.blocks_per_kv_block[i]
             if bpk > 1:
                 block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
+            end = start + len(block_ids)
+            row_capacity = self.block_tables[i].gpu.shape[1]
+            if end > row_capacity:
+                raise RuntimeError(
+                    f"Block table write for request {req_index}, group {i} exceeds "
+                    f"row capacity ({end} > {row_capacity})"
+                )
             self.block_tables[i].stage_write(req_index, start, block_ids)
-            self.num_blocks.np[i, req_index] = start + len(block_ids)
+            self.num_blocks.np[i, req_index] = end
 
     def apply_staged_writes(self) -> None:
+        if self.num_kv_cache_groups == 0:
+            return
         if self.num_kv_cache_groups == 1:
             # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
-        else:
+        elif self.num_kv_cache_groups > 1:
             # Multiple groups: apply all block tables with one fused kernel.
             assert self.fused_writer is not None
             self.fused_writer.apply(
@@ -135,27 +147,43 @@ class BlockTables:
         self,
         idx_mapping: torch.Tensor,
         num_reqs_padded: int,
+        out: tuple[torch.Tensor, ...] | None = None,
+        out_ptrs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        if self.num_kv_cache_groups == 0:
+            return ()
+        if out is None:
+            out = tuple(self.input_block_tables)
+            out_ptrs = self.input_block_table_ptrs
+        else:
+            assert out_ptrs is not None
+            assert len(out) == self.num_kv_cache_groups
         num_reqs = idx_mapping.shape[0]
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
         _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
             idx_mapping,
             self.block_table_ptrs,
-            self.input_block_table_ptrs,
+            out_ptrs,
             self.block_table_strides,
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
             BLOCK_SIZE=1024,  # type: ignore
         )
-        return tuple(bt[:num_reqs_padded] for bt in self.input_block_tables)
+        return tuple(bt[:num_reqs_padded] for bt in out)
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
-        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+        #
+        # Zero the rows so dummy runs write mamba state to the reserved null
+        # block rather than through the previous real step's (stale) block
+        # ids, which may point at blocks since freed and reallocated.
+        return tuple(
+            block_table[:num_reqs].zero_() for block_table in self.input_block_tables
+        )
 
     def compute_slot_mappings(
         self,
@@ -163,26 +191,31 @@ class BlockTables:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
         num_tokens_padded: int,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.num_kv_cache_groups == 0:
+            return (self.slot_mappings if out is None else out)[:, :num_tokens_padded]
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
+        slot_mappings = self.slot_mappings if out is None else out
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            self.max_num_batched_tokens,
+            slot_mappings.shape[1],
             idx_mapping,
             query_start_loc,
             positions,
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
-            self.slot_mappings,
-            self.slot_mappings.stride(0),
+            self.kernel_block_sizes_tensor,
+            slot_mappings,
+            slot_mappings.stride(0),
             self.cp_rank,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
-        return self.slot_mappings[:, :num_tokens_padded]
+        return slot_mappings[:, :num_tokens_padded]
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
         # Fill the entire slot_mappings tensor, not just the first `num_tokens` entries.
@@ -245,6 +278,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
     block_sizes,  # [num_kv_cache_groups]
+    kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
@@ -271,7 +305,8 @@ def _compute_slot_mappings_kernel(
 
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
-    block_size = tl.load(block_sizes + group_id)
+    kv_block_size = tl.load(block_sizes + group_id)
+    kernel_block_size = tl.load(kernel_block_sizes + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
@@ -280,22 +315,30 @@ def _compute_slot_mappings_kernel(
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
 
-        block_indices = positions // (block_size * CP_SIZE)
-        block_offsets = positions % (block_size * CP_SIZE)
-        block_numbers = tl.load(
-            block_table_ptr + req_state_idx * block_table_stride + block_indices
-        )
-
         if CP_SIZE == 1:
             # Common case: Context parallelism is not used.
-            slot_ids = block_numbers * block_size + block_offsets
+            local_positions = positions
+            is_local = True
         else:
             # Context parallelism is used.
-            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-            rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-            remainder = block_offsets % CP_INTERLEAVE
+            virtual_block_size = kv_block_size * CP_SIZE
+            virtual_block_indices = positions // virtual_block_size
+            virtual_block_offsets = positions % virtual_block_size
+            is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+            rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
+            remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
-            slot_ids = block_numbers * block_size + local_offsets
+            local_positions = virtual_block_indices * kv_block_size + local_offsets
+
+        block_indices = local_positions // kernel_block_size
+        block_offsets = local_positions % kernel_block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_state_idx * block_table_stride + block_indices,
+            mask=is_local,
+            other=0,
+        )
+        slot_ids = block_numbers * kernel_block_size + block_offsets
+        if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
