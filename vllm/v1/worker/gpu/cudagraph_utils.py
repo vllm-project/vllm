@@ -29,6 +29,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.profiler.graph_capture import graph_capture_step
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
@@ -358,12 +359,16 @@ class CudaGraphManager:
                         desc.cg_mode == CUDAGraphMode.PIECEWISE
                         and not self.use_breakable_cg
                     ):
-                        forward_fn(CUDAGraphMode.PIECEWISE)
+                        with graph_capture_step(desc.num_tokens, desc.cg_mode.name):
+                            forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         # Capture with fresh attention state.
                         forward_fn = create_forward_fn(desc, warmup=False)
                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                            forward_fn(CUDAGraphMode.PIECEWISE)
+                            with graph_capture_step(
+                                desc.num_tokens, desc.cg_mode.name
+                            ):
+                                forward_fn(CUDAGraphMode.PIECEWISE)
                             continue
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
@@ -379,8 +384,9 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(
-                            graph, self.pool, stream=current_stream()
+                        with (
+                            graph_capture_step(desc.num_tokens, desc.cg_mode.name),
+                            torch.cuda.graph(graph, self.pool, stream=current_stream()),
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid

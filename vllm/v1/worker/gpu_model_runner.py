@@ -118,6 +118,7 @@ from vllm.multimodal.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
+from vllm.profiler.graph_capture import graph_capture_profiler
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -7009,7 +7010,12 @@ class GPUModelRunner(
             # Capture encoder CUDA graphs if enabled
             if self.encoder_cudagraph_manager is not None:
                 encoder_graph_pool = current_platform.graph_pool_handle()
-                self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
+                with graph_capture_profiler(
+                    self.vllm_config, subsystem="encoder", label_prefix="encoder"
+                ):
+                    self.encoder_cudagraph_manager.capture(
+                        graph_pool=encoder_graph_pool
+                    )
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
