@@ -2412,6 +2412,10 @@ class rocm_aiter_ops:
         return torch.ops.vllm.fused_mla_dual_rms_norm_per_token_quant.default
 
     @staticmethod
+    def get_fused_mla_dual_rms_norm_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant.default
+
+    @staticmethod
     def fused_qk_rmsnorm_group_quant(
         q: torch.Tensor,
         q_weight: torch.Tensor,
