@@ -7,6 +7,9 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -116,6 +119,103 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         )
         == "_DraftBackend"
     )
+
+
+def _cg_support_groups(draft_support: AttentionCGSupport):
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    target_group = AttentionGroup(
+        _TargetBackend,
+        ["target"],
+        spec,
+        0,  # type: ignore[arg-type]
+    )
+    target_group.metadata_builders = [
+        _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
+    ]
+    draft_group = AttentionGroup(
+        _DraftBackend,
+        ["draft"],
+        spec,
+        0,  # type: ignore[arg-type]
+    )
+    draft_group.metadata_builders = [
+        _FakeMetadataBuilder(draft_support)  # type: ignore[list-item]
+    ]
+    return [[target_group, draft_group]], draft_group
+
+
+def test_draft_only_group_does_not_constrain_target_cudagraph_support():
+    weak = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    groups, draft_group = _cg_support_groups(weak)
+
+    support = get_attn_cg_support(
+        groups,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        cg_support_exclude_layers={"draft"},
+    )
+    # The runner's cudagraph mode ignores the draft-only group...
+    assert support.graph_min_cg_support == AttentionCGSupport.ALWAYS
+    assert support.graph_min_cg_attn_backend is None
+    # ...while min_cg_support still answers for every builder, so callers that
+    # need all of them (adaptive verification) keep seeing the draft.
+    assert support.min_cg_support == weak
+    assert support.min_cg_attn_backend == "_DraftBackend"
+
+    # Without an exclusion set the two reductions agree.
+    unfiltered = get_attn_cg_support(groups, None)  # type: ignore[arg-type]
+    assert unfiltered.graph_min_cg_support == weak
+    assert unfiltered.graph_min_cg_attn_backend == "_DraftBackend"
+
+    # A group that also holds a target layer is never skipped.
+    draft_group.layer_names.append("target")
+    mixed = get_attn_cg_support(
+        groups,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        cg_support_exclude_layers={"draft"},
+    )
+    assert mixed.graph_min_cg_support == weak
+    assert mixed.graph_min_cg_attn_backend == "_DraftBackend"
+
+
+def test_only_a_self_sizing_speculator_is_excluded():
+    """The other half of the fix: which layers the runner actually passes.
+
+    `test_draft_only_group_does_not_constrain_target_cudagraph_support` hands
+    `get_attn_cg_support` an exclusion set directly, so it cannot see a caller
+    that stops producing one. Only a draft that sizes its own cudagraph mode
+    may be left out; one that follows the target's resolved mode still needs
+    the target downgraded on its behalf.
+    """
+    from vllm.v1.worker.gpu.model_runner import _cg_support_exclusions
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    self_sizing = Mock(spec=DraftModelSpeculator)
+    self_sizing.sizes_own_cudagraph_mode = True
+    self_sizing.draft_attn_layer_names = {"draft.0", "draft.1"}
+    assert _cg_support_exclusions(self_sizing) == {"draft.0", "draft.1"}
+
+    # Eagle/MTP follow the target's mode, so they must keep constraining it.
+    follower = Mock(spec=DraftModelSpeculator)
+    follower.sizes_own_cudagraph_mode = False
+    follower.draft_attn_layer_names = {"eagle.0"}
+    assert _cg_support_exclusions(follower) is None
+
+    # Not a DraftModelSpeculator, and no speculator at all, exclude nothing.
+    other = SimpleNamespace(
+        sizes_own_cudagraph_mode=True, draft_attn_layer_names={"other.0"}
+    )
+    assert _cg_support_exclusions(other) is None
+    assert _cg_support_exclusions(None) is None
+
+    # The classes as shipped: DFlash (and DSpark) self-size, the base does not.
+    assert DFlashSpeculator.sizes_own_cudagraph_mode is True
+    assert DraftModelSpeculator.sizes_own_cudagraph_mode is False
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():

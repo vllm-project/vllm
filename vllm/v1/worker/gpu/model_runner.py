@@ -148,7 +148,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    BaseSpeculator,
+    DraftModelSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -161,6 +164,23 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import use_workspace_lane
 
 logger = init_logger(__name__)
+
+
+def _cg_support_exclusions(speculator: BaseSpeculator | None) -> set[str] | None:
+    """Layers that must not constrain the target runner's cudagraph mode.
+
+    A draft that sizes its own cudagraph mode from its own attention support
+    is self-contained: whether its layers can be graphed says nothing about the
+    target. A draft that just follows the target's resolved mode is not, and
+    still depends on the target being downgraded on its behalf, so its layers
+    stay in.
+    """
+    if (
+        isinstance(speculator, DraftModelSpeculator)
+        and speculator.sizes_own_cudagraph_mode
+    ):
+        return speculator.draft_attn_layer_names
+    return None
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -571,6 +591,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.vllm_config,
             self.device,
+            cg_support_exclude_layers=_cg_support_exclusions(self.speculator),
         )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
@@ -616,8 +637,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-            attn_cg_support.min_cg_support,
-            attn_cg_support.min_cg_attn_backend,
+            attn_cg_support.graph_min_cg_support,
+            attn_cg_support.graph_min_cg_attn_backend,
             self.decode_query_len,
             use_v2_model_runner=True,
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
