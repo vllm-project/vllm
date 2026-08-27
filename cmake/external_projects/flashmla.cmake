@@ -163,7 +163,8 @@ if(FLASH_MLA_ARCHS)
 
     # _flashmla_C is now ABI-stable torch 2.11+
     target_compile_definitions(_flashmla_C PRIVATE
-        TORCH_TARGET_VERSION=0x020B000000000000ULL)
+        TORCH_TARGET_VERSION=0x020B000000000000ULL
+        _USE_MATH_DEFINES=1)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_C PRIVATE USE_CUDA)
     endif()
@@ -181,7 +182,8 @@ if(FLASH_MLA_ARCHS)
 
     # _flashmla_extension_C is now ABI-stable w/ torch 2.11+
     target_compile_definitions(_flashmla_extension_C PRIVATE
-        TORCH_TARGET_VERSION=0x020B000000000000ULL)
+        TORCH_TARGET_VERSION=0x020B000000000000ULL
+        _USE_MATH_DEFINES=1)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_extension_C PRIVATE USE_CUDA)
     endif()
