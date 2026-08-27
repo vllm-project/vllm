@@ -647,6 +647,8 @@ def swiglu_limit_func(
     # requires topk_ids. Fall back to the torch implementation otherwise.
     if topk_ids is not None:
         _swiglu_limit_pad_aware(output, input, topk_ids, swiglu_limit, expert_map)
+    elif current_platform.is_cuda():
+        torch.ops._C.silu_and_mul_with_clamp(output, input, swiglu_limit, 1.0, 0.0)
     else:
         _swiglu_limit_torch(output, input, swiglu_limit)
 
