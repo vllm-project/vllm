@@ -377,17 +377,16 @@ class MoRIIOWriter:
             The transfer plan
         """
         layer_cache = self.worker.kv_caches[task.layer_name]
-        key = (task.layer_name, *_get_write_geometry_key(layer_cache))
-        offsets = request_info.transfer_offsets.get(key)
+        geometry_key = _get_write_geometry_key(layer_cache)
+        offsets = request_info.transfer_offsets.get(geometry_key)
         if offsets is None:
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
                 task.local_block_ids,
                 request_info.block_ids,
                 remote_moriio_meta,
-                remote_engine_id=task.dst_engine_id,
             )
-            request_info.transfer_offsets[key] = offsets
+            request_info.transfer_offsets[geometry_key] = offsets
 
         # Get session index
         layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())

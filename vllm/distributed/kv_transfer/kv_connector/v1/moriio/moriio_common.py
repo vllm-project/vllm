@@ -41,7 +41,6 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 TransferId = str
-TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype]
 
 
 class MoRIIOTransferAck(NamedTuple):
@@ -92,7 +91,7 @@ class RemoteAllocInfo:
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
-        TransferOffsetsKey,
+        tuple[tuple[int, ...], tuple[int, ...], torch.dtype],
         tuple[list[int], list[int], list[int]],
     ] = field(default_factory=dict)
 
