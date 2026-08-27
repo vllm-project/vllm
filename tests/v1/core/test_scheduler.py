@@ -1794,6 +1794,33 @@ def test_spec_decode_padding_skipped_for_diffusion():
     assert r2.request_id not in out.scheduled_spec_decode_tokens
 
 
+def test_spec_decode_padding_skipped_for_adaptive_verification():
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    speculative_config.enable_adaptive_verification = True
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_skipped_with_prefill_in_batch():
     """Padding is skipped when the batch contains a prefill chunk: the batch is
     already mixed/non-uniform, so padding a new decode request buys nothing.

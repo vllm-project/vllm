@@ -961,6 +961,7 @@ class Scheduler(SchedulerInterface):
                     # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and not (spec is not None and spec.enable_adaptive_verification)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
