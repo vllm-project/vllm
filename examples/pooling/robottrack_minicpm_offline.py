@@ -105,4 +105,5 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     main(parse_args())
 
-# python examples/pooling/robottrack_minicpm_offline.py --model openbmb/MiniCPM-RobotTrack
+# python examples/pooling/robottrack_minicpm_offline.py \
+#     --model openbmb/MiniCPM-RobotTrack
