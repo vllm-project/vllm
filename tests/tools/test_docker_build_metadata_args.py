@@ -154,7 +154,12 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
 
 
 def test_rust_build_cache_excludes_git_metadata() -> None:
-    for name in ("Dockerfile", "Dockerfile.cpu", "Dockerfile.xpu"):
+    from vllm.platforms import current_platform
+
+    dockerfile_names = ["Dockerfile", "Dockerfile.cpu"]
+    if not current_platform.is_rocm():
+        dockerfile_names.append("Dockerfile.xpu")
+    for name in dockerfile_names:
         dockerfile = (REPO_ROOT / "docker" / name).read_text()
         cached_stage, exact_version_stage = dockerfile.split(
             "FROM rust-build-cache AS rust-build", maxsplit=1
