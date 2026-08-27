@@ -3,6 +3,11 @@
 import uuid
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+from vllm.config.ec_transfer import ECRole
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
+    ECCPUWorkerMetadata,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
@@ -37,13 +42,26 @@ class _Request:
             self.request_id = request_id
 
 
+class _WorkerOutput:
+    """Stand-in for ECConnectorOutput carrying a completion report.
+
+    `saves` are mm_hashes; `loads` are transfer ids. One entry per reporting
+    rank, so a list holding the same id twice is two ranks reporting it.
+    """
+
+    def __init__(self, *, saves=None, loads=None):
+        self.ec_connector_worker_meta = ECCPUWorkerMetadata(
+            completed_saves=list(saves or []),
+            completed_loads=list(loads or []),
+        )
+
+
 def _make_scheduler(
     monkeypatch,
     num_blocks=_N,
-    max_concurrent_batches=1,
     *,
-    is_producer=True,
-    is_consumer=True,
+    ec_role: ECRole = "ec_both",
+    tensor_parallel_size=1,
 ) -> ECCPUScheduler:
     region = ECSharedRegion(
         engine_id=str(uuid.uuid4()),
@@ -52,27 +70,22 @@ def _make_scheduler(
     )
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
-    _is_prod = is_producer
-    _is_cons = is_consumer
-    _mcb = max_concurrent_batches
-
-    class _EC:
-        is_ec_producer = _is_prod
-        is_ec_consumer = _is_cons
-
-    class _Cfg:
-        ec_transfer_config = _EC()
-
-        @property
-        def max_concurrent_batches(self):
-            return _mcb
-
-    return ECCPUScheduler(_Cfg())
+    return ECCPUScheduler(
+        create_ec_vllm_config(
+            ec_role=ec_role,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+    )
 
 
-class _SchedulerOutput:
-    def __init__(self, finished_req_ids=None):
-        self.finished_req_ids = finished_req_ids or set()
+def _load_ids(meta) -> list[int]:
+    """Transfer ids the scheduler dispatched in this step's metadata."""
+    return [transfer_id for transfer_id, _ in meta.loads.values()]
+
+
+def _load_blocks(meta, mm_hash: str) -> list[int]:
+    """Block ids the scheduler dispatched for one load."""
+    return meta.loads[mm_hash][1]
 
 
 def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
@@ -83,7 +96,9 @@ def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
 
 def test_offload_reuse_cycle(monkeypatch):
     s = _make_scheduler(monkeypatch)
-    req = _Request([_Feature("h1", length=1)])
+    # Two blocks, so the reload also pins down that every allocated block id
+    # comes back in meta.loads, not just the first.
+    req = _Request([_Feature("h1", length=2)])
 
     # Step A: first sight — allocate and save.
     assert s.has_cache_item("h1") is False
@@ -92,24 +107,24 @@ def test_offload_reuse_cycle(monkeypatch):
     meta_a = s.build_connector_meta(scheduler_output=None)
     assert "h1" in meta_a.saves
     assert meta_a.loads == {}
-    # Not ready yet (max_concurrent_batches=1 means ready next step).
+    # Not ready until the worker reports the save memcpy complete.
     assert s.has_cache_item("h1") is False
 
-    # Step B: _step_readiness marks h1 ready (no new allocs).
-    s.build_connector_meta(scheduler_output=None)
+    # Worker reports the save copy finished → entry becomes ready.
+    s.update_connector_output(_WorkerOutput(saves=["h1"]))
     assert s.has_cache_item("h1") is True
 
     # Step C: reload now works — entry is ready at update_state_after_alloc time.
     s.update_state_after_alloc(req, 0)
     meta_c = s.build_connector_meta(scheduler_output=None)
     assert "h1" in meta_c.loads
-    assert meta_c.loads["h1"] == meta_a.saves["h1"]
+    assert _load_blocks(meta_c, "h1") == meta_a.saves["h1"]
 
     s.shutdown()
 
 
 def test_has_cache_item_false_when_not_consumer(monkeypatch):
-    s = _make_scheduler(monkeypatch, is_consumer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_producer")
     assert s.has_cache_item("anything") is False
     s.shutdown()
 
@@ -123,10 +138,10 @@ def test_connector_keys_on_identifier_not_mm_hash(monkeypatch):
     meta = s.build_connector_meta(scheduler_output=None)
     assert "ENC_KEY" in meta.saves
     assert "PROC_KEY" not in meta.saves
-    # Not ready yet (1 step delay).
+    # Not ready until the completion report.
     assert s.has_cache_item("ENC_KEY") is False
-    # After another step it becomes ready — keyed on identifier.
-    s.build_connector_meta(scheduler_output=None)
+    # After the report it becomes ready — keyed on identifier.
+    s.update_connector_output(_WorkerOutput(saves=["ENC_KEY"]))
     assert s.has_cache_item("ENC_KEY") is True
     assert s.has_cache_item("PROC_KEY") is False
     s.shutdown()
@@ -136,13 +151,11 @@ def test_cpu_region_fifo_eviction(monkeypatch):
     # Region holds exactly 2 one-block encodings.
     s = _make_scheduler(monkeypatch, num_blocks=2)
 
-    # Fill with A and B, marking each ready.
+    # Fill with A and B, marking each ready via a completion report.
     for h in ("A", "B"):
         s.update_state_after_alloc(_Request([_Feature(h, length=1)]), 0)
         s.build_connector_meta(scheduler_output=None)
-    # After the step above, A's step was called in B's build. A is ready.
-    # B was submitted in the last build, so one more step makes it ready.
-    s.build_connector_meta(scheduler_output=None)  # marks B ready
+        s.update_connector_output(_WorkerOutput(saves=[h]))
     assert s.has_cache_item("A") is True
     assert s.has_cache_item("B") is True
 
@@ -161,8 +174,8 @@ def test_multiple_mm_items_per_request(monkeypatch):
     meta = s.build_connector_meta(scheduler_output=None)
     assert set(meta.saves) == {"h1", "h2"}
 
-    # Step delay: mark both ready.
-    s.build_connector_meta(scheduler_output=None)
+    # Worker reports both saves complete.
+    s.update_connector_output(_WorkerOutput(saves=["h1", "h2"]))
     assert s.has_cache_item("h1") is True
     assert s.has_cache_item("h2") is True
 
@@ -171,26 +184,6 @@ def test_multiple_mm_items_per_request(monkeypatch):
     s.update_state_after_alloc(req, 1)
     meta2 = s.build_connector_meta(scheduler_output=None)
     assert set(meta2.loads) == {"h1", "h2"}
-    s.shutdown()
-
-
-def test_load_returns_correct_block_ids(monkeypatch):
-    """meta.loads must contain the same block IDs that meta.saves
-    allocated — verified through the public API only."""
-    s = _make_scheduler(monkeypatch)
-    req = _Request([_Feature("a", length=2)])
-
-    s.update_state_after_alloc(req, 0)
-    meta_save = s.build_connector_meta(scheduler_output=None)
-    assert "a" in meta_save.saves
-
-    # Readiness delay.
-    s.build_connector_meta(scheduler_output=None)
-
-    # Reload.
-    s.update_state_after_alloc(req, 0)
-    meta_load = s.build_connector_meta(scheduler_output=None)
-    assert meta_load.loads["a"] == meta_save.saves["a"]
     s.shutdown()
 
 
@@ -228,10 +221,10 @@ def test_load_not_emitted_for_uncached_entry(monkeypatch):
     s.shutdown()
 
 
-def test_delayed_unpin_protects_blocks_during_worker_read(monkeypatch):
-    """Blocks being loaded must not be evictable until the delayed unpin
-    fires. Observable: a save that needs eviction cannot reclaim a
-    still-pinned loaded entry."""
+def test_load_pin_protects_blocks_until_completion(monkeypatch):
+    """Loaded blocks stay pinned until the worker reports the load memcpy
+    complete. Observable: a save that needs eviction cannot reclaim a
+    still-pinned loaded entry, but can once the completion report arrives."""
     # 2 blocks, both occupied by "a" (ready).
     s = _make_scheduler(monkeypatch, num_blocks=2)
     _seed_cached(s, "a", n_blocks=2)
@@ -240,94 +233,79 @@ def test_delayed_unpin_protects_blocks_during_worker_read(monkeypatch):
     s.update_state_after_alloc(_Request([_Feature("a")]), 0)
     meta = s.build_connector_meta(scheduler_output=None)
     assert "a" in meta.loads
+    (transfer_id,) = _load_ids(meta)
 
     # Try to save "b" (needs 2 blocks, but "a" is pinned) — must fail.
     s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
     meta2 = s.build_connector_meta(scheduler_output=None)
     assert "b" not in meta2.saves  # can't evict pinned "a"
 
-    # After the delay, "a" unpins. Now "b" can evict it.
+    # The one participant reports the load complete → "a" unpins. Now "b" can
+    # evict it.
+    s.update_connector_output(_WorkerOutput(loads=[transfer_id]))
     s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
     meta3 = s.build_connector_meta(scheduler_output=None)
     assert "b" in meta3.saves
     s.shutdown()
 
 
-def test_delayed_unpin_depth_2(monkeypatch):
-    """With max_concurrent_batches=2, loaded blocks stay pinned for 2 steps
-    after build. Observable via eviction failure."""
-    s = _make_scheduler(monkeypatch, num_blocks=2, max_concurrent_batches=2)
-    _seed_cached(s, "a", n_blocks=2)
-
-    # Load "a" → pinned.
-    s.update_state_after_alloc(_Request([_Feature("a")]), 0)
-    s.build_connector_meta(scheduler_output=None)
-
-    # Step 1 after load: still pinned — can't evict for "b".
-    s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
-    meta1 = s.build_connector_meta(scheduler_output=None)
-    assert "b" not in meta1.saves
-
-    # Step 2 after load: still pinned.
-    s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
-    meta2 = s.build_connector_meta(scheduler_output=None)
-    assert "b" not in meta2.saves
-
-    # Step 3: unpin fires, now eviction works.
-    s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
-    meta3 = s.build_connector_meta(scheduler_output=None)
-    assert "b" in meta3.saves
-    s.shutdown()
+def _can_evict(s: ECCPUScheduler, mm_hash: str, n_blocks: int) -> bool:
+    """Whether a new save of `mm_hash` can claim `n_blocks`, i.e. whether the
+    blocks currently held by other entries are reclaimable."""
+    s.update_state_after_alloc(_Request([_Feature(mm_hash, length=n_blocks)]), 0)
+    meta = s.build_connector_meta(scheduler_output=None)
+    return mm_hash in meta.saves
 
 
-def test_shutdown_unpins_pending_loads(monkeypatch):
-    """Shutdown must unpin entries still in _pending_loads (not yet drained
-    to the unpin deque). Observable: after shutdown, the entry is evictable
-    (alloc can reclaim its blocks)."""
-    s = _make_scheduler(monkeypatch, num_blocks=2)
+def test_load_needs_every_participant_before_unpin(monkeypatch):
+    """With two participating ranks, one report must not release the pin.
+
+    This is the multi-rank case: each rank copies the same CPU blocks into its
+    own GPU memory, so the blocks stay in use until the last rank is done.
+    """
+    s = _make_scheduler(monkeypatch, num_blocks=2, tensor_parallel_size=2)
     _seed_cached(s, "a", n_blocks=2)
 
     s.update_state_after_alloc(_Request([_Feature("a")]), 0)
-    # Don't call build_connector_meta — "a" stays in _pending_loads.
+    (transfer_id,) = _load_ids(s.build_connector_meta(scheduler_output=None))
+
+    # First rank reports: still in use by the second, so "a" must hold.
+    s.update_connector_output(_WorkerOutput(loads=[transfer_id]))
+    assert _can_evict(s, "b", 2) is False
+    assert s.has_pending_push_work() is True
+
+    # Second rank reports: now it is genuinely free.
+    s.update_connector_output(_WorkerOutput(loads=[transfer_id]))
+    assert s.has_pending_push_work() is False
+    assert _can_evict(s, "c", 2) is True
     s.shutdown()
 
-    # After shutdown, scheduler reports no items (consumer role is off).
-    assert s.has_cache_item("a") is False
 
+def test_late_report_does_not_release_a_later_load_of_same_hash(monkeypatch):
+    """A straggling report from one dispatch must not release the pin taken by
+    a subsequent dispatch of the same mm_hash.
 
-def test_shutdown_unpins_deferred_unpin_queue(monkeypatch):
-    """Shutdown must unpin entries queued in the deferred unpin deque
-    (already drained from _pending_loads but not yet expired)."""
-    s = _make_scheduler(monkeypatch, num_blocks=2, max_concurrent_batches=2)
+    This is what the transfer id is for: mm_hash identifies a cache entry, not
+    a transfer, so it cannot tell the two dispatches apart.
+    """
+    s = _make_scheduler(monkeypatch, num_blocks=2, tensor_parallel_size=2)
     _seed_cached(s, "a", n_blocks=2)
 
-    # Load "a" and build — moves to unpin deque.
+    # First dispatch, fully reported by both ranks → pin released.
     s.update_state_after_alloc(_Request([_Feature("a")]), 0)
-    s.build_connector_meta(scheduler_output=None)
+    (first_id,) = _load_ids(s.build_connector_meta(scheduler_output=None))
+    s.update_connector_output(_WorkerOutput(loads=[first_id, first_id]))
+    assert s.has_pending_push_work() is False
 
-    # "a" is in the deferred unpin deque (depth=2, not yet expired).
-    # Shutdown must unpin it.
-    s.shutdown()
-    assert s.has_cache_item("a") is False
+    # Second dispatch of the same hash takes a fresh pin.
+    s.update_state_after_alloc(_Request([_Feature("a")]), 0)
+    (second_id,) = _load_ids(s.build_connector_meta(scheduler_output=None))
+    assert second_id != first_id
 
-
-def test_eviction_skips_entry_pinned_by_pending_load(monkeypatch):
-    """A loaded entry still within the unpin delay window must survive
-    eviction attempts from new saves."""
-    # 2 blocks: A occupies both, ready.
-    s = _make_scheduler(monkeypatch, num_blocks=2)
-    _seed_cached(s, "A", n_blocks=2)
-
-    # Load A → pinned.
-    s.update_state_after_alloc(_Request([_Feature("A")]), 0)
-    meta_load = s.build_connector_meta(scheduler_output=None)
-    assert "A" in meta_load.loads
-
-    # Try to save C (needs 2 blocks) — can't evict pinned A.
-    s.update_state_after_alloc(_Request([_Feature("C", length=2)]), 0)
-    meta_save = s.build_connector_meta(scheduler_output=None)
-    assert "C" not in meta_save.saves
-    assert s.has_cache_item("A") is True  # survived
+    # A replayed report for the first dispatch must be ignored entirely.
+    s.update_connector_output(_WorkerOutput(loads=[first_id, first_id]))
+    assert s.has_pending_push_work() is True
+    assert _can_evict(s, "b", 2) is False
     s.shutdown()
 
 
@@ -350,30 +328,10 @@ def test_region_full_skips_save_and_never_blocks(monkeypatch):
     s.shutdown()
 
 
-def test_step_readiness_depth_2(monkeypatch):
-    """With max_concurrent_batches=2, entries need 2 steps to become ready."""
-    s = _make_scheduler(monkeypatch, max_concurrent_batches=2)
-    req = _Request([_Feature("h1", length=1)])
-
-    s.update_state_after_alloc(req, 0)
-    meta_0 = s.build_connector_meta(scheduler_output=None)
-    assert "h1" in meta_0.saves
-    assert s.has_cache_item("h1") is False
-
-    # One step later: still not ready (depth=2).
-    s.build_connector_meta(scheduler_output=None)
-    assert s.has_cache_item("h1") is False
-
-    # Two steps later: now ready.
-    s.build_connector_meta(scheduler_output=None)
-    assert s.has_cache_item("h1") is True
-    s.shutdown()
-
-
 def test_producer_only_never_emits_loads(monkeypatch):
     """A producer-only scheduler must never populate meta.loads, even when
     entries are ready."""
-    s = _make_scheduler(monkeypatch, is_consumer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_producer")
     req = _Request([_Feature("h1", length=1)])
 
     s.update_state_after_alloc(req, 0)
@@ -381,8 +339,7 @@ def test_producer_only_never_emits_loads(monkeypatch):
     assert "h1" in meta.saves
     assert meta.loads == {}
 
-    # Mark ready.
-    s.build_connector_meta(scheduler_output=None)
+    s.update_connector_output(_WorkerOutput(saves=["h1"]))
 
     # Even if we re-encounter the same feature, no load.
     s.update_state_after_alloc(req, 0)
@@ -393,7 +350,7 @@ def test_producer_only_never_emits_loads(monkeypatch):
 
 def test_consumer_only_never_emits_saves(monkeypatch):
     """A consumer-only scheduler must never populate meta.saves."""
-    s = _make_scheduler(monkeypatch, is_producer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_consumer")
     _seed_cached(s, "a", n_blocks=1)
 
     req = _Request([_Feature("a", length=1)])
@@ -406,7 +363,7 @@ def test_consumer_only_never_emits_saves(monkeypatch):
 
 def test_consumer_only_has_cache_item(monkeypatch):
     """Consumer-only: has_cache_item works normally for ready entries."""
-    s = _make_scheduler(monkeypatch, is_producer=False)
+    s = _make_scheduler(monkeypatch, ec_role="ec_consumer")
     assert s.has_cache_item("a") is False
     _seed_cached(s, "a", n_blocks=1)
     assert s.has_cache_item("a") is True
@@ -431,50 +388,75 @@ def test_save_not_emitted_for_already_cached_entry(monkeypatch):
     s.shutdown()
 
 
-# ── first-finish fast-path (idle engine) ────────────────────────────────────
+# ── completion reporting (update_connector_output) ──────────────────────────
 
 
-def test_first_finish_marks_ready_immediately(monkeypatch):
-    """When the originating request finishes, the save entry becomes ready
-    without waiting for the step-count delay."""
-    s = _make_scheduler(monkeypatch, max_concurrent_batches=5)
-    req = _Request([_Feature("h1", length=1)], request_id="req_x")
+def test_update_connector_output_ignores_foreign_meta(monkeypatch):
+    """A worker output whose payload is not an ECCPUWorkerMetadata is a
+    no-op — no cache mutation, no crash."""
+    s = _make_scheduler(monkeypatch)
+    _seed_cached(s, "a", n_blocks=1)
 
-    s.update_state_after_alloc(req, 0)
+    class _Foreign:
+        ec_connector_worker_meta = object()
+
+    s.update_connector_output(_Foreign())  # must not raise
+    assert s.has_cache_item("a") is True
+    s.shutdown()
+
+
+def test_update_connector_output_ignores_unknown_report(monkeypatch):
+    """Reports for a never-seen save hash or a transfer id this scheduler never
+    dispatched are dropped rather than mutating unrelated state."""
+    s = _make_scheduler(monkeypatch)
+    s.update_connector_output(_WorkerOutput(saves=["gone"], loads=[4242]))
+    assert s.has_cache_item("gone") is False
+    s.shutdown()
+
+
+# ── has_pending_push_work ───────────────────────────────────────────────────
+
+
+def test_has_pending_push_work_tracks_inflight_save(monkeypatch):
+    """A dispatched-but-unconfirmed save keeps push work pending until the
+    completion report marks it ready."""
+    s = _make_scheduler(monkeypatch)
+    assert s.has_pending_push_work() is False
+
+    s.update_state_after_alloc(_Request([_Feature("h1", length=1)]), 0)
     s.build_connector_meta(scheduler_output=None)
-    assert s.has_cache_item("h1") is False
+    assert s.has_pending_push_work() is True  # save not yet confirmed
 
-    # Request finishes — readiness should fire immediately.
-    s.build_connector_meta(_SchedulerOutput(finished_req_ids={"req_x"}))
-    assert s.has_cache_item("h1") is True
+    s.update_connector_output(_WorkerOutput(saves=["h1"]))
+    assert s.has_pending_push_work() is False
     s.shutdown()
 
 
-def test_first_finish_unpins_immediately(monkeypatch):
-    """When the originating request finishes, the load entry is unpinned
-    without waiting for the step-count delay."""
-    s = _make_scheduler(monkeypatch, num_blocks=2, max_concurrent_batches=5)
-    _seed_cached(s, "a", n_blocks=2)
+def test_has_pending_push_work_tracks_inflight_load(monkeypatch):
+    """A dispatched-but-unconfirmed load keeps push work pending until the
+    unpin completion report arrives."""
+    s = _make_scheduler(monkeypatch)
+    _seed_cached(s, "a", n_blocks=1)
+    assert s.has_pending_push_work() is False  # ready + unpinned
 
-    req = _Request([_Feature("a")], request_id="req_y")
-    s.update_state_after_alloc(req, 0)
+    s.update_state_after_alloc(_Request([_Feature("a")]), 0)
     meta = s.build_connector_meta(scheduler_output=None)
-    assert "a" in meta.loads
+    assert s.has_pending_push_work() is True  # pinned, awaiting unpin
 
-    # "a" is pinned. Try to evict — must fail.
-    s.update_state_after_alloc(
-        _Request([_Feature("b", length=2)], request_id="req_z"), 0
-    )
-    meta2 = s.build_connector_meta(scheduler_output=None)
-    assert "b" not in meta2.saves
-
-    # req_y finishes — unpin fires in build_connector_meta (fast-path).
-    s.build_connector_meta(_SchedulerOutput(finished_req_ids={"req_y"}))
-
-    # Next step: "a" is now evictable, so "b" can be allocated.
-    s.update_state_after_alloc(
-        _Request([_Feature("b", length=2)], request_id="req_w"), 0
-    )
-    meta3 = s.build_connector_meta(scheduler_output=None)
-    assert "b" in meta3.saves
+    s.update_connector_output(_WorkerOutput(loads=_load_ids(meta)))
+    assert s.has_pending_push_work() is False
     s.shutdown()
+
+
+# ── shutdown ────────────────────────────────────────────────────────────────
+
+
+def test_shutdown_disables_roles_and_cleans_region(monkeypatch):
+    """After shutdown the scheduler serves no items and the region is
+    cleaned up."""
+    s = _make_scheduler(monkeypatch, num_blocks=2)
+    _seed_cached(s, "a", n_blocks=2)
+    assert s.has_cache_item("a") is True
+
+    s.shutdown()
+    assert s.has_cache_item("a") is False  # consumer role disabled
