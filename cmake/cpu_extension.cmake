@@ -483,6 +483,7 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
         "csrc/cpu/cpu_tanhf_neon.hpp"
+        "csrc/cpu/sgl-kernels/conv.cpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
         if (ARM_I8MM_FOUND)
