@@ -19,6 +19,7 @@ from vllm.v1.simple_kv_offload.metadata import (
 from vllm.v1.simple_kv_offload.sizing import (
     local_num_offload_blocks,
     sync_num_offload_blocks_across_workers,
+    view_complete_kv_cache_regions,
 )
 
 if TYPE_CHECKING:
@@ -122,7 +123,7 @@ class SimpleCPUOffloadWorker:
             )
             block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
             raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
-            regions = raw.view(-1, num_blocks, block_bytes)
+            regions = view_complete_kv_cache_regions(raw, num_blocks, block_bytes)
             for idx, region in enumerate(regions):
                 key_name = name if len(regions) == 1 else f"{name}.{idx}"
                 unique_gpu_caches[key_name] = region

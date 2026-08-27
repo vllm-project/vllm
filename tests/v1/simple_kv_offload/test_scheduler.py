@@ -46,6 +46,7 @@ from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
 from vllm.v1.simple_kv_offload.sizing import (
     compute_num_offload_blocks_from_configs,
+    view_complete_kv_cache_regions,
 )
 
 # ---------------------------------------------------------------------------
@@ -1845,6 +1846,23 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
 # ---------------------------------------------------------------------------
 # Test 18: PP / spec-decode sizing alignment
 # ---------------------------------------------------------------------------
+@pytest.mark.parametrize("padding_bytes", [0, 5])
+def test_view_complete_kv_cache_regions_excludes_storage_padding(
+    padding_bytes: int,
+) -> None:
+    num_regions = 2
+    num_blocks = 3
+    block_bytes = 4
+    data_bytes = num_regions * num_blocks * block_bytes
+    raw = torch.arange(data_bytes + padding_bytes, dtype=torch.int8)
+
+    regions = view_complete_kv_cache_regions(raw, num_blocks, block_bytes)
+
+    assert regions.shape == (num_regions, num_blocks, block_bytes)
+    assert regions.data_ptr() == raw.data_ptr()
+    torch.testing.assert_close(regions.flatten(), raw[:data_bytes])
+
+
 def test_compute_num_cpu_blocks_uses_heaviest_worker() -> None:
     """Offload block count must follow the worker with the largest bytes/block."""
     num_gpu_blocks = 100
