@@ -902,7 +902,7 @@ def test_tokenspeed_mla_noncausal_capability():
     assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
 
 
-def test_flashinfer_mla_dspark_support_is_tp_only(monkeypatch):
+def test_flashinfer_mla_dspark_dcp_supports_target_only(monkeypatch):
     flashinfer_mla_module = pytest.importorskip(
         "vllm.v1.attention.backends.mla.flashinfer_mla"
     )
@@ -931,26 +931,10 @@ def test_flashinfer_mla_dspark_support_is_tp_only(monkeypatch):
         device_capability=SimpleNamespace(),
     )
 
-    assert reason == "FlashInfer MLA does not support DSpark with DCP"
+    assert reason is None
     assert backend.supports_non_causal()
     assert builder.supports_non_causal_multi_token_decode
     assert not backend.supports_non_causal_dcp()
-
-    vllm_config.parallel_config.decode_context_parallel_size = 1
-    assert (
-        backend.supports_combination(
-            head_size=576,
-            dtype=torch.bfloat16,
-            kv_cache_dtype="fp8",
-            block_size=64,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=False,
-            use_mm_prefix=False,
-            device_capability=SimpleNamespace(),
-        )
-        is None
-    )
 
 
 @pytest.mark.parametrize(
