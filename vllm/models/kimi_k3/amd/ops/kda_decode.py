@@ -79,8 +79,9 @@ def alloc_kda_mxfp4(
     assert hidden % _MXFP4_GROUP == 0
     n_groups = hidden // _MXFP4_GROUP
     if layout == "plain":
-        data = torch.zeros((num_tokens, hidden // 2), dtype=torch.uint8, device=device)
-        scale = torch.zeros((n_groups, num_tokens), dtype=torch.uint8, device=device).T
+        # Can use exact-size buffer since producer writes every element.
+        data = torch.empty((num_tokens, hidden // 2), dtype=torch.uint8, device=device)
+        scale = torch.empty((n_groups, num_tokens), dtype=torch.uint8, device=device).T
         return data, scale
     if layout == "shuffled":
         pad_m32 = (num_tokens + 31) // 32 * 32
