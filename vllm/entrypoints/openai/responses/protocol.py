@@ -51,7 +51,9 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
+    ValidationInfo,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -462,6 +464,16 @@ class ResponsesRequest(OpenAIBaseModel):
         return (
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
+        )
+
+    @field_validator("top_logprobs")
+    @classmethod
+    def normalize_top_logprobs(
+        cls, value: int | None, info: ValidationInfo
+    ) -> int | None:
+        include = info.data.get("include") or []
+        return (
+            0 if value is None and "message.output_text.logprobs" in include else value
         )
 
     @model_validator(mode="before")
