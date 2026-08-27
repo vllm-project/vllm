@@ -87,15 +87,16 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.tokenizer = tokenizer
 
-        # Opt-in exact prefix reuse for long multi-turn prompts. Shared
-        # across requests (renderer-level, above the tokenizer pool);
-        # requests it cannot serve exactly fall through to the regular
-        # encode path, so it is silently inert for tokenizers without an
-        # HF fast backend.
+        # Exact common-prefix reuse for long prompts (on by default above
+        # the module's size threshold). Shared across requests
+        # (renderer-level, above the tokenizer pool); requests it cannot
+        # serve exactly fall through to the regular encode path, so it is
+        # silently inert for tokenizers without an HF fast backend.
         self._incremental_encoder: IncrementalEncodeCache | None = None
-        if tokenizer is not None and (
-            config.model_config.enable_incremental_encoding
-            or envs.VLLM_INCREMENTAL_ENCODING
+        if (
+            tokenizer is not None
+            and config.model_config.enable_incremental_encoding
+            and envs.VLLM_INCREMENTAL_ENCODING
         ):
             self._incremental_encoder = IncrementalEncodeCache()
         # Thread pool executor for blocking tokenizer operations.  The

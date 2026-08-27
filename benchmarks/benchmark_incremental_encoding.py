@@ -75,7 +75,9 @@ def percentile(values: list[float], p: float) -> float:
     ]
 
 
-def bench_history_size(tokenizer, target_tokens: int, num_turns: int, seed: int):
+def bench_history_size(
+    tokenizer, target_tokens: int, num_turns: int, seed: int, scenario: str
+):
     rng = random.Random(seed)
     history = build_history(tokenizer, target_tokens, rng)
 
@@ -89,7 +91,13 @@ def bench_history_size(tokenizer, target_tokens: int, num_turns: int, seed: int)
 
     text = history
     for i in range(num_turns):
-        text += new_turn(i, rng)
+        if scenario == "multi-turn":
+            # Each request strictly extends the previous one.
+            text += new_turn(i, rng)
+        else:
+            # shared-prefix: requests share `history` and then diverge
+            # (no request is a strict prefix of another).
+            text = history + new_turn(i, rng) * 8
 
         start = time.perf_counter()
         expected = tokenizer(text)["input_ids"]
@@ -115,7 +123,10 @@ def bench_history_size(tokenizer, target_tokens: int, num_turns: int, seed: int)
 
 def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    print(f"tokenizer: {args.tokenizer}, turns per size: {args.num_turns}")
+    print(
+        f"tokenizer: {args.tokenizer}, turns per size: {args.num_turns}, "
+        f"scenario: {args.scenario}"
+    )
     header = (
         f"{'history':>9} {'prompt_tok':>10} {'cold p50':>10} {'cold p99':>10} "
         f"{'incr p50':>10} {'incr p99':>10} {'speedup':>8} {'hit/miss/fb':>12}"
@@ -123,7 +134,9 @@ def main(args: argparse.Namespace):
     print(header)
     print("-" * len(header))
     for target in args.history_tokens:
-        result = bench_history_size(tokenizer, target, args.num_turns, args.seed)
+        result = bench_history_size(
+            tokenizer, target, args.num_turns, args.seed, args.scenario
+        )
         speedup = result["cold_p50_ms"] / max(result["incr_p50_ms"], 1e-9)
         print(
             f"{target:>9} {result['prompt_tokens']:>10} "
@@ -151,6 +164,15 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="Number of appended turns measured per history size.",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=["multi-turn", "shared-prefix"],
+        default="multi-turn",
+        help=(
+            "multi-turn: each request strictly extends the previous one; "
+            "shared-prefix: requests share a prefix and then diverge."
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
     main(parser.parse_args())
