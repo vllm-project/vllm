@@ -268,6 +268,21 @@ class RejectionSampler:
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        if not self.enable_adaptive_verification and (
+            invalid_counts := input_batch.num_invalid_spec_tokens
+        ):
+            invalid_indices: list[int] = []
+            for req_id, start, end in zip(
+                input_batch.req_ids,
+                input_batch.cu_num_logits_np[:-1],
+                input_batch.cu_num_logits_np[1:],
+                strict=True,
+            ):
+                num_invalid = invalid_counts.get(req_id, 0)
+                assert 0 <= num_invalid <= end - start
+                invalid_indices.extend(range(int(end) - num_invalid, int(end)))
+            if invalid_indices:
+                draft_sampled[invalid_indices] = -1
         pos = input_batch.positions[input_batch.logits_indices]
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(

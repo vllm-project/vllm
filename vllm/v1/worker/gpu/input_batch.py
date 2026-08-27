@@ -107,6 +107,9 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Per-request reject-only draft suffix lengths.
+    num_invalid_spec_tokens: dict[str, int] | None = None
+
     # Longest query the batch may contain. Set when a cudagraph descriptor promises
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.

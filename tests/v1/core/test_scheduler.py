@@ -1724,6 +1724,7 @@ def test_spec_decode_padding_first_decode_step():
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    assert out.num_invalid_spec_tokens == {r2.request_id: num_spec}
 
 
 def test_spec_decode_padding_follows_mamba_alignment():

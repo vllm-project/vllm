@@ -530,6 +530,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        num_invalid_spec_tokens: dict[str, int] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
 
@@ -1170,6 +1171,7 @@ class Scheduler(SchedulerInterface):
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+                    num_invalid_spec_tokens[request_id] = self.num_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1324,6 +1326,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            num_invalid_spec_tokens=num_invalid_spec_tokens or None,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -2312,7 +2315,7 @@ class Scheduler(SchedulerInterface):
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
-        num_invalid_spec_tokens: dict[str, int] = {}
+        num_invalid_spec_tokens = dict(scheduler_output.num_invalid_spec_tokens or {})
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
@@ -2340,11 +2343,13 @@ class Scheduler(SchedulerInterface):
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
                 spec_token_ids.extend([-1] * num_invalid_tokens)
-                num_invalid_spec_tokens[req_id] = num_invalid_tokens
+                num_invalid_spec_tokens[req_id] = max(
+                    num_invalid_spec_tokens.get(req_id, 0), num_invalid_tokens
+                )
 
             sched_spec_tokens[req_id] = spec_token_ids
 
-        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
+        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens or None
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
