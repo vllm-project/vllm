@@ -20,6 +20,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.kimi_k25 import KimiK25MediaPixelInputs
 from vllm.model_executor.models.kimi_k25_vit import (
@@ -61,6 +62,7 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsReplaySSM,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 

@@ -249,7 +249,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, _ = self.get_state_dtype()
+        conv_state_dtype = self.get_state_dtype()[0]
         decode_conv1d_weight = None
         if is_fused_kda_decode_supported(
             self.local_num_heads,
