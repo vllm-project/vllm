@@ -11,9 +11,9 @@ import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
@@ -615,43 +615,7 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-        MambaMixer2,
-        share_replayssm_ring_trackers,
-    )
-
-    replayssm_mixers: dict[str, MambaMixer2] = {}
-    for layer_name in ordered_layer_names:
-        layer = forward_context[layer_name]
-        if (
-            isinstance(layer, MambaMixer2)
-            and layer.use_replayssm
-            and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        ):
-            replayssm_mixers[layer_name] = layer
-    if kv_cache_groups:
-        mixer_groups = []
-        grouped_names = {
-            layer_name for group in kv_cache_groups for layer_name in group.layer_names
-        }
-        for group in kv_cache_groups:
-            group_names = set(group.layer_names)
-            mixer_groups.append(
-                [
-                    replayssm_mixers[layer_name]
-                    for layer_name in ordered_layer_names
-                    if layer_name in group_names and layer_name in replayssm_mixers
-                ]
-            )
-        mixer_groups.extend(
-            [mixer]
-            for layer_name, mixer in replayssm_mixers.items()
-            if layer_name not in grouped_names
-        )
-    else:
-        # Without cache groups, block-index namespaces cannot be proven equal.
-        mixer_groups = [[mixer] for mixer in replayssm_mixers.values()]
-    share_replayssm_ring_trackers(mixer_groups)
+    share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 def copy_kv_cache_blocks_inplace(

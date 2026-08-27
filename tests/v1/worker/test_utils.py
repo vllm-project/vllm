@@ -45,10 +45,11 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
     mixers = [_TestReplaySSMMixer() for _ in range(3)]
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
+    # Reverse insertion order: updater must follow layer index, not dict order.
     kv_cache = {
-        layer_names[0]: _packed_replayssm_cache(4),
-        layer_names[1]: _packed_replayssm_cache(4),
         layer_names[2]: _packed_replayssm_cache(4),
+        layer_names[1]: _packed_replayssm_cache(4),
+        layer_names[0]: _packed_replayssm_cache(4),
     }
     kv_cache_groups = [
         SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
@@ -79,6 +80,7 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
     assert mixers[0]._replayssm_ring_start.is_contiguous()
     assert torch.count_nonzero(mixers[0]._replayssm_ring_start) == 0
     assert torch.count_nonzero(mixers[0]._replayssm_prev_num_accepted) == 0
+    # Group {0, 2} shares trackers; layer 2 (not 0) updates after both run.
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 
