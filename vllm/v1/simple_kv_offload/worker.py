@@ -118,7 +118,15 @@ class SimpleCPUOffloadWorker:
             )
             block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
             raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
-            regions = raw.view(-1, num_blocks, block_bytes)
+            region_bytes = num_blocks * block_bytes
+            num_regions = raw.numel() // region_bytes
+            assert num_regions > 0, (
+                f"KV cache {name!r} storage has {raw.numel()} bytes, fewer than "
+                f"one {region_bytes}-byte cache region"
+            )
+            regions = raw[: num_regions * region_bytes].view(
+                num_regions, num_blocks, block_bytes
+            )
             for idx, region in enumerate(regions):
                 key_name = name if len(regions) == 1 else f"{name}.{idx}"
                 unique_gpu_caches[key_name] = region
