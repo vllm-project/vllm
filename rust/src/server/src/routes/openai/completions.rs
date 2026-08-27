@@ -66,7 +66,8 @@ pub async fn completions(
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
     let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
@@ -186,7 +187,6 @@ async fn collect_completion(
         Some(prompt_logprobs_to_maps(
             collected.prompt_logprobs.as_ref(),
             collected.prompt_token_ids.as_ref(),
-            return_tokens_as_token_ids,
         )?)
     } else {
         None

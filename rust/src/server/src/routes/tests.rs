@@ -3654,7 +3654,10 @@ async fn non_stream_completions_include_prompt_logprobs() {
     );
     assert_eq!(
         json["choices"][0]["prompt_logprobs"][1],
-        json!({"a": -0.5, "e": -0.3})
+        json!({
+            "97": {"logprob": -0.5, "rank": 1, "decoded_token": "a"},
+            "101": {"logprob": -0.3, "rank": 1, "decoded_token": "e"},
+        })
     );
 }
 
