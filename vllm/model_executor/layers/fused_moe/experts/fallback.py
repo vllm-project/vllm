@@ -42,12 +42,12 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         )
 
     @classmethod
-    def activation_format(
+    def activation_formats(
         cls: type["FallbackExperts"],
-    ) -> mk.FusedMoEActivationFormat:
+    ) -> list[mk.FusedMoEActivationFormat]:
         experts_cls, fallback_cls = cls.get_clses()
-        assert experts_cls.activation_format() == fallback_cls.activation_format()
-        return experts_cls.activation_format()
+        assert experts_cls.activation_formats() == fallback_cls.activation_formats()
+        return experts_cls.activation_formats()
 
     @classmethod
     def _supports_current_device(cls) -> bool:

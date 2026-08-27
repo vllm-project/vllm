@@ -111,8 +111,8 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return True
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     def supports_expert_map(self) -> bool:
         return False

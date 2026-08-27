@@ -968,8 +968,8 @@ class OAITritonExperts(BaseOAITritonExperts):
         return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     def workspace_shapes(
         self,
@@ -1064,8 +1064,8 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         ]
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     def workspace_shapes(
         self,
@@ -1301,8 +1301,8 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         )
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @staticmethod
     def _supports_current_device() -> bool:

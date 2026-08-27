@@ -92,8 +92,10 @@ class FusedMoEActivationFormat(Enum):
     The batched experts format (num experts, max tokens per expert, hidden dim)
     """
     BatchedExperts = ("batched_experts",)
-
-    PaddedStandard = ("Paddedstandard",)  # E-padded (indexed?)
+    """
+    Like 'Standard' format but potentially padded in the expert (E) dimension.
+    """
+    PaddedStandard = ("padded_standard",)  # E-padded (indexed?)
 
 
 @dataclass
@@ -494,16 +496,17 @@ class FusedMoEExperts(ABC):
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        if self.activation_format() != FusedMoEActivationFormat.BatchedExperts and (
-            max_num_tokens is not None or num_dispatchers is not None
+        if (
+            FusedMoEActivationFormat.BatchedExperts not in self.activation_formats()
+            and (max_num_tokens is not None or num_dispatchers is not None)
         ):
             raise ValueError(
                 "max_num_tokens and num_dispatchers should only be set for "
                 "BatchedExperts activation format."
             )
-        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
-            max_num_tokens is None or num_dispatchers is None
-        ):
+        elif self.activation_formats() == [
+            FusedMoEActivationFormat.BatchedExperts
+        ] and (max_num_tokens is None or num_dispatchers is None):
             raise ValueError(
                 "max_num_tokens and num_dispatchers must be set for "
                 "BatchedExperts activation format."
@@ -537,7 +540,7 @@ class FusedMoEExperts(ABC):
 
     @staticmethod
     @abstractmethod
-    def activation_format() -> FusedMoEActivationFormat:
+    def activation_formats() -> list[FusedMoEActivationFormat]:
         """
         A property which is a tuple of the input and output activation formats
         for the 'apply' method.
@@ -589,7 +592,7 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"{moe_config.hidden_dim} hidden dim is not supported"
             )
-        elif activation_format != cls.activation_format():
+        elif activation_format not in cls.activation_formats():
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
@@ -1668,7 +1671,7 @@ class FusedMoEKernel:
         self.prepare_finalize.post_init_setup(self.impl.fused_experts)
         assert (
             self.prepare_finalize.activation_format
-            == self.fused_experts.activation_format()
+            in self.fused_experts.activation_formats()
         )
 
     def output_is_reduced(self) -> bool:

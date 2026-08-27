@@ -58,8 +58,8 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.BatchedExperts]
 
     @staticmethod
     def _supports_current_device() -> bool:

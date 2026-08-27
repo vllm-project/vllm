@@ -149,8 +149,11 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         )
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.PaddedStandard,
+        ]
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -416,8 +419,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @staticmethod
     def _supports_current_device() -> bool:

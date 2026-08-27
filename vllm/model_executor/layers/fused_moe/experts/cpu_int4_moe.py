@@ -46,8 +46,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         return True
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @staticmethod
     def is_supported_config(

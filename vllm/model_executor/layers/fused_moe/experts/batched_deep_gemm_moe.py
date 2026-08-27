@@ -322,8 +322,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         assert self.quant_config.use_fp8_w8a8
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.BatchedExperts]
 
     @staticmethod
     def _supports_current_device() -> bool:

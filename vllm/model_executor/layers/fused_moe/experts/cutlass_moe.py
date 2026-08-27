@@ -370,9 +370,9 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         if expert_tokens_meta is not None:
             expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_formats() == [
+            mk.FusedMoEActivationFormat.BatchedExperts
+        ]
 
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
@@ -409,8 +409,8 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
     """CUTLASS FP8 fused MoE expert implementation."""
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -460,8 +460,8 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         return True
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.BatchedExperts]
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         return self.out_dtype if self.out_dtype is not None else act_dtype
@@ -743,8 +743,8 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -1044,8 +1044,8 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
         return moe_parallel_config.ep_size == 1
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -1302,8 +1302,8 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         self._permute_scratch: MoEPermuteScratch | None = None
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @staticmethod
     def is_supported_config(
@@ -1408,9 +1408,9 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         expert_num_tokens = None
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_formats() == [
+            mk.FusedMoEActivationFormat.BatchedExperts
+        ]
         assert not use_batched_format, "batched format not supported"
 
         in_dtype = hidden_states.dtype

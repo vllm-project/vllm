@@ -1399,6 +1399,9 @@ class FusedMoEConfig:
 
     @property
     def activation_format(self) -> "FusedMoEActivationFormat":
+        """
+        The all2all activation format.
+        """
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEActivationFormat,
         )
@@ -1407,7 +1410,7 @@ class FusedMoEConfig:
         if (
             conf.use_deepep_ll_kernels
             or conf.use_nixl_ep_kernels
-            or conf.moe_backend == "batched_triton"
+            or self.moe_backend == "batched_triton"
         ):
             return FusedMoEActivationFormat.BatchedExperts
         elif conf.use_deepep_v2_kernels:

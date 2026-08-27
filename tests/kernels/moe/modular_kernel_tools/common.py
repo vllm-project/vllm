@@ -262,7 +262,8 @@ class Config:
         if self.prepare_finalize_format() != self.fused_experts_format():
             return (
                 False,
-                f"Mismatched format {self.prepare_finalize_format()} != {self.fused_experts_format()}.",
+                f"Mismatched format {self.prepare_finalize_format()}"
+                f"!= {self.fused_experts_format()}.",
             )
 
         # Check quantization sanity

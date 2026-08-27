@@ -698,8 +698,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         return TopKWeightAndReduceNoOP()
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     def workspace_shapes(
         self,
@@ -952,8 +952,8 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         return TopKWeightAndReduceDelegate()
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.BatchedExperts]
 
     def workspace_shapes(
         self,

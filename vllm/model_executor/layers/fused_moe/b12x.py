@@ -503,8 +503,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         )
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @property
     def expects_unquantized_inputs(self) -> bool:

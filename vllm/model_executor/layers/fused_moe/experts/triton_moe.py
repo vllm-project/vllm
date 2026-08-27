@@ -100,8 +100,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         super().__init__(moe_config, quant_config)
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.PaddedStandard,
+        ]
 
     @property
     def expects_unquantized_inputs(self) -> bool:
