@@ -205,6 +205,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.rswa_window = model_config.rswa_window
+        # build() touches persistent builder state only in the R-SWA branch
+        # (persistent_rswa_prefix_lens is restaged for captured graphs to
+        # read), so skipping a to-be-discarded draft build() is safe exactly
+        # when R-SWA is inactive.
+        self.supports_skip_draft_rebuild = self.rswa_window is None
         self.persistent_rswa_prefix_lens: torch.Tensor | None = None
         if self.rswa_window is not None:
             self.persistent_rswa_prefix_lens = torch.empty(
