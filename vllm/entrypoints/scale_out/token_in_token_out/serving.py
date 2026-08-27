@@ -203,6 +203,16 @@ class ServingTokens(GenerateBaseServing):
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 
+        # Pass disaggregated-serving parameters through to the engine.
+        if request.kv_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["kv_transfer_params"] = request.kv_transfer_params
+            sampling_params.extra_args = extra
+        if request.ec_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["ec_transfer_params"] = request.ec_transfer_params
+            sampling_params.extra_args = extra
+
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
@@ -218,8 +228,9 @@ class ServingTokens(GenerateBaseServing):
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
-        if request.stream:
-            sampling_params.output_kind = RequestOutputKind.DELTA
+        sampling_params.output_kind = (
+            RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
+        )
 
         self._log_inputs(
             request_id,
@@ -287,6 +298,8 @@ class ServingTokens(GenerateBaseServing):
         choices: list[GenerateResponseChoice] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
+            self._raise_if_error(output.finish_reason, request_id)
+
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 

@@ -13,10 +13,6 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -25,9 +21,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
@@ -42,6 +35,10 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -116,54 +113,6 @@ class DeepseekV32Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
         )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        qr: torch.Tensor,
-        positions: torch.Tensor,
-        rotary_emb: nn.Module,
-    ) -> torch.Tensor:
-        q, _ = self.wq_b(qr)
-        q = q.view(-1, self.n_head, self.head_dim)
-
-        q_pe, q_nope = torch.split(
-            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
-
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        weights = kw[:, self.head_dim :]
-
-        k = self.k_norm(k)
-        k_pe, k_nope = torch.split(
-            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
-
-        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-
-        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
-
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
-
-        q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q,
-            self.quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=self.scale_fmt is not None,
-        )
-        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
-        q_scale = q_scale.view(-1, self.n_head, 1)
-
-        weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
-        )
-        weights = weights.squeeze(-1)
-
-        return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
 class DeepseekV32Attention(MLAAttention):
