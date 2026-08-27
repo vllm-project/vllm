@@ -332,9 +332,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct"),
     "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     # Internal checkpoint, not publicly available yet.
-    "HYV4ForCausalLM": _HfExamplesInfo(
-        "tencent/Hy4-preview", is_available_online=False
-    ),
+    "HYV4ForCausalLM": _HfExamplesInfo("tencent/Hy4-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         min_transformers_version="5.9.0",
@@ -1731,7 +1729,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "HYV4MTPModel": _HfExamplesInfo(
         "tencent/Hy4-preview",
         speculative_model="tencent/Hy4-preview",
-        is_available_online=False,
     ),
     "InklingMTPModel": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4",

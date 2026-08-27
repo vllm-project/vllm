@@ -70,7 +70,12 @@ class StreamToolCall(TypedDict):
 
 
 class StreamDelta(TypedDict):
-    """Return of ``extract_tool_calls_streaming`` (0 or 1 tool-call entry)."""
+    """Return of ``extract_tool_calls_streaming``.
+
+    A single engine delta can carry content plus every tool call that was
+    drained from the buffer (batched decode), so ``tool_calls`` is not limited
+    to one entry.
+    """
 
     content: str | None
     tool_calls: list[StreamToolCall]
@@ -343,6 +348,13 @@ class HYV4ToolExtractor:
     Holds only parser state: the structural token strings/ids, the compiled
     regexes, and the streaming incremental state. Stateless argument parsing is
     delegated to the module-level utilities above.
+
+    Streaming has two entry paths sharing one incremental argument parser,
+    selected by the ``guided`` flag of :meth:`extract_tool_calls_streaming`:
+    normal / auto tool choice detects markers on atomic token ids so ordinary
+    ``<`` in content is never withheld, while structural-tag guided decoding
+    detects them on the string level because the grammar may split a marker
+    across sub-word tokens.
     """
 
     def __init__(self, vocab: dict[str, int], token_suffix: str, strict: bool):
@@ -568,53 +580,93 @@ class HYV4ToolExtractor:
         current_token_ids,
         delta_token_ids,
         tools: list[ToolSchema] | None,
+        *,
+        guided: bool = False,
     ) -> StreamDelta | None:
-        # NOTE: We must detect the tool_calls start marker on the *string*
-        # level rather than via ``tool_calls_start_token_id in current_token_ids``.
-        # When guided decoding is driven by a structural_tag (ConstStringFormat),
-        # the marker is only constrained as a string and may be emitted as
-        # several sub-word tokens (e.g. ``<`` ``tool`` ``_call`` ``s`` ...), so
-        # the atomic ``tool_calls_start_token_id`` never appears in the token
-        # stream and the id-based check would misclassify every tool delta as
-        # plain content.
-        marker = self.tool_calls_start_token
-        marker_pos = current_text.find(marker)
+        """Consume one engine delta and emit content / tool-call deltas.
 
-        if marker_pos == -1:
-            # Marker not seen yet. The tail of ``current_text`` might still be a
-            # partial prefix of the marker split across deltas; hold that tail
-            # back and only stream the safe portion as content.
-            safe_end = len(current_text) - partial_tag_overlap(current_text, marker)
-            # Emit only the newly-arrived, safe content (delta relative to what
-            # was previously streamed).
-            content = current_text[len(previous_text) : safe_end]
-            return StreamDelta(
-                content=content if content else None,
-                tool_calls=[],
-            )
+        Two entry paths share the same incremental argument parser:
+        - ``guided=False`` (normal / auto tool choice): the structural markers
+          arrive as atomic tokenizer tokens, so detection is done on token ids
+          and ordinary ``<`` in model content is never withheld.
+        - ``guided=True`` (structural-tag constrained decoding): the grammar
+          only constrains strings, so ``<tool_calls...>`` may be split across
+          sub-word tokens and must be detected on the string level.
 
-        # Marker present. Stream any content that precedes it (only the part we
-        # have not already emitted), then buffer the tool payload.
-        #
-        # ``payload`` is everything after the marker in the *full* text. We keep
-        # the buffer in sync with it by only appending the portion that arrived
-        # in this delta, mirroring the original incremental ``+=`` semantics
-        # while remaining correct when the marker itself was split across
-        # sub-word tokens.
-        content_end = marker_pos
-        content = current_text[len(previous_text) : content_end]
+        Args:
+            previous_text: Text decoded before this delta.
+            current_text: Full text decoded so far.
+            delta_text: Text decoded in this delta.
+            previous_token_ids: Token ids before this delta.
+            current_token_ids: Token ids decoded so far.
+            delta_token_ids: Token ids in this delta.
+            tools: Plain tool schemas used for argument typing.
+            guided: Whether guided decoding may split markers into sub-word
+                tokens.
 
-        payload_start = marker_pos + len(marker)
-        # How much of the payload had already been buffered before this delta.
-        prev_payload_len = max(len(previous_text) - payload_start, 0)
-        new_payload = current_text[payload_start + prev_payload_len :]
-        self._buffer += new_payload
+        Returns:
+            A streaming delta carrying content and/or the tool calls drained
+            from the buffer, or None when nothing can be emitted yet.
+        """
+        content_delta: str | None = None
+        tool_calls: list[StreamToolCall] = []
 
-        if content:
-            # There is still un-emitted content preceding the marker. Emit it
-            # now; the tool payload has already been buffered and will be
-            # parsed on subsequent calls.
-            return StreamDelta(content=content, tool_calls=[])
+        if guided:
+            # Guided path: a structural-tag grammar constrains strings, not
+            # token ids, so the atomic ``tool_calls_start_token_id`` never
+            # appears in the token stream and an id-based check would
+            # misclassify every tool delta as plain content.
+            marker = self.tool_calls_start_token
+            marker_pos = current_text.find(marker)
+
+            if marker_pos == -1:
+                # Marker not seen yet. The tail of ``current_text`` might still
+                # be a partial prefix of the marker split across deltas; hold
+                # that tail back and only stream the safe portion as content.
+                safe_end = len(current_text) - partial_tag_overlap(current_text, marker)
+                # Emit only the newly-arrived, safe content (delta relative to
+                # what was previously streamed).
+                content = current_text[len(previous_text) : safe_end]
+                return StreamDelta(
+                    content=content if content else None,
+                    tool_calls=[],
+                )
+
+            # Marker present. Stream any content that precedes it (only the
+            # part we have not already emitted), then buffer the tool payload.
+            #
+            # The payload is everything after the marker in the *full* text. We
+            # keep the buffer in sync with it by only appending the portion that
+            # arrived in this delta, mirroring the incremental ``+=`` semantics
+            # while remaining correct when the marker itself was split across
+            # sub-word tokens.
+            content_end = marker_pos
+            content = current_text[len(previous_text) : content_end]
+
+            payload_start = marker_pos + len(marker)
+            # How much of the payload had already been buffered before this
+            # delta.
+            prev_payload_len = max(len(previous_text) - payload_start, 0)
+            new_payload = current_text[payload_start + prev_payload_len :]
+            self._buffer += new_payload
+
+            if content:
+                content_delta = content
+        else:
+            # Atomic-token path: normal / auto generation emits the HYV4
+            # structural markers as single tokenizer tokens. Pass ordinary
+            # content through exactly as decoded, including comparison
+            # operators such as ``<``.
+            if self.tool_calls_start_token_id not in current_token_ids:
+                return StreamDelta(content=delta_text, tool_calls=[])
+
+            if self.tool_calls_start_token in delta_text:
+                text_parts = delta_text.split(self.tool_calls_start_token)
+                self._buffer += text_parts[-1]
+                if text_parts[0]:
+                    content_delta = text_parts[0]
+            else:
+                self._buffer += delta_text
 
         # Encountered finish, extract valid arguments
         if (
@@ -624,64 +676,86 @@ class HYV4ToolExtractor:
         ):
             self._buffer += self.tool_call_end_token + self.tool_calls_end_token
 
-        cur_text = self._buffer
+        # Drain every complete tool call that is already buffered so a single
+        # engine delta can carry content + N tool calls (batched decode).
+        while True:
+            cur_text = self._buffer
 
-        # Haven't encountered tool_call start tag yet; drop the inter-tag padding
-        # but keep any tail that may be a partial tool_call start tag (guided
-        # decoding can split it across deltas).
-        start_idx = cur_text.find(self.tool_call_start_token)
-        if start_idx == -1 and self._streaming_tool_name is None:
-            keep = partial_tag_overlap(cur_text, self.tool_call_start_token)
-            self._buffer = cur_text[len(cur_text) - keep :] if keep else ""
-            return None
+            # Haven't encountered tool_call start tag yet; drop the inter-tag
+            # padding but keep any tail that may be a partial tool_call start
+            # tag (guided decoding can split it across deltas).
+            start_idx = cur_text.find(self.tool_call_start_token)
+            if start_idx == -1 and self._streaming_tool_name is None:
+                keep = partial_tag_overlap(cur_text, self.tool_call_start_token)
+                self._buffer = cur_text[len(cur_text) - keep :] if keep else ""
+                break
 
-        # === Phase 1: Detect tool name (send when first arg_key is seen) ===
-        # ``name_new`` mirrors the old ``name_delta is not None``: it marks the
-        # chunk that first emits this tool's name, which is the only chunk the
-        # wrapper mints an id + type for.
-        name_new = False
-        pending_name: str | None = None
-        if self._streaming_tool_name is None:
-            arg_idx = cur_text.find(self.arg_key_start_token, start_idx)
-            end_idx = cur_text.find(self.tool_call_end_token, start_idx)
-            if arg_idx == -1 and end_idx == -1:
-                # tool name not yet complete; keep buffering from tool_call_start
-                self._buffer = cur_text[start_idx:]
-                return None
+            # === Phase 1: Detect tool name (send when first arg_key is seen) =
+            # ``name_new`` mirrors the old ``name_delta is not None``: it marks
+            # the chunk that first emits this tool's name, which is the only
+            # chunk the wrapper mints an id + type for.
+            name_new = False
+            pending_name: str | None = None
+            if self._streaming_tool_name is None:
+                arg_idx = cur_text.find(self.arg_key_start_token, start_idx)
+                end_idx = cur_text.find(self.tool_call_end_token, start_idx)
+                if arg_idx == -1 and end_idx == -1:
+                    # tool name not yet complete; keep buffering from
+                    # tool_call_start
+                    self._buffer = cur_text[start_idx:]
+                    break
 
-            name_start = start_idx + len(self.tool_call_start_token)
-            name_end = arg_idx if arg_idx != -1 else end_idx
+                name_start = start_idx + len(self.tool_call_start_token)
+                name_end = arg_idx if arg_idx != -1 else end_idx
 
-            tool_name = cur_text[name_start:name_end].strip()
-            self._streaming_tool_name = tool_name
+                tool_name = cur_text[name_start:name_end].strip()
+                self._streaming_tool_name = tool_name
 
-            if arg_idx != -1:
-                self._buffer = cur_text[arg_idx:]
-            else:
-                self._buffer = cur_text[end_idx:]
+                if arg_idx != -1:
+                    self._buffer = cur_text[arg_idx:]
+                else:
+                    self._buffer = cur_text[end_idx:]
 
-            # Increment tool_id and mark that a name chunk should be emitted
-            self.current_tool_id += 1
-            name_new = True
-            pending_name = tool_name
+                # Increment tool_id and mark that a name chunk should be emitted
+                self.current_tool_id += 1
+                name_new = True
+                pending_name = tool_name
 
-            # Check if buffer already has complete arguments (all-in-one-delta)
-            if self.tool_call_end_token not in self._buffer:
-                return StreamDelta(
-                    content=None,
-                    tool_calls=[
+                # Check if buffer already has complete arguments
+                # (all-in-one-delta); otherwise only the name is ready now.
+                if self.tool_call_end_token not in self._buffer:
+                    tool_calls.append(
                         StreamToolCall(
                             index=self.current_tool_id,
                             new=True,
                             name=tool_name,
                             arguments=None,
                         )
-                    ],
-                )
-            # Buffer already has a complete tool call; continue to phase 2 below
+                    )
+                    break
+                # Buffer already has a complete tool call; fall through to
+                # phase 2 below.
 
-        # === Phase 2: Incremental argument streaming ===
-        return self._extract_streaming_incremental(name_new, pending_name, tools)
+            # === Phase 2: Incremental argument streaming ===
+            result = self._extract_streaming_incremental(name_new, pending_name, tools)
+            if result:
+                tool_calls.extend(result["tool_calls"])
+
+            # Continue only after the current tool call has completed and the
+            # remaining structural payload starts with another tool call.
+            # A literal ``<tool_call>`` may legitimately appear inside an open
+            # string argument; in that case the current tool name is still set
+            # and the buffer has not been consumed, so continuing would spin on
+            # the same buffer forever.
+            if self._streaming_tool_name is None and self._buffer.startswith(
+                self.tool_call_start_token
+            ):
+                continue
+            break
+
+        if content_delta is not None or tool_calls:
+            return StreamDelta(content=content_delta, tool_calls=tool_calls)
+        return None
 
     def _make_args_delta(self, argument_diff: str) -> StreamDelta:
         """Build an args-only streaming delta (no id/type -> new=False)."""
@@ -977,6 +1051,28 @@ class HYV4ToolParser(ToolParser):
         self.streamed_args_for_tool = self._extractor.streamed_args_for_tool
         self.current_tool_id = self._extractor.current_tool_id
 
+    @staticmethod
+    def _is_guided(request: ChatCompletionRequest) -> bool:
+        """Whether a structural tag constrains this request's decoding.
+
+        ``get_structural_tag`` only applies to required / named tool choice and
+        the serving layer records the result on the request. A structural tag
+        constrains strings rather than token ids, so the ``<tool_calls>`` marker
+        can arrive split across sub-word tokens and must be detected on the
+        string level.
+
+        Args:
+            request: The request being streamed.
+
+        Returns:
+            True when the streaming parser must use the string-marker path.
+        """
+        structured_outputs = getattr(request, "structured_outputs", None)
+        return (
+            structured_outputs is not None
+            and structured_outputs.structural_tag is not None
+        )
+
     def _tools(self, request: ChatCompletionRequest) -> list[ToolSchema] | None:
         # Prefer the tools passed at construction; fall back to the request.
         if self._plain_tools is not None:
@@ -1023,6 +1119,7 @@ class HYV4ToolParser(ToolParser):
             current_token_ids,
             delta_token_ids,
             self._tools(request),
+            guided=self._is_guided(request),
         )
         self._mirror_state()
         if delta is None:
@@ -1055,11 +1152,15 @@ class HYV4ToolParser(ToolParser):
             else:
                 tool_calls.append(DeltaToolCall(index=tc["index"], function=function))
 
-        # Emit content and tool-call deltas as separate messages (like hy_v3):
-        # never set ``content`` on a tool-call chunk (avoids ``content: null``).
-        if tool_calls:
-            return DeltaMessage(tool_calls=tool_calls)
+        # A single engine delta can carry content plus N drained tool calls.
+        # Only set the fields that are present so streaming serialization
+        # (exclude_unset) never emits ``content: null`` on a tool-call chunk.
         content = delta.get("content")
-        if content is None:
+        kwargs: dict[str, Any] = {}
+        if content is not None:
+            kwargs["content"] = content
+        if tool_calls:
+            kwargs["tool_calls"] = tool_calls
+        if not kwargs:
             return None
-        return DeltaMessage(content=content)
+        return DeltaMessage(**kwargs)
