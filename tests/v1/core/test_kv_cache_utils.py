@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import math
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -172,6 +174,7 @@ def new_sliding_window_spec(
     dtype=torch.float32,
     page_size_padded=None,
     sliding_window=1,
+    non_causal_multi_token_decode=False,
 ):
     return SlidingWindowSpec(
         block_size=block_size,
@@ -180,6 +183,7 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+        non_causal_multi_token_decode=non_causal_multi_token_decode,
     )
 
 
@@ -3419,3 +3423,91 @@ def test_deepseek_v4_annotation_requires_model_version():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+def _qwen38_dflash2_specs(*, mark_draft: bool) -> dict[str, KVCacheSpec]:
+    full = new_kv_cache_spec(block_size=16)
+    mamba = new_mamba_spec(block_size=64, mamba_cache_mode="align")
+    draft = new_sliding_window_spec(
+        block_size=16,
+        sliding_window=2048,
+        non_causal_multi_token_decode=mark_draft,
+    )
+    specs: dict[str, KVCacheSpec] = {}
+    specs.update({f"model.layers.{i}.linear_attn": mamba for i in range(48)})
+    specs.update({f"model.layers.{i}.self_attn": full for i in range(48, 64)})
+    specs.update({f"draft.layers.{i}.self_attn": draft for i in range(5)})
+    return specs
+
+
+def _hybrid_coord(groups: list[KVCacheGroupSpec]):
+    block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    scheduler_block_size = math.lcm(*block_sizes)
+    return get_kv_cache_coordinator(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=groups,
+        ),
+        max_model_len=4096,
+        max_in_flight_tokens=256,
+        use_eagle=True,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=min(block_sizes),
+    )
+
+
+def test_dflash_swa_draft_marks_only_eagle_group():
+    """Qwen3.8 + DFlash2: 48 Mamba + 16 full + 5 draft SWA.
+
+    The general hybrid path must flag only the draft SWA group. Flag-all
+    would mark target full and (after #48375) Mamba groups as eagle.
+    """
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="dflash"),
+        _qwen38_dflash2_specs(mark_draft=True),
+    )
+
+    eagle = [g for g in groups if g.is_eagle_group]
+    assert len(eagle) == 1
+    eagle_group = eagle[0]
+    assert isinstance(eagle_group.kv_cache_spec, SlidingWindowSpec)
+    assert eagle_group.kv_cache_spec.non_causal_multi_token_decode
+    assert not getattr(eagle_group.kv_cache_spec, "non_causal", False)
+    assert all(name.startswith("draft.layers.") for name in eagle_group.layer_names)
+    assert all(
+        not g.is_eagle_group for g in groups if isinstance(g.kv_cache_spec, MambaSpec)
+    )
+
+
+def test_dflash_unmarked_swa_flag_all_hybrid_groups():
+    """Main-tree baseline: no draft marker → coordinator flags every group."""
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="dflash"),
+        _qwen38_dflash2_specs(mark_draft=False),
+    )
+    assert not any(g.is_eagle_group for g in groups)
+    coord = _hybrid_coord(groups)
+    assert coord.eagle_group_ids == set(range(len(groups)))
+
+
+def test_dflash_marked_swa_stops_hybrid_flag_all():
+    """Draft SWA marker must prevent flag-all on target full and Mamba groups."""
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="dflash"),
+        _qwen38_dflash2_specs(mark_draft=True),
+    )
+    coord = _hybrid_coord(groups)
+    eagle_idx = {i for i, g in enumerate(groups) if g.is_eagle_group}
+    assert eagle_idx == coord.eagle_group_ids
+    assert len(eagle_idx) == 1
+    assert isinstance(groups[next(iter(eagle_idx))].kv_cache_spec, SlidingWindowSpec)
+    assert all(
+        i not in coord.eagle_group_ids
+        for i, g in enumerate(groups)
+        if isinstance(g.kv_cache_spec, MambaSpec)
+    )

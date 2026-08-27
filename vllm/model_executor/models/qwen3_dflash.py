@@ -75,6 +75,17 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
+def _dflash_all_layers_sliding(config: Qwen3Config) -> bool:
+    """Whether every draft attention layer resolves to sliding window."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    use_swa = dflash_config.get("use_swa", False)
+    layer_types = getattr(config, "layer_types", None)
+    if not layer_types:
+        return use_swa
+    num_sliding = sum(lt == _SLIDING_ATTENTION for lt in layer_types)
+    return num_sliding == len(layer_types) or (use_swa and num_sliding == 0)
+
+
 def dflash_target_rope_is_neox_style(target_model: nn.Module) -> bool | None:
     """The target's RoPE layout, from its first attention layer.
 
@@ -192,6 +203,7 @@ class DFlashQwen3Attention(nn.Module):
         is_neox_style: bool = True,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        non_causal_multi_token_decode: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -255,6 +267,9 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
+            # Draft-layer marker for HybridKVCacheCoordinator last-block drop.
+            # Not AttentionSpec.non_causal (that disables prefix cache).
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
         self.causal = causal
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -337,6 +352,10 @@ class DFlashQwen3DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
+            # In a mixed SWA/full drafter, marking only the SWA subset would
+            # suppress the conservative flag-all fallback while leaving full
+            # draft groups unmarked.
+            non_causal_multi_token_decode=_dflash_all_layers_sliding(config),
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,

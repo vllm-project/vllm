@@ -696,6 +696,10 @@ class SlidingWindowSpec(AttentionSpec):
     # re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
     # of the sequence, and thus needs to delay freeing/caching of blocks.
     extra_retained_tokens: int = 0
+    # Same name as MLAAttentionSpec: marks a speculative draft SWA group so
+    # the general hybrid grouping path can set KVCacheGroupSpec.is_eagle_group.
+    # Does not set AttentionSpec.non_causal (that disables prefix cache).
+    non_causal_multi_token_decode: bool = False
 
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int

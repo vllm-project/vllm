@@ -245,6 +245,7 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        non_causal_multi_token_decode: bool = False,
         **extra_impl_args,
     ) -> None:
         """
@@ -327,6 +328,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.non_causal_multi_token_decode = non_causal_multi_token_decode
         self.has_sink = extra_impl_args.get("sinks") is not None
 
         # NOTE: model_config may be None during certain tests
@@ -629,6 +631,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     dtype=self.kv_cache_torch_dtype,
                     kv_quant_mode=quant_mode,
                     sliding_window=self.sliding_window,
+                    non_causal_multi_token_decode=self.non_causal_multi_token_decode,
                 )
             ).real_page_size_bytes
             sw_block_size = _largest_kernel_block_within(
@@ -643,6 +646,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
+                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
             )
         else:
             return FullAttentionSpec(

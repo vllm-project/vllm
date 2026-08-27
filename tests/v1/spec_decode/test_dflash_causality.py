@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from vllm.model_executor.models.qwen3_dflash import (
+    _dflash_all_layers_sliding,
     _dflash_layer_causal,
     _get_dflash_fc_input_size,
     dflash_has_any_non_causal,
@@ -21,12 +22,22 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
 )
 
 
-def _config(num_hidden_layers, layer_types=None, causal_override=None, is_causal=None):
-    dflash_config = None if causal_override is None else {"causal": causal_override}
+def _config(
+    num_hidden_layers,
+    layer_types=None,
+    causal_override=None,
+    is_causal=None,
+    use_swa=None,
+):
+    dflash_config = {}
+    if causal_override is not None:
+        dflash_config["causal"] = causal_override
+    if use_swa is not None:
+        dflash_config["use_swa"] = use_swa
     return SimpleNamespace(
         num_hidden_layers=num_hidden_layers,
         layer_types=layer_types,
-        dflash_config=dflash_config,
+        dflash_config=dflash_config or None,
         is_causal=is_causal,
     )
 
@@ -81,6 +92,24 @@ def test_dflash_layer_causal_honors_top_level_override():
     )
     assert _dflash_layer_causal(config, 0) is False
     assert _dflash_layer_causal(config, 1) is False
+
+
+@pytest.mark.parametrize(
+    "config,expected",
+    [
+        (_config(2, layer_types=None, use_swa=True), True),
+        (_config(2, layer_types=None, use_swa=False), False),
+        (_config(2, layer_types=["sliding_attention"] * 2), True),
+        (
+            _config(2, layer_types=["sliding_attention", "full_attention"]),
+            False,
+        ),
+        (_config(2, layer_types=["full_attention"] * 2, use_swa=True), True),
+        (_config(2, layer_types=["full_attention"] * 2, use_swa=False), False),
+    ],
+)
+def test_dflash_all_layers_sliding(config, expected):
+    assert _dflash_all_layers_sliding(config) is expected
 
 
 def _vllm_config(**draft_config):
