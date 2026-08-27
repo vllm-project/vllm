@@ -102,9 +102,7 @@ class DraftModelSpeculator(BaseSpeculator):
         # (eh_proj: hidden*2 -> hidden), not the HC-multiplexed pre-hc_head
         # residual, so never widen for it regardless of mhc. Covers the target
         # (glm5_next) and MTP draft (glm5_next_mtp) config model_types.
-        if getattr(self.draft_model_config.hf_config, "model_type", "").startswith(
-            "glm5_next"
-        ):
+        if self.draft_model_config.hf_config.model_type.startswith("glm5_next"):
             hc_mult = 1
         self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
@@ -145,11 +143,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=vllm_config.model_config.head_dtype,
+            dtype, fill = self.draft_logits_spec(vllm_config)
+            self.draft_logits = torch.full(
+                (
+                    self.max_num_reqs,
+                    self.num_speculative_steps,
+                    self.vocab_size,
+                ),
+                fill,
+                dtype=dtype,
                 device=device,
             )
 
@@ -247,6 +249,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
         query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
@@ -291,6 +294,11 @@ class DraftModelSpeculator(BaseSpeculator):
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+            dcp_local_seq_lens=(
+                None
+                if dcp_local_seq_lens is None
+                else dcp_local_seq_lens[:num_reqs_padded]
+            ),
             max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
@@ -299,6 +307,13 @@ class DraftModelSpeculator(BaseSpeculator):
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
+
+    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
+        """Dtype and fill for the cached proposal distribution.
+
+        Speculators that write only a subset of columns each step override this.
+        """
+        return vllm_config.model_config.head_dtype, 0.0
 
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:

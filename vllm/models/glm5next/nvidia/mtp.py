@@ -27,6 +27,7 @@ from vllm.sequence import IntermediateTensors
 
 from .model import (
     Glm5NextDecoderLayer,
+    Glm5NextMLAAttention,
     Glm5NextMoE,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
@@ -50,7 +51,9 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         # Reserve room for the incomplete pool tail and align the sparse MLA
         # buffer width to BLOCK_N=128.
         topk_tokens = config.index_topk
-        kpool = getattr(config, "index_kpool", 1) or 1
+        assert topk_tokens is not None
+        kpool = config.index_kpool
+        assert kpool is not None
         buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
         sparse_topk_block_n = 128
         buffer_width = (
@@ -132,23 +135,25 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         # Plain list for the per-propose lookup: ModuleDict[str(...)] builds a
         # string and hashes it on every draft step.
         self._mtp_layers = list(self.layers.values())
+        self._mtp_mla_attns = []
+        for layer in self._mtp_layers:
+            self_attn = layer.mtp_block.self_attn
+            assert isinstance(self_attn, Glm5NextMLAAttention)
+            self._mtp_mla_attns.append(self_attn.mla_attn)
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
         # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
-        for layer in self.layers.values():
-            self_attn = getattr(layer.mtp_block, "self_attn", None)
-            if self_attn is not None and hasattr(self_attn, "skip_topk"):
-                self_attn.skip_topk = skip
+        for mla_attn in self._mtp_mla_attns:
+            mla_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
         """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
         num_slots = slot_ids.numel()
-        for layer in self.layers.values():
-            self_attn = getattr(layer.mtp_block, "self_attn", None)
-            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
-                topk_indices_buffer = self_attn.topk_indices_buffer
-                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+        for mla_attn in self._mtp_mla_attns:
+            topk_indices_buffer = mla_attn.topk_indices_buffer
+            assert topk_indices_buffer is not None
+            topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

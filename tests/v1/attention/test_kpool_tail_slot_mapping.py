@@ -26,11 +26,33 @@ import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    KpoolTailBackend,
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
+from vllm.v1.kv_cache_interface import KpoolTailSpec, compute_layout_strides
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 KPOOL = 4
+
+
+def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
+    (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
+    spec = KpoolTailSpec(
+        block_size=KPOOL,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        sliding_window=KPOOL,
+    )
+    strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
+    _, _, head_stride, state_stride, content_stride = strides
+
+    assert layout is KVCacheLayout.LBHNC
+    assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
+    assert state_stride == 128 * torch.bfloat16.itemsize
+    assert content_stride == 1
 
 
 def make_tail_block_table(own_blocks, width=64):

@@ -18,6 +18,7 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
@@ -90,6 +91,17 @@ class EncoderRunner:
                     continue
                 if mm_feature.identifier in self.encoder_cache.encoder_outputs:
                     continue
+                if mm_feature.modality == "prompt_embeds":
+                    # Passthrough modality: the tensor is already in the
+                    # model's embedding space, so no encoder runs. Cache it
+                    # directly so gather_mm_embeddings splices it via the
+                    # standard is_mm_embed path.
+                    embeds = mm_feature.data["embedding"].data
+                    assert isinstance(embeds, torch.Tensor)
+                    self.encoder_cache.encoder_outputs[mm_feature.identifier] = (
+                        async_tensor_h2d(embeds, device=self.device)
+                    )
+                    continue
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
 
@@ -140,7 +152,7 @@ class EncoderRunner:
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs, device=self.device, pin_memory=True
+            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):
             cg_manager = self.cudagraph_manager
             cudagraph_output = (

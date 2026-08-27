@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
-import os
-
 import torch
 
 import vllm.envs as envs
@@ -376,11 +374,7 @@ def sparse_attn_indexer_kpool(
                 # ``pos % kpool`` within the request's tail block. Processing
                 # only the batch's trailing tokens would miss all but the last
                 # request in a multi-request prefill.
-                if (
-                    tail_kv_cache is not None
-                    and tail_prefix is not None
-                    and os.environ.get("VLLM_KPOOL_SKIP_TAIL_CACHE") != "1"
-                ):
+                if tail_kv_cache is not None and tail_prefix is not None:
                     tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
                     if tail_meta is not None:
                         assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
@@ -572,7 +566,6 @@ def sparse_attn_indexer_kpool(
             and compress_ape is not None
             and positions is not None
             and not skip_k_cache_insert
-            and os.environ.get("VLLM_KPOOL_SKIP_DECODE_WRITE") != "1"
         ):
             num_requests = attn_metadata_narrowed.num_decodes
             # Kpool writes must recover the original request grouping after the

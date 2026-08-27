@@ -101,7 +101,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
             spatial_merge_size,
             video_needs_metadata=self._supports_video,
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
 
@@ -140,6 +140,7 @@ class ColQwen3_5Model(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.": "language_model.model.",
+            "mtp.": None,
         }
     )
 
@@ -238,10 +239,7 @@ class ColQwen3_5Model(
             else:
                 model_weights.append((name, weight))
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(model_weights, mapper=self.hf_to_vllm_mapper)
 
         for name, weight in proj_weights:

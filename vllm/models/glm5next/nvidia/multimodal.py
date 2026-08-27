@@ -3,7 +3,7 @@
 """GLM-5.3-Flash vision tower and multimodal processor."""
 
 from collections.abc import Mapping
-from functools import partial
+from functools import cached_property, partial
 
 import numpy as np
 import torch
@@ -370,10 +370,9 @@ class Glm5NextVisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.out_hidden_size = vision_config.out_hidden_size
 
-        # Fall back to the text clamp limit when vision_config omits it.
-        swiglu_limit = getattr(vision_config, "swiglu_limit", None)
+        swiglu_limit = vision_config.swiglu_limit
         if swiglu_limit is None:
-            swiglu_limit = getattr(text_config, "swiglu_limit", None)
+            swiglu_limit = text_config.swiglu_limit
         assert swiglu_limit is not None, (
             "GLM-5.3-Flash vision requires swiglu_limit (vision_config or text_config)"
         )
@@ -625,14 +624,14 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     inside ``smart_resize``'s spatial factor.
     """
 
-    def get_hf_processor(self, **kwargs: object):
-        proc = getattr(self, "_glm5_hf_processor", None)
-        if proc is None:
-            from vllm.transformers_utils.processors.glm5next import Glm5NextProcessor
+    @cached_property
+    def _glm5_hf_processor(self):
+        from vllm.transformers_utils.processors.glm5next import Glm5NextProcessor
 
-            proc = Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
-            self._glm5_hf_processor = proc
-        return proc
+        return Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
+
+    def get_hf_processor(self, **kwargs: object):
+        return self._glm5_hf_processor
 
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
         from vllm.transformers_utils.processors.glm5next import _pixel_budget

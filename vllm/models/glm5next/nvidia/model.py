@@ -161,7 +161,7 @@ class Glm5NextMoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -184,7 +184,7 @@ class Glm5NextMoE(nn.Module):
             out_dtype=self.router_dtype,
             prefix=f"{prefix}.gate",
         )
-        if getattr(config, "topk_method", None) == "noaux_tc":
+        if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32)
             )
@@ -205,7 +205,7 @@ class Glm5NextMoE(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        swiglu_limit = getattr(config, "swiglu_limit", None)
+        swiglu_limit = config.swiglu_limit
         if config.n_shared_experts is None:
             self.shared_experts = None
         else:
@@ -229,13 +229,13 @@ class Glm5NextMoE(nn.Module):
             top_k=config.num_experts_per_token,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=getattr(config, "norm_topk_prob", True),
+            renormalize=config.moe_renormalize,
             quant_config=quant_config,
             use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=getattr(config, "scoring_func", "softmax"),
+            scoring_func=config.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=apply_routed_scale_to_output,
             e_score_correction_bias=self.gate.e_score_correction_bias,
@@ -329,7 +329,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 quant_config=None,  # MLA projections are BF16 in checkpoint
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
-                skip_rope=getattr(config, "mla_nope", False),
+                skip_rope=config.mla_nope,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -595,14 +595,13 @@ class Glm5NextModel(nn.Module):
             )
         else:
         """
-        # `index_topk` is declared on Glm5NextTextConfig with a default of None,
-        # so hasattr() is True even for full-MLA configs (no kpool indexer).
-        # Gate on the value being set instead.
-        self.is_v32 = getattr(config, "index_topk", None) is not None
+        self.is_v32 = config.index_topk is not None
         if self.is_v32:
             topk_tokens = config.index_topk
+            assert topk_tokens is not None
             # Reserve room for the incomplete pool tail.
-            kpool = getattr(config, "index_kpool", 1) or 1
+            kpool = config.index_kpool
+            assert kpool is not None
             buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
             # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
             sparse_topk_block_n = 128
@@ -897,9 +896,8 @@ class Glm5NextForCausalLM(
             )
         else:
             self.lm_head = PPMissingLayer()
-        logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            self.config.vocab_size, scale=logit_scale
+            self.config.vocab_size, scale=self.config.logit_scale
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -963,10 +961,7 @@ class Glm5NextForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 
@@ -1056,10 +1051,8 @@ class Glm5NextForConditionalGeneration(
         # model) and we intentionally do not alias it here.
 
     def get_encoder_cudagraph_config(self):
-        # The forked vision tower (multimodal.py) has no abs-pos embeddings, so its
-        # prepare_encoder_metadata does not produce "pos_embeds". Drop it from the
-        # buffer_keys inherited from Glm4vForConditionalGeneration so encoder
-        # CUDA-graph capture/replay does not expect a buffer that is never filled.
+        # This vision tower does not produce the absolute position embedding
+        # buffer used by GLM4V.
         config = super().get_encoder_cudagraph_config()
         config.buffer_keys = [k for k in config.buffer_keys if k != "pos_embeds"]
         return config

@@ -8,15 +8,22 @@ only get the `eos_token_id` from the tokenizer as defined by
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from transformers import PretrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
-from vllm.transformers_utils.config import try_get_generation_config
-from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
+from vllm.transformers_utils.config import (
+    get_safetensors_params_metadata,
+    try_get_generation_config,
+)
+from vllm.transformers_utils.configs.glm5_next import (
+    Glm5NextConfig,
+    Glm5NextTextConfig,
+    Glm5NextVisionConfig,
+)
 
 
 def test_glm5_next_accepts_deepseek_sparse_attention_layers():
@@ -28,6 +35,19 @@ def test_glm5_next_accepts_deepseek_sparse_attention_layers():
 
     assert config.layer_types == layer_types
     assert config.layers_block_type == ["linear_attention", "attention"]
+
+
+def test_glm5_next_accepts_prebuilt_subconfigs():
+    text_config = Glm5NextTextConfig(hidden_size=1024)
+    vision_config = Glm5NextVisionConfig(hidden_size=768)
+
+    config = Glm5NextConfig(
+        text_config=text_config,
+        vision_config=vision_config,
+    )
+
+    assert config.text_config is text_config
+    assert config.vision_config is vision_config
 
 
 def test_get_llama3_eos_token():
@@ -89,3 +109,22 @@ def test_model_config_generation_fallback_forwards_code_revision():
         config_format="auto",
         token=None,
     )
+
+
+def test_safetensors_metadata_of_repo_without_safetensors():
+    """A repo storing its weights in another format is an answer, not a failure,
+    so it must not be retried."""
+    from huggingface_hub.errors import LocalEntryNotFoundError, NotASafetensorsRepoError
+
+    get_safetensors_metadata = MagicMock(
+        side_effect=NotASafetensorsRepoError("not a safetensors repo")
+    )
+    api = SimpleNamespace(
+        get_safetensors_metadata=get_safetensors_metadata,
+        snapshot_download=MagicMock(side_effect=LocalEntryNotFoundError("no cache")),
+    )
+
+    with patch.object(config_module, "hf_api", lambda: api):
+        assert get_safetensors_params_metadata("some/pytorch-only-model") == {}
+
+    get_safetensors_metadata.assert_called_once()

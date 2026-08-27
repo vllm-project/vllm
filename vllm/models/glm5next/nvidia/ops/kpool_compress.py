@@ -45,19 +45,6 @@ def _hadamard128(x):
     return x * 0.08838834764831845  # 1/sqrt(128)
 
 
-def _hadamard128_torch(x: torch.Tensor) -> torch.Tensor:
-    """Reference / fallback Hadamard-128 on the last dim (must be 128)."""
-    import math
-
-    n = x.shape[-1]
-    assert n == 128, f"_hadamard128 expects last dim 128, got {n}"
-    h = torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=torch.float32, device=x.device)
-    while h.shape[0] < n:
-        h = torch.cat([torch.cat([h, h], dim=1), torch.cat([h, -h], dim=1)], dim=0)
-    h = h / math.sqrt(n)
-    return x @ h
-
-
 @triton.jit
 def _fwht_stage(x, N: tl.constexpr, GROUPS: tl.constexpr, STRIDE: tl.constexpr):
     # One FWHT butterfly stage on a flat tensor of N = GROUPS*2*STRIDE elems;
@@ -142,50 +129,6 @@ def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     grid = (triton.cdiv(n_rows, BLOCK_R),)
     _fwht_quant_kernel[grid](q, q_fp8, q_scale, n_rows, BLOCK_R=BLOCK_R, num_warps=2)
     return q_fp8, q_scale
-
-
-# Map pool ids to physical cache slots.
-
-
-def compute_pooled_write_locs(
-    page_table_64: torch.Tensor,
-    pool_ids: torch.Tensor,
-    pool_size: int,
-) -> torch.Tensor:
-    """Map logical pooled-K ids to physical flat cache slots.
-
-    ``pool_size`` consecutive tokens share one pool slot that lives at the
-    *first* token page of each page-group. ``page_table_64`` maps token pages
-    to physical block ids; we gather the block id of each pool's page-group
-    and add the in-block pool offset.
-    """
-    assert page_table_64.ndim == 1
-    pool_ids = pool_ids.to(torch.int64)
-    block_size = 64
-    pool_page_group = torch.div(pool_ids, block_size, rounding_mode="floor")
-    token_page_row = pool_page_group * pool_size
-    packed_page = page_table_64.index_select(0, token_page_row.to(torch.int64))
-    return packed_page.to(torch.int64) * block_size + torch.remainder(
-        pool_ids, block_size
-    )
-
-
-def build_pooled_page_table(
-    page_table: torch.Tensor,
-    pool_size: int,
-) -> torch.Tensor:
-    """Build a pool-granular page table by taking every ``pool_size``-th
-    token-page column (one pool maps to ``pool_size`` token pages).
-
-    Uses gather (not strided slicing) so the result is always a fresh
-    row-major tensor — some downstream kernels require stride(-1) == 1.
-    """
-    block_size = page_table.shape[-1]
-    assert block_size % pool_size == 0, (
-        f"pool_size ({pool_size}) must divide page columns ({block_size})"
-    )
-    idx = torch.arange(0, block_size, pool_size, device=page_table.device)
-    return page_table[..., idx].contiguous()
 
 
 # Fused pool compression and cache write.

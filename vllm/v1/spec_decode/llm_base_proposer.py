@@ -1014,12 +1014,16 @@ class SpecDecodeBaseProposer:
 
     def model_returns_tuple(self) -> bool:
         if self.method == "mtp":
-            # DeepSeek and GLM-5.3-Flash MTP recycle the post-final-norm
-            # hidden, so its forward returns (logit_hidden, recycle_hidden).
-            # Other MTP families return a single tensor.
-            return any(
-                arch in (self.draft_model_config.hf_config.architectures or [])
-                for arch in ("DeepSeekMTPModel", "Glm5NextMTPModel")
+            # These models return separate hidden states for logits and for
+            # feedback into the next draft step.
+            architectures = self.draft_model_config.hf_config.architectures or []
+            return bool(
+                {
+                    "DeepSeekMTPModel",
+                    "DeepseekV32MTPModel",
+                    "Glm5NextMTPModel",
+                    "KimiK3MTPModel",
+                }.intersection(architectures)
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 
@@ -1399,6 +1403,10 @@ class SpecDecodeBaseProposer:
             ):
                 self.model.config.image_token_index = (
                     target_model.config.media_placeholder_token_id
+                )
+            elif self.get_model_name(target_model) == "NemotronH_Nano_VL_V2":
+                self.model.config.image_token_index = (
+                    target_model.config.img_context_token_id
                 )
             else:
                 self.model.config.image_token_index = (
@@ -1785,30 +1793,20 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        spec_block_size = (
-            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
-        )
-        # kv_cache_gid stays at its -1 sentinel when no group claims the draft
-        # layers; guard the lower bound so it can't wrap around and select the
-        # last group's kernel block size.
-        if self.kv_cache_gid < 0:
-            logger.warning(
-                "Draft layers matched no KV cache group (kv_cache_gid=-1); "
-                "falling back to the spec block size %d for drafting.",
-                spec_block_size,
+        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
+            kernel_block_sizes
+        ):
+            # Slot mappings are computed against the block table, which is
+            # stored at kernel-block granularity. Use the kernel block size
+            # rather than the KV cache manager's block size; the two differ
+            # when manager blocks are split for the attention kernel.
+            self.block_size = kernel_block_sizes[self.kv_cache_gid]
+        else:
+            self.block_size = (
+                self.draft_attn_groups[0]
+                .get_metadata_builder()
+                .kv_cache_spec.block_size
             )
-        kernel_block_size = (
-            kernel_block_sizes[self.kv_cache_gid]
-            if kernel_block_sizes is not None
-            and 0 <= self.kv_cache_gid < len(kernel_block_sizes)
-            else None
-        )
-        # eagle_step / compute_new_slot_mapping index the raw shared
-        # block_table, which for a virtually-split MLA is in kernel (storage)
-        # block-size units (e.g. 64) even though the scheduler/spec block_size
-        # is larger (e.g. 1024). Using the spec block_size here yields slot ids
-        # ~compress_ratio x too large -> OOB KV write, so prefer the kernel one.
-        self.block_size = kernel_block_size or spec_block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(

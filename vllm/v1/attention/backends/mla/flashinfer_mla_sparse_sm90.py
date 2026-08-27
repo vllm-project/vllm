@@ -58,8 +58,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -168,8 +167,8 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.LBHNC,)
 
 
 class _SM90State:
@@ -220,6 +219,12 @@ class _SM90State:
             use_cuda_graph=True,
             backend="fa3",
         )
+        self._arange_cpu = torch.arange(self.max_tokens + 1, dtype=torch.int32)
+        self._qo_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
+        self._kv_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
+        self._lens_cpu = torch.full(
+            (self.max_tokens,), self.topk_width, dtype=torch.int32
+        )
 
     def plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
         """Replan with exact per-row KV lengths (CPU int32, ``[num_tokens]``).
@@ -238,18 +243,11 @@ class _SM90State:
                 "FlashInferMLASparseSM90 plan() called inside CUDA graph "
                 "capture; lengths must be planned host-side before capture."
             )
-        # Cached CPU staging buffers, filled in place: plan() runs per step
+        # CPU staging buffers are filled in place: plan() runs per step
         # (once per draft/verify metadata build), so per-call allocations and
         # device round trips are on the hot path. Passing CPU tensors lets
         # the wrapper's internal .to("cpu") no-op; its reserved-buffer
         # copy_ then performs the single H2D transfer per tensor.
-        if getattr(self, "_arange_cpu", None) is None:
-            self._arange_cpu = torch.arange(self.max_tokens + 1, dtype=torch.int32)
-            self._qo_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
-            self._kv_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
-            self._lens_cpu = torch.full(
-                (self.max_tokens,), self.topk_width, dtype=torch.int32
-            )
         # use_cuda_graph=True makes the wrapper copy qo/kv indptr into its
         # fixed (max_tokens+1)-sized buffers with exact-size copy_, so the
         # indptr must always be full-size. Rows past num_tokens are padded
@@ -302,7 +300,8 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # the cost of one D2H sync per metadata build.
         self._async_scheduling = bool(vllm_config.scheduler_config.async_scheduling)
         hf_config = vllm_config.model_config.hf_text_config
-        self._index_topk = int(getattr(hf_config, "index_topk", 2048))
+        assert hf_config.index_topk is not None
+        self._index_topk = int(hf_config.index_topk)
         self._index_kpool = int(getattr(hf_config, "index_kpool", 1))
 
     def _kv_lens_host(self, cam: CommonAttentionMetadata) -> tuple[int, torch.Tensor]:
@@ -328,9 +327,9 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # back to the exact device positions (one D2H sync per build). The
         # seq_lens derivation equals position + 1 because positions are
         # contiguous per request.
-        sl_host = getattr(cam, "seq_lens_cpu_upper_bound", None)
-        positions = getattr(cam, "positions", None)
-        if not getattr(self, "_async_scheduling", False) and sl_host is not None:
+        sl_host = cam.seq_lens_cpu_upper_bound
+        positions = cam.positions
+        if not self._async_scheduling and sl_host is not None:
             seq_lens = sl_host[:num_reqs].to(torch.int32)
             q_lens = qsl[1:] - qsl[:-1]
             first_pos = seq_lens - q_lens
@@ -461,7 +460,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
         # return_valid_counts=True keeps the compacted-prefix layout: valid
         # entries at [0, valid_count), -1 past it — exactly the prefix the
         # planned per-row lengths address.
-        topk_slots, valid_counts = triton_convert_req_index_to_global_index(
+        topk_slots, _ = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_tokens],
             attn_metadata.block_table,
             topk_indices,

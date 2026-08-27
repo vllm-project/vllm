@@ -29,7 +29,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.platforms import current_platform
@@ -78,10 +77,10 @@ def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     """Indexer K cache that stores kpool-compressed entries.
 
-    Setting ``compress_ratio = index_kpool`` on the kv_cache_spec makes vLLM's
+    Setting ``tokens_per_state = index_kpool`` on the KV cache spec makes vLLM's
     indexer metadata builder emit pool-granular ``slot_mapping`` /
     ``seq_lens`` / ``cu_seq_lens`` / ``page_table`` for free, and shrinks the
-    cache allocation to ``storage_block_size = block_size // kpool``. The pool
+    cache allocation store one state per ``index_kpool`` tokens. The pool
     *content* (softmax-weighted sum vs keep-every-Nth) is computed by the
     kpool compress kernel inside the indexer op — the cache only provides the
     addressing, which is identical for both schemes.
@@ -124,11 +123,10 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         from dataclasses import replace
 
         spec = super().get_kv_cache_spec(vllm_config)
-        # compress_ratio lives on MLAAttentionSpec, but the base
-        # DeepseekV32IndexerCache.get_kv_cache_spec is typed to return the
-        # KVCacheSpec base; narrow so dataclass.replace sees the field.
+        # ``tokens_per_state`` is the KV-spec representation of kpool
+        # compression in the current cache-layout API.
         assert isinstance(spec, MLAAttentionSpec)
-        spec = replace(spec, compress_ratio=self._index_kpool)
+        spec = replace(spec, tokens_per_state=self._index_kpool)
 
         # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
         # (= block_size // index_kpool) is virtually split into pool pages of
@@ -178,14 +176,12 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         self._index_kpool = index_kpool
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
-        # K + gate score packed into head_size (== 2*head_dim), head_size_v=0:
-        # KpoolTailBackend.get_kv_cache_shape only consumes head_size and splits
-        # it into [2, kpool, head_dim] (K | score halves), so the connectors'
-        # non-MLA K/V half-split transfers K and score as separate halves.
+        # The two head slots form [K, gate score] in the generic
+        # [block, head, state, content] cache view.
         return KpoolTailSpec(
             block_size=self._index_kpool,
-            num_kv_heads=1,
-            head_size=2 * self.head_dim,
+            num_kv_heads=2,
+            head_size=self.head_dim,
             head_size_v=0,
             dtype=torch.bfloat16,
             sliding_window=self._index_kpool,
@@ -265,6 +261,7 @@ class Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
+        self._wp_fp32: torch.Tensor | None = None
 
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
@@ -314,7 +311,7 @@ class Indexer(nn.Module):
         # rankings on long-context tasks. Cache it after weights are loaded.
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
-        if getattr(self, "_wp_fp32", None) is None:
+        if self._wp_fp32 is None:
             self._wp_fp32 = (
                 self.wk_weights_proj.weight.data[self.head_dim :, :]
                 .t()
@@ -510,18 +507,14 @@ class Glm5NextMLAAttention(nn.Module):
         else:
             self.rotary_emb = None
 
-        # `index_topk` is declared on Glm5NextTextConfig with a default of None,
-        # so hasattr() is True even for full-MLA configs (no kpool indexer).
-        self.is_v32 = getattr(config, "index_topk", None) is not None
-        # self.is_v32 = False
+        self.is_v32 = config.index_topk is not None
 
-        _skip_topk = False
         if self.is_v32:
             self.indexer_rope_emb: RotaryEmbedding | None = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
-                is_neox_style=not getattr(config, "indexer_rope_interleave", False),
+                is_neox_style=not config.indexer_rope_interleave,
             )
             # The sparse indexer projects from the MLA q-lora rank, which is
             # always set for v32 MLA configs; narrow away the `int | None`.
@@ -536,20 +529,6 @@ class Glm5NextMLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
-
-            # Enable IndexCache for DeepSeek models to reduce redundant top-k
-            # token selection computations in sparse attention.
-            use_index_cache = getattr(config, "use_index_cache", False)
-            if use_index_cache:
-                # IndexCache config
-                # Refer: https://arxiv.org/abs/2603.12201 for more details.
-                _index_topk_freq = getattr(config, "index_topk_freq", 1)
-                _index_topk_pattern = getattr(config, "index_topk_pattern", None)
-                layer_id = extract_layer_index(prefix)
-                if _index_topk_pattern is None:
-                    _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
-                elif 0 <= layer_id < len(_index_topk_pattern):
-                    _skip_topk = _index_topk_pattern[layer_id] == "S"
 
         else:
             self.indexer_rope_emb = None
@@ -588,7 +567,7 @@ class Glm5NextMLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
-            skip_topk=_skip_topk,
+            skip_topk=False,
             fuse_qkv_rmsnorm=True,
         )
 

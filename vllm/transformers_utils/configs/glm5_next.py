@@ -38,6 +38,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         num_experts_per_token: int = 7,
         n_shared_experts: int = 1,
         routed_scaling_factor: float = 2.5,
+        topk_method: str | None = None,
         first_k_dense_replace: int = 0,
         moe_layer_freq: int = 1,
         use_grouped_topk: bool = True,
@@ -60,7 +61,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         linear_head_dim: int = 128,
         linear_num_heads: int = 64,
         linear_conv_kernel_dim: int = 4,
-        linear_lower_bound: float | None = -5.0,
+        linear_lower_bound: float = -5.0,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
         index_n_heads: int | None = None,
@@ -71,6 +72,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         # granularity (select_k = index_topk // index_kpool).
         index_kpool: int | None = 4,
         index_kpool_always_select_tail: bool = True,
+        indexer_rope_interleave: bool = False,
         mhc: bool | None = True,
         mhc_num_residual_streams: int = 4,
         hc_eps: float | None = 1e-06,
@@ -80,11 +82,13 @@ class Glm5NextTextConfig(PretrainedConfig):
         mhc_sinkhorn_iterations: int | None = 20,
         mhc_post_mult_value: float | None = 2.0,
         swiglu_limit: float | None = None,
+        logit_scale: float = 1.0,
         **kwargs,
     ):
         # Preserve checkpoint field names and local aliases because their
         # consumers use different spellings.
         num_experts_per_token = kwargs.get("num_experts_per_tok", num_experts_per_token)
+        moe_renormalize = kwargs.get("norm_topk_prob", moe_renormalize)
         mhc_num_residual_streams = kwargs.get("hc_mult", mhc_num_residual_streams)
         mhc_sinkhorn_iterations = kwargs.get(
             "hc_sinkhorn_iters", mhc_sinkhorn_iterations
@@ -140,6 +144,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         self.moe_renormalize = moe_renormalize
         self.n_shared_experts = n_shared_experts
         self.routed_scaling_factor = routed_scaling_factor
+        self.topk_method = topk_method
         self.scoring_func = scoring_func
         assert self.scoring_func in ("softmax", "sigmoid")
         self.moe_intermediate_size = moe_intermediate_size
@@ -178,6 +183,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         self.index_kpool_compress = index_kpool_compress
         self.index_kpool = index_kpool
         self.index_kpool_always_select_tail = index_kpool_always_select_tail
+        self.indexer_rope_interleave = indexer_rope_interleave
 
         # mhc config
         self.mhc = mhc
@@ -190,6 +196,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         self.mhc_post_mult_value = mhc_post_mult_value
 
         self.swiglu_limit = swiglu_limit
+        self.logit_scale = logit_scale
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -263,6 +270,7 @@ class Glm5NextVisionConfig(PretrainedConfig):
         temporal_patch_size: int = 2,
         attention_dropout: float = 0.0,
         attention_bias: bool = True,
+        swiglu_limit: float | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -290,6 +298,7 @@ class Glm5NextVisionConfig(PretrainedConfig):
         self.temporal_patch_size = temporal_patch_size
         self.attention_dropout = attention_dropout
         self.attention_bias = attention_bias
+        self.swiglu_limit = swiglu_limit
 
 
 class Glm5NextConfig(PretrainedConfig):
@@ -321,6 +330,8 @@ class Glm5NextConfig(PretrainedConfig):
             self.vision_config = self.sub_configs["vision_config"](**vision_config)
         elif vision_config is None:
             self.vision_config = self.sub_configs["vision_config"]()
+        else:
+            self.vision_config = vision_config
 
         if isinstance(text_config, dict):
             self.text_config = self.sub_configs["text_config"](**text_config)
@@ -328,6 +339,8 @@ class Glm5NextConfig(PretrainedConfig):
             # Backward compatibility: a flat top-level checkpoint (no nested
             # text_config) folds its text fields into Glm5NextTextConfig.
             self.text_config = self.sub_configs["text_config"](**kwargs)
+        else:
+            self.text_config = text_config
 
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id

@@ -39,7 +39,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
     chunk_kda_with_fused_gate,
     fused_recurrent_kda,
 )
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
@@ -117,8 +117,6 @@ def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
-    # Declared int (set in __init__ from config) so mypy doesn't see the
-    # getattr-derived `Any | None` at the kernel call sites.
     head_dim: int
     num_heads: int
     conv_size: int
@@ -149,35 +147,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: KimiLinearConfig,
+        config: Glm5NextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         # KDA projections remain BF16 because fp8 checkpoints omit their scales.
         saved_quant_config = vllm_config.quant_config
-        vllm_config.quant_config = None
-        super().__init__(config, vllm_config, prefix)
-        vllm_config.quant_config = saved_quant_config
+        try:
+            vllm_config.quant_config = None
+            super().__init__(config, vllm_config, prefix)
+        finally:
+            vllm_config.quant_config = saved_quant_config
 
-        # Linear-attention head config: read the flattened top-level fields when
-        # present (new schema); fall back to the legacy linear_attn_config dict
-        # otherwise (shared base is also used by KimiLinearConfig). Narrow via
-        # locals so the int-typed attrs are assigned a non-None value.
-        head_dim = getattr(config, "linear_head_dim", None)
-        num_heads = getattr(config, "linear_num_heads", None)
-        conv_size = getattr(config, "linear_conv_kernel_dim", None)
-        if head_dim is None or num_heads is None or conv_size is None:
-            kda_config = config.linear_attn_config  # type: ignore[attr-defined]
-            assert kda_config is not None, "linear_attn_config must be set"
-            head_dim = kda_config["head_dim"]
-            num_heads = kda_config["num_heads"]
-            conv_size = kda_config["short_conv_kernel_size"]
-        assert head_dim is not None
-        assert num_heads is not None
-        assert conv_size is not None
-        self.head_dim = head_dim
-        self.num_heads = num_heads
-        self.conv_size = conv_size
+        self.head_dim = config.linear_head_dim
+        self.num_heads = config.linear_num_heads
+        self.conv_size = config.linear_conv_kernel_dim
         assert self.num_heads % self.tp_size == 0
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 
@@ -285,18 +269,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
-        linear_lower_bound = getattr(config, "linear_lower_bound", None)
-        if linear_lower_bound is not None:
-            self.kda_safe_gate = True
-            self.kda_lower_bound = linear_lower_bound
-        else:
-            legacy = getattr(config, "linear_attn_config", None) or {}
-            if legacy.get("safe_gate", True):
-                self.kda_safe_gate = True
-                self.kda_lower_bound = legacy.get("lower_bound", -5.0)
-            else:
-                self.kda_safe_gate = False
-                self.kda_lower_bound = -5.0
+        self.kda_safe_gate = True
+        self.kda_lower_bound = config.linear_lower_bound
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
@@ -361,11 +335,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata_raw = forward_context.attn_metadata
 
         if attn_metadata_raw is None:
-            #     # V1 profile run
             return
 
         assert isinstance(attn_metadata_raw, dict)
-        attn_metadata_narrowed = attn_metadata_raw[self.prefix]
+        attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
+        if attn_metadata_narrowed is None:
+            # Profile/warmup dummy runs may omit mamba-family metadata.
+            return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         has_initial_state = attn_metadata_narrowed.has_initial_state
         non_spec_query_start_loc = attn_metadata_narrowed.non_spec_query_start_loc

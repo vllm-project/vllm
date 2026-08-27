@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 import vllm.envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
@@ -156,11 +157,12 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
-        Returns True if the FSM was advanced successfully.
-        Returns False if the FSM failed to advance.
+        Returns True if all grammar-constrained tokens were accepted.
+        Tokens after termination are ignored. Returns False if the FSM
+        failed to advance.
         """
         if self._is_terminated:
-            return False
+            return True
         for token in tokens:
             if not self.matcher.accept_token(token):
                 logger.error(
@@ -171,7 +173,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
                 )
                 return False
             self.num_processed_tokens += 1
-        self._is_terminated = self.matcher.is_terminated()
+            self._is_terminated = self.matcher.is_terminated()
+            if self._is_terminated:
+                break
         return True
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
@@ -180,10 +184,15 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        if self._is_terminated:
+            return []
+
         accepted_tokens = []
         for token in tokens:
             if self.matcher.accept_token(token):
                 accepted_tokens.append(token)
+                if self.matcher.is_terminated():
+                    break
             else:
                 break
         if len(accepted_tokens) > 0:
@@ -203,8 +212,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
         return self._is_terminated
 
     def reset(self):
-        self.num_processed_tokens = 0
         self.matcher.reset()
+        self.num_processed_tokens = 0
+        self._is_terminated = False
 
 
 # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
@@ -252,6 +262,20 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
+        # A string mixing a generative constraint (pattern or format) with
+        # explicit length bounds. xgrammar compiles the pattern/format side
+        # and silently drops minLength/maxLength from the grammar, so output
+        # can violate the bound without any error surfacing. Verified against
+        # the compiled EBNF: pattern/format grammars come out byte-identical
+        # with and without the length keywords, while maxLength alone lowers
+        # to {0, N} correctly.
+        if (
+            obj.get("type") == "string"
+            and ("pattern" in obj or "format" in obj)
+            and ("minLength" in obj or "maxLength" in obj)
+        ):
+            return True
+
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
             key in obj for key in ("patternProperties", "propertyNames")
@@ -276,7 +300,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
-    Raises ValueError if the request is not supported.
+    Raises VLLMValidationError if the request is not supported.
     """
     if sampling_params.structured_outputs is None:
         return
@@ -284,13 +308,21 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     so_params = sampling_params.structured_outputs
 
     if so_params.regex:
+        # A NUL byte is never meaningful in a regex pattern and is not handled
+        # by xgrammar's native regex converter. Reject it here, before the
+        # pattern reaches that native code; the try/except below does not cover
+        # this case.
+        if "\x00" in so_params.regex:
+            raise ValueError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
         try:
             compile_regex_with_timeout(
                 xgr.Grammar.from_regex,
                 so_params.regex,
             )
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform regex into a grammar: {err}"
             ) from err
 
@@ -299,7 +331,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         try:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform choices into a grammar: {err}"
             ) from err
         so_params.choice = None
@@ -311,19 +343,19 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             try:
                 schema = json.loads(so_params.json)
             except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             schema = so_params.json
 
         if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
+            raise VLLMValidationError(
                 "The provided JSON schema contains features not supported by xgrammar."
             )
 
         try:
             xgr.Grammar.from_json_schema(schema)
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
         return
@@ -334,7 +366,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             try:
                 so_params.grammar = convert_lark_to_ebnf(so_params.grammar)
             except ValueError as e:
-                raise ValueError(
+                raise VLLMValidationError(
                     "Failed to convert the grammar from Lark to EBNF. "
                 ) from e
 
@@ -343,7 +375,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             # parse the grammar, but we aren't compiling it.
             xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
-            raise ValueError("Invalid grammar specification.") from e
+            raise VLLMValidationError("Invalid grammar specification.") from e
         return
 
     if so_params.structural_tag:
@@ -364,4 +396,4 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             else:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
-            raise ValueError("Invalid structural tag specification.") from e
+            raise VLLMValidationError("Invalid structural tag specification.") from e
