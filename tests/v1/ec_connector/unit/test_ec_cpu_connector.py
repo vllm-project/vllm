@@ -138,8 +138,11 @@ def _accuracy_test(llm: LLM) -> None:
     not (current_platform.is_cuda() or current_platform.is_xpu()),
     reason="Requires an accelerator (CUDA or XPU)",
 )
-def test_ec_cpu_offloading() -> None:
+def test_ec_cpu_offloading(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests ECCPUConnector accuracy and latency with a VLM model."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
     ec_transfer_config = ECTransferConfig(
         ec_connector="ECCPUConnector",
         ec_role="ec_both",
