@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM103 selector."""
+"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM103/SM100 selectors."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +39,7 @@ EXPECTED_SELECTIONS = {
     (7168, 8448): (set(range(1, 4)), set()),
     (8448, 7168): ({1, 2}, set()),
     (16896, 7168): ({1, 2}, set()),
+    (7168, 14336): ({1, 2}, set()),
     (20480, 7168): (set(range(1, 5)), set()),
     (40960, 7168): (set(range(1, 5)), set()),
     # TP16.
@@ -96,6 +97,8 @@ EXPECTED_CUTE_CONFIGS = {
     (8448, 7168, 2): (32, 4, 4, 8),
     (16896, 7168, 1): (224, 6, 4, 8),
     (16896, 7168, 2): (32, 4, 4, 8),
+    (7168, 14336, 1): (256, 2, 1, 4),
+    (7168, 14336, 2): (224, 4, 2, 8),
     (20480, 7168, 1): (224, 4, 2, 8),
     (20480, 7168, 2): (64, 4, 2, 8),
     (20480, 7168, 3): (64, 2, 2, 8),
@@ -182,6 +185,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
 
     specs = [
         *KIMI_K3_PROJECTIONS.values(),
+        *k3_gemm.KIMI_K3_PROJECTIONS_SM100.values(),
         glm52_gemm.GLM52_QKV_A_PROJECTION,
         glm52_gemm.GLM52_Q_B_PROJECTION,
     ]
@@ -217,7 +221,12 @@ def test_cute_configs_match_measured_table() -> None:
         for n, k, num_tokens, config in configs
     }
     assert actual == EXPECTED_CUTE_CONFIGS
-    assert all(config.static_k is None for *_, config in configs)
+    static_k_configs = {
+        (n, k, num_tokens, config.static_k)
+        for n, k, num_tokens, config in configs
+        if config.static_k is not None
+    }
+    assert static_k_configs == {(7168, 14336, 1, 14336)}
 
 
 def test_residual_cute_configs_match_measured_table() -> None:
@@ -404,6 +413,92 @@ def test_build_plan_matches_selector() -> None:
                 assert plan[num_tokens][0] == backend
 
 
+# Keyed by local (N, K): (cute token counts, dsv3 token counts). Mirrors
+# KIMI_K3_PROJECTIONS_SM100, measured on B200; intentionally different from
+# EXPECTED_SELECTIONS (e.g. 3584x7168 routes dsv3 at M2..8 on SM103 but only
+# wins with CuTe at M1..3 on SM100).
+EXPECTED_SELECTIONS_SM100 = {
+    (1536, 128): (set(), {1, 16}),
+    (3072, 128): (set(), {8}),
+    (1536, 7168): ({1, 2}, {4, 8}),
+    (3072, 7168): ({1, 2}, set()),
+    (2112, 7168): ({1, 2}, {4, 16}),
+    (2304, 1536): (set(), set(range(1, 17))),
+    (4608, 1536): (set(), {1, 2, 4}),
+    (6288, 7168): ({1}, set()),
+    (12448, 7168): ({1, 2, 3, 4}, set()),
+    (7168, 768): (set(), {1}),
+    # SM103-tuned config wins on B200 where the heuristic config tied.
+    (7168, 1536): ({1}, set()),
+    # M2 config lifted from the SM103 table (wins on B200).
+    (7168, 3072): ({1, 2}, set()),
+    (7168, 3584): ({1, 2}, set()),
+    (7168, 8448): ({1, 2, 3}, set()),
+    (8448, 7168): ({1, 2}, set()),
+    (16896, 7168): ({1}, set()),
+    (20480, 7168): ({1, 2, 3, 4}, set()),
+    (40960, 7168): ({1, 2, 3, 4}, set()),
+    (10240, 7168): ({1, 2, 3, 4}, set()),
+    (3584, 7168): ({1, 2, 3}, set()),
+    # TP16 shapes measured on B200.
+    (768, 7168): ({1, 2, 3, 4}, set()),
+    (1152, 1536): ({1}, set()),
+    (3216, 7168): ({1, 2}, set()),
+    (4224, 7168): ({1, 2, 3}, set()),
+}
+
+
+def test_sm100_table_is_keyed_by_shape() -> None:
+    for (n, k), spec in k3_gemm.KIMI_K3_PROJECTIONS_SM100.items():
+        assert (spec.n, spec.k) == (n, k)
+
+
+@pytest.mark.parametrize("key", EXPECTED_SELECTIONS_SM100)
+def test_sm100_selector_table(key: tuple[int, int]) -> None:
+    n, k = key
+    spec = k3_gemm.KIMI_K3_PROJECTIONS_SM100[key]
+    cute_tokens, dsv3_tokens = EXPECTED_SELECTIONS_SM100[key]
+    for num_tokens in range(1, 17):
+        backend = k3_gemm._backend_for(spec, num_tokens, has_residual=False)
+        if num_tokens in cute_tokens:
+            assert backend == "cute"
+        elif num_tokens in dsv3_tokens:
+            assert backend == "dsv3_fused_a"
+        else:
+            assert backend is None
+
+
+def test_sm100_build_plan_matches_table() -> None:
+    for spec in k3_gemm.KIMI_K3_PROJECTIONS_SM100.values():
+        plan = k3_gemm._build_plan(spec)
+        for num_tokens in range(1, 17):
+            backend = k3_gemm._backend_for(spec, num_tokens, has_residual=False)
+            if backend is None:
+                assert num_tokens not in plan
+            else:
+                assert plan[num_tokens][0] == backend
+
+
+def test_low_latency_table_capability_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(k3_gemm, "_is_sm103", lambda: True)
+    assert k3_gemm._low_latency_table() is k3_gemm.KIMI_K3_PROJECTIONS
+
+    monkeypatch.setattr(k3_gemm, "_is_sm103", lambda: False)
+    monkeypatch.setattr(
+        k3_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == (10, 0),
+    )
+    assert k3_gemm._low_latency_table() is k3_gemm.KIMI_K3_PROJECTIONS_SM100
+
+    monkeypatch.setattr(
+        k3_gemm.current_platform, "is_device_capability", lambda cc: False
+    )
+    assert k3_gemm._low_latency_table() is None
+
+
 def test_installation_is_shape_specific_and_unquantized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -491,6 +586,13 @@ def test_installation_requires_bf16_sm103(
     root.projection = FakeLinear()
     monkeypatch.setattr(k3_gemm, "LinearBase", FakeLinear)
     monkeypatch.setattr(k3_gemm, "_is_sm103", lambda: platform_enabled)
+    # Pin the rest of the capability probe so platform_enabled=False stays a
+    # no-op even when the test itself runs on SM100 hardware.
+    monkeypatch.setattr(
+        k3_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: platform_enabled and cc == (10, 3),
+    )
 
     k3_gemm.enable_kimi_k3_low_latency_gemm(root, dtype)
 
