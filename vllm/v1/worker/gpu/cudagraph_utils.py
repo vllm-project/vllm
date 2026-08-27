@@ -147,6 +147,21 @@ def has_compiled_submodule(model: nn.Module) -> bool:
     )
 
 
+def varlen_descriptor_rungs(
+    num_tokens: int, max_query_len: int, max_num_reqs: int
+) -> list[tuple[int, int]]:
+    """(num_reqs, honest max_query_len) rungs for a varlen capture size."""
+    return [
+        (r, max(1, min(max_query_len, num_tokens - r + 1)))
+        for r in sorted(
+            {
+                max(1, -(-num_tokens // max_query_len)),
+                min(num_tokens, max_num_reqs),
+            }
+        )
+    ]
+
+
 class CudaGraphManager:
     def __init__(
         self,
