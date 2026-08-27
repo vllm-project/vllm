@@ -1,53 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
-import importlib
-import inspect
-import multiprocessing
-import multiprocessing.forkserver as forkserver
-import os
-import signal
-import socket
-import tempfile
 import warnings
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-import uvloop
-from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.datastructures import State
-
-import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
-from vllm.entrypoints.serve.utils.api_utils import (
-    cli_env_setup,
-    log_non_default_args,
-    log_version_and_model,
-    process_lora_modules,
+from vllm.entrypoints.launchers.api_server.app_state import init_app_state
+from vllm.entrypoints.launchers.api_server.entry import (
+    build_and_serve,
+    build_async_engine_client,
+    build_async_engine_client_from_engine_args,
+    run_server,
+    run_server_worker,
 )
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.entrypoints.serve.utils.server_utils import (
-    exception_handler,
-    get_uvicorn_log_config,
-    http_exception_handler,
-    lifespan,
-    log_response,
-    validation_exception_handler,
-    vllm_error_handler,
+from vllm.entrypoints.launchers.api_server.routers import register_api_routers
+from vllm.entrypoints.launchers.app import build_app
+from vllm.entrypoints.launchers.launcher import (
+    create_server_socket,
+    create_server_unix_socket,
+    setup_server,
+    validate_api_server_args,
+)
+from vllm.entrypoints.launchers.render.app_state import init_render_app_state
+from vllm.entrypoints.launchers.render.entry import build_and_serve_renderer
+
+warnings.warn(
+    "`vllm.entrypoints.openai.api_server` is deprecated and will likely be"
+    "unsupported in a future version. Use the corresponding function from "
+    "`vllm.entrypoints.launchers` instead.",
+    DeprecationWarning,
+    stacklevel=1,
 )
 from vllm.exceptions import VLLMError
 from vllm.logger import init_logger
@@ -775,30 +758,31 @@ async def run_server_worker(
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
         ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
-    async with build_async_engine_client(
-        args,
-        client_config=client_config,
-    ) as engine_client:
-        shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, **uvicorn_kwargs
-        )
-    # NB: Await server shutdown only after the backend context is exited
-    try:
-        await shutdown_task
-    finally:
-        sock.close()
 
+__all__ = [
+    "build_async_engine_client",
+    "build_async_engine_client_from_engine_args",
+    "build_app",
+    "init_app_state",
+    "init_render_app_state",
+    "create_server_socket",
+    "create_server_unix_socket",
+    "validate_api_server_args",
+    "setup_server",
+    "build_and_serve",
+    "build_and_serve_renderer",
+    "run_server",
+    "run_server_worker",
+    "register_api_routers",
+]
 
 if __name__ == "__main__":
-    # NOTE(simon):
-    # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
-    # entrypoints.
-    cli_env_setup()
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server."
+    warnings.warn(
+        "The `python -m vllm.entrypoints.openai.api_server` command is deprecated "
+        "and may be removed in a future release. Please use `vllm server` instead.",
+        DeprecationWarning,
+        stacklevel=1,
     )
-    parser = make_arg_parser(parser)
-    args = parser.parse_args()
-    validate_parsed_serve_args(args)
+    from vllm.entrypoints.launchers.api_server.entry import main
 
-    uvloop.run(run_server(args))
+    main()

@@ -5,7 +5,7 @@ set -euo pipefail
 test_suite="${1:-}"
 
 if [[ -z "${test_suite}" ]]; then
-  echo "Usage: $0 <example|v1|server>" >&2
+  echo "Usage: $0 <example|w8a8-fp8-linear|v1|server|quantization|compressed-tensors-fp8|graph>" >&2
   exit 1
 fi
 
@@ -26,6 +26,13 @@ case "${test_suite}" in
     python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel
     python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192
     ;;
+  w8a8-fp8-linear)
+    python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --enforce-eager --max-model-len 4096
+    python3 examples/basic/offline_inference/generate.py --linear-backend torch --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --enforce-eager --max-model-len 4096
+    python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic --enforce-eager --max-model-len 4096
+    python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
+    python3 examples/basic/offline_inference/generate.py --linear-backend torch --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
+    ;;
   v1)
     cd tests
 
@@ -45,6 +52,24 @@ case "${test_suite}" in
 
     pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py
     pytest -v -s benchmarks/test_serve_cli.py
+    ;;
+  quantization)
+    cd tests
+
+    pytest -v -s quantization/test_auto_round.py
+    pytest -v -s quantization/test_online.py
+    ;;
+  compressed-tensors-fp8)
+    cd tests
+
+    pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8
+    ;;
+  graph)
+    export VLLM_XPU_ENABLE_XPU_GRAPH=1
+
+    python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B
+    python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B --kv-cache-dtype fp8
+    python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-CT-AutoRound --max-model-len 4096
     ;;
   *)
     echo "Unknown Intel test suite: ${test_suite}" >&2
