@@ -19,7 +19,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950
+from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -495,6 +495,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm._aiter_ops import rocm_aiter_ops
 
         if not rocm_aiter_ops.is_enabled():
+            return
+        # aiter's gemm_a8w8_blockscale_bpreshuffle has no working gfx1250 path.
+        # Leaving the block scales as None -> "not preshuffled"
+        # _fused_wqa_wkv_gemm and _o_proj both fall back to the standard linear path
+        if on_gfx1250():
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,

@@ -1014,22 +1014,14 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_data = w2_data.transpose(1, 2)
 
             # Scales are [E, N, K_scale]; both kernels index them as
-            # [E, K_scale, N] with K innermost, so transpose(1, 2) is the base
-            # layout (it leaves K contiguous, which the Triton kernel requires).
-            # Keep them uint8: the shuffle is a pure permute, and the Triton
-            # moe_gemm_a4w4 takes e8m0 scales as uint8 pointers (Triton has no
-            # binding for float8_e8m0fnu), matching mxfp4_quant's uint8 x_scale.
+            # [E, K_scale, N] with K innermost, so transpose(1, 2) 
+            # Keep them uint8: Triton moe_gemm_a4w4 takes e8m0 scales
             w13_scale = w13_weight_scale.data.view(torch.uint8).transpose(1, 2)
             w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
 
-            # GFX1250_SCALE is a gluon-only layout. The Triton kernel in
-            # aiter.ops.triton._triton_kernels.moe.moe_op_gemm_a4w4 only branches
-            # on CDNA4_SCALE / None, so handing it a swizzled buffer makes it
-            # index the scales as plain [E, K_scale, N] and stride far past the
-            # end of the allocation (GPU page fault at model dims, silent garbage
-            # at small ones). Only swizzle when gluon will actually consume it;
-            # aiter_triton_kernel_w4a4_moe_forward makes the matching choice for
-            # swizzle_mx_scale.
+            # GFX1250_SCALE is a gluon-only layout
+            # The a4w4 gfx1250 kernels both hardcode SCALE_KWIDTH = 4 in their
+            # SWIZZLE_MX_SCALE == "GFX1250_SCALE" branch
             if a4w4_backend() != "triton":
                 from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
@@ -1037,13 +1029,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                     w13_scale,
                     arch="gfx1250",
                     preshuffle_factor=32,
-                    scale_kwidth=8,
+                    scale_kwidth=4,
                 )
                 w2_scale = shuffle_scale_moe(
                     w2_scale,
                     arch="gfx1250",
                     preshuffle_factor=32,
-                    scale_kwidth=8,
+                    scale_kwidth=4,
                 )
 
             return (w13_data, w2_data, w13_scale, w2_scale,
