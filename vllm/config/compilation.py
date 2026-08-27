@@ -33,6 +33,22 @@ else:
 
 logger = init_logger(__name__)
 
+_CUDAGRAPH_INCOMPATIBLE_ALL2ALL_BACKENDS = {
+    "deepep_high_throughput": (
+        "its high-throughput kernels are prefill-optimized and return per-expert "
+        "counts to the host -- a host sync plus a dynamic compute shape"
+    ),
+    "flashinfer_ep_high_throughput": (
+        "its prepare step reads the recv-token count back to the host -- a host "
+        "sync plus a dynamic compute shape"
+    ),
+    "flashinfer_ep_low_latency": (
+        "flashinfer.moe_ep does not support CUDA graph capture yet -- it "
+        "recreates the transport handle every forward, so a captured graph "
+        "replays against freed device memory"
+    ),
+}
+
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
@@ -1232,9 +1248,9 @@ class CompilationConfig:
                 )
                 self.cudagraph_mode = CUDAGraphMode.FULL
 
-        # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
+        # Disable CUDA graphs for all2all backends that are not CG compatible
         if (
-            all2all_backend == "deepep_high_throughput"
+            all2all_backend in _CUDAGRAPH_INCOMPATIBLE_ALL2ALL_BACKENDS
             and data_parallel_size > 1
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
@@ -1242,11 +1258,11 @@ class CompilationConfig:
             # if torch compile cache key issue fixed
             # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
-                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput kernels "
-                "are optimized for prefill and are incompatible with CUDA Graphs. "
-                "In order to use CUDA Graphs for decode-optimized workloads, "
-                "use --all2all-backend with another option, such as "
-                "deepep_low_latency, nixl_ep, or allgather_reducescatter."
+                "Disabling CUDA Graphs for --all2all-backend %s: %s. To keep "
+                "CUDA Graphs, use another backend such as deepep_low_latency, "
+                "nixl_ep, or allgather_reducescatter.",
+                all2all_backend,
+                _CUDAGRAPH_INCOMPATIBLE_ALL2ALL_BACKENDS[all2all_backend],
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
