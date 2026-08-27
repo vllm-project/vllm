@@ -242,10 +242,6 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -293,8 +289,12 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp_utils import MLADCPManager
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -371,8 +371,17 @@ def _get_kv_b_proj_input_dtype(
         return kv_b_proj.params_dtype
     if weight_dtype == torch.uint8:
         return None
-    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
-        return None
+    if weight_dtype == current_platform.fp8_dtype():
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8PbWoLinearMethod,
+        )
+
+        quant_method = getattr(kv_b_proj, "quant_method", None)
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
+        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+            return quant_method.input_dtype
+        if not use_fp8_prefill:
+            return None
     return weight_dtype
 
 
@@ -389,6 +398,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
     """
+
+    supports_dense_mha_prefill: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -538,6 +549,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
+        # AMX reads kv_b_proj's weight directly and never calls it live; the
+        # reference CPU MLA backend calls it but isn't perf-critical. Skip
+        # the packed-kernel dispatch either way.
+        kv_b_proj._cpu_skip_gemm_dispatch = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -549,9 +565,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not self.impl.supports_dense_mha_prefill:
+        if self.impl.is_sparse and not (
+            self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
+        ):
             logger.warning_once(
-                "Sparse MLA impl has no dense-MHA prefill path; using the top-k "
+                "Sparse MLA layer has no dense-MHA prefill path; using the top-k "
                 "MQA path only."
             )
             self.prefill_backend = None
@@ -630,6 +648,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -802,27 +824,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
+        use_mha = True
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill = getattr(attn_metadata, "prefill", None)
-            use_dense_mha = getattr(prefill, "use_dense_mha", False)
-            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_masked_mha = (
-                self.prefill_backend is not None
-                and self.impl.masked_mha_available  # type: ignore[attr-defined]
-                and self.impl.dcp_world_size <= 1
-                and prefill is not None
-                and _use_masked_mha(
-                    backend_name=self.attn_backend.get_name(),
-                    tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
-                    query_len=prefill.max_query_len,
-                    seq_len=prefill_max_seq_len,
-                )
-                and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-            )
-            use_mha = (use_dense_mha or use_masked_mha) and not (
-                self._vllm_config.attention_config.sparse_mla_force_mqa
-            )
+            use_mha = self._use_sparse_mha(attn_metadata)
             if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
@@ -904,6 +909,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
+            elif self.is_amx_bmm_enabled:
+                # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+                # AMXMLAImpl's own (N, L, P) packed W_UK -- same as prefill.
+                N, B, P = mqa_q_nope.shape
+                L = self.kv_lora_rank
+                mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
+                ops.bmm_cpu(
+                    mqa_ql_nope,
+                    mqa_q_nope,
+                    self.impl._w_uk_packed,  # type: ignore[attr-defined]
+                    True,
+                    None,
+                )
+                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
@@ -956,16 +975,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
-                seq_lens = (
-                    attn_metadata.decode.seq_lens
-                    if attn_metadata.decode is not None
-                    else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
-                        : attn_metadata.num_decodes
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if not use_mha:
+                    seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
+                    query_start_loc = attn_metadata.query_start_loc
+                else:
+                    seq_lens = (
+                        decode_metadata.seq_lens
+                        if decode_metadata is not None
+                        else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
+                            : attn_metadata.num_decodes
+                        ]
+                    )
+                    query_start_loc = attn_metadata.query_start_loc[
+                        : attn_metadata.num_decodes + 1
                     ]
-                )
-                query_start_loc = attn_metadata.query_start_loc[
-                    : attn_metadata.num_decodes + 1
-                ]
                 attn_out = self.dcp_manager.combine(
                     attn_out,
                     lse,
@@ -1021,7 +1045,44 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             output_padded[num_actual_toks:].zero_()
         return output_padded
 
+    def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
+        prefill = attn_metadata.prefill
+        if prefill is None:
+            return False
+        use_masked_mha = (
+            self.prefill_backend is not None
+            and self.impl.masked_mha_available  # type: ignore[attr-defined]
+            and self.impl.dcp_world_size <= 1
+            and _use_masked_mha(
+                backend_name=self.attn_backend.get_name(),
+                tensor_parallel_size=(
+                    self._vllm_config.parallel_config.tensor_parallel_size
+                ),
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                query_len=prefill.max_query_len,
+                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
+                has_context=prefill.chunked_context is not None,
+            )
+            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
+        )
+        return (prefill.use_dense_mha or use_masked_mha) and not (
+            self._vllm_config.attention_config.sparse_mla_force_mqa
+        )
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Let per-backend impls do their own weight packing first (no-op
+        # unless overridden), mirroring Attention.process_weights_after_loading.
+        self.impl.process_weights_after_loading(act_dtype)
+
+        if self.is_amx_bmm_enabled:
+            # AMXMLAImpl already packed its own W_UK/W_UV above, for both
+            # prefill and decode. Release the now-unused raw weight.
+            self.kv_b_proj.weight = torch.nn.Parameter(
+                torch.empty(0), requires_grad=False
+            )
+            return
+
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -1187,6 +1248,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        elif self.is_amx_bmm_enabled:
+            # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+            # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
+            ops.bmm_cpu(
+                out.transpose(0, 1),
+                x,
+                self.impl._w_uv_packed,  # type: ignore[attr-defined]
+                True,
+                None,
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
@@ -1397,27 +1468,6 @@ class MLACommonBackend(AttentionBackend):
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # Default to identity permutation to signal cross-layer allocation
-            # is unsupported. Each MLA backend must opt in to support cross-layer
-            # allocation by overriding this method.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [320, 576]
@@ -1576,36 +1626,121 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     )
 
 
-_DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
-    "FLASHMLA_SPARSE": {
-        1: (1536, 4096, None, None, None),
-        2: (512, 1024, 4096, None, None),
-        4: (512, 1024, 1536, 8192, None),
-        8: (512, 512, 1024, 2048, 16384),
+_MaskedMHARanges = tuple[tuple[int, int], ...]
+
+_MASKED_MHA_THRESHOLDS: dict[
+    tuple[int, int],
+    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
+] = {
+    (192, 128): {
+        "FLASHMLA_SPARSE": {
+            1: (((2048, 1536), (4096, 4096)), None),
+            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
+            4: (
+                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
+                None,
+            ),
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 512),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 16384),
+                ),
+                None,
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 1024),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 32768),
+                ),
+                None,
+            ),
+        },
     },
-    "FLASHINFER_MLA_SPARSE": {
-        8: (512, 1024, 1024, 2048, 32768),
+    (256, 256): {
+        "FLASHMLA_SPARSE": {
+            1: (((8 * 1024, 0),), ()),
+            2: (
+                ((20 * 1024, 0),),
+                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
+            ),
+            4: (
+                ((48 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (34 * 1024, 32 * 1024),
+                ),
+            ),
+            8: (
+                ((112 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                ),
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            4: (
+                ((36 * 1024, 0),),
+                (
+                    (12 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (28 * 1024, 24 * 1024),
+                ),
+            ),
+            8: (
+                ((64 * 1024, 0),),
+                (
+                    (20 * 1024, 4 * 1024),
+                    (24 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                    (56 * 1024, 40 * 1024),
+                    (64 * 1024, 48 * 1024),
+                    (72 * 1024, 56 * 1024),
+                ),
+            ),
+        },
     },
 }
-_DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
 
 
 def _use_masked_mha(
     *,
     backend_name: str,
     tensor_parallel_size: int,
+    qk_head_dim: int,
+    v_head_dim: int,
     query_len: int,
     seq_len: int,
+    has_context: bool,
 ) -> bool:
-    thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
-        tensor_parallel_size
+    thresholds = (
+        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
+        .get(backend_name, {})
+        .get(tensor_parallel_size)
     )
     if thresholds is None:
         return False
-    for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
-        if seq_len <= bucket_seq_len:
-            min_query_len = thresholds[bucket_idx]
-            return min_query_len is not None and query_len >= min_query_len
+    pure_prefill_ranges, context_ranges = thresholds
+    ranges = pure_prefill_ranges
+    if has_context and context_ranges is not None:
+        ranges = context_ranges
+    for max_seq_len, min_query_len in ranges:
+        if seq_len <= max_seq_len:
+            return query_len >= min_query_len
     return False
 
 
@@ -1984,12 +2119,40 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # Whether this builder can flatten a non-causal query block into decode rows.
     supports_non_causal_multi_token_decode: ClassVar[bool] = False
 
+    # Whether can support non-causal multi-token decode with DCP KV cache.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = False
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
+
+    def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
+        speculative_config = getattr(self.vllm_config, "speculative_config", None)
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            speculative_config is None
+            or getattr(speculative_config, "method", None) != "dspark"
+            or parallel_config.decode_context_parallel_size <= 1
+        ):
+            return
+
+        if self.non_causal_multi_token_decode:
+            supported = self.supports_non_causal_multi_token_dcp
+            query_mode = "non-causal draft"
+        else:
+            supported = supports_dcp_with_varlen
+            query_mode = "causal multi-token"
+
+        if not supported:
+            raise ValueError(
+                f"{type(self).__name__} does not support {query_mode} MLA "
+                "attention for DSpark with decode context parallelism. Select "
+                "a backend with explicit DSpark DCP support or set "
+                "decode_context_parallel_size=1."
+            )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -2084,6 +2247,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.non_causal_multi_token_decode = getattr(
             kv_cache_spec, "non_causal_multi_token_decode", False
         )
+        self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
         # A draft cache group can have a different head count from the target.
         self.num_heads = get_num_attention_heads_from_layers(
