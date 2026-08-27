@@ -16,6 +16,7 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
+from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
@@ -344,3 +345,23 @@ def test_ple_state_shape_reserves_speculative_tokens() -> None:
     module.num_spec_tokens = 3
 
     assert module.get_state_shape()[0] in ((32, 12), (12, 32))
+
+
+def test_ple_short_conv_uses_fallback_when_profile_metadata_is_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.prefix = "model.layers.1.ple"
+    inputs = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    expected = inputs + 1
+    monkeypatch.setattr(module, "_short_conv_fallback", lambda _: expected)
+    monkeypatch.setattr(
+        ple_layer_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"model.layers.0.self_attn": object()}),
+    )
+
+    output = module._short_conv(inputs)
+
+    assert output is expected

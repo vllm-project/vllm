@@ -1069,10 +1069,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
-            raise RuntimeError(
-                f"Missing short-conv metadata for layer '{self.prefix}'. "
-                "This would bypass conv-state updates and is not allowed."
-            )
+            # MRV2 omits Mamba-family metadata during profile warmup.
+            return self._short_conv_fallback(inputs)
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
                 "Expected PleShortConvAttentionMetadata for layer "
