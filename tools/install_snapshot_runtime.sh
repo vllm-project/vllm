@@ -4,9 +4,11 @@
 
 set -euxo pipefail
 
-# Surface the isolated snapshot-runtime install cost in the CI build log.
+# Surface the isolated snapshot-runtime install cost in the CI build log. The
+# trap captures the status first: the date substitution below would reset it.
 _snapshot_install_started=$(date +%s)
-trap 'echo "[TIMING] snapshot runtime install: $(( $(date +%s) - _snapshot_install_started )) s (exit $?)"' EXIT
+code=0
+trap 'code=$?; echo "[TIMING] snapshot runtime install: $(( $(date +%s) - _snapshot_install_started )) s (exit $code)"' EXIT
 
 readonly CRIU_VERSION="4.2.1"
 readonly CRIU_SOURCE_SHA256="feffdf4638125ebb12d2434754f80a1d7bbba85a3e6bee98c216f88fb99a5d96"

@@ -32,7 +32,10 @@ Snapshots currently require:
   files, container filesystem, and generated-cache paths available at restore.
   Generated-cache files are not copied into the artifact. The manifest
   fingerprints the ones the captured tree holds open, so restore fails early
-  and names the file when one is removed or replaced.
+  and names the file when one is removed or replaced. Only open descriptors
+  are recorded. A library the tree mapped and then closed is not fingerprinted,
+  and CRIU still reopens it by path, so replacing that file permanently
+  invalidates the artifact without an early error.
 
 The official `vllm/vllm-openai` Linux x86-64 image includes the snapshot
 runtime. It still requires a compatible host driver, kernel, and privileges.

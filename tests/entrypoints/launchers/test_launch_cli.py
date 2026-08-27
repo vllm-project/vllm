@@ -579,11 +579,11 @@ def test_snapshot_restore_rejects_unavailable_pid_before_mutation(
     assert {path.name: path.read_bytes() for path in artifact.iterdir()} == before
 
 
-@pytest.mark.parametrize("pinned", [True, False])
+@pytest.mark.parametrize("mode", ["pinned", "unpinned", "cleanup-fails"])
 def test_snapshot_restore_terminates_only_a_pinned_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    pinned: bool,
+    mode: str,
 ):
     _mark_snapshot_pids_free(monkeypatch)
     artifact = _local_restore_artifact(tmp_path)
@@ -594,12 +594,14 @@ def test_snapshot_restore_terminates_only_a_pinned_tree(
 
     def terminate_and_wait(pid: int) -> None:
         terminated.append(pid)
+        if mode == "cleanup-fails":
+            raise SnapshotRestoreError("restored process cleanup is incomplete")
         tools._restored_processes.pop(pid)
 
     def pin(
         _artifact: Path, process_tree: tuple[int, ...], _holders: tuple[int, ...]
     ) -> None:
-        if not pinned:
+        if mode == "unpinned":
             raise SnapshotRestoreError(
                 "restored session does not match the captured process tree"
             )
@@ -614,13 +616,19 @@ def test_snapshot_restore_terminates_only_a_pinned_tree(
         lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "333\n", ""),
     )
 
-    with pytest.raises(SnapshotRestoreError, match="does not match"):
+    with pytest.raises(SnapshotRestoreError, match="does not match") as failure:
         tools.restore(artifact, manifest)
 
     # A pinned tree is ours: it must be terminated and waited for, not left to
     # honour the abort marker. An unpinned PID is never signalled.
-    assert terminated == ([root_pid] if pinned else [])
-    assert tools._restored_processes == {}
+    assert terminated == ([] if mode == "unpinned" else [root_pid])
+    if mode == "cleanup-fails":
+        # The failure to terminate is reported beside the primary error, and a
+        # tree that may still be running stays pinned.
+        assert "restore cleanup failed" in str(failure.value)
+        assert tools._restored_processes == {root_pid: ()}
+    else:
+        assert tools._restored_processes == {}
     assert json.loads((artifact / "release.json").read_text())["release"] is False
 
 
@@ -706,6 +714,17 @@ def test_snapshot_manifest_records_external_cache_files(tmp_path: Path):
     assert read_manifest(artifact).external_cache_files == ()
 
 
+def _pin_generated_cache_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the resolver off whatever cache roots the host running this has."""
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton_cache_default"))
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "inductor_cache"))
+
+
+def _unreadable(_path: Path) -> str:
+    raise OSError("cache file is unreadable")
+
+
 def test_snapshot_inventory_records_open_generated_cache_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -720,6 +739,7 @@ def test_snapshot_inventory_records_open_generated_cache_files(
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
     (artifact / "child.log.lock").write_bytes(b"")
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
     monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
 
     targets = {
@@ -752,6 +772,74 @@ def test_snapshot_inventory_records_open_generated_cache_files(
     assert manifest.external_cache_files == (
         (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
         (str(lock), "locked"),
+    )
+
+
+def test_snapshot_inventory_marks_a_cache_file_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    lock = cache_root / "launcher.lock"
+    lock.write_bytes(b"held by pid 100")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(
+        tools, "_descriptor_targets", lambda _pid: (str(kernel), str(lock))
+    )
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+    monkeypatch.setattr(tools, "_sha256", _unreadable)
+
+    # A file that cannot be digested keeps its own marker, so the manifest says
+    # which entries restore can check for existence only.
+    assert tools.inventory(100, artifact).external_cache_files == (
+        (str(kernel), "unreadable"),
+        (str(lock), "locked"),
+    )
+
+
+def test_snapshot_inventory_matches_resolved_cache_roots_not_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Descriptor targets come back kernel-canonical, so the fixture must be too.
+    base = Path(os.path.realpath(tmp_path))
+    real_cache = base / "mnt_cache"
+    real_cache.mkdir()
+    kernel = real_cache / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    linked_cache = base / "linked_cache"
+    linked_cache.symlink_to(real_cache, target_is_directory=True)
+    sibling = base / "vllm_cache-backup"
+    sibling.mkdir()
+    stale = sibling / "stale.so"
+    stale.write_bytes(b"stale kernel")
+    artifact = base / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    _pin_generated_cache_roots(monkeypatch, base)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(linked_cache))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(
+        tools, "_descriptor_targets", lambda _pid: (str(kernel), str(stale))
+    )
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    # A cache root reached through a symlink still covers the file the kernel
+    # reports by its real path, and a directory that merely shares the root's
+    # name prefix is not part of the cache at all.
+    assert tools.inventory(100, artifact).external_cache_files == (
+        (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
     )
 
 
@@ -788,3 +876,47 @@ def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
     assert str(lock) in str(gone.value)
 
     assert {path.name: path.read_bytes() for path in artifact.iterdir()} == before
+
+
+def test_snapshot_restore_rejects_a_cache_file_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    kernel = tmp_path / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    manifest = _manifest(
+        external_cache_files=(
+            (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
+        )
+    )
+    artifact = _local_restore_artifact(tmp_path)
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
+    monkeypatch.setattr(tools, "_sha256", _unreadable)
+
+    # A recorded digest that cannot be read again is a failed check, not a file
+    # to wave through on existence.
+    with pytest.raises(
+        SnapshotRestoreError, match="unreadable since capture"
+    ) as blocked:
+        tools.restore(artifact, manifest)
+    assert str(kernel) in str(blocked.value)
+
+
+def test_snapshot_runtime_installer_logs_the_failing_exit_code():
+    installer = Path(__file__).parents[3] / "tools" / "install_snapshot_runtime.sh"
+    timing = [
+        line
+        for line in installer.read_text().splitlines()
+        if line.startswith(("_snapshot_install_started=", "trap "))
+    ]
+    assert len(timing) == 2
+
+    result = subprocess.run(
+        ["bash", "-c", "\n".join([*timing, "exit 7"])],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert "(exit 7)" in result.stdout

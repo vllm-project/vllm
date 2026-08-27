@@ -59,6 +59,8 @@ _COMMON_CRIU_OPTIONS = (
 _CACHE_REMEDY = "recreate the snapshot or restore with the same cache state"
 # Recorded instead of a digest for files whose content is volatile by design.
 _CACHE_LOCKED = "locked"
+# Recorded instead of a digest for a file capture found but could not read.
+_CACHE_UNREADABLE = "unreadable"
 
 
 def _generated_cache_prefixes() -> tuple[str, ...]:
@@ -66,18 +68,27 @@ def _generated_cache_prefixes() -> tuple[str, ...]:
 
     vLLM redirects Inductor and Triton under ``VLLM_CACHE_ROOT`` when it
     compiles, but a process can still hold their upstream defaults open.
+    A cache root is resolved and separator-terminated so that it still matches
+    the kernel-canonical descriptor targets under a symlinked root, and so that
+    a sibling directory sharing its name does not. Inductor's default location
+    is a bare prefix instead, because its directory carries a per-user suffix.
     """
     import vllm.envs as envs
 
-    return tuple(
-        os.path.expanduser(root).rstrip(os.sep)
+    inductor_root = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+    roots = tuple(
+        f"{os.path.realpath(os.path.expanduser(root)).rstrip(os.sep)}{os.sep}"
         for root in (
             envs.VLLM_CACHE_ROOT,
             os.environ.get("TRITON_CACHE_DIR") or "~/.triton/cache",
-            os.environ.get("TORCHINDUCTOR_CACHE_DIR")
-            or os.path.join(tempfile.gettempdir(), "torchinductor_"),
             "~/.cache/flashinfer",
+            *((inductor_root,) if inductor_root else ()),
         )
+    )
+    if inductor_root:
+        return roots
+    return roots + (
+        os.path.join(os.path.realpath(tempfile.gettempdir()), "torchinductor_"),
     )
 
 
@@ -333,7 +344,9 @@ class LocalSnapshotTools:
         try:
             return self._sha256(path)
         except OSError:
-            return _CACHE_LOCKED
+            # Restore can only check that this one still exists, so record the
+            # downgrade rather than passing it off as a volatile file.
+            return _CACHE_UNREADABLE
 
     def _external_cache_files(
         self, process_tree: tuple[int, ...], artifact: Path
@@ -968,7 +981,7 @@ class LocalSnapshotTools:
                     f"external cache file vanished since capture: {path}; "
                     f"{_CACHE_REMEDY}"
                 )
-            if fingerprint == _CACHE_LOCKED:
+            if fingerprint in (_CACHE_LOCKED, _CACHE_UNREADABLE):
                 continue
             try:
                 current = self._sha256(target)
