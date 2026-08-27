@@ -183,6 +183,10 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
+    # The fused all-reduce + RMSNorm path is not batch-invariant
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+
     if current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
 
@@ -2460,10 +2464,6 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1 and not (
-            model_config is not None and model_config.use_mla
-        ):
-            unsupported.append("prefill context parallelism")
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
