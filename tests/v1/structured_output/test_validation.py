@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Request-time validation of structured output requests."""
 
+import sys
+
 import pytest
 
 from vllm.config import StructuredOutputsConfig
@@ -108,6 +110,33 @@ def test_regex_with_nul_byte_rejected(regex):
 
     with pytest.raises(ValueError, match="NUL"):
         validate_xgrammar_grammar(params)
+
+
+def test_deeply_nested_schema_rejected():
+    def nested_schema_json(depth: int) -> str:
+        # Built as text: json.dumps on a nested dict would itself recurse.
+        prefix = '{"type": "object", "properties": {"n": '
+        suffix = '}, "required": ["n"]}'
+        leaf = (
+            '{"type": "object", "properties": {"a": {"type": "string"}}, '
+            '"required": ["a"]}'
+        )
+        return prefix * depth + leaf + suffix * depth
+
+    def validate(schema_json: str) -> None:
+        params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(json=schema_json)
+        )
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(),
+            tokenizer=object(),
+        )
+
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        validate(nested_schema_json(sys.getrecursionlimit()))
+
+    validate(nested_schema_json(8))
 
 
 INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}

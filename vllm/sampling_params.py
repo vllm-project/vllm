@@ -1164,6 +1164,29 @@ class SamplingParams(
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
+        # Schema inspection recurses per nesting level; report a schema too deep for
+        # the interpreter's stack as a validation error instead of a 500.
+        try:
+            self._validate_structured_outputs_for_backend(
+                model_config, structured_outputs_config, tokenizer
+            )
+        except RecursionError as e:
+            structured_outputs = self.structured_outputs
+            if structured_outputs is None or structured_outputs.json is None:
+                # Not caused by a JSON schema; do not report it as a client error.
+                raise
+            raise VLLMValidationError(
+                "Validating the provided JSON schema exceeded the interpreter's "
+                "recursion limit. This usually means it is nested too deeply; flatten "
+                "it and retry."
+            ) from e
+
+    def _validate_structured_outputs_for_backend(
+        self,
+        model_config: ModelConfig,
+        structured_outputs_config: StructuredOutputsConfig | None,
+        tokenizer: TokenizerLike | None,
+    ) -> None:
         if structured_outputs_config is None or self.structured_outputs is None:
             return
 
