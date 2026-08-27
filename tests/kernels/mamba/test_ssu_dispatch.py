@@ -30,18 +30,9 @@ except ImportError:
     HAS_FLASHINFER = False
 
 try:
-    from flashinfer.mamba.checkpointing_ssu import (
-        CheckpointingSSURunner,
-        allocate_checkpointing_ssu_scratch,
-    )
-    from flashinfer.mamba.checkpointing_ssu import (
-        checkpointing_ssu as checkpointing_ssu_kernel,
-    )
+    from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
 
-    HAS_FLASHINFER_CHECKPOINTING_SSU = all(
-        callable(symbol)
-        for symbol in (CheckpointingSSURunner, allocate_checkpointing_ssu_scratch)
-    )
+    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
@@ -256,7 +247,7 @@ def test_triton_basic_call():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_replayssm_flashinfer_call_forwards_scratch_and_rounding(monkeypatch):
+def test_replayssm_flashinfer_wrapper_forwards_vllm_owned_args(monkeypatch):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
     kernel = Mock(return_value=torch.empty(1, 1, 2, 4, device="cuda"))
@@ -309,6 +300,7 @@ def test_replayssm_flashinfer_call_forwards_scratch_and_rounding(monkeypatch):
     kwargs = kernel.call_args.kwargs
     assert args[4] is ring_start
     assert args[5] is prev_num_accepted
+    assert kwargs["state_batch_indices"] is state_batch_indices
     assert kwargs["cb_scaled"] is scratch[0]
     assert kwargs["cumAdt_vec"] is scratch[1]
     assert kwargs["cb_old"] is scratch[2]
@@ -316,23 +308,10 @@ def test_replayssm_flashinfer_call_forwards_scratch_and_rounding(monkeypatch):
     assert kwargs["rand_seed"].shape == (1,)
     assert kwargs["rand_seed"].dtype == torch.int64
     assert kwargs["rand_seed"].device.type == "cuda"
+    assert "algorithm" not in kwargs
+    assert "d_split" not in kwargs
+    assert "precompute_heads_per_cta" not in kwargs
     tracker.assert_not_called()
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="compatible flashinfer checkpointing_ssu not available",
-)
-def test_replayssm_flashinfer_backend_init():
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER),
-        _kv_cache_config_with_ssu(),
-        use_replayssm=True,
-    )
-    assert isinstance(get_mamba_ssu_backend(), FlashInferSSUBackend)
-    assert mod._flashinfer_replayssm_kernel is checkpointing_ssu_kernel
 
 
 @pytest.mark.parametrize(
