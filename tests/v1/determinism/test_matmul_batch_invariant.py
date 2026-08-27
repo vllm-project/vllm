@@ -6,6 +6,10 @@ Tests correctness (matches torch.matmul) and batch invariance (result for one
 item doesn't change based on other items in the batch).
 """
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 import torch
 from utils import skip_unsupported
@@ -129,3 +133,64 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+def test_enabling_batch_invariance_does_not_rebind_torch_bmm():
+    from vllm.model_executor.determinism.batch_invariant import (
+        enable_batch_invariant_mode,
+    )
+
+    before = torch.bmm
+    enable_batch_invariant_mode()
+
+    assert torch.bmm is before
+    a_cpu = torch.rand(2, 4, 8)
+    b_cpu = torch.rand(2, 8, 4)
+    torch.testing.assert_close(torch.bmm(a_cpu, b_cpu), a_cpu @ b_cpu)
+
+
+@skip_unsupported
+def test_dispatcher_still_intercepts_bmm_on_the_accelerator():
+    if not current_platform.is_cuda_alike():
+        pytest.skip("the float64 probe needs native float64 bmm")
+
+    # A subprocess, because the mode cannot be disabled once enabled. float64 has no
+    # tile config, so the same call succeeds before the mode and raises after it.
+    probe = textwrap.dedent(
+        f"""
+        import torch
+        from vllm.model_executor.determinism.batch_invariant import (
+            enable_batch_invariant_mode,
+        )
+
+        device = torch.device({DEVICE_TYPE!r})
+        a64 = torch.rand(2, 4, 8, dtype=torch.float64, device=device)
+        b64 = torch.rand(2, 8, 4, dtype=torch.float64, device=device)
+        assert torch.bmm(a64, b64).shape == (2, 4, 4), "native float64 bmm failed"
+
+        enable_batch_invariant_mode()
+        try:
+            torch.bmm(a64, b64)
+        except NotImplementedError as exc:
+            assert "no tile config" in str(exc), exc
+        else:
+            raise AssertionError("override did not intercept bmm on the accelerator")
+
+        a_bf = torch.rand(2, 4, 8, dtype=torch.bfloat16, device=device)
+        b_bf = torch.rand(2, 8, 4, dtype=torch.bfloat16, device=device)
+        torch.testing.assert_close(
+            torch.bmm(a_bf, b_bf).float(),
+            torch.matmul(a_bf.float(), b_bf.float()),
+            atol=2e-2,
+            rtol=2e-2,
+        )
+        print("PROBE_OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=600
+    )
+    assert "PROBE_OK" in result.stdout, (
+        f"probe failed (rc={result.returncode})\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )

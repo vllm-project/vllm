@@ -844,6 +844,11 @@ def bmm_batch_invariant(a, b, *, out=None):
         },
     }
 
+    if dtype not in configs:
+        raise NotImplementedError(
+            f"batch-invariant bmm has no tile config for {dtype}; supported dtypes are "
+            f"{sorted(str(d) for d in configs)}"
+        )
     cfg = configs[dtype]
     # grid = (B, num_tiles_per_matrix)
     grid = (
@@ -1123,7 +1128,6 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl(
             "aten::bmm", bmm_batch_invariant, key, allow_override=True
         )
-        torch.bmm = bmm_batch_invariant
 
     reduced_precision_val = (
         (False, False) if is_torch_equal_or_newer("2.10.0") else False
