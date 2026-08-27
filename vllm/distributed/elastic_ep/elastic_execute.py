@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import weakref
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -20,12 +20,14 @@ from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
     get_tp_group,
+    get_world_group,
 )
 from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
     get_standby_ep_group,
     get_standby_eplb_group,
+    get_standby_world_group,
     pop_standby_groups,
 )
 from vllm.distributed.eplb.eplb_communicator import (
@@ -43,6 +45,9 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
     make_eep_staged_quant_method,
+)
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    sync_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.utils import is_moe_layer
@@ -165,6 +170,16 @@ class ElasticEPScalingExecutor:
             self.worker.vllm_config.parallel_config,
         )
 
+    @contextmanager
+    def _disable_flashinfer_autotune(self) -> Iterator[None]:
+        kernel_config = self.worker.vllm_config.kernel_config
+        enabled = kernel_config.enable_flashinfer_autotune
+        kernel_config.enable_flashinfer_autotune = False
+        try:
+            yield
+        finally:
+            kernel_config.enable_flashinfer_autotune = enabled
+
     def execute(self, execute_method: str, *args, **kwargs):
         method = getattr(self, execute_method, None)
         if method is None:
@@ -269,6 +284,10 @@ class ElasticEPScalingExecutor:
         if new_dp_size > old_dp_size:
             self.transfer_weights(old_dp_size, new_dp_size)
         self._warm_target_groups(get_standby_dp_group(), standby_ep_group)
+        if new_dp_size > old_dp_size and self._can_reuse_fused_moe_kernel():
+            target_world_group = get_standby_world_group()
+            assert target_world_group is not None
+            sync_flashinfer_autotune_cache(self.worker.model_runner, target_world_group)
 
     def _prepare_eplb_communicator(self, eplb_group) -> None:
         assert eplb_group is not None
@@ -628,6 +647,8 @@ class ElasticEPScalingExecutor:
         )
         torch.accelerator.synchronize()
         self._warm_target_groups(get_dp_group(), get_ep_group())
+        if self._can_reuse_fused_moe_kernel():
+            sync_flashinfer_autotune_cache(self.worker.model_runner, get_world_group())
 
     def receive_expert_mapping(self) -> torch.Tensor:
         dp_group = get_dp_group()
@@ -673,6 +694,7 @@ class ElasticEPScalingExecutor:
         with (
             assume_uniform_dp_batch() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
+            self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
         ):
             runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
             self.worker.compile_or_warm_up_model()
