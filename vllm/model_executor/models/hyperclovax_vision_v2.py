@@ -12,7 +12,7 @@ Supports:
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -328,7 +328,7 @@ class HCXVisionV2MultiModalProcessor(
                 grid_thw_elem = out_item.get("image_grid_thw")
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
-                    grid_thw = grid_thw_elem.data
+                    grid_thw = cast(torch.Tensor, grid_thw_elem.data)
                     # Qwen2.5-VL style calculation
                     h, w = grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (h * w) // (merge_size**2)
@@ -339,7 +339,7 @@ class HCXVisionV2MultiModalProcessor(
                 grid_thw_elem = out_item.get("video_grid_thw")
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
-                    grid_thw = grid_thw_elem.data
+                    grid_thw = cast(torch.Tensor, grid_thw_elem.data)
                     t, h, w = grid_thw[0].item(), grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (t * h * w) // (merge_size**2)
                 else:
@@ -606,8 +606,12 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> dict[str, HCXVisionV2ImageInputs | HCXVisionV2VideoInputs | None]:
+        modalities: dict[
+            str, HCXVisionV2ImageInputs | HCXVisionV2VideoInputs | None
+        ] = {}
 
         for input_key in kwargs:
             if (
@@ -635,12 +639,12 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         for modality in modalities:
             if modality == "image":
-                image_input = modalities["image"]
+                image_input = cast(HCXVisionV2ImageInputs | None, modalities["image"])
                 if image_input is not None:
                     image_embeddings = self._process_image_input(image_input)
                     multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_input = modalities["video"]
+                video_input = cast(HCXVisionV2VideoInputs | None, modalities["video"])
                 if video_input is not None:
                     video_embeddings = self._process_video_input(video_input)
                     multimodal_embeddings += tuple(video_embeddings)

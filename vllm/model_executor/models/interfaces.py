@@ -19,6 +19,7 @@ from typing import (
     Literal,
     Protocol,
     TypeAlias,
+    cast,
     overload,
     runtime_checkable,
 )
@@ -46,7 +47,9 @@ if TYPE_CHECKING:
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.interfaces_base import VllmModel
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -128,12 +131,22 @@ class SupportsMultiModalEmbeddings(Protocol):
 
     supports_multimodal_embeddings: ClassVar[Literal[True]] = True
 
+    @overload
     def embed_input_ids(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        multimodal_embeddings: None = None,
         *,
         is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
     ) -> Tensor: ...
 
 
@@ -243,26 +256,29 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             torch.nn.Module: The core language model component.
         """
         # Cached
-        if self in _language_model_by_module:
-            return _language_model_by_module[self]
+        self_module = cast(nn.Module, self)
+        if self_module in _language_model_by_module:
+            return _language_model_by_module[self_module]
 
         if self._language_model_names:
-            mod = self
+            mod = self_module
             for attr in common_prefix(
                 [name.split(".") for name in self._language_model_names]
             ):
                 if attr:
                     mod = getattr(mod, attr)
 
-            if mod is not self and hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+            if mod is not self_module and hasattr(mod, "embed_input_ids"):
+                language_model = cast("VllmModel", mod)
+                _language_model_by_module[self_module] = language_model
+                return language_model
 
         # Fallback
-        for mod in self.children():
+        for mod in self_module.children():
             if hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+                language_model = cast("VllmModel", mod)
+                _language_model_by_module[self_module] = language_model
+                return language_model
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
@@ -289,7 +305,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         """
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -339,7 +355,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         else:
             stage_name = "_".join([*modalities, "tower"])
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -361,7 +377,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         offloader = get_offloader()
         if offloader.supports_tower_offload:
             for name in children_names:
-                offloader.wrap_modules(iter([attrgetter(name)(self)]), prefix=name)
+                modules = (module for module in [attrgetter(name)(self)])
+                offloader.wrap_modules(modules, prefix=name)
 
     @contextmanager
     def _mark_composite_model(
@@ -434,18 +451,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             num_connector_tokens if isinstance(num_connector_tokens, int) else None,
         )
 
-    @overload
-    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
-
-    @overload
-    def embed_input_ids(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings,
-        *,
-        is_multimodal: torch.Tensor,
-    ) -> Tensor: ...
-
     def _embed_text_input_ids(
         self,
         input_ids: Tensor,
@@ -464,6 +469,24 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
+    ) -> Tensor: ...
 
     def embed_input_ids(
         self,
@@ -864,11 +887,11 @@ class HasInnerState(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
+def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
 
 
 @overload
-def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
+def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
 
 
 def has_inner_state(
@@ -891,11 +914,11 @@ class IsAttentionFree(Protocol):
 
 
 @overload
-def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
+def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
 
 
 @overload
-def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
+def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
 
 
 def is_attention_free(
@@ -946,11 +969,11 @@ class IsHybrid(Protocol):
 
 
 @overload
-def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
+def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
 
 
 @overload
-def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
+def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
 
 
 def is_hybrid(
@@ -1025,7 +1048,7 @@ class MixtureOfExperts(Protocol):
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
+            self.expert_weights.append(list(layer.get_expert_weights()))
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -1083,11 +1106,11 @@ class HasNoOps(Protocol):
 
 
 @overload
-def has_noops(model: object) -> TypeIs[HasNoOps]: ...
+def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
 
 
 @overload
-def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
+def has_noops(model: object) -> TypeIs[HasNoOps]: ...
 
 
 def has_noops(
@@ -1108,14 +1131,14 @@ class SupportsMambaPrefixCaching(Protocol):
 
 @overload
 def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
+    model: type[object],
+) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
 
 
 @overload
 def supports_mamba_prefix_caching(
-    model: type[object],
-) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
 
 
 def supports_mamba_prefix_caching(
@@ -1136,11 +1159,11 @@ class SupportsReplaySSM(Protocol):
 
 
 @overload
-def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
 
 
 @overload
-def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
 
 
 def supports_replayssm(
@@ -1503,6 +1526,9 @@ class LocalArgmaxMixin:
         ``self.lm_head``: ParallelLMHead
         ``self.draft_id_to_target_id`` (optional): nn.Parameter
     """
+
+    logits_processor: "LogitsProcessor"
+    lm_head: "ParallelLMHead"
 
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax with optional D2T remapping."""
