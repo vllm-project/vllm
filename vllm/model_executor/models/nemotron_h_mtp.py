@@ -592,6 +592,15 @@ class NemotronHMTP(nn.Module, SupportsPP):
         # checkpoints serialize every model-owned parameter, so enforce the
         # stronger invariant here to catch missed name mappings.
         missing_params = set(params_dict) - loaded_params
+
+        # Existing proposer behavior replaces the temporary draft embedding
+        # with the target embedding after checkpoint loading.
+        missing_params -= {
+            name
+            for name in missing_params
+            if name.startswith("model.embed_tokens.")
+        }
+
         runtime_owned_params = {
             name
             for name in missing_params
