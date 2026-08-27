@@ -244,6 +244,34 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 - 并发 1 的 6.1s TTFT 含 CUDA graph 预热，正常现象
 - 改造调度代码后重跑该脚本即可对比基线
 
+## 六点五、压力场景基线（2026-08-27 实测，KV-aware 改造的对照基准）
+
+脚本：`Documents_xxy/stress_bench.py`，结果存 `stress_bench_baseline.json`（含 192 请求逐条明细）
+
+**服务端配置**（复现抢占的关键，缺一不可）：
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --gpu-memory-utilization 0.75 \
+    --num-gpu-blocks-override 1250 \
+    --max-model-len 8192 --enable-prefix-caching
+# KV cache 被压到 20,000 tokens（日志确认 "GPU KV cache size: 20,000 tokens"）
+```
+
+**场景**：并发 48 × 192 请求，8 个共享前缀池（~900 tok，70% 共享率），输出长度混合 [512, 1024, 1536]，seed=42 可复现。
+
+| 指标 | 基线值 | 说明 |
+|------|--------|------|
+| **抢占次数** | **135 / 192 请求** | 平均 1.4 个请求被抢一次，压力真实 |
+| TTFT mean / p50 | 9.41s / 10.79s | 高排队延迟 |
+| TTFT p90 / p99 | 20.79s / 22.10s | 长尾严重 |
+| ITL mean | 23.3ms | 正常解码速度 |
+| **ITL p99** | **1345ms** | 被抢占请求整段重算的卡顿尖峰 |
+| 前缀命中率 | 91.5% (141k/154k) | 共享前缀生效 |
+| 输出吞吐 | 1705 tok/s | 0 失败 |
+
+**改造后复测流程**：同一服务配置 + `python stress_bench.py stress_bench_new.json`，对比上表。
+
 ## 七、经验教训总结
 
 1. **大下载不要走 Agent 后台**——环境不一致导致变慢甚至无声失败，一律前台手动跑
