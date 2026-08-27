@@ -867,16 +867,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         structured_outputs_kwargs = data["structured_outputs"]
         # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
         # as a StructuredOutputsParams dataclass instance.
-        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
-        count = sum(
-            (
-                getattr(structured_outputs_kwargs, k, None)
-                if is_dataclass
-                else structured_outputs_kwargs.get(k)
+        if isinstance(structured_outputs_kwargs, StructuredOutputsParams):
+            count = sum(
+                getattr(structured_outputs_kwargs, k, None) is not None
+                for k in ("json", "regex", "choice")
             )
-            is not None
-            for k in ("json", "regex", "choice")
-        )
+        elif isinstance(structured_outputs_kwargs, dict):
+            count = sum(
+                structured_outputs_kwargs.get(k) is not None
+                for k in ("json", "regex", "choice")
+            )
+        else:
+            return data
         # you can only use one kind of constraints for structured outputs
         if count > 1:
             raise VLLMValidationError(

@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -561,6 +562,17 @@ def test_structured_outputs_structural_tag_invalid(structural_tag):
             prompt="Test prompt",
             max_tokens=10,
             structured_outputs={"structural_tag": structural_tag},
+        )
+
+
+def test_invalid_structured_outputs_type_rejected():
+    with pytest.raises(ValidationError, match="structured_outputs"):
+        CompletionRequest.model_validate(
+            {
+                "model": MODEL_NAME,
+                "prompt": "Test prompt",
+                "structured_outputs": 3,
+            }
         )
 
 

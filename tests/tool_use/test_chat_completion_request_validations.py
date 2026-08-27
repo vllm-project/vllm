@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
@@ -180,5 +181,16 @@ def test_multiple_structured_outputs_rejected():
                     "json": {"type": "object"},
                     "regex": ".*",
                 },
+            }
+        )
+
+
+def test_invalid_structured_outputs_type_rejected():
+    with pytest.raises(ValidationError, match="structured_outputs"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "structured_outputs": 3,
             }
         )
