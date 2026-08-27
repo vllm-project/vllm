@@ -112,14 +112,17 @@ pub(super) struct AttributedTextBuffer {
 }
 
 impl AttributedTextBuffer {
+    /// Return all decoded text accumulated so far.
     pub(super) fn text(&self) -> &str {
         &self.text
     }
 
+    /// Return the decoded text length in bytes.
     pub(super) fn len(&self) -> usize {
         self.text.len()
     }
 
+    /// Record a token awaiting visible decoded output.
     pub(super) fn record_pending_token(&mut self, token_id: u32) {
         self.pending_start.get_or_insert(self.attributions.len());
         self.attributions.push(PendingAttribution {
@@ -128,6 +131,7 @@ impl AttributedTextBuffer {
         });
     }
 
+    /// Record a token that produced no visible decoded output.
     pub(super) fn record_zero_width_token(&mut self, token_id: u32) {
         self.attributions.push(PendingAttribution {
             token_id,
@@ -137,6 +141,7 @@ impl AttributedTextBuffer {
         });
     }
 
+    /// Append visible text and anchor pending tokens at its start.
     pub(super) fn append_visible_text(&mut self, text: &str) {
         let byte_offset = offset_as_u32(self.text.len());
         if let Some(pending_start) = self.pending_start.take() {
@@ -150,6 +155,7 @@ impl AttributedTextBuffer {
         self.text.push_str(text);
     }
 
+    /// Resolve remaining pending tokens at the current text boundary.
     pub(super) fn resolve_pending_zero_width(&mut self) {
         let Some(pending_start) = self.pending_start.take() else {
             return;
@@ -163,6 +169,7 @@ impl AttributedTextBuffer {
         }
     }
 
+    /// Truncate text and collapse removed anchors to the new boundary.
     pub(super) fn truncate(&mut self, byte_offset: usize) {
         self.text.truncate(byte_offset);
         let byte_offset = offset_as_u32(byte_offset);
@@ -176,6 +183,7 @@ impl AttributedTextBuffer {
         }
     }
 
+    /// Emit decoded text and attributions ready through `cutoff`.
     pub(super) fn take_ready(&mut self, cutoff: usize) -> Option<DecodedText> {
         let chunk_start = self.emitted_byte_offset;
         let cutoff_u32 = offset_as_u32(cutoff);
@@ -219,6 +227,7 @@ impl AttributedTextBuffer {
         Some(DecodedText { text, attributions })
     }
 
+    /// Emit the final chunk and take the complete decoded output.
     pub(super) fn finish(&mut self) -> (Option<DecodedText>, DecodedText) {
         let last_chunk = self.take_ready(self.text.len());
         let attributions = take(&mut self.attributions)
