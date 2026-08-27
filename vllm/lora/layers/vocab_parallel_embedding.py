@@ -21,8 +21,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
-        self.embeddings_slice: tuple[int, int] | None
-        self.embeddings_weights: torch.Tensor | None
 
     def create_lora_weights(
         self,
@@ -30,25 +28,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
-        if self.base_layer.num_added_embeddings_per_partition > 0:
-            # We can start adding lora weights
-            self.embeddings_weights = self.base_layer.weight.data[
-                self.base_layer.num_org_embeddings_per_partition : self.base_layer.num_org_embeddings_per_partition  # noqa: E501
-                + self.base_layer.num_added_embeddings_per_partition
-            ]
-            self.embeddings_slice = (
-                self.base_layer.shard_indices.added_vocab_start_index
-                - self.base_layer.org_vocab_size,
-                self.base_layer.shard_indices.added_vocab_end_index
-                - self.base_layer.org_vocab_size,
-            )
-            self.base_layer.weight.data[
-                self.base_layer.num_org_embeddings_per_partition :
-            ].fill_(0)
-        else:
-            self.embeddings_slice = None
-            self.embeddings_weights = None
-
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -100,10 +79,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]
-        indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens]
+        embeddings_indices = self.punica_wrapper._embeddings_indices[:num_tokens]
 
         full_lora_a_embeddings = F.embedding(
-            x + indices_1,
+            x + embeddings_indices,
             self.lora_a_stacked_2d,
         )
         full_output = self.base_layer.forward(x)
