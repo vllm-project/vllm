@@ -72,7 +72,7 @@ def _make_specs():
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=64,
+        tokens_per_state=64,
     )
     raw_spec = CircularBufferSpec(
         block_size=RAW_CAPACITY,
@@ -193,12 +193,14 @@ def test_preserves_builder_slot_mapping_in_each_cache_owner_metadata(
                     query_start_loc=common_attn_metadata.query_start_loc,
                 )
             elif isinstance(spec, MLAAttentionSpec):
+                compress_ratio = spec.tokens_per_state
+                assert isinstance(compress_ratio, int)
                 slots = compressed_qsa_slot_mapping(
                     common_attn_metadata.block_table_tensor,
                     token_to_req,
                     logical_positions,
-                    spec.storage_block_size,
-                    spec.compress_ratio,
+                    spec.num_states,
+                    compress_ratio,
                 )
             else:
                 slots = common_attn_metadata.slot_mapping

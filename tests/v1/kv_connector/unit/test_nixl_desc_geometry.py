@@ -682,7 +682,7 @@ def _make_csa_linear_ple_worker():
             num_kv_heads=1,
             head_size=64,
             dtype=torch.float16,
-            compress_ratio=2,
+            tokens_per_state=2,
         )
         for index in range(2)
     }
@@ -724,20 +724,26 @@ def _make_csa_linear_ple_worker():
         assert uniform is not None
         return KVCacheGroupSpec(list(specs), uniform)
 
+    tensor_regions = (
+        ("main_kv.0", "mamba.sharded", "mamba.ple"),
+        ("main_kv.1",),
+        ("compressed.0", "compressor_state.0"),
+        ("compressed.1", "compressor_state.1"),
+    )
+    region_size = 512
+    page_size = 256
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=512,
-                shared_by=[
-                    "main_kv.0",
-                    "mamba.sharded",
-                    "mamba.ple",
-                ],
-            ),
-            KVCacheTensor(size=512, shared_by=["main_kv.1"]),
-            KVCacheTensor(size=512, shared_by=["compressed.0", "compressor_state.0"]),
-            KVCacheTensor(size=512, shared_by=["compressed.1", "compressor_state.1"]),
+                size=len(tensor_regions) * region_size,
+                layers=[layer_name],
+                layer_stride=region_size,
+                block_stride=page_size,
+                offset=region_index * region_size,
+            )
+            for region_index, layer_names in enumerate(tensor_regions)
+            for layer_name in layer_names
         ],
         kv_cache_groups=[
             group(compressed_sparse_specs),
@@ -886,6 +892,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         device_id=0,
         num_blocks=2,
         block_lens=[256] * 4,
+        block_strides=[256] * 4,
         kv_cache_layout="HND",
         block_size=4,
         ssm_sizes=(24, 32),

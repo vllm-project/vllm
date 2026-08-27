@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1487,6 +1488,7 @@ def test_circular_buffer_uses_custom_slot_mapping(wrap_uniform: bool):
     runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
     runner.vllm_config = SimpleNamespace(reasoning_config=None)
     runner.cache_config = SimpleNamespace(use_replayssm=False)
+    runner.jit_warmup_registry = SimpleNamespace(activate=nullcontext)
     runner.is_pooling_model = False
     runner.input_batch = SimpleNamespace(
         logitsprocs=None,
