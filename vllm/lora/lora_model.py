@@ -139,6 +139,8 @@ class LoRAModel:
         # split the full-parameters weights from the LoRA weights.
         lora_tensors = tensors.copy()
         for tensor_name, tensor in tensors.items():
+            if is_base_embedding_weights(tensor_name):
+                continue
             module_name, _ = parse_fine_tuned_lora_name(tensor_name, weights_mapper)
             if module_name in (peft_helper.modules_to_save or ()):
                 full_parameters.setdefault(module_name, {})[
