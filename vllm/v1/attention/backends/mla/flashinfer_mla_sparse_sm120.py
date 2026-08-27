@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SM120 implementation variant for ``FLASHINFER_MLA_SPARSE_SM120``."""
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -118,16 +118,22 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_physical = cast(
-            torch.Tensor,
-            triton_convert_req_index_to_global_index(
+        assert attn_metadata.physical_topk_indices is not None
+        topk_indices_physical = attn_metadata.physical_topk_indices[:num_actual_toks]
+        wrote_fresh_topk = getattr(layer, "indexer", None) is not None and not getattr(
+            layer, "skip_topk", False
+        )
+        if wrote_fresh_topk or not attn_metadata.physical_topk_is_valid:
+            topk_indices_physical = triton_convert_req_index_to_global_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],
                 attn_metadata.block_table,
                 topk_indices,
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
-            ),
-        )
+                output=topk_indices_physical,
+            )
+            assert isinstance(topk_indices_physical, torch.Tensor)
+            attn_metadata.physical_topk_is_valid = True
 
         output = q.new_empty(
             (num_actual_toks, self.num_heads, self.kv_lora_rank),

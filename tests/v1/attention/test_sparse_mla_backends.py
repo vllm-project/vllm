@@ -51,6 +51,9 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    triton_filter_and_convert_dcp_index,
+)
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
@@ -809,30 +812,48 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         ),
         block_table=torch.arange(40, dtype=torch.int32, device=device).view(4, 10),
         block_size=block_size,
+        physical_topk_indices=torch.empty(
+            num_mqa_tokens,
+            num_topk_tokens,
+            dtype=torch.int32,
+            device=device,
+        ),
+        physical_topk_valid_counts=torch.empty(
+            num_mqa_tokens, dtype=torch.int32, device=device
+        ),
+        physical_topk_is_valid=False,
     )
     assert attn_metadata.req_id_per_token.shape[0] == num_batch_tokens
 
     q = torch.zeros(num_mqa_tokens, 4, 576, dtype=torch.bfloat16, device=device)
     kv_cache = torch.zeros(40, block_size, 576, dtype=torch.bfloat16, device=device)
-    topk_indices = torch.randint(
-        0,
-        block_size * 10,
-        (num_mqa_tokens, num_topk_tokens),
+    topk_indices = torch.arange(
+        num_mqa_tokens * num_topk_tokens,
         dtype=torch.int32,
         device=device,
-    )
+    ).view(num_mqa_tokens, num_topk_tokens)
 
     captured = {}
 
     def _stub_kernel(q, kv, indices, lengths):
         captured["indices"] = indices
-        return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
+        return (
+            torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device),
+            None,
+        )
 
-    stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
-
-    out = FlashMLASparseImpl._forward_bf16_kv(
-        stub_impl, q, kv_cache, topk_indices, attn_metadata
+    stub_impl = SimpleNamespace(
+        _bf16_flash_mla_kernel=_stub_kernel,
+        kv_cache_dtype="auto",
+        topk_indices_buffer=topk_indices,
+        dcp_world_size=1,
+        need_to_return_lse_for_decode=False,
     )
+    stub_impl._forward_bf16_kv = MethodType(
+        FlashMLASparseImpl._forward_bf16_kv, stub_impl
+    )
+
+    out, _ = FlashMLASparseImpl.forward_mqa(stub_impl, q, kv_cache, attn_metadata, None)
 
     assert out.shape[0] == num_mqa_tokens
     assert captured["indices"].shape[0] == num_mqa_tokens
@@ -843,6 +864,10 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         block_size,
         num_topk_tokens,
     )
+    torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
+
+    topk_indices.zero_()
+    FlashMLASparseImpl.forward_mqa(stub_impl, q, kv_cache, attn_metadata, None)
     torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
 
 
@@ -1302,6 +1327,25 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
 
     torch.testing.assert_close(valid_counts, expected_valid_tensor, rtol=0, atol=0)
 
+    output_buffer = torch.empty_like(token_indices)
+    valid_counts_buffer = torch.full_like(expected_valid_tensor, -1)
+    buffered_result, buffered_valid_counts = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+        return_valid_counts=True,
+        output=output_buffer,
+        valid_counts_out=valid_counts_buffer,
+    )
+    assert buffered_result.data_ptr() == output_buffer.data_ptr()
+    assert buffered_valid_counts.data_ptr() == valid_counts_buffer.data_ptr()
+    torch.testing.assert_close(buffered_result, result, rtol=0, atol=0)
+    torch.testing.assert_close(
+        buffered_valid_counts, expected_valid_tensor, rtol=0, atol=0
+    )
+
     # Test that return_valid_counts=False returns only the indices
     result_only = triton_convert_req_index_to_global_index(
         req_id,
@@ -1487,6 +1531,11 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         ),
         block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
         block_size=64,
+        physical_topk_indices=torch.empty_like(topk_indices),
+        physical_topk_valid_counts=torch.empty(
+            num_decode_tokens, dtype=torch.int32, device=DEVICE_TYPE
+        ),
+        physical_topk_is_valid=False,
     )
     impl = SimpleNamespace(
         kv_cache_dtype="fp8_ds_mla",
@@ -1621,10 +1670,17 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         device=DEVICE_TYPE,
     )
 
+    convert_calls = 0
+
+    def convert_indices(*args, **kwargs):  # noqa: ARG001
+        nonlocal convert_calls
+        convert_calls += 1
+        return kwargs["output"].copy_(local_indices)
+
     monkeypatch.setattr(
         "vllm.v1.attention.backends.mla.flashmla_sparse."
         "triton_filter_and_convert_dcp_index",
-        lambda *args, **kwargs: local_indices,
+        convert_indices,
     )
 
     def run_kernel(**kwargs):
@@ -1647,16 +1703,27 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
         block_size=64,
         cp_kv_cache_interleave_size=1,
+        fp8_use_mixed_batch=True,
+        physical_topk_indices=torch.empty_like(local_indices),
+        physical_topk_valid_counts=torch.empty(
+            num_tokens, dtype=torch.int32, device=DEVICE_TYPE
+        ),
+        physical_topk_is_valid=False,
     )
     impl = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        topk_indices_buffer=local_indices,
         dcp_world_size=2,
         dcp_rank=0,
         need_to_return_lse_for_decode=True,
         _fp8_flash_mla_kernel=run_kernel,
     )
+    impl._forward_fp8_kv_mixed_batch = MethodType(
+        FlashMLASparseImpl._forward_fp8_kv_mixed_batch, impl
+    )
 
-    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
-        impl, q, torch.empty(0, device=DEVICE_TYPE), local_indices, metadata
+    out, lse = FlashMLASparseImpl.forward_mqa(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), metadata, None
     )
 
     assert torch.equal(out[1], torch.zeros_like(out[1]))
@@ -1667,3 +1734,50 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
     assert not out.isnan().any()
     assert not lse.isnan().any()
+
+    local_indices.zero_()
+    FlashMLASparseImpl.forward_mqa(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), metadata, None
+    )
+    assert convert_calls == 1
+
+
+@pytest.mark.parametrize("compact_valid_to_front", [False, True])
+def test_dcp_convert_reuses_output_buffers(compact_valid_to_front: bool):
+    device = torch.device(DEVICE_TYPE)
+    num_topk_tokens = 128
+    req_id = torch.zeros(2, dtype=torch.int32, device=device)
+    block_table = torch.arange(8, dtype=torch.int32, device=device).view(1, 8)
+    token_indices = torch.arange(
+        2 * num_topk_tokens, dtype=torch.int32, device=device
+    ).view(2, num_topk_tokens)
+
+    expected, expected_counts = triton_filter_and_convert_dcp_index(
+        req_id,
+        block_table,
+        token_indices,
+        dcp_size=2,
+        dcp_rank=0,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+        return_valid_counts=True,
+        compact_valid_to_front=compact_valid_to_front,
+    )
+    output = torch.empty_like(token_indices)
+    valid_counts = torch.full((2,), -1, dtype=torch.int32, device=device)
+    actual, actual_counts = triton_filter_and_convert_dcp_index(
+        req_id,
+        block_table,
+        token_indices,
+        dcp_size=2,
+        dcp_rank=0,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+        return_valid_counts=True,
+        compact_valid_to_front=compact_valid_to_front,
+        output=output,
+        valid_counts_out=valid_counts,
+    )
+
+    assert actual.data_ptr() == output.data_ptr()
+    assert actual_counts.data_ptr() == valid_counts.data_ptr()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_counts, expected_counts, rtol=0, atol=0)
