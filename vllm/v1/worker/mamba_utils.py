@@ -988,12 +988,13 @@ class MambaSpecDecodeGPUContext:
                 state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
-                assert len(kv_caches) == len(mamba_spec.shapes), (
-                    f"layer {layer_name} exposes {len(kv_caches)} Mamba states, "
-                    f"but its cache spec declares {len(mamba_spec.shapes)}"
-                )
-
-                for state_type_idx, state in enumerate(kv_caches):
+                if len(kv_caches) < len(state_copy_funcs):
+                    raise ValueError(
+                        f"Expected at least {len(state_copy_funcs)} Mamba state "
+                        f"tensors, got {len(kv_caches)}"
+                    )
+                for state_type_idx, copy_func in enumerate(state_copy_funcs):
+                    state = kv_caches[state_type_idx]
                     # Base address
                     self.state_base_addrs[idx] = _reinterpret_u64_as_i64(
                         state.data_ptr()
@@ -1012,7 +1013,6 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    copy_func = state_copy_funcs[state_type_idx]
                     assert (
                         copy_func is get_conv_copy_spec
                         or copy_func is get_temporal_copy_spec
@@ -1358,10 +1358,6 @@ def collect_mamba_copy_meta(
             state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
-            assert len(kv_caches) == len(mamba_spec.shapes), (
-                f"layer {layer_name} exposes {len(kv_caches)} Mamba states, "
-                f"but its cache spec declares {len(mamba_spec.shapes)}"
-            )
             for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
