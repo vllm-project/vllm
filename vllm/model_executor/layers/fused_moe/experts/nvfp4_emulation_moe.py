@@ -544,4 +544,4 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             compute_type=compute_type,
         )
 
-        self.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)

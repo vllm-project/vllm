@@ -26,6 +26,7 @@ from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
+    TritonExperts,
     fused_topk,
 )
 from vllm.model_executor.layers.fused_moe.activation import (
@@ -1640,6 +1641,30 @@ def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
     opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, expert_map))
+
+
+def test_triton_experts_moe_sum_ignores_unrouted_slots():
+    m, topk, k = 2, 4, 128
+    expert_output = torch.arange(m * topk * k, device="cuda", dtype=torch.float32).view(
+        m, topk, k
+    )
+    topk_ids = torch.tensor(
+        [[0, -1, 2, 1], [3, 1, -1, 0]], device="cuda", dtype=torch.int64
+    )
+    expert_map = torch.tensor([0, 1, -1, -1], device="cuda", dtype=torch.int32)
+    actual = torch.empty((m, k), device="cuda", dtype=expert_output.dtype)
+
+    experts = TritonExperts(
+        make_dummy_moe_config(),
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    experts.moe_sum(expert_output, actual, topk_ids, expert_map)
+
+    safe_topk_ids = topk_ids.clamp(min=0)
+    routed = (topk_ids >= 0) & (expert_map[safe_topk_ids] >= 0)
+    expected = torch.where(routed.unsqueeze(-1), expert_output, 0).sum(dim=1)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def _batched_fused_marlin_moe_cases() -> list[Any]:

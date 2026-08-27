@@ -560,10 +560,19 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+    def moe_sum(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        if expert_map is not None:
+            ops.moe_sum(input, output, topk_ids, expert_map)
+        else:
+            ops.moe_sum(input, output)
 
 
 class TritonWNA16Experts(TritonExperts):
@@ -749,4 +758,4 @@ class TritonWNA16Experts(TritonExperts):
         )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
