@@ -269,6 +269,7 @@ def _write_granite_config(tmp_path, quantization_config=None):
         payload["quantization_config"] = quantization_config
     (tmp_path / "config.json").write_text(json.dumps(payload))
 
+
 def test_recipe_yaml_fp8_dynamic_maps_to_compressed_tensors():
     recipe = {
         "default_stage": {
