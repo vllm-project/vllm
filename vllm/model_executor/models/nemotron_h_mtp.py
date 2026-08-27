@@ -348,33 +348,17 @@ class NemotronHMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        speculative_config = vllm_config.speculative_config
-        self.has_own_lm_head = (
-            speculative_config is not None
-            and speculative_config.method == "mtp"
-            and not speculative_config.mtp_share_lm_head
-        )
-        lm_head_quant_config = self.quant_config if self.has_own_lm_head else None
+        self.has_own_lm_head = False
 
-        # The proposer replaces a shared temporary head with the target head.
-        # A private head stays draft-owned and must therefore be constructed
-        # from the draft checkpoint's quantization configuration.
+        # Construct from the draft checkpoint's quantization configuration.
+        # Weight loading below determines whether the checkpoint owns this head;
+        # otherwise, the proposer replaces it with the target head.
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
-            quant_config=lm_head_quant_config,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        if self.has_own_lm_head:
-            quant_name = (
-                self.quant_config.get_name()
-                if self.quant_config is not None
-                else "unquantized"
-            )
-            logger.info(
-                "Constructed Nemotron MTP draft-owned lm_head with %s quantization.",
-                quant_name,
-            )
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
@@ -446,18 +430,14 @@ class NemotronHMTP(nn.Module, SupportsPP):
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
-            # Full checkpoints contain an lm_head even when MTP will share the
-            # already-loaded target head. Skip that representation unless this
-            # draft explicitly owns a private head.
-            if "lm_head" in name and not self.has_own_lm_head:
-                continue
+            is_lm_head_weight = name.startswith("lm_head.")
+            if is_lm_head_weight:
+                self.has_own_lm_head = True
             # Only process MTP weights - skip all non-MTP weights
             if (
                 not name.startswith("mtp.")
                 and "embeddings" not in name
-                and not (
-                    self.has_own_lm_head and name.startswith("lm_head.")
-                )
+                and not is_lm_head_weight
             ):
                 continue
             # Skip rotary embeddings (computed, not loaded)
@@ -561,11 +541,12 @@ class NemotronHMTP(nn.Module, SupportsPP):
             }
             if not loaded_lm_head_params:
                 raise ValueError(
-                    "mtp_share_lm_head=False requires lm_head weights in the "
-                    "external MTP checkpoint."
+                    "Nemotron MTP detected an owned lm_head but did not load any "
+                    "lm_head parameters from the checkpoint."
                 )
             logger.info(
-                "Loaded %d private MTP lm_head tensors from the draft checkpoint.",
+                "Detected and loaded %d Nemotron MTP lm_head tensors from the "
+                "draft checkpoint.",
                 len(loaded_lm_head_params),
             )
         else:
