@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
+    VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
@@ -90,8 +91,6 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
-    # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
-    VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -562,19 +561,6 @@ def get_env_or_set_default(
 logger = logging.getLogger(__name__)
 
 
-def _deprecated_triton_attn_use_td() -> None:
-    """Warn that VLLM_TRITON_ATTN_USE_TD was renamed to VLLM_TRITON_USE_TD.
-
-    The old name is ignored; VLLM_TRITON_USE_TD is the supported variable.
-    """
-    if "VLLM_TRITON_ATTN_USE_TD" in os.environ:
-        logger.warning(
-            "VLLM_TRITON_ATTN_USE_TD is deprecated and will be removed in "
-            "v0.25. Use VLLM_TRITON_USE_TD instead."
-        )
-    return None
-
-
 def _resolve_rust_cli_path() -> str | None:
     """Resolve the vllm-rs binary path.
 
@@ -650,10 +636,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
     ),
-    # Deprecated: renamed to VLLM_TRITON_USE_TD.  Kept registered so it does
-    # not trip the unknown-env-var check; warns on use and is otherwise
-    # ignored.
-    "VLLM_TRITON_ATTN_USE_TD": lambda: _deprecated_triton_attn_use_td(),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -988,6 +970,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
         os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
     ),
+    # Maximum size in MB for a single remote media download. The limit is
+    # enforced while streaming the response body so oversized or infinite
+    # responses cannot grow the API server heap without bound. Default is 256.
+    "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB", "256")
+    ),
     # Whether to allow HTTP redirects when fetching from media URLs.
     # Default to True
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
@@ -999,9 +987,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_LOADING_THREAD_COUNT": lambda: int(
         os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")
     ),
-    # Maximum filesize in MB for a single audio file when processing
-    # speech-to-text requests. Files larger than this will be rejected.
-    # Default is 25 MB
+    # Maximum filesize in MB for a single audio file. Enforced on all
+    # audio inputs (multimodal chat, speech-to-text uploads, data: URLs,
+    # and local file:// paths). Files larger than this will be rejected
+    # before decoding. Default is 25 MB.
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
     ),
@@ -1861,7 +1850,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
     ),
-    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``.
+    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``
+    # and its render endpoint at ``POST /cohere/v2/chat/render``.
     # Default off
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))

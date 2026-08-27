@@ -148,6 +148,7 @@ from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
@@ -2572,6 +2573,7 @@ class GPUModelRunner(
                     Mamba2AttentionMetadataBuilder,
                     GDNAttentionMetadataBuilder,
                     BailingLinearAttentionMetadataBuilder,
+                    ShortConvAttentionMetadataBuilder,
                 ),
             ):
                 assert ubid is None, (
@@ -3548,10 +3550,7 @@ class GPUModelRunner(
             hidden_states=hidden_states, pooling_metadata=pooling_metadata
         )
 
-        finished_mask = [
-            seq_len == prompt_len
-            for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
-        ]
+        finished_mask = pooling_metadata.get_pooling_cursor().get_finished_mask()
         raw_pooler_output = self.late_interaction_runner.postprocess_pooler_output(
             raw_pooler_output=raw_pooler_output,
             pooling_params=pooling_metadata.pooling_params,
@@ -5804,7 +5803,7 @@ class GPUModelRunner(
                 scores = logits.to(torch.float32)
             else:
                 scores = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+            token_ids, logprobs, ranks, *_ = self.sampler.gather_logprobs(
                 scores, num_prompt_logprobs, tgt_token_ids
             )
 

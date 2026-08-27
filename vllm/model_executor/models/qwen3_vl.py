@@ -1555,17 +1555,19 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
         if self._expands_only_video_token(hf_processor):
             # transformers>=5.10 expands only the bare video_token
-            video_target = hf_processor.video_token
+            video_target = [video_token_id]
         else:
             # Old-style processors expand the full placeholder
-            # NOTE: We match string on purpose since searching sequence of
-            # token ids takes more time.
-            video_target = "<|vision_start|><|video_pad|><|vision_end|>"
+            video_target = [
+                vision_start_token_id,
+                video_token_id,
+                vision_end_token_id,
+            ]
 
         return [
             PromptReplacement(
                 modality="image",
-                target=hf_processor.image_token,
+                target=[hf_processor.image_token_id],
                 replacement=get_image_replacement_qwen3vl,
             ),
             PromptReplacement(
@@ -1585,7 +1587,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         vision_end_token_id: int,
         video_token_id: int,
         select_token_id: bool = False,
-    ) -> PromptUpdateDetails[list[int]]:
+    ) -> PromptUpdateDetails:
         """Build prompt replacement for a video in Qwen3VL format.
 
         The replacement structure for each frame is:
@@ -1609,7 +1611,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
         # Tokenize timestamp strings independently to avoid tokenizer merging
         # tokens across boundaries.
-        # TODO: switch to `_seq2tokens` which has some caching.
         timestamp_token_ids = [
             tokenizer.encode(f"<{timestamp:.1f} seconds>", add_special_tokens=False)
             for timestamp in timestamps
