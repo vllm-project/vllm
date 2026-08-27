@@ -284,11 +284,10 @@ def _replayssm_autotune_kwargs(
         and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
     ):
         return None
-    use_v2_model_runner = config.use_v2_model_runner
     v2_runner: Any = runner
     query_len = (
         v2_runner.decode_query_len
-        if use_v2_model_runner
+        if config.use_v2_model_runner
         else runner.uniform_decode_query_len
     )
     max_num_reqs = min(
@@ -308,7 +307,7 @@ def _replayssm_autotune_kwargs(
         "num_tokens": max_num_reqs * query_len,
         "uniform_decode": True,
     }
-    if use_v2_model_runner:
+    if config.use_v2_model_runner:
         decode_kwargs["valid_dummy_state_slots"] = True
     else:
         decode_kwargs.update(
@@ -355,10 +354,9 @@ def _temporary_replayssm_autotune_state(
             if tensor.numel():
                 reset_tensors.setdefault(tensor.data_ptr(), tensor)
 
-    use_v2_model_runner = runner.vllm_config.use_v2_model_runner
     v2_runner: Any = runner
     block_tables = saved_block_ids = None
-    if not use_v2_model_runner:
+    if not runner.vllm_config.use_v2_model_runner:
         block_tables = runner.input_batch.block_table.block_tables
         saved_block_ids = tuple(
             block_table.block_table.np[:max_num_reqs, 0].copy()
@@ -395,7 +393,7 @@ def _temporary_replayssm_autotune_state(
     try:
         yield
     finally:
-        if use_v2_model_runner:
+        if runner.vllm_config.use_v2_model_runner:
             v2_runner.block_tables.get_dummy_block_tables(max_num_reqs)
         else:
             assert block_tables is not None and saved_block_ids is not None
