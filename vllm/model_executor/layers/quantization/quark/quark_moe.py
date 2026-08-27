@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
@@ -804,7 +805,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1027,7 +1027,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
             moe_config=layer.moe_config,
-            expert_map=layer.expert_map,
+            expert_mask=layer.expert_mask,
         )
 
 
@@ -1063,8 +1063,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 )
         else:
             self.input_dtype = None
-
-        self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
@@ -1335,6 +1333,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -1444,7 +1443,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -1590,15 +1589,16 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        if not torch.allclose(
+        # Match existing NVFP4 MoE paths: fused w13 uses the w1 global scale.
+        if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
-            raise ValueError("Different global scales for w1 and w3 is not supported.")
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected."
+            )
 
-        # Use a single gscale for w13
-        w13_weight_scale_2 = torch.maximum(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ).contiguous()
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         w2_weight_scale_2 = layer.w2_weight_scale_2
 
@@ -1645,7 +1645,6 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(

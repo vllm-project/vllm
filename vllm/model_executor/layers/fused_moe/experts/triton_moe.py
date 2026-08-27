@@ -48,6 +48,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
     kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8Static,
@@ -186,8 +188,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             swiglu_limit_func(output, input, activation_config.clamp_limit)
             return
 
-        # SWIGLUOAI_UNINTERLEAVE routes to the silu_and_mul_with_clamp kernel and
-        # requires a clamp limit. Other activations ignore these parameters.
+        # SWIGLUOAI_UNINTERLEAVE routes to torch.ops._C.silu_and_mul_with_clamp
+        # via apply_moe_activation() and requires clamp_limit to be set.
         if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
             assert activation_config.clamp_limit is not None, (
                 "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
@@ -252,6 +254,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.bfloat16,
             torch.float8_e4m3fn,
             torch.float8_e4m3fnuz,
+            torch.int8,
         ]
 
         # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
@@ -298,6 +301,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         elif (
             hidden_states.dtype == torch.float8_e4m3fn
             or hidden_states.dtype == torch.float8_e4m3fnuz
+            or hidden_states.dtype == torch.int8
         ):
             compute_type = tl.bfloat16
         else:
@@ -311,13 +315,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        # Include fused shared-expert rows while preserving EP remapping.
+        num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             _prepare_expert_assignment(
                 topk_ids,
                 config,
                 num_tokens,
                 top_k_num,
-                global_num_experts,
+                num_align_experts,
                 expert_map,
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
@@ -578,6 +584,8 @@ class TritonWNA16Experts(TritonExperts):
             kInt4Static,
             kInt8Static,
             kInt4Static32,
+            kInt4StaticAsym,
+            kInt4Static32Asym,
             # other group sizes?
         ]
         return weight_key in SUPPORTED_W
@@ -589,6 +597,7 @@ class TritonWNA16Experts(TritonExperts):
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
@@ -681,8 +690,10 @@ class TritonWNA16Experts(TritonExperts):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        # Include fused shared-expert rows while preserving EP remapping.
+        num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            topk_ids, config["BLOCK_SIZE_M"], num_align_experts, expert_map
         )
 
         invoke_fused_moe_wna16_triton_kernel(
