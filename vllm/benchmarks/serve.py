@@ -57,7 +57,7 @@ from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
-WARM_PREFIX_CACHE_HIT_RATE_THRESHOLD = 0.01
+PREFIX_CACHE_HIT_RATE_WARNING_THRESHOLD = 0.01
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -364,12 +364,11 @@ async def fetch_prefix_cache_counters(
         return None
 
 
-def _warn_if_warm_prefix_cache(
-    dataset_name: str,
+def _warn_if_prefix_cache_hits(
     before: PrefixCacheCounters | None,
     after: PrefixCacheCounters | None,
 ) -> None:
-    if dataset_name != "random" or before is None or after is None:
+    if before is None or after is None:
         return
 
     queries = after.queries - before.queries
@@ -378,14 +377,14 @@ def _warn_if_warm_prefix_cache(
         return
 
     hit_rate = hits / queries
-    if hit_rate < WARM_PREFIX_CACHE_HIT_RATE_THRESHOLD:
+    if hit_rate < PREFIX_CACHE_HIT_RATE_WARNING_THRESHOLD:
         return
 
     warnings.warn(
-        f"This random-dataset run observed a {hit_rate:.1%} prefix cache hit "
-        "rate. RandomDataset is deterministic for a fixed --seed, so repeated "
-        "runs against the same server can reuse cached prompts and inflate "
-        "throughput. Reset the prefix cache, vary --seed, or use "
+        f"This benchmark run observed a {hit_rate:.1%} prefix cache hit rate. "
+        "Hits may come from shared prefixes within this run or cached prompts "
+        "from an earlier run; the latter can inflate throughput. If cache reuse "
+        "is not intended, reset the prefix cache, restart the server, or use "
         "`vllm bench sweep serve` for parameter sweeps.",
         stacklevel=2,
     )
@@ -859,7 +858,6 @@ async def benchmark(
     model_name: str,
     tokenizer: TokenizerLike | None,
     input_requests: list[SampleRequest],
-    dataset_name: str,
     logprobs: int | None,
     request_rate: float,
     burstiness: float,
@@ -1043,11 +1041,7 @@ async def benchmark(
 
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
     diffusion_metrics_before = await fetch_diffusion_metrics(base_url, session)
-    prefix_cache_counters_before = (
-        await fetch_prefix_cache_counters(base_url, session)
-        if dataset_name == "random"
-        else None
-    )
+    prefix_cache_counters_before = await fetch_prefix_cache_counters(base_url, session)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -1237,13 +1231,8 @@ async def benchmark(
                 "committed_per_step": delta_committed / denoising_steps,
             }
 
-    prefix_cache_counters_after = (
-        await fetch_prefix_cache_counters(base_url, session)
-        if dataset_name == "random"
-        else None
-    )
-    _warn_if_warm_prefix_cache(
-        dataset_name,
+    prefix_cache_counters_after = await fetch_prefix_cache_counters(base_url, session)
+    _warn_if_prefix_cache_hits(
         prefix_cache_counters_before,
         prefix_cache_counters_after,
     )
@@ -2294,7 +2283,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         model_name=model_name,
         tokenizer=tokenizer,
         input_requests=input_requests,
-        dataset_name=args.dataset_name,
         logprobs=args.logprobs,
         request_rate=args.request_rate,
         burstiness=args.burstiness,

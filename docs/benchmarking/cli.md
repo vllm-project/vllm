@@ -112,13 +112,14 @@ P99 ITL (ms):                            8.39
 ```
 
 !!! warning
-    The synthetic random dataset is reproducible for a fixed `--seed`, which
-    defaults to `0`. Repeating `vllm bench serve` against the same server can
-    therefore reuse prompts left in the prefix cache and inflate throughput.
-    The benchmark warns when a random-dataset run observes a prefix cache hit
-    rate of at least 1%. Vary `--seed`, reset or restart the server between
-    runs, or use `vllm bench sweep serve`, which resets server caches between
-    runs.
+    Repeating `vllm bench serve` against the same server can reuse prompts left
+    in the prefix cache and inflate throughput. This can affect any reproducible
+    dataset; the synthetic random dataset is reproducible for a fixed `--seed`,
+    which defaults to `0`. The benchmark warns when a run observes a prefix
+    cache hit rate of at least 1%. Hits can also come from shared prefixes within
+    the run, so interpret the warning in the context of the workload. If cache
+    reuse is not intended, vary `--seed`, reset or restart the server, or use
+    `vllm bench sweep serve`, which resets server caches between runs.
 
 #### Understanding the Latency Metrics
 
