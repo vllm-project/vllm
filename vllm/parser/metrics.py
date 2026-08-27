@@ -88,11 +88,11 @@ def init_parser_metrics(*, model_name: str) -> None:
             REGISTRY._names_to_collectors[_TOOL_CALLS_COMPLETED_TOTAL],
         )
 
-    for request_type, outcome in product(RequestType, ValidationOutcome):
+    for request_type, validation_outcome in product(RequestType, ValidationOutcome):
         _tool_calls_completed.labels(
             model_name=_model_name,
             request_type=request_type.value,
-            validation_outcome=outcome.value,
+            validation_outcome=validation_outcome.value,
         )
 
 
