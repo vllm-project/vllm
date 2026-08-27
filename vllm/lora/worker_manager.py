@@ -157,6 +157,9 @@ class WorkerLoRAManager:
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
+            # Validate full classification-head weights.
+            self._adapter_manager._validate_modules_to_save(lora)
+
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
             # - No adapter found to download from huggingface (or in

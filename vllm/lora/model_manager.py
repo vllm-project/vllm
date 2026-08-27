@@ -383,7 +383,6 @@ class LoRAModelManager:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
-        self._validate_modules_to_save(lora)
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
 
