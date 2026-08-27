@@ -1663,6 +1663,30 @@ def test_parse_chat_messages_multiple_images_interleave(
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
 
+def test_parse_chat_messages_interleave_placeholder_overcount_raises(
+    phi3v_model_config_mm_interleaved,
+    image_url,
+):
+    # Only one image is supplied, but the user's text also contains the internal
+    # image sentinel, so the interleaved prompt references more image
+    # placeholders than actual images. This must surface as a clear validation
+    # error rather than an IndexError from popping an empty list.
+    with pytest.raises(VLLMValidationError, match="placeholders in input prompt"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "<##IMAGE##>"},
+                    ],
+                }
+            ],
+            phi3v_model_config_mm_interleaved,
+            content_format="string",
+        )
+
+
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_interleave_async(
     phi3v_model_config_mm_interleaved,
