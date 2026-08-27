@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.envs as envs
@@ -11,19 +13,16 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.models.glm5next.nvidia.ops.kpool_compress import (
-    expand_pools_and_append_tail,
-    expand_pools_to_tokens,
-    kpool_compress_and_write_cache,
-    kpool_decode_update_and_maybe_write_cache_batched,
-    kpool_seed_tail_cache,
-)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    fp8_fp4_mqa_logits,
-    fp8_fp4_paged_mqa_logits,
-    has_deep_gemm,
-)
+
+if TYPE_CHECKING:
+    from vllm.models.glm5next.nvidia.ops import kpool_compress as kpool_ops
+elif current_platform.is_rocm():
+    from vllm.models.glm5next.amd.ops import kpool_compress as kpool_ops
+else:
+    from vllm.models.glm5next.nvidia.ops import kpool_compress as kpool_ops
+
+from vllm.utils.deep_gemm import has_deep_gemm
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -83,7 +82,7 @@ def _kpool_compress_insert(
     write_mask = valid & (pos >= kpool - 1)
     offs = torch.arange(kpool, device=k.device)
     idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + offs[None, :]
-    kpool_compress_and_write_cache(
+    kpool_ops.kpool_compress_and_write_cache(
         kv_cache,
         k[idx],  # [n, kpool, head_dim]
         gate_score[idx],
@@ -192,6 +191,29 @@ def _decode_topk_seq_lens(
         scatter_idx,
     )
     return padded.reshape(n) + 1  # pad rows: -1 + 1 = 0 -> empty tail
+
+
+def _fill_causal_indices(rows: torch.Tensor, positions: torch.Tensor) -> None:
+    causal_range = torch.arange(rows.shape[1], device=rows.device, dtype=torch.int32)
+    positions = positions.to(torch.int32)
+    rows[:] = causal_range[None, :]
+    rows[causal_range[None, :] > positions[:, None]] = -1
+
+
+def _fill_short_decode_causal_indices(
+    topk_indices_buffer: torch.Tensor,
+    positions: torch.Tensor | None,
+    num_decode_tokens: int,
+    max_seq_len: int,
+    topk_tokens: int,
+) -> bool:
+    """Fill exact causal rows when sparse decode would select every token."""
+    if positions is None or positions.numel() == 0 or max_seq_len > topk_tokens:
+        return False
+    _fill_causal_indices(
+        topk_indices_buffer[:num_decode_tokens], positions[:num_decode_tokens]
+    )
+    return True
 
 
 def _gather_workspace_shapes(
@@ -378,7 +400,7 @@ def sparse_attn_indexer_kpool(
                     tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
                     if tail_meta is not None:
                         assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
-                        kpool_seed_tail_cache(
+                        kpool_ops.kpool_seed_tail_cache(
                             tail_kv_cache,
                             k[prefill_slice],
                             gate_score[prefill_slice],
@@ -389,13 +411,26 @@ def sparse_attn_indexer_kpool(
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
-            ops.indexer_k_quant_and_cache(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
+            if current_platform.is_rocm():
+                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                    indexer_k_quant_and_cache_triton,
+                )
+
+                indexer_k_quant_and_cache_triton(
+                    k,
+                    kv_cache,
+                    slot_mapping,
+                    quant_block_size,
+                    scale_fmt,
+                )
+            else:
+                ops.indexer_k_quant_and_cache(
+                    k,
+                    kv_cache,
+                    slot_mapping,
+                    quant_block_size,
+                    scale_fmt,
+                )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -428,15 +463,9 @@ def sparse_attn_indexer_kpool(
             # short_prefill is only True when positions is not None (above),
             # but narrow explicitly for the indexer below.
             assert positions is not None
-            _arange = torch.arange(
-                topk_indices_buffer.shape[1],
-                device=topk_indices_buffer.device,
-                dtype=torch.int32,
-            )
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
-            _buf[:] = _arange[None, :]
-            _buf[_arange[None, :] > _pos[:, None]] = -1
+            _fill_causal_indices(_buf, _pos)
 
         # Get the full shared workspace buffers once (will allocate on first use).
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
@@ -455,13 +484,27 @@ def sparse_attn_indexer_kpool(
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
             if not chunk.skip_kv_gather:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_quant,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                )
+                if current_platform.is_rocm():
+                    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                        cp_gather_indexer_k_quant_cache_triton,
+                    )
+
+                    cp_gather_indexer_k_quant_cache_triton(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                        token_to_seq=chunk.token_to_seq,
+                    )
+                else:
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                    )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
@@ -479,14 +522,30 @@ def sparse_attn_indexer_kpool(
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            logits = fp8_fp4_mqa_logits(
-                (q_slice_cast, q_scale_slice),
-                (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                clean_logits=False,
-            )
+            if current_platform.is_rocm():
+                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                    rocm_fp8_mqa_logits,
+                )
+
+                assert q_scale_slice is None
+                logits = rocm_fp8_mqa_logits(
+                    q_slice_cast,
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                )
+            else:
+                from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
+
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    clean_logits=False,
+                )
             num_rows = logits.shape[0]
 
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
@@ -536,12 +595,12 @@ def sparse_attn_indexer_kpool(
                         positions[chunk.token_start : chunk.token_end].to(torch.int32)
                         + 1
                     )
-                    expanded = expand_pools_and_append_tail(
+                    expanded = kpool_ops.expand_pools_and_append_tail(
                         pool_ids, q_seq, index_kpool
                     )
                 else:
                     valid = pool_ids >= 0
-                    expanded = expand_pools_to_tokens(
+                    expanded = kpool_ops.expand_pools_to_tokens(
                         pool_ids, valid, topk_tokens, index_kpool
                     )
                 topk_indices_buffer[
@@ -660,7 +719,7 @@ def sparse_attn_indexer_kpool(
                 # provided. Inputs are already grouped per request (uniform:
                 # view; non-uniform: _scatter_decode_tokens_by_request padded to
                 # [B, lmax]) — no per-token .contiguous() copies needed.
-                kpool_decode_update_and_maybe_write_cache_batched(
+                kpool_ops.kpool_decode_update_and_maybe_write_cache_batched(
                     kv_cache_raw,
                     tail_kv_cache,
                     dec_tail_slot,
@@ -673,6 +732,14 @@ def sparse_attn_indexer_kpool(
                     head_dim,
                     round_scale=(scale_fmt is not None),
                 )
+        if current_platform.is_rocm() and _fill_short_decode_causal_indices(
+            topk_indices_buffer,
+            positions,
+            num_decode_tokens,
+            attn_metadata_narrowed.max_seq_len,
+            topk_tokens,
+        ):
+            return topk_indices_buffer
         decode_lens = decode_metadata.decode_lens
         if decode_metadata.requires_padding:
             # Padding also covers short chunked prefills classified as decode.
@@ -716,16 +783,34 @@ def sparse_attn_indexer_kpool(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        logits = fp8_fp4_paged_mqa_logits(
-            (padded_q_quant_cast, padded_q_scale),
-            kv_cache,
-            padded_weights[:num_padded_tokens],
-            seq_lens,
-            decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
-            clean_logits=False,
-        )
+        if current_platform.is_rocm():
+            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_fp8_paged_mqa_logits,
+            )
+
+            assert padded_q_scale is None
+            logits = rocm_fp8_paged_mqa_logits(
+                padded_q_quant_cast,
+                kv_cache,
+                padded_weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_model_len,
+            )
+        else:
+            from vllm.utils.deep_gemm import fp8_fp4_paged_mqa_logits
+
+            logits = fp8_fp4_paged_mqa_logits(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                padded_weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_model_len,
+                clean_logits=False,
+            )
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
         # then expand each pool back to its kpool tokens.
@@ -795,7 +880,7 @@ def sparse_attn_indexer_kpool(
                 if dec_seq.ndim == 2:
                     dec_seq = dec_seq[:, -1]
                 dec_seq = dec_seq.to(torch.int32)
-            out = expand_pools_and_append_tail(pool_ids, dec_seq, index_kpool)
+            out = kpool_ops.expand_pools_and_append_tail(pool_ids, dec_seq, index_kpool)
         else:
             out = topk_dst
 
@@ -918,7 +1003,16 @@ class SparseAttnIndexerKpool(CustomOp):
                 positions=positions,
             )
         elif current_platform.is_rocm():
-            return self.forward_hip(hidden_states, q_quant, k, weights)
+            return self.forward_hip(
+                hidden_states,
+                q_quant,
+                k,
+                weights,
+                gate_score=gate_score,
+                compress_ape=compress_ape,
+                index_kpool=index_kpool,
+                positions=positions,
+            )
         else:
             raise NotImplementedError(
                 "SparseAttnIndexer native forward is only implemented for "
@@ -974,27 +1068,43 @@ class SparseAttnIndexerKpool(CustomOp):
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
+        *,
+        gate_score: torch.Tensor | None = None,
+        compress_ape: torch.Tensor | None = None,
+        index_kpool: int = 1,
+        positions: torch.Tensor | None = None,
     ):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
         if rocm_aiter_ops.is_enabled():
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            if index_kpool <= 1:
+                return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+                    hidden_states,
+                    _encode_layer_name(self.k_cache.prefix),
+                    self.k_cache.kv_cache,
+                    q_quant,
+                    k,
+                    weights,
+                    self.quant_block_size,
+                    self.scale_fmt,
+                    self.topk_tokens,
+                    self.head_dim,
+                    self.max_model_len,
+                    self.max_total_seq_len,
+                    self.topk_indices_buffer,
+                    skip_k_cache_insert=self.skip_k_cache_insert,
+                )
+            return self.forward_cuda(
                 hidden_states,
-                _encode_layer_name(self.k_cache.prefix),
-                self.k_cache.kv_cache,
                 q_quant,
                 k,
                 weights,
-                self.quant_block_size,
-                self.scale_fmt,
-                self.topk_tokens,
-                self.head_dim,
-                self.max_model_len,
-                self.max_total_seq_len,
-                self.topk_indices_buffer,
-                skip_k_cache_insert=self.skip_k_cache_insert,
+                gate_score=gate_score,
+                compress_ape=compress_ape,
+                index_kpool=index_kpool,
+                positions=positions,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path is only supported on AITER. "

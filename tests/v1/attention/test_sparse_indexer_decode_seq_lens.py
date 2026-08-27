@@ -18,16 +18,7 @@ expansion consequences via the pure-torch expand/append pair that the fused
 kernel is documented to replicate.
 """
 
-import pytest
 import torch
-
-from vllm.platforms import current_platform
-
-if current_platform.is_rocm() or current_platform.is_xpu():
-    pytest.skip(
-        "GLM-5.3-Flash is not supported on ROCm or XPU.",
-        allow_module_level=True,
-    )
 
 # Bootstrap the glm5next package before entering the indexer module: its
 # kpool_compress import runs glm5next/__init__, which pulls model ->
@@ -41,13 +32,41 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import (  # noqa: E402
 )
 # isort: on
 
+import vllm.model_executor.layers.sparse_attn_indexer_kpool as indexer_mod
 from vllm.model_executor.layers.sparse_attn_indexer_kpool import (
     _decode_topk_seq_lens,
+    _fill_short_decode_causal_indices,
 )
+from vllm.platforms import current_platform
 
 KPOOL = 4
 TOPK_TOKENS = 16
 SELECT_K = TOPK_TOKENS // KPOOL
+
+
+def test_kpool_ops_dispatch_matches_platform():
+    expected_backend = ".amd." if current_platform.is_rocm() else ".nvidia."
+    assert expected_backend in indexer_mod.kpool_ops.__name__
+
+
+def test_short_decode_fills_exact_causal_rows():
+    topk = torch.full((3, 8), 99, dtype=torch.int32)
+    positions = torch.tensor([0, 3, 7], dtype=torch.int64)
+
+    assert _fill_short_decode_causal_indices(topk, positions, 3, 8, 8)
+    assert topk.tolist() == [
+        [0, -1, -1, -1, -1, -1, -1, -1],
+        [0, 1, 2, 3, -1, -1, -1, -1],
+        [0, 1, 2, 3, 4, 5, 6, 7],
+    ]
+
+
+def test_short_decode_leaves_buffer_unchanged_for_sparse_context():
+    topk = torch.full((2, 8), 99, dtype=torch.int32)
+    before = topk.clone()
+
+    assert not _fill_short_decode_causal_indices(topk, torch.tensor([7, 8]), 2, 9, 8)
+    assert torch.equal(topk, before)
 
 
 def make_non_uniform_batch():

@@ -28,17 +28,28 @@ import math
 import pytest
 import torch
 
-from vllm.models.glm5next.nvidia.ops.kpool_compress import (
-    kpool_compress_and_write_cache,
-    kpool_decode_update_and_maybe_write_cache_batched,
-)
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.models.glm5next.amd.ops.kpool_compress import (
+        kpool_compress_and_write_cache,
+        kpool_decode_update_and_maybe_write_cache_batched,
+        kpool_seed_tail_cache,
+    )
+else:
+    from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+        kpool_compress_and_write_cache,
+        kpool_decode_update_and_maybe_write_cache_batched,
+        kpool_seed_tail_cache,
+    )
 
 HEAD_DIM = 128
 POOL_SIZE = 16
 PAGE_SIZE = 64
 NUM_BLOCKS = 32
 ROUND_SCALE = True
-FP8_MAX = 448.0
+FP8_DTYPE = current_platform.fp8_dtype()
+FP8_MAX = torch.finfo(FP8_DTYPE).max
 
 
 def _make_caches():
@@ -176,17 +187,25 @@ def _torch_reference(
                     scale = torch.exp2(torch.ceil(torch.log2(absmax / FP8_MAX)))
                 else:
                     scale = absmax / FP8_MAX
-                quantized = torch.clamp(x / scale, -FP8_MAX, FP8_MAX).to(
-                    torch.float8_e4m3fn
-                )
+                quantized = torch.clamp(x / scale, -FP8_MAX, FP8_MAX).to(FP8_DTYPE)
                 # write K and scale at the separated-layout offsets
                 loc = cache_loc
                 loc_page_index = loc // PAGE_SIZE
                 loc_tok = loc % PAGE_SIZE
                 page_base = loc_page_index * page_bytes
-                k_off = page_base + loc_tok * HEAD_DIM
+                if current_platform.is_rocm():
+                    dims = torch.arange(HEAD_DIM)
+                    k_off = (
+                        page_base
+                        + (loc_tok // 16) * 16 * HEAD_DIM
+                        + (dims // 16) * 16 * 16
+                        + (loc_tok % 16) * 16
+                        + dims % 16
+                    )
+                else:
+                    k_off = page_base + loc_tok * HEAD_DIM + torch.arange(HEAD_DIM)
                 s_off = page_base + k_region + loc_tok * 4
-                kv_flat[k_off : k_off + HEAD_DIM] = quantized.view(torch.uint8)
+                kv_flat[k_off] = quantized.view(torch.uint8)
                 kv_flat[s_off : s_off + 4] = scale.detach().reshape(1).view(torch.uint8)
 
             # stash -- gated on the TOKEN-granular tail slot, not on pos_valid.
@@ -212,6 +231,46 @@ def _assert_eq(r_ref, r_kern):
         "tail_kv_cache differs: max diff "
         f"{(tail_ref.float() - tail_kern.float()).abs().max().item()}"
     )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_amd_prefill_writer_uses_preshuffled_cache_layout():
+    from vllm.models.glm5next.amd.ops.kpool_compress import (
+        kpool_compress_and_write_cache as amd_kpool_compress,
+    )
+
+    torch.manual_seed(0)
+    token_offset = 17
+    kv = torch.zeros(1, PAGE_SIZE, HEAD_DIM + 4, dtype=torch.uint8, device="cuda")
+    key = torch.randn(1, POOL_SIZE, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    score = torch.randn_like(key)
+    ape = torch.randn(POOL_SIZE, HEAD_DIM, dtype=torch.float32, device="cuda")
+    compressed_k, compressed_scale = amd_kpool_compress(
+        kv,
+        key,
+        score,
+        ape,
+        torch.tensor([token_offset], dtype=torch.int64, device="cuda"),
+        pool_size=POOL_SIZE,
+        head_dim=HEAD_DIM,
+        round_scale=ROUND_SCALE,
+        return_compressed=True,
+    )
+
+    dim = torch.arange(HEAD_DIM, device="cuda")
+    offsets = (
+        (token_offset // 16) * 16 * HEAD_DIM
+        + (dim // 16) * 16 * 16
+        + (token_offset % 16) * 16
+        + dim % 16
+    )
+    flat = kv.view(torch.uint8).reshape(-1)
+    stored_k = flat[offsets].view(compressed_k.dtype)
+    scale_offset = PAGE_SIZE * HEAD_DIM + token_offset * 4
+    stored_scale = flat[scale_offset : scale_offset + 4].view(torch.float32)
+
+    assert torch.equal(stored_k, compressed_k[0])
+    assert torch.equal(stored_scale, compressed_scale)
 
 
 def _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos):
@@ -323,6 +382,44 @@ def test_leading_invalid_tail_slot():
     r_ref = _torch_reference(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     r_kern = _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     _assert_eq(r_ref, r_kern)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_amd_prefill_seed_honors_padded_tail_block_stride():
+    """The tail shares a padded indexer allocation in production."""
+    kpool = 4
+    num_blocks = 6
+    logical_block_elems = 2 * kpool * HEAD_DIM
+    padded_block_elems = logical_block_elems + 256
+    sentinel = -123.0
+    backing = torch.full(
+        (num_blocks * padded_block_elems,),
+        sentinel,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    tail = torch.as_strided(
+        backing,
+        size=(num_blocks, 2, kpool, HEAD_DIM),
+        stride=(padded_block_elems, kpool * HEAD_DIM, HEAD_DIM, 1),
+    )
+
+    block = 3
+    ring_slot = 2
+    key = torch.arange(HEAD_DIM, dtype=torch.bfloat16, device="cuda").unsqueeze(0)
+    score = (key + 256).to(torch.bfloat16)
+    tail_slot = torch.tensor(
+        [block * kpool + ring_slot], dtype=torch.int32, device="cuda"
+    )
+
+    kpool_seed_tail_cache(tail, key, score, tail_slot, kpool, HEAD_DIM)
+    torch.accelerator.synchronize()
+
+    assert torch.equal(tail[block, 0, ring_slot], key[0])
+    assert torch.equal(tail[block, 1, ring_slot], score[0])
+
+    compact_offset = (block * 2 * kpool + ring_slot) * HEAD_DIM
+    assert torch.all(backing[compact_offset : compact_offset + HEAD_DIM] == sentinel)
 
 
 @pytest.mark.parametrize(

@@ -3374,7 +3374,7 @@ class rocm_aiter_ops:
         # AITER's Python wrapper allocates intermediate/output tensors without
         # explicit device arguments, so run it under the residual tensor's device.
         with torch.device(residual_flat.device):
-            post_mix, comb_mix, layer_input = mhc_pre(
+            args = (
                 residual_flat,
                 fn,
                 hc_scale,
@@ -3384,9 +3384,11 @@ class rocm_aiter_ops:
                 hc_sinkhorn_eps,
                 hc_post_mult_value,
                 sinkhorn_repeat,
-                norm_weight,
-                norm_eps,
             )
+            if norm_weight is None:
+                post_mix, comb_mix, layer_input = mhc_pre(*args)
+            else:
+                post_mix, comb_mix, layer_input = mhc_pre(*args, norm_weight, norm_eps)
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
@@ -3536,23 +3538,26 @@ class rocm_aiter_ops:
                 ),
             )
 
+        args = (
+            x_flat,
+            residual_flat,
+            post_flat,
+            comb_flat,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
         with torch.device(residual_flat.device):
-            post_mix, comb_mix, layer_input, next_residual = mhc_fused_post_pre(
-                x_flat,
-                residual_flat,
-                post_flat,
-                comb_flat,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-                norm_weight,
-                norm_eps,
-            )
+            if norm_weight is None:
+                result = mhc_fused_post_pre(*args)
+            else:
+                result = mhc_fused_post_pre(*args, norm_weight, norm_eps)
+            post_mix, comb_mix, layer_input, next_residual = result
 
         return (
             next_residual.view_as(residual),
