@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import os
+import threading
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
@@ -28,6 +29,7 @@ _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_text",
     "qwen3_5_moe_text",
 }
+_BLOCK_SIZE_MULTIPLE_LOCK = threading.Lock()
 
 
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
@@ -323,6 +325,42 @@ def set_num_sms(num_sms: int) -> None:
     dg.set_num_sms(num_sms)
 
 
+def supports_block_size_multiple_of() -> bool:
+    """Return whether DeepGEMM exposes block-size candidate constraints."""
+    _lazy_init()
+    dg = _import_deep_gemm()
+    return dg is not None and hasattr(dg, "set_block_size_multiple_of")
+
+
+@contextlib.contextmanager
+def _block_size_multiple_scope(
+    value: list[int] | tuple[int, int] | None,
+):
+    """Apply a block-size constraint for one normal GEMM launch.
+
+    DeepGEMM exposes only a process-wide setter, so all normal GEMM launches
+    are serialized and constrained calls restore the default before returning.
+    """
+    with _BLOCK_SIZE_MULTIPLE_LOCK:
+        if value is None:
+            yield
+            return
+
+        assert len(value) == 2
+        value = tuple(value)
+        if any(multiple <= 0 for multiple in value):
+            raise ValueError("block-size multiples must be positive")
+
+        dg = _import_deep_gemm()
+        if dg is None or not hasattr(dg, "set_block_size_multiple_of"):
+            raise RuntimeError("DeepGEMM block-size constraints are not available")
+        dg.set_block_size_multiple_of(value)
+        try:
+            yield
+        finally:
+            dg.set_block_size_multiple_of((1, 1))
+
+
 def get_mk_alignment_for_contiguous_layout() -> list[int]:
     _lazy_init()
     if _get_mk_alignment_for_contiguous_layout_impl is None:
@@ -461,7 +499,9 @@ def fp8_gemm_nt(*args, **kwargs):
         del kwargs["is_deep_gemm_e8m0_used"]
     else:
         use_ue8m0 = is_deep_gemm_e8m0_used()
-    return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
+    block_size_multiple_of = kwargs.pop("block_size_multiple_of", None)
+    with _block_size_multiple_scope(block_size_multiple_of):
+        return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
 def fp8_einsum(*args, **kwargs):
@@ -783,6 +823,7 @@ __all__ = [
     "is_deep_gemm_supported",
     "get_num_sms",
     "set_num_sms",
+    "supports_block_size_multiple_of",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
