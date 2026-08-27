@@ -559,6 +559,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -699,6 +700,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     if attn_metadata is not None
                     else None,
                     self.use_pcp,
+                    pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -1279,6 +1281,7 @@ def unified_mla_kv_cache_update(
             layer_slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
             attn_layer.use_pcp,
+            pcp_shard_decode_requests=attn_layer.pcp_shard_decode_requests,
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,

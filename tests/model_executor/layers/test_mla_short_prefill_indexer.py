@@ -163,6 +163,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
             topk_indices,
             False,
             False,
+            False,
             dense_mha_layer,
         )
 

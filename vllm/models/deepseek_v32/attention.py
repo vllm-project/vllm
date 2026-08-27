@@ -450,6 +450,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=not self.use_pcp,
                 use_pcp=self.use_pcp,
+                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 dcp_rank=(
                     self.dcp_manager.group.rank_in_group
