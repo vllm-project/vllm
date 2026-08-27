@@ -325,6 +325,24 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+# Apply the existing make_zmq_socket memory policy to every socket owner.
+_ZMQ_LARGE_BUFFER_SIZE = 512 * 1024**2
+_ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY = 32 * 1024**3
+_ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY = 16 * 1024**3
+
+
+def _get_zmq_socket_buffer_size() -> int:
+    """Choose the shared libzmq and inherited-listener buffer policy."""
+    mem = psutil.virtual_memory()
+    if (
+        mem.total > _ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY
+        and mem.available > _ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY
+    ):
+        return _ZMQ_LARGE_BUFFER_SIZE
+    # libzmq interprets -1 as the system default.
+    return -1
+
+
 def make_zmq_socket(
     ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
@@ -340,17 +358,8 @@ def make_zmq_socket(
     When supplied, ``listener`` is detached and its fd moves to libzmq.
     """
 
-    mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
-
-    # Calculate buffer size based on system memory
-    total_mem = mem.total / 1024**3
-    available_mem = mem.available / 1024**3
-    # For systems with substantial memory (>32GB total, >16GB available):
-    # - Set a large 0.5GB buffer to improve throughput
-    # For systems with less memory:
-    # - Use system default (-1) to avoid excessive memory consumption
-    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
+    buf_size = _get_zmq_socket_buffer_size()
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
@@ -411,9 +420,11 @@ def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
 
     listener = socket.socket(family, socket.SOCK_STREAM)
     try:
-        mem = psutil.virtual_memory()
-        if mem.total / 1024**3 > 32 and mem.available / 1024**3 > 16:
-            buf_size = int(0.5 * 1024**3)
+        buf_size = _get_zmq_socket_buffer_size()
+        if buf_size >= 0:
+            # Accepted stream sockets inherit these settings from the listener.
+            # ZMQ_USE_FD adopts this pre-created socket, so the policy belongs
+            # here as well as on the eventual libzmq socket.
             if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buf_size)
             if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):

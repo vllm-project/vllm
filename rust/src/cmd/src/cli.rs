@@ -24,7 +24,7 @@ use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
-use vllm_engine_core_client::{InheritedZmqListener, TransportMode};
+use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
@@ -476,8 +476,8 @@ impl SharedRuntimeArgs {
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
-                input_listener: InheritedZmqListener::new(input_listener_fd),
-                output_listener: InheritedZmqListener::new(output_listener_fd),
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 data_parallel_size,

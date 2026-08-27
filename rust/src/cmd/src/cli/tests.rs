@@ -1731,16 +1731,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
     expect![[r#"
         Config {
             transport_mode: Bootstrapped {
-                input_listener: InheritedZmqListener(
-                    Some(
-                        999999,
-                    ),
-                ),
-                output_listener: InheritedZmqListener(
-                    Some(
-                        999998,
-                    ),
-                ),
+                input_listener_fd: 999999,
+                output_listener_fd: 999998,
                 engine_start_index: 3,
                 engine_count: 1,
                 data_parallel_size: 4,

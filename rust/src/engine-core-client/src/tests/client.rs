@@ -42,7 +42,7 @@ use crate::test_utils::{
 };
 use crate::{
     CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
-    Error, InheritedZmqListener, TransportMode,
+    Error, TransportMode,
 };
 
 static TRACING: Once = Once::new();
@@ -300,17 +300,17 @@ fn bootstrapped_test_config(
     client_index: u32,
     coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
-    fn listener(address: &str) -> InheritedZmqListener {
+    fn listener(address: &str) -> i32 {
         let path = address.strip_prefix("ipc://").expect("bootstrapped tests use IPC listeners");
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path).expect("bind inherited test listener");
-        InheritedZmqListener::new(listener.into_raw_fd())
+        listener.into_raw_fd()
     }
 
     EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
-            input_listener: listener(&input_address),
-            output_listener: listener(&output_address),
+            input_listener_fd: listener(&input_address),
+            output_listener_fd: listener(&output_address),
             engine_start_index: 0,
             engine_count,
             data_parallel_size: engine_count,

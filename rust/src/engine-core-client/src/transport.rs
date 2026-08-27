@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
-use std::os::fd::OwnedFd;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::time::Duration;
 
@@ -329,8 +329,8 @@ pub async fn connect_handshake(
 /// identities are synthesized from contiguous rank order instead of being
 /// discovered through a Rust-owned handshake.
 pub async fn connect_bootstrapped(
-    input_listener: OwnedFd,
-    output_listener: OwnedFd,
+    input_listener_fd: RawFd,
+    output_listener_fd: RawFd,
     engine_start_index: u32,
     engine_count: usize,
     ready_timeout: Duration,
@@ -356,12 +356,16 @@ pub async fn connect_bootstrapped(
     }
 
     let mut input_socket = RouterSocket::new();
-    let input_address =
-        input_socket.bind_listener(adopt_listener(input_listener)?).await?.to_string();
+    let input_address = input_socket
+        .bind_listener(adopt_listener(input_listener_fd)?)
+        .await?
+        .to_string();
 
     let mut output_socket = PullSocket::new();
-    let output_address =
-        output_socket.bind_listener(adopt_listener(output_listener)?).await?.to_string();
+    let output_address = output_socket
+        .bind_listener(adopt_listener(output_listener_fd)?)
+        .await?
+        .to_string();
 
     let engines = wait_for_input_registrations(
         &mut input_socket,
@@ -389,7 +393,17 @@ pub async fn connect_bootstrapped(
     })
 }
 
-fn adopt_listener(fd: OwnedFd) -> Result<zeromq::Listener> {
+fn adopt_listener(fd: RawFd) -> Result<zeromq::Listener> {
+    if fd < 0 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(Error::InvalidClientConfig {
+            message: format!("inherited ZMQ listener fd {fd} is not open"),
+        });
+    }
+
+    // SAFETY: Python's Popen(pass_fds) gives the frontend its own descriptor.
+    // The bootstrapped startup path calls this function once per descriptor,
+    // transferring ownership to the listener constructed below.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let socket: socket2::Socket = fd.into();
     let domain = socket.domain()?;
     socket.set_nonblocking(true)?;
@@ -630,6 +644,8 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::IntoRawFd;
+
     use zeromq::RouterSocket;
     use zeromq::prelude::Socket;
 
@@ -652,7 +668,9 @@ mod tests {
         let mut router = RouterSocket::new();
 
         let endpoint = router
-            .bind_listener(adopt_listener(listener.into()).expect("adopt listener"))
+            .bind_listener(
+                adopt_listener(listener.into_raw_fd()).expect("adopt inherited listener fd"),
+            )
             .await
             .expect("bind inherited listener");
 
