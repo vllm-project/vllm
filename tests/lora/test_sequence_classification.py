@@ -73,7 +73,7 @@ def test_native_classification_model_with_modules_to_save(
         runner="pooling",
         dtype="float16",
         enable_lora=True,
-        max_lora_rank=4,
+        max_lora_rank=8,
         enforce_eager=True,
         max_model_len=512,
         gpu_memory_utilization=0.5,

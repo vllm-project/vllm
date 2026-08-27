@@ -20,20 +20,18 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
     ) -> None:
         # Preserve ordinary LoRA A/B support for classification heads.
         super().create_lora_weights(max_loras, lora_config, model_config)
-        dtype = self.base_layer.params_dtype
-
         self.full_weight_stacked = torch.zeros(
             max_loras,
             1,
             self.output_size,
             self.input_size,
-            dtype=dtype,
+            dtype=lora_config.lora_dtype,
             device=self.device,
         )
         self.full_bias_stacked = torch.zeros(
             max_loras,
             self.output_size,
-            dtype=dtype,
+            dtype=self.base_layer.params_dtype,
             device=self.device,
         )
         self.full_module_enabled = torch.zeros(
@@ -64,7 +62,7 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
 
         full_output = self.punica_wrapper.apply_lora_full_linear(
             output,
-            input_,
+            input_.to(self.full_weight_stacked.dtype),
             self.full_weight_stacked,
             self.full_bias_stacked,
             self.full_module_enabled,
@@ -84,7 +82,11 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
 
         # Classification outputs are request-level, so use prompt-based LoRA routing.
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            output, x, self.lora_a_stacked[0], self.lora_b_stacked[0], 1.0
+            output,
+            x.to(self.lora_a_stacked[0].dtype),
+            self.lora_a_stacked[0],
+            self.lora_b_stacked[0],
+            1.0,
         )
         if not current_platform.can_update_inplace():
             output = lora_output
