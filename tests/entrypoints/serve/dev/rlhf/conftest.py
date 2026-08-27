@@ -28,6 +28,9 @@ import requests
 # ---------------------------------------------------------------------------
 
 
+MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
+
+
 _BASE_ARGS = [
     "--dtype",
     "bfloat16",
@@ -37,6 +40,7 @@ _BASE_ARGS = [
     "32",
     "--gpu-memory-utilization",
     "0.75",
+    "--enforce-eager",
 ]
 
 
@@ -51,6 +55,7 @@ _DUMMY_ARGS = [
     "8",
     "--gpu-memory-utilization",
     "0.5",
+    "--enforce-eager",
     "--load-format",
     "dummy",
 ]
@@ -93,9 +98,8 @@ def server(
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
 
-    The vLLM defaults apply unless the caller opts in via ``extra_args``
-    (e.g. pass ``--enforce-eager`` for eager execution; otherwise the
-    default ``-O2`` CUDA-graph configuration is used).
+    The base args pin eager execution (``--enforce-eager``); callers can
+    add further flags via ``extra_args``.
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
