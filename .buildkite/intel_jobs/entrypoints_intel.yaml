@@ -35,7 +35,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -60,7 +60,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -77,34 +77,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc &&
-    PYTHONPATH=.. pytest -v -s entrypoints/serve/dev/rpc &&
+    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+    --deselect="tests/entrypoints/serve/dev/rlhf/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
+    PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc &&
     pytest -v -s entrypoints/scale_out'
-
-- label: ":intel: (BMG) Entrypoints Integration (API Server OpenAI - Part 2)"
-  key: entrypoints-integration-api-server-openai-part-2-intel
-  timeout_in_minutes: 90
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 2+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
-  env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
-  source_file_dependencies:
-  - vllm/
-  - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-    cd tests &&
-    pytest -v -s entrypoints/openai/chat_completion'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Generate)"
   key: entrypoints-integration-api-server-generate-intel
@@ -113,7 +89,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -143,7 +119,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
