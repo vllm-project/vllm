@@ -449,10 +449,12 @@ class MossTranscribeDiarizeDummyInputsBuilder(
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
         num_audios = mm_counts.get("audio", 0)
         tokenizer = self.info.get_tokenizer()
-        prompt = tokenizer.encode(
+        prompt = cached_encode(
+            tokenizer,
             AUDIO_PLACEHOLDER * num_audios,
             add_special_tokens=False,
-        ) or tokenizer.encode(
+        ) or cached_encode(
+            tokenizer,
             "\n",
             add_special_tokens=False,
         )
