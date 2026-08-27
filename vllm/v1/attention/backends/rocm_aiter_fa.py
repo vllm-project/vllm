@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -496,13 +497,14 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        # Only copy seq_lens to CPU when prefill or extend is present to avoid a
-        # blocking device→host transfer.
-        seq_lens = (
-            common_attn_metadata.seq_lens.cpu()
-            if num_prefills > 0 or num_extends > 0
-            else None
-        )
+        with gpu_sync_allowed():
+            # Only copy seq_lens to CPU when prefill or extend is present to avoid a
+            # blocking device→host transfer.
+            seq_lens = (
+                common_attn_metadata.seq_lens.cpu()
+                if num_prefills > 0 or num_extends > 0
+                else None
+            )
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
