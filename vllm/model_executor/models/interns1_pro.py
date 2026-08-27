@@ -545,7 +545,7 @@ class InternS1ProForConditionalGeneration(
     Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
     is_3d_moe_weight: ClassVar[bool] = True
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -587,7 +587,7 @@ class InternS1ProForConditionalGeneration(
 
         # Whether to include the gate_up_proj mapping is determined by
         # the language model.
-        self.packed_modules_mapping = (  # type: ignore[misc]
+        self.packed_modules_mapping = (
             self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
 

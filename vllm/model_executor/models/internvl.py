@@ -10,7 +10,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Annotated, Any, Literal, TypeAlias, TypeVar, cast
+from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
 
 import torch
 import torch.nn as nn
@@ -126,6 +126,11 @@ class InternVLVideoEmbeddingInputs(TensorSchema):
 
 
 InternVLVideoInputs: TypeAlias = InternVLVideoPixelInputs | InternVLVideoEmbeddingInputs
+
+
+class InternVLMultiModalInputs(TypedDict, total=False):
+    images: InternVLImageInputs | None
+    videos: InternVLVideoInputs | None
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):
@@ -433,7 +438,10 @@ class InternVLDummyInputsBuilder(
                 seq_len, mm_counts
             )
             num_videos = mm_counts.get("video", 0)
-            video_overrides = cast(VideoDummyOptions | None, mm_options.get("video"))
+            video_overrides = mm_options.get("video")
+            assert video_overrides is None or isinstance(
+                video_overrides, VideoDummyOptions
+            )
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=image_size,
@@ -807,8 +815,8 @@ class InternVLChatModel(
 
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
-    ) -> dict[str, InternVLImageInputs | InternVLVideoInputs | None]:
-        modalities: dict[str, InternVLImageInputs | InternVLVideoInputs | None] = {}
+    ) -> InternVLMultiModalInputs:
+        modalities: InternVLMultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -836,13 +844,15 @@ class InternVLChatModel(
         # to preserve the order of the modalities.
         for modality in modalities:
             if modality == "images":
-                image_input = cast(InternVLImageInputs, modalities["images"])
-                image_embeddings = self._process_vision_input(image_input)
-                multimodal_embeddings += tuple(image_embeddings)
+                image_input = modalities["images"]
+                if image_input is not None:
+                    image_embeddings = self._process_vision_input(image_input)
+                    multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
-                video_input = cast(InternVLVideoInputs, modalities["videos"])
-                video_embeddings = self._process_vision_input(video_input)
-                multimodal_embeddings += tuple(video_embeddings)
+                video_input = modalities["videos"]
+                if video_input is not None:
+                    video_embeddings = self._process_vision_input(video_input)
+                    multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 

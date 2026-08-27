@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import numpy as np
 import torch
@@ -44,7 +44,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -902,8 +901,10 @@ class IsaacForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                mm_data = cast(MultiModalKwargsItem, mm_feature.data)
-                grid_thw = cast(torch.Tensor, mm_data["image_grid_thw"].data)
+                mm_data = mm_feature.data
+                assert mm_data is not None
+                grid_thw = mm_data["image_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
                 t, h, w = grid_thw.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, h // spatial_merge_size, w // spatial_merge_size

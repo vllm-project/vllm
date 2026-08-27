@@ -19,7 +19,6 @@ from typing import (
     Literal,
     Protocol,
     TypeAlias,
-    cast,
     overload,
     runtime_checkable,
 )
@@ -33,6 +32,7 @@ from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces_base import VllmModel, is_vllm_model
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
@@ -50,7 +50,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-    from vllm.model_executor.models.interfaces_base import VllmModel
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
@@ -256,7 +255,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             torch.nn.Module: The core language model component.
         """
         # Cached
-        self_module = cast(nn.Module, self)
+        assert isinstance(self, nn.Module)
+        self_module = self
         if self_module in _language_model_by_module:
             return _language_model_by_module[self_module]
 
@@ -268,17 +268,17 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                 if attr:
                     mod = getattr(mod, attr)
 
-            if mod is not self_module and hasattr(mod, "embed_input_ids"):
-                language_model = cast("VllmModel", mod)
-                _language_model_by_module[self_module] = language_model
-                return language_model
+            candidate: object = mod
+            if candidate is not self_module and is_vllm_model(candidate):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         # Fallback
         for mod in self_module.children():
-            if hasattr(mod, "embed_input_ids"):
-                language_model = cast("VllmModel", mod)
-                _language_model_by_module[self_module] = language_model
-                return language_model
+            candidate = mod
+            if is_vllm_model(candidate):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
@@ -694,7 +694,7 @@ class SupportsLoRA(Protocol):
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None"
@@ -1195,7 +1195,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     hf_to_vllm_mapper: "WeightsMapper | None" = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]]]
+    packed_modules_mapping: dict[str, list[str]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:

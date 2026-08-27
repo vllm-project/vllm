@@ -7,7 +7,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias, cast
+from typing import Annotated, Literal, TypeAlias, TypedDict
 
 import regex as re
 import torch
@@ -146,6 +146,11 @@ class InternS1VideoEmbeddingInputs(TensorSchema):
 
 
 InternS1VideoInputs: TypeAlias = InternS1VideoPixelInputs | InternS1VideoEmbeddingInputs
+
+
+class InternS1MultiModalInputs(TypedDict, total=False):
+    images: InternS1ImageInputs | None
+    videos: InternS1VideoInputs | None
 
 
 def resolve_interns1_min_max_num(
@@ -311,7 +316,8 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         image_size_h, image_size_w = config.vision_config.image_size
 
         image_overrides = mm_options.get("image")
-        video_overrides = cast(VideoDummyOptions | None, mm_options.get("video"))
+        video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -760,8 +766,8 @@ class InternS1ForConditionalGeneration(
 
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
-    ) -> dict[str, InternS1ImageInputs | InternS1VideoInputs | None]:
-        modalities: dict[str, InternS1ImageInputs | InternS1VideoInputs | None] = {}
+    ) -> InternS1MultiModalInputs:
+        modalities: InternS1MultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -792,13 +798,15 @@ class InternS1ForConditionalGeneration(
         # to preserve the order of the modalities.
         for modality in modalities:
             if modality == "images":
-                image_input = cast(InternS1ImageInputs, modalities["images"])
-                image_embeddings = self._process_vision_input(image_input)
-                multimodal_embeddings += tuple(image_embeddings)
+                image_input = modalities["images"]
+                if image_input is not None:
+                    image_embeddings = self._process_vision_input(image_input)
+                    multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
-                video_input = cast(InternS1VideoInputs, modalities["videos"])
-                video_embeddings = self._process_vision_input(video_input)
-                multimodal_embeddings += tuple(video_embeddings)
+                video_input = modalities["videos"]
+                if video_input is not None:
+                    video_embeddings = self._process_vision_input(video_input)
+                    multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 

@@ -475,7 +475,8 @@ class HYV3Model(nn.Module, MixtureOfExperts):
 
             assert isinstance(layer, HYV3DecoderLayer)
             if layer.block_type == "moe":
-                example_layer = typing.cast(HYV3MoEFused, layer.mlp)
+                assert isinstance(layer.mlp, HYV3MoEFused)
+                example_layer = layer.mlp
                 self.moe_layers.append(example_layer.experts)
 
         if example_layer is None:

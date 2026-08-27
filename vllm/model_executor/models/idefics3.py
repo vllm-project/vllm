@@ -17,7 +17,7 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias, cast
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -600,9 +600,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        image_features = self._process_image_pixels(
-            cast(Idefics3ImagePixelInputs, image_input)
-        )
+        assert isinstance(image_input, Idefics3ImagePixelInputs)
+        image_features = self._process_image_pixels(image_input)
         image_features = self.model.connector(image_features)
 
         num_patches = image_input["num_patches"]
