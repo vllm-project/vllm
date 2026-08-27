@@ -154,7 +154,10 @@ class ParserEngineToolAdapter(ToolParser):
     owning :class:`~vllm.parser.abstract_parser.Parser` sets
     :attr:`skip_reasoning_parsing` so reasoning markup — plain content
     in that configuration — passes through verbatim instead of being
-    consumed or reclassified by the engine.
+    consumed or reclassified by the engine. The engine honors the flag
+    only for markers that are reasoning-exclusive in its config; a
+    grammar like Inkling, whose block closer is shared with text and
+    tool blocks, keeps parsing unchanged.
 
     Subclasses set :attr:`_parser_engine_cls` to the concrete
     :class:`ParserEngine` class.

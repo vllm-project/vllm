@@ -164,6 +164,10 @@ class StreamingParserEngine:
             if state in self._TOOL_STATES and tr.next_state not in self._TOOL_STATES
         )
 
+        self._reasoning_markup_terminals: frozenset[str] = (
+            self._compute_reasoning_markup_terminals()
+        )
+
         self.skip_tool_parsing = False
         self.skip_reasoning_parsing = False
         self.reset(initial_state=initial_state)
@@ -359,7 +363,36 @@ class StreamingParserEngine:
         }
     )
 
-    _REASONING_TERMINALS = frozenset({"THINK_START", "THINK_END"})
+    _PLAIN_STATES = frozenset({ParserState.CONTENT, ParserState.REASONING})
+
+    _REASONING_EVENTS = frozenset({EventType.REASONING_START, EventType.REASONING_END})
+
+    def _compute_reasoning_markup_terminals(self) -> frozenset[str]:
+        """Terminals the ``skip_reasoning_parsing`` bypass may neutralize.
+
+        Only reasoning-exclusive markers qualify: every transition they
+        participate in stays within CONTENT/REASONING and emits nothing
+        but reasoning events. Inkling's ``<|end_message|>`` is labelled
+        THINK_END yet also closes text, header, and tool blocks;
+        bypassing a shared marker would eat that structure, so one impure
+        marker disables the bypass for the whole config.
+        """
+        markers = frozenset(
+            terminal
+            for (state, terminal), tr in self.config.transitions.items()
+            if ParserState.REASONING in (state, tr.next_state)
+            and tr.next_state not in self._TOOL_STATES
+        )
+        for (state, terminal), tr in self.config.transitions.items():
+            if terminal not in markers:
+                continue
+            if (
+                state not in self._PLAIN_STATES
+                or tr.next_state not in self._PLAIN_STATES
+                or not self._REASONING_EVENTS.issuperset(tr.events)
+            ):
+                return frozenset()
+        return markers
 
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
@@ -375,7 +408,7 @@ class StreamingParserEngine:
                 self._in_skipped_tool_span = False
             return self._emit_for_state(value, token_count)
 
-        if self.skip_reasoning_parsing and terminal in self._REASONING_TERMINALS:
+        if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
             return self._emit_for_state(value, token_count)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:

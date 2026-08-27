@@ -137,8 +137,10 @@ class Parser:
             and hasattr(self._tool_parser, "skip_reasoning_parsing")
         ):
             # With no reasoning parser configured, reasoning markup is
-            # plain content: an engine-based tool parser must pass it
-            # through verbatim, not consume or reclassify it.
+            # plain content: an engine-based tool parser should pass it
+            # through verbatim where its grammar allows, not consume or
+            # reclassify it. The engine ignores the flag for markers
+            # shared with non-reasoning structure.
             self._tool_parser.skip_reasoning_parsing = True
         self._stream_state = StreamState(
             tool_call_id_type=(
