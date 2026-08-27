@@ -11,15 +11,19 @@ frontend) and
   1. ``test_generate_routed_experts_parallel``: the
      ``/inference/v1/generate`` frontend with TP=2 + DP=2 together on
      the tiny MoE model.
-  2. ``test_completions_routed_experts_models``: ``/v1/completions``,
-     parametrized over layer-reduced Qwen3.5-MoE and DeepSeek-V4-Flash
-     checkpoints with dummy weights (pattern from PR #49555).
+  2. ``test_completions_routed_experts_models``: ``/v1/completions``
+     with the layer-reduced Qwen3.5-MoE / DeepSeek-V4-Flash checkpoints
+     (dummy weights, pattern from PR #49555).
 
 The parallel scenario runs on both model runners (MRV1 / MRV2); the
 model matrix runs on MRV2 only. Every server runs eagerly (the shared
-harness passes ``--enforce-eager``), and validates the decoded payload:
+harness passes ``--enforce-eager``) and validates the decoded payload:
 shape ``(num_tokens, num_layers, num_experts_per_tok)`` with valid
 expert IDs.
+
+The model is chosen by ``VLLM_TEST_MODEL`` (one model per pytest run):
+the parallel scenario expects the tiny MoE model, while the two model
+families each need their own run (select the case with ``-k``).
 """
 
 import io
@@ -38,15 +42,7 @@ import torch
 
 from vllm.utils.network_utils import get_open_port
 
-from ..conftest import SERVED_MODEL_NAME
 from ..conftest import server as _server
-
-# MoE model for the DP/TP scenarios; VLLM_TEST_MODEL overrides it.
-# tiny-mixtral: 8 local experts, top-2 routing, 2 hidden layers. The
-# published config has sliding_window=4096, which produces
-# SlidingWindowSpec kv-cache groups; the routed-experts slot buffer
-# requires a FullAttentionSpec group, so we override sliding_window=null.
-MOE_MODEL = os.environ.get("VLLM_TEST_MODEL", "TitanML/tiny-mixtral")
 
 
 @dataclass(frozen=True)
@@ -75,10 +71,6 @@ REDUCED_OVERRIDES = {
     "num_experts_per_tok": 2,
 }
 
-MODEL_NAMES = [
-    pytest.param("codecho/Qwen3.5-35B-A3B-text-only", id="qwen3.5-moe"),
-    pytest.param("deepseek-ai/DeepSeek-V4-Flash", id="deepseek-v4-flash"),
-]
 
 
 def assert_valid_routed_experts(encoded: str | None, shape: RoutingShape) -> None:
@@ -95,12 +87,12 @@ def assert_valid_routed_experts(encoded: str | None, shape: RoutingShape) -> Non
 
 
 @contextmanager
-def _launch(model: str, extra_args: list[str], use_v2: bool):
+def _launch(extra_args: list[str], use_v2: bool):
     """Start one server for the given runner; yield its base URL."""
     env_vars = {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0"}
     with (
         patch.dict(os.environ, env_vars),
-        _server(model, extra_args=extra_args, port=get_open_port()) as url,
+        _server(extra_args=extra_args, port=get_open_port()) as url,
     ):
         yield url
 
@@ -110,9 +102,13 @@ def use_v2(request):
     return request.param
 
 
+# The parallel scenario expects a tiny MoE model (e.g. TitanML/tiny-mixtral:
+# 8 experts, top-2, 2 layers). Its published sliding_window=4096 produces
+# SlidingWindowSpec kv-cache groups, while the routed-experts slot buffer
+# requires a FullAttentionSpec group, so we override sliding_window=null.
 @pytest.fixture(scope="module")
 def scale_out_server(use_v2):
-    """TITO server with TP=2 + DP=2 (needs 4 GPUs)."""
+    """TITO server with TP=2 + DP=2 (needs 4 GPUs; model via VLLM_TEST_MODEL)."""
     if torch.cuda.device_count() < 4:
         pytest.skip("TP2+DP2 scenario needs 4 GPUs")
     extra_args = [
@@ -124,13 +120,18 @@ def scale_out_server(use_v2):
         "--data-parallel-size",
         "2",
     ]
-    with _launch(MOE_MODEL, extra_args, use_v2) as url:
+    with _launch(extra_args, use_v2) as url:
         yield url
 
 
-@pytest.fixture(scope="module", params=MODEL_NAMES)
-def models_server(request):
-    """Completions server per layer-reduced model, MRV2 only (dummy weights)."""
+@pytest.fixture(scope="module")
+def models_server():
+    """Completions server for the VLLM_TEST_MODEL model, MRV2 only.
+
+    Intended for the layer-reduced model families (Qwen3.5-MoE /
+    DeepSeek-V4-Flash) with dummy weights; run once per model with
+    VLLM_TEST_MODEL set (select the case with -k).
+    """
     extra_args = [
         "--enable-return-routed-experts",
         "--load-format",
@@ -138,7 +139,7 @@ def models_server(request):
         "--hf-overrides",
         json.dumps(REDUCED_OVERRIDES),
     ]
-    with _launch(request.param, extra_args, True) as url:
+    with _launch(extra_args, True) as url:
         yield url
 
 
@@ -148,7 +149,7 @@ class TestRoutedExperts:
     def test_generate_routed_experts_parallel(self, scale_out_server):
         """/inference/v1/generate returns routed_experts under TP/DP."""
         payload = {
-            "model": SERVED_MODEL_NAME,
+            "model": "m",
             "token_ids": [1, 2, 3],
             "sampling_params": {"max_tokens": 10, "temperature": 0.0},
             "stream": False,
@@ -169,7 +170,7 @@ class TestRoutedExperts:
         response = openai.OpenAI(
             base_url=f"{models_server}/v1", api_key="EMPTY", max_retries=0
         ).completions.create(
-            model=SERVED_MODEL_NAME,
+            model="m",
             prompt="Hello, world",
             max_tokens=10,
             temperature=0,
