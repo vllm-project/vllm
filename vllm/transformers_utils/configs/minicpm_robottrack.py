@@ -36,6 +36,8 @@ class MiniCPMRobotTrackConfig(PretrainedConfig):
         siglip_model: str = "google/siglip-so400m-patch14-384",
         image_size: int = 384,
         frame_cache_size: int = 64,
+        pixel_cache_size: int = 64,
+        max_cached_streams: int = 8,
         **kwargs: Any,
     ) -> None:
         self.backbone_config = self._wrap_backbone_config(backbone_config)
@@ -63,6 +65,16 @@ class MiniCPMRobotTrackConfig(PretrainedConfig):
         # tower encodes each unique frame once and reuses its pooled features
         # across the sliding window; set to 0 to disable (re-encode every step).
         self.frame_cache_size = int(frame_cache_size)
+        # Bound of the CPU-side per-frame normalized-pixel cache (pixels-in
+        # path). Resizing + normalizing is re-done every step for the whole
+        # window, so history frames are served from this cache and only the new
+        # frame is processed. Set to 0 to disable (re-process every step).
+        self.pixel_cache_size = int(pixel_cache_size)
+        # Bound of the stateful stream cache (pixels-in path). A stream keeps
+        # its rolling 31-frame coarse history server-side, so the client sends
+        # only the new frame each step (plus ``stream_id``/``frame_index``).
+        # Entries are evicted LRU when the bound is exceeded.
+        self.max_cached_streams = int(max_cached_streams)
         super().__init__(**kwargs)
 
     @staticmethod
