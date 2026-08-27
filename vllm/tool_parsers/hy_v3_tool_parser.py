@@ -419,12 +419,11 @@ class HYV3ToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         # Encountered tool_calls start tag; extract preceding content and buffer
+        content_delta: str | None = None
         if self.tool_calls_start_token in delta_text:
             text_parts = delta_text.split(self.tool_calls_start_token)
             self._buffer += text_parts[-1]
-            if text_parts[0]:
-                return DeltaMessage(content=text_parts[0])
-            # Don't return None; continue processing buffer for complete content
+            content_delta = text_parts[0] or None
         else:
             self._buffer += delta_text
 
@@ -441,6 +440,8 @@ class HYV3ToolParser(ToolParser):
         # Haven't encountered tool_call start tag yet; keep buffering
         start_idx = cur_text.find(self.tool_call_start_token)
         if start_idx == -1 and self._streaming_tool_name is None:
+            if content_delta is not None:
+                return DeltaMessage(content=content_delta)
             self._buffer = ""
             return None
 
@@ -451,7 +452,9 @@ class HYV3ToolParser(ToolParser):
             if sep_idx == -1:
                 # tool_sep not yet seen; keep buffering from tool_call_start
                 self._buffer = cur_text[start_idx:]
-                return None
+                if content_delta is None:
+                    return None
+                return DeltaMessage(content=content_delta)
 
             # Extract tool name: between tool_call_start_token and tool_sep_token
             name_start = start_idx + len(self.tool_call_start_token)
@@ -476,6 +479,7 @@ class HYV3ToolParser(ToolParser):
                     )
                 ]
             )
+            name_delta.content = content_delta
 
             # Check if buffer already has complete arguments (all-in-one-delta)
             if self.tool_call_end_token not in self._buffer:
@@ -495,6 +499,34 @@ class HYV3ToolParser(ToolParser):
                 )
             ]
         )
+
+    def _drain_calls(self, request: ChatCompletionRequest) -> list[DeltaToolCall]:
+        deltas: list[DeltaToolCall] = []
+        while (start_idx := self._buffer.find(self.tool_call_start_token)) != -1:
+            end_idx = self._buffer.find(self.tool_call_end_token, start_idx)
+            if end_idx == -1:
+                break
+            end_idx += len(self.tool_call_end_token)
+            complete_call = self._buffer[start_idx:end_idx]
+            self._buffer = self._buffer[end_idx:]
+            for call in self._extract_tool_calls(complete_call, request):
+                self.current_tool_id += 1
+                arguments = call.function.arguments
+                self.prev_tool_call_arr.append(
+                    {"name": call.function.name, "arguments": json.loads(arguments)}
+                )
+                self.streamed_args_for_tool.append(arguments)
+                deltas.append(
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        id=make_tool_call_id(),
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name=call.function.name, arguments=arguments
+                        ),
+                    )
+                )
+        return deltas
 
     def _extract_streaming_incremental(
         self,
@@ -632,9 +664,10 @@ class HYV3ToolParser(ToolParser):
                 self._streamed_json_len = end
 
         # --- construct return DeltaMessage ---
+        delta: DeltaMessage | None
         if name_delta is not None and argument_diff:
             nd_func = name_delta.tool_calls[0].function
-            return DeltaMessage(
+            delta = DeltaMessage(
                 tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
@@ -647,9 +680,17 @@ class HYV3ToolParser(ToolParser):
                     )
                 ]
             )
+            delta.content = name_delta.content
         elif name_delta is not None:
-            return name_delta
+            delta = name_delta
         elif argument_diff:
-            return self._make_args_delta(argument_diff)
+            delta = self._make_args_delta(argument_diff)
         else:
-            return None
+            delta = None
+
+        extra_tool_calls = self._drain_calls(request) if is_complete else []
+        if extra_tool_calls:
+            if delta is None:
+                return DeltaMessage(tool_calls=extra_tool_calls)
+            delta.tool_calls.extend(extra_tool_calls)
+        return delta
