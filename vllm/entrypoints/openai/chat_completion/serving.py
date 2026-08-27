@@ -155,6 +155,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self.enable_auto_tools: bool = enable_auto_tools
         self._include_reasoning_tokens_details = bool(reasoning_parser)
+        self._has_reasoning_parser = bool(reasoning_parser)
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -355,15 +356,15 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                if not request.include_reasoning:
-                    reasoning_ended = True
-                elif request._grammar_from_parser:
+                if request._grammar_from_parser:
                     # The Mistral grammar already includes an optional
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.
                     reasoning_ended = True
-                elif parser is not None and parser.reasoning_parser is not None:
+                elif parser is not None and self._has_reasoning_parser:
                     reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
+                elif not request.include_reasoning:
+                    reasoning_ended = True
                 else:
                     reasoning_ended = None
 
