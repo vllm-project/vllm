@@ -824,18 +824,20 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 
     captured = {}
 
-    def _stub_kernel(q, kv, indices, lengths):
+    def _stub_kernel(q, kv, indices, lengths, actual_num_heads):
         captured["indices"] = indices
+        captured["actual_num_heads"] = actual_num_heads
         return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
 
     stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
 
     out = FlashMLASparseImpl._forward_bf16_kv(
-        stub_impl, q, kv_cache, topk_indices, attn_metadata
+        stub_impl, q, kv_cache, topk_indices, attn_metadata, q.shape[1]
     )
 
     assert out.shape[0] == num_mqa_tokens
     assert captured["indices"].shape[0] == num_mqa_tokens
+    assert captured["actual_num_heads"] == q.shape[1]
     reference = _triton_convert_reference_impl(
         attn_metadata.req_id_per_token[:num_mqa_tokens],
         attn_metadata.block_table,
