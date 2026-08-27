@@ -1512,17 +1512,10 @@ class MooncakeStoreWorker:
             )
             return
 
-        # Scale transfer-group specs to the token span used by scheduler-side
-        # hashing. For a single transfer group, use the scheduler block size so
-        # the coordinator's divisibility invariants hold.
+        # Scale transfer-group specs to the token span used under DCP.
         groups = []
-        single_transfer_group = len(kv_cache_config.transfer_groups) == 1
         for group in kv_cache_config.transfer_groups:
-            block_size = (
-                self.block_size
-                if single_transfer_group
-                else resolve_dcp_kv_block_size(group.kv_cache_spec, self.dcp_size)
-            )
+            block_size = resolve_dcp_kv_block_size(group.kv_cache_spec, self.dcp_size)
             if block_size != group.kv_cache_spec.block_size:
                 group = dataclasses.replace(
                     group,
