@@ -48,8 +48,10 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     chunk_kda_with_fused_gate,
-    fused_recurrent_kda,
-    fused_recurrent_kda_packed_decode,
+)
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -63,21 +65,114 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3ROCmKDABackend
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        base = MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
+        if self._use_kda_replayssm():
+            return MambaStateDtypeCalculator.append_kda_replayssm_dtypes(
+                base, self.model_config.dtype
+            )
+        return base
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.kda_state_shape(
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        base = MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
-            num_spec=self.num_spec,
+            num_spec=self.num_spec if not self._use_kda_replayssm() else 0,
         )
+        if self._use_kda_replayssm():
+            assert self.cache_config is not None
+            cache_len = max(
+                self.cache_config.replayssm_buffer_len,
+                2 * (self.num_spec + 1),
+            )
+            return MambaStateShapeCalculator.append_kda_replayssm_buffers(
+                base, cache_len
+            )
+        return base
+
+    def _use_kda_replayssm(self) -> bool:
+        return (
+            current_platform.is_rocm()
+            and self.cache_config is not None
+            and self.cache_config.use_replayssm
+            and self.num_spec > 0
+        )
+
+    def _run_kda_sigmoid_gating(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        metadata: GDNAttentionMetadata,
+        *,
+        cu_seqlens: torch.Tensor,
+        ssm_state_indices: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
+        replayssm_slot_idx: torch.Tensor | None = None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if metadata.replayssm:
+            from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
+                replayssm_sigmoid_gating_delta_rule,
+            )
+
+            assert metadata.write_pos is not None
+            assert metadata.slot_idx is not None
+            slot_idx = (
+                replayssm_slot_idx
+                if replayssm_slot_idx is not None
+                else metadata.slot_idx
+            )
+            conv_state, recurrent_state, buf_k, buf_u, buf_g = self.kv_cache
+            result = replayssm_sigmoid_gating_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                a=gate,
+                b=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                ckpt=recurrent_state,
+                buf_k=buf_k,
+                buf_u=buf_u,
+                buf_g=buf_g,
+                write_pos=metadata.write_pos,
+                slot_idx=slot_idx,
+                cu_seqlens=cu_seqlens,
+                max_query_len=metadata.replayssm_max_query_len,
+                o=out,
+                use_qk_l2norm_in_kernel=True,
+                lower_bound=self.gate_lower_bound,
+            )
+            return result.squeeze(0)
+
+        core_out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=self.A_log,
+            a=gate,
+            b=beta,
+            dt_bias=self.dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            o=out,
+            initial_state=self.kv_cache[1],
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+            is_kda=True,
+            lower_bound=self.gate_lower_bound,
+        )
+        return core_out
 
     def __init__(
         self,
@@ -334,7 +429,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         constant_caches = self.kv_cache
 
-        conv_state, recurrent_state = constant_caches
+        conv_state, recurrent_state = constant_caches[:2]
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
@@ -401,7 +496,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
-            spec_max_query_len = spec_state_indices_tensor.size(-1)
+            spec_max_query_len = (
+                m.replayssm_max_query_len
+                if m.replayssm
+                else spec_state_indices_tensor.size(-1)
+            )
 
             # Sibling beta and, for full-rank gates, output-gate views remain
             # live, so write the convolution output separately.
@@ -434,19 +533,25 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if m.num_prefills == 0 and m.num_decodes == 0
                 else None
             )
-            core_attn_out_spec, _ = fused_recurrent_kda(
+            core_attn_out_spec = self._run_kda_sigmoid_gating(
                 q=q_spec,
                 k=k_spec,
                 v=v_spec,
-                raw_g=g1_spec,
-                raw_beta=beta_spec,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                lower_bound=self.gate_lower_bound,
-                initial_state=recurrent_state,
+                gate=g1_spec,
+                beta=beta_spec,
+                metadata=m,
                 cu_seqlens=spec_cu_seqlens,
-                ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=num_accepted_tokens,
+                ssm_state_indices=(
+                    None if m.replayssm else spec_state_indices_tensor
+                ),
+                num_accepted_tokens=(
+                    None if m.replayssm else num_accepted_tokens
+                ),
+                replayssm_slot_idx=(
+                    m.slot_idx[m.num_decodes : m.num_decodes + m.num_spec_decodes]
+                    if m.replayssm and m.slot_idx is not None
+                    else None
+                ),
                 out=spec_out,
             )
 
@@ -501,20 +606,25 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
-                    core_attn_out_decode, _ = fused_recurrent_kda(
+                    core_attn_out_decode = self._run_kda_sigmoid_gating(
                         q=q_ns[:, :nd_tok],
                         k=k_ns[:, :nd_tok],
                         v=v_ns[:, :nd_tok],
-                        raw_g=g1_ns[:, :nd_tok],
-                        raw_beta=beta_ns[:, :nd_tok],
-                        A_log=self.A_log,
-                        dt_bias=self.dt_bias,
-                        lower_bound=self.gate_lower_bound,
-                        initial_state=recurrent_state,
+                        gate=g1_ns[:, :nd_tok],
+                        beta=beta_ns[:, :nd_tok],
+                        metadata=m,
                         cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
-                        ssm_state_indices=non_spec_state_indices_tensor[
-                            : m.num_decodes
-                        ],
+                        ssm_state_indices=(
+                            None
+                            if m.replayssm
+                            else non_spec_state_indices_tensor[: m.num_decodes]
+                        ),
+                        replayssm_slot_idx=(
+                            m.slot_idx[: m.num_decodes]
+                            if m.replayssm and m.slot_idx is not None
+                            else None
+                        ),
+                        out=None,
                     )
                     q_ns = q_ns[:, nd_tok:]
                     k_ns = k_ns[:, nd_tok:]
@@ -588,15 +698,29 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     validate_data=True,
                     out=packed_conv_out,
                 )
-                core_attn_out_non_spec, _ = fused_recurrent_kda_packed_decode(
-                    mixed_qkv=mixed_qkv_ns,
-                    raw_g=g1_ns,
-                    raw_beta=beta_ns,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    lower_bound=self.gate_lower_bound,
-                    initial_state=recurrent_state,
-                    state_indices=decode_conv_indices,
+                q_ns, k_ns, v_ns = (
+                    rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                    for x in mixed_qkv_ns.split(self.local_projection_size, dim=-1)
+                )
+                core_attn_out_non_spec = self._run_kda_sigmoid_gating(
+                    q=q_ns,
+                    k=k_ns,
+                    v=v_ns,
+                    gate=g1_ns,
+                    beta=beta_ns,
+                    metadata=m,
+                    cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
+                    ssm_state_indices=(
+                        None
+                        if m.replayssm
+                        else decode_conv_indices
+                    ),
+                    replayssm_slot_idx=(
+                        m.slot_idx[: m.num_decodes]
+                        if m.replayssm and m.slot_idx is not None
+                        else None
+                    ),
+                    out=core_attn_out[:, : mixed_qkv_ns.size(0)],
                 )
 
         # ---------- merge spec and non-spec outputs ----------

@@ -93,6 +93,16 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
+    def append_kda_replayssm_dtypes((
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append KDA ReplaySSM record-buffer dtypes (k, u, g)."""
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (*base_dtypes, activation_dtype, activation_dtype, activation_dtype)
+
+        @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -322,6 +332,27 @@ class MambaStateShapeCalculator:
             *base_shapes,
             (local_num_heads, spec_query_len, head_dim),
             (local_num_heads, spec_query_len, 2 * head_dim),
+        )
+
+    @classmethod
+    def append_kda_replayssm_buffers((
+        cls,
+        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
+        replayssm_cache_len: int,
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]:
+        """Append KDA ReplaySSM record buffers (k, u, g) to conv + recurrent."""
+        local_num_heads, head_dim, _ = base_shapes[1]
+        return (
+            *base_shapes,
+            (replayssm_cache_len, local_num_heads, head_dim),
+            (replayssm_cache_len, local_num_heads, head_dim),
+            (replayssm_cache_len, local_num_heads, head_dim),
         )
 
 

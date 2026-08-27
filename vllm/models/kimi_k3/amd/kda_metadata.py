@@ -5,16 +5,22 @@
 The request classification and cudagraph staging intentionally mirror
 ``GDNAttentionMetadataBuilder``. Only the FLA chunk metadata is built
 differently on device rather than on the host.
+
+When ``--use-replayssm`` is enabled on ROCm, KDA speculative decode uses the
+ATOM-style ReplaySSM path (one checkpoint + ring record buffers) instead of
+materializing one recurrent state per draft token.
 """
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 
@@ -86,6 +92,48 @@ def prepare_chunk_metadata_device(
 
 
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    def __init__(
+        self,
+        kv_cache_spec,
+        layer_names: list[str],
+        vllm_config,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        cache_config = vllm_config.cache_config
+        self.use_kda_replayssm = (
+            current_platform.is_rocm()
+            and cache_config.use_replayssm
+            and self.use_spec_decode
+        )
+        self.replayssm_max_query_len = self.num_spec + 1
+        self.replayssm_cache_len = 0
+        if self.use_kda_replayssm:
+            requested = cache_config.replayssm_buffer_len
+            min_cache_len = 2 * self.replayssm_max_query_len
+            self.replayssm_cache_len = max(requested, min_cache_len)
+            if self.replayssm_cache_len != requested:
+                logger.warning(
+                    "replayssm_buffer_len=%d is below 2*(mtp_k+1)=%d; "
+                    "raising to %d for KDA ReplaySSM.",
+                    requested,
+                    min_cache_len,
+                    self.replayssm_cache_len,
+                )
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            self.replayssm_write_pos = torch.zeros(
+                max_num_seqs,
+                dtype=torch.int32,
+                device=device,
+            )
+            logger.info_once(
+                "KDA ReplaySSM enabled on ROCm: cache_len=%d, verify window=%d.",
+                self.replayssm_cache_len,
+                self.replayssm_max_query_len,
+            )
+        else:
+            self.replayssm_write_pos = None
+
     def _build_chunk_metadata(
         self,
         prefill_query_start_loc: torch.Tensor,
@@ -96,6 +144,49 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             prefill_query_start_loc,
             prefill_query_start_loc_cpu,
             FLA_CHUNK_SIZE,
+        )
+
+    def build(self, *args, **kwargs) -> GDNAttentionMetadata:
+        metadata = super().build(*args, **kwargs)
+        if not self.use_kda_replayssm:
+            return metadata
+        self._attach_kda_replayssm(metadata)
+        return metadata
+
+    def _attach_kda_replayssm(self, md: GDNAttentionMetadata) -> None:
+        from vllm.models.kimi_k3.amd.ops.third_party.replayssm import replayssm_commit
+
+        assert self.replayssm_write_pos is not None
+        num_reqs = md.num_decodes + md.num_spec_decodes
+        if num_reqs == 0:
+            return
+
+        assert md.non_spec_state_indices_tensor is not None
+        decode_slots = md.non_spec_state_indices_tensor[: md.num_decodes]
+        if md.num_spec_decodes > 0:
+            assert md.spec_state_indices_tensor is not None
+            spec_slots = md.spec_state_indices_tensor[: md.num_spec_decodes, 0]
+            slot_idx = torch.cat([decode_slots, spec_slots])
+        else:
+            slot_idx = decode_slots
+
+        md.replayssm = True
+        md.slot_idx = slot_idx
+        md.write_pos = self.replayssm_write_pos
+        md.replayssm_cache_len = self.replayssm_cache_len
+        md.replayssm_max_query_len = self.replayssm_max_query_len
+
+        if md.num_prefills > 0:
+            self.replayssm_write_pos.index_fill_(0, slot_idx.to(torch.int64), 0)
+            return
+
+        assert md.num_accepted_tokens is not None
+        replayssm_commit(
+            self.replayssm_write_pos,
+            slot_idx,
+            md.num_accepted_tokens[:num_reqs],
+            self.replayssm_max_query_len,
+            self.replayssm_cache_len,
         )
 
 
