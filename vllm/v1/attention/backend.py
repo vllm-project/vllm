@@ -612,6 +612,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Whether all step-dependent draft decode metadata can be updated in place,
     # allowing one metadata build to be reused across autoregressive draft steps.
     supports_draft_decode_metadata_update: bool = False
+    # Safe to skip build() when FULL replay discards its result. Builders that
+    # restage persistent buffers or update decode plans must leave this False.
+    supports_skip_draft_rebuild: bool = False
 
     @abstractmethod
     def __init__(

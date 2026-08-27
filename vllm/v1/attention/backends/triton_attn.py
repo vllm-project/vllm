@@ -193,6 +193,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.rswa_window = model_config.rswa_window
+        # R-SWA restages prefix lengths read by captured graphs.
+        self.supports_skip_draft_rebuild = self.rswa_window is None
         self.persistent_rswa_prefix_lens: torch.Tensor | None = None
         if self.rswa_window is not None:
             self.persistent_rswa_prefix_lens = torch.empty(
