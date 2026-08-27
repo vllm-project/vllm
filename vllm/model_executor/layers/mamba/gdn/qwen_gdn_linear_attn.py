@@ -1322,6 +1322,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if (
             self.enable_packed_recurrent_decode
+            and not envs.VLLM_BATCH_INVARIANT  # per-seq loop required for BI
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -1403,17 +1404,45 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
+            if envs.VLLM_BATCH_INVARIANT:
+                # Process each prefill sequence independently so BS=1 and
+                # BS=N give bitwise-identical per-sequence conv states.
+                device = mixed_qkv_non_spec_T.device
+                cu_list = non_spec_query_start_loc.tolist()
+                chunks = []
+                for _pi in range(attn_metadata.num_prefills):
+                    _ps = cu_list[_pi]
+                    _pe = cu_list[_pi + 1]
+                    _chunk_T = mixed_qkv_non_spec_T[:, _ps:_pe]
+                    _has_init = (has_initial_state[_pi : _pi + 1]
+                                 if has_initial_state is not None else None)
+                    _cache_idx = non_spec_state_indices_tensor[_pi : _pi + 1]
+                    _cu = torch.tensor([0, _pe - _ps],
+                                       dtype=torch.int32, device=device)
+                    _conv_out = causal_conv1d_fn(
+                        _chunk_T,
+                        conv_weights,
+                        self.conv1d.bias,
+                        activation=self.activation,
+                        conv_states=conv_state,
+                        has_initial_state=_has_init,
+                        cache_indices=_cache_idx,
+                        query_start_loc=_cu,
+                    ).transpose(0, 1)
+                    chunks.append(_conv_out)
+                mixed_qkv_non_spec = torch.cat(chunks, dim=0)
+            else:
+                mixed_qkv_non_spec = causal_conv1d_fn(
+                    mixed_qkv_non_spec_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=attn_metadata,
+                ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
