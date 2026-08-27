@@ -494,6 +494,7 @@ class DeepseekV32Attention(MLAAttention):
             output.zero_()
             return
         attn_metadata = cast("MLACommonMetadata", attn_metadata)
+        self.impl.prepare_for_batch(attn_metadata)
 
         if self.use_pcp:
             assert kv_c is not None and k_pe is not None
