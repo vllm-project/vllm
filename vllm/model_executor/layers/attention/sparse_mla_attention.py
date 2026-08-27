@@ -239,16 +239,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )
 
-    def get_max_profile_tokens(
-        self,
-        max_num_tokens: int,
-        max_num_reqs: int,
-        max_query_len: int,
-    ) -> int:
-        if self.vllm_config.attention_config.hisparse_config is None:
-            return max_num_tokens
-        return min(max_num_tokens, max_num_reqs * max_query_len)
-
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
