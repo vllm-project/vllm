@@ -93,6 +93,18 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 
+def _run_post_weights_wake_up_hooks(model: torch.nn.Module) -> None:
+    """Restore stateful module and quantization workspaces after remapping."""
+    for module in model.modules():
+        hook = getattr(module, "post_weights_wake_up", None)
+        if hook is not None:
+            hook()
+        quant_method = getattr(module, "quant_method", None)
+        hook = getattr(quant_method, "post_weights_wake_up", None)
+        if hook is not None:
+            hook(module)
+
+
 def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
     spec_config = vllm_config.speculative_config
     return (
@@ -255,6 +267,12 @@ class Worker(WorkerBase):
                     if name in self._sleep_saved_draft_buffers:
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
+
+        if wake_weights:
+            _run_post_weights_wake_up_hooks(self.model_runner.model)
+            draft = self.get_draft_model()
+            if draft is not None:
+                _run_post_weights_wake_up_hooks(draft)
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
