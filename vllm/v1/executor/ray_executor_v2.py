@@ -329,9 +329,13 @@ class RayExecutorV2(MultiprocExecutor):
         # must be able to reach this address.
         dist_ip = bundle_assignments[0]["node_ip"]
         parallel_config = self.vllm_config.parallel_config
+        local_dp_rank = (
+            parallel_config.data_parallel_rank_local
+            if parallel_config.data_parallel_size > 1
+            else None
+        )
         port = self._select_tcpstore_port(
-            parallel_config.data_parallel_rank_local,
-            parallel_config.data_parallel_master_port,
+            local_dp_rank, parallel_config.data_parallel_master_port
         )
         distributed_init_method = get_distributed_init_method(dist_ip, port)
 
