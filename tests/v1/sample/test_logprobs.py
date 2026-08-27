@@ -10,6 +10,7 @@ from typing import get_args
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import large_gpu_mark
 from tests.v1.sample.utils import (
     BatchLogprobsComposition,
@@ -159,19 +160,10 @@ def _run_and_validate(
         # Extract request-level (prompt)logprobs config
         num_top_logprobs, num_top_prompt_logprobs = logprob_prompt_logprob
 
-        # Test whether sampled token output is consistent between vLLM and HF
-        # vLLM prompt+completion should match HF output
-        if temperature == 0.0:
-            assert (
-                vllm_result.prompt_token_ids + vllm_result.outputs[0].token_ids
-                == hf_output[0]
-            )
-        else:
-            # Sampled tokens won't match if not greedy
-            assert (
-                vllm_result.prompt_token_ids
-                == hf_output[0][: len(vllm_result.prompt_token_ids)]
-            )
+        assert (
+            vllm_result.prompt_token_ids
+            == hf_output[0][: len(vllm_result.prompt_token_ids)]
+        )
 
         # Validate sample logprobs
         if num_top_logprobs is not None:
@@ -385,6 +377,19 @@ def test_get_logprobs_and_prompt_logprobs(
             temperature=temperature,
             max_tokens=max_tokens,
             do_apc=do_apc,
+        )
+
+    if temperature == 0.0:
+        num_logprobs = 5
+        check_logprobs_close(
+            outputs_0_lst=hf_model.generate_greedy_logprobs_limit(
+                test_prompts, max_tokens, num_logprobs
+            ),
+            outputs_1_lst=vllm_model.generate_greedy_logprobs(
+                test_prompts, max_tokens, num_logprobs
+            ),
+            name_0="hf",
+            name_1="vllm",
         )
 
 
@@ -1115,6 +1120,7 @@ def test_correct_decoded_token_preserves_valid_tokens():
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, dict, int],
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -1129,6 +1135,9 @@ def test_spec_decode_logprobs(
             speculative_config dict, top_logprobs).
     """
     from vllm import LLM
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     method, model_name, spec_config, top_logprobs = model_setup
 
