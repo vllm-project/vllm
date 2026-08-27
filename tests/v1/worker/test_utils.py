@@ -50,21 +50,29 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     return worker
 
 
-def test_hisparse_worker_finish_step_counts_each_index_group_once():
+def test_hisparse_worker_finish_step_reads_completed_snapshot(monkeypatch):
     worker = _make_hisparse_worker()
+    worker.is_host_writer = False
     worker._finish_mirror_phase = MagicMock()
     worker._submit_transfers = MagicMock()
     worker._release_completed_dma_descriptors = MagicMock()
     worker._post_forward_transfers = []
     worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
-    worker._metrics_last = HiSparseStats()
+    worker._metrics_pending = False
+    worker._metrics_event = MagicMock()
+    worker._metrics_event.query.return_value = True
     group = SimpleNamespace(
-        swap_stats=torch.tensor([7, 3]),
+        swap_stats=torch.tensor([12, 4], dtype=torch.uint64),
+        swap_stats_host=torch.empty(2, dtype=torch.uint64),
         stats_row_bytes=16,
     )
     worker.leader_runtimes = [SimpleNamespace(index_group=group)]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
 
-    assert worker.finish_step() == HiSparseStats(7, 3, 48)
+    assert worker.finish_step() is None
+    worker._metrics_event.record.assert_called_once_with()
+    assert group.swap_stats.tolist() == [0, 0]
+    assert worker.finish_step() == HiSparseStats(12, 4, 64)
 
 
 def test_hisparse_row_mirrors_follow_runner_request_order():
