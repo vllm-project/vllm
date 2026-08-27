@@ -4,11 +4,19 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize("full_width_decode", [False, True])
+@pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
-    full_width_decode: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    sm120: bool,
 ):
-    from vllm.models.deepseek_v4.sparse_mla import build_c128a_topk_metadata
+    from vllm.models.deepseek_v4 import sparse_mla
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setattr(
+        sparse_mla.current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(12, 0) if sm120 else DeviceCapability(10, 0),
+    )
 
     device = torch.device("cuda")
     capacity_width = 512
@@ -29,20 +37,19 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
         global_decode_buffer=global_decode_buffer,
         decode_lens_buffer=torch.empty(2, dtype=torch.int32, device=device),
         prefill_buffer=prefill_buffer,
-        full_width_decode=full_width_decode,
     )
-    captured_decode, _, captured_prefill = build_c128a_topk_metadata(
+    captured_decode, _, captured_prefill = sparse_mla.build_c128a_topk_metadata(
         max_compressed_tokens=256,
         **kwargs,
     )
-    # SM120 (full_width_decode) keeps the decode view contiguous across the
-    # full buffer width; other backends get the active-width slice. The
-    # prefill view is always narrowed.
-    expected_decode_width = capacity_width if full_width_decode else 256
+    # SM120 keeps the decode view contiguous across the full buffer width;
+    # other backends get the active-width slice. The prefill view is always
+    # narrowed.
+    expected_decode_width = capacity_width if sm120 else 256
     assert captured_decode.shape == (2, expected_decode_width)
     assert captured_prefill.shape == (2, 256)
     assert captured_decode.stride(0) == captured_prefill.stride(0) == capacity_width
-    assert captured_decode.is_contiguous() == full_width_decode
+    assert captured_decode.is_contiguous() == sm120
 
     captured_rows = torch.empty((4, 4), dtype=torch.int32, device=device)
     captured_rows[:2].copy_(captured_decode[:, :4])
@@ -55,7 +62,7 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
 
     global_decode_buffer.fill_(-99)
     prefill_buffer.fill_(-99)
-    build_c128a_topk_metadata(
+    sparse_mla.build_c128a_topk_metadata(
         max_compressed_tokens=128,
         **kwargs,
     )

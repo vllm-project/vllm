@@ -149,13 +149,6 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
         # Pre-allocate C128A topk buffers for CUDA graph address stability.
         if self.compress_ratio == 128:
-            # The FlashInfer SM120 sparse-MLA kernel requires a contiguous
-            # eidx, so its decode view spans the full buffer width; other
-            # backends keep the active-width slice.
-            capability = current_platform.get_device_capability()
-            self._c128a_decode_full_width = (
-                capability is not None and capability.major == 12
-            )
             c128a_max_compressed = cdiv(
                 self.model_config.max_model_len, self.compress_ratio
             )
@@ -272,7 +265,6 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.c128a_decode_lens_buffer,
             self.c128a_prefill_buffer,
             max_compressed_tokens=active_topk_width,
-            full_width_decode=self._c128a_decode_full_width,
         )
 
         result: dict[str, torch.Tensor | None] = {}
@@ -312,7 +304,6 @@ def build_c128a_topk_metadata(
     decode_lens_buffer: torch.Tensor,
     prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
-    full_width_decode: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single kernel for all C128A tokens (decode + prefill).
 
@@ -322,12 +313,10 @@ def build_c128a_topk_metadata(
     Writes into pre-allocated buffers for CUDA graph address stability.
     Returns views of the buffers.
 
-    With full_width_decode (SM120), the decode view keeps the full buffer
-    width: full-width row slices are contiguous, which the FlashInfer SM120
-    kernel requires of eidx, and decode reads are bounded by the per-token
-    lens. Otherwise the decode view is narrowed to the active width. The
-    prefill view always stays narrowed: its Triton consumers count
-    non-negative entries and must not scan stale tail columns.
+    The decode view keeps the full buffer width on SM120: full-width row
+    slices are contiguous, which the FlashInfer SM120 kernel requires of
+    eidx, and decode reads are bounded by the per-token lens. The prefill
+    view always stays narrowed to the active width.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
@@ -339,7 +328,10 @@ def build_c128a_topk_metadata(
     )
     assert global_decode_buffer.stride(-1) == prefill_buffer.stride(-1) == 1
 
-    if full_width_decode:
+    # TODO: support adaptive-width decode on SM120 (needs the FlashInfer
+    # SM120 kernel to accept a real row stride for eidx).
+    capability = current_platform.get_device_capability()
+    if capability is not None and capability.major == 12:
         global_decode = global_decode_buffer[:num_decode_tokens]
     else:
         global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
