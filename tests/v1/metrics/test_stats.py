@@ -327,8 +327,6 @@ def test_operation_name_is_last_engine_core_request_field():
     assert EngineCoreRequest.__struct_fields__[-1] == "operation_name"
 
 
-
-
 def test_embeddings_do_not_record_ttft_or_itl():
     from unittest.mock import MagicMock
 
