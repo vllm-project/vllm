@@ -41,6 +41,8 @@ def _make_builder():
     builder.device = torch.device("cpu")
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16
+    builder.kv_cache_dtype = "fp8"
+    builder.mla_dims = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)
     builder.topk_tokens = topk_tokens
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"

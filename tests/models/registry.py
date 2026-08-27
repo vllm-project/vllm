@@ -295,6 +295,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
+    "Glm5NextForCausalLM": _HfExamplesInfo("zai-org/GLM-5.3-Flash"),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -923,6 +924,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "zai-org/GLM-OCR",
         min_transformers_version="5.1.0",
     ),
+    "Glm5NextForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-5.3-Flash"),
     "H2OVLChatModel": _HfExamplesInfo(
         "h2oai/h2ovl-mississippi-800m",
         trust_remote_code=True,
@@ -1718,6 +1720,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="zai-org/GLM-OCR",
         is_available_online=False,
         min_transformers_version="5.1.0",
+    ),
+    "Glm5NextMTPModel": _HfExamplesInfo(
+        "zai-org/GLM-5.3-Flash",
+        speculative_model="zai-org/GLM-5.3-Flash",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",

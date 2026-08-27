@@ -1206,7 +1206,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=self.kv_cache_dtype,
             # Stamp the quant mode so runners don't take the unquantized
             # ("auto") shape path for quantized layouts like fp8_ds_mla,
             # whose kernel page layout (656 B/token) differs from

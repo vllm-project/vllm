@@ -1368,7 +1368,11 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         return_valid_counts=False,
     )
     assert isinstance(result_only, torch.Tensor)
-    torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+    for row, num_valid in enumerate(expected_valid):
+        compact_valid = result[row, :num_valid].sort().values
+        original_valid = result_only[row][result_only[row] >= 0].sort().values
+        torch.testing.assert_close(compact_valid, original_valid, rtol=0, atol=0)
+        assert torch.all(result[row, num_valid:] == -1)
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():

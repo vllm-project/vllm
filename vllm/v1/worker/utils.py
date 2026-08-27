@@ -17,7 +17,6 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -34,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -52,22 +52,6 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
         if num_nans > 0
     }
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
-
-
-def compressed_kernel_block_size(spec: AttentionSpec) -> int:
-    """Choose a token block whose compressed state count tiles DeepGEMM."""
-    assert isinstance(spec.tokens_per_state, int) and spec.tokens_per_state > 1
-    num_states = spec.num_states
-    max_page = max(PAGED_MQA_PAGE_SIZES)
-    min_page = min(PAGED_MQA_PAGE_SIZES)
-    page_states = (
-        num_states
-        if num_states <= max_page
-        else max_page
-        if num_states % max_page == 0
-        else min_page
-    )
-    return page_states * spec.tokens_per_state
 
 
 @triton.jit
@@ -290,11 +274,11 @@ class AttentionGroup:
         if kernel_block_size is None:
             kv_cache_spec_builder = self.kv_cache_spec
         elif (
-            isinstance(self.kv_cache_spec, AttentionSpec)
-            and self.kv_cache_spec.tokens_per_state > 1
+            isinstance(self.kv_cache_spec, MLAAttentionSpec)
+            and self.kv_cache_spec.storage_block_size is not None
         ):
             kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
-                compressed_kernel_block_size(self.kv_cache_spec)
+                self.kv_cache_spec.storage_block_size
             )
         else:
             kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
@@ -449,8 +433,8 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
-        if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
-            kernel_block_size = compressed_kernel_block_size(spec)
+        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
+            kernel_block_size = spec.storage_block_size
 
         views = create_kv_cache_views(
             buf,

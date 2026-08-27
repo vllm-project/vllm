@@ -33,6 +33,7 @@ from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -141,7 +142,18 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
             f"storage block, got block_size={spec.block_size} -> "
             f"storage_block_size={storage_block_size}."
         )
-        return spec
+        max_page_size = max(PAGED_MQA_PAGE_SIZES)
+        min_page_size = min(PAGED_MQA_PAGE_SIZES)
+        if storage_block_size <= max_page_size:
+            page_size = storage_block_size
+        elif storage_block_size % max_page_size == 0:
+            page_size = max_page_size
+        else:
+            page_size = min_page_size
+        return replace(
+            spec,
+            storage_block_size=page_size * self._index_kpool,
+        )
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):

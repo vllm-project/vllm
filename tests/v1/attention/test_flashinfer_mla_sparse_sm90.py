@@ -2,25 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests for the FlashInfer SM90 sparse MLA backend wiring (no GPU).
 
-The FlashInfer wrapper is replaced by a recorder, and the top-k conversion
-Triton kernel runs via TRITON_INTERPRET; the tests pin the contract between
-the impl and the kernel API: page_size=1 varlen rows, reserved-buffer
-refresh, plan parameters (dims, NoPE/rope scale, causality), ckv/kpe cache
-splitting, and the backend's model-shape gates.
+The FlashInfer wrapper and top-k conversion are replaced by CPU recorders;
+the tests pin the contract between the impl and the kernel API: page_size=1
+varlen rows, reserved-buffer refresh, plan parameters (dims, NoPE/rope scale,
+causality), ckv/kpe cache splitting, and the backend's model-shape gates.
 """
 
-import os
+from types import SimpleNamespace
 
-os.environ.setdefault("TRITON_INTERPRET", "1")
-
-from types import SimpleNamespace  # noqa: E402
-
-import pytest  # noqa: E402
-import torch  # noqa: E402
+import pytest
+import torch
 
 # isort: off
-import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod  # noqa: E402
-from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (  # noqa: E402
+import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Backend,
     FlashInferMLASparseSM90Builder,
     FlashInferMLASparseSM90Impl,
