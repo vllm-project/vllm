@@ -753,7 +753,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         all_wrappers: list[Any] = []
         original_pools: dict[int, Any] = {}
         speculator = getattr(runner, "speculator", None)
-        spec_managers: list[tuple[str, CudaGraphManager]] = []
+        spec_manager_names: list[str] = []
         try:
             if not manager.needs_capture():
                 return 0
@@ -769,8 +769,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                 original_pools[id(wrapper)] = wrapper.graph_pool
                 wrapper.graph_pool = throwaway_pool
             if speculator is not None:
-                spec_managers = [
-                    (name, value)
+                spec_manager_names = [
+                    name
                     for name, value in vars(speculator).items()
                     if isinstance(value, CudaGraphManager)
                 ]
@@ -799,8 +799,11 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # Drop the speculator's cudagraph managers; the real
             # initialize_kv_cache re-creates them. Their profiling graphs
             # release the throwaway pool here rather than after the real init.
-            for name, _ in spec_managers:
+            for name in spec_manager_names:
                 setattr(speculator, name, None)
+            # Drop local references before teardown detaches the runner's
+            # manager and flushes the allocator.
+            del manager
             _teardown_profiling_state(runner)
     finally:
         platform_cls._global_graph_pool = saved_global_pool
@@ -869,6 +872,7 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
             layer.kv_cache = (
                 torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
             )
+            del kv_cache
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()
