@@ -9,6 +9,7 @@ block dim (a contiguous region per layer) or inside it (all layers' pages within
 block); the allocation is the same either way.
 """
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
     _max_memory_usage_bytes_from_groups,
     _pool_bytes_per_block,
+    generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
     resolve_kv_cache_block_sizes,
@@ -180,14 +182,28 @@ def _placements_by_layer(kv_cache_config) -> dict[str, tuple[int, int]]:
     }
 
 
-class TestCSALinearPacking:
-    def test_layer_types_form_compressed_sparse_compressor_state_and_mamba_groups(
-        self,
-    ):
+class TestMixedUniformTypePacking:
+    @staticmethod
+    def _group_with_specs(groups, spec_type):
+        return next(
+            group
+            for group in groups
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            and all(
+                isinstance(spec, spec_type)
+                for spec in group.kv_cache_spec.kv_cache_specs.values()
+            )
+        )
+
+    def test_specs_form_compatible_manager_groups(self):
         groups = get_kv_cache_groups(_shared_layout_config(), _make_csa_linear_specs())
 
-        assert len(groups) == 6
-        compressed_sparse, compressor_state, *mamba = groups
+        assert len(groups) == 3
+        mamba = self._group_with_specs(groups, MambaSpec)
+        compressor_state = self._group_with_specs(groups, CircularBufferSpec)
+        compressed_sparse = next(
+            group for group in groups if group not in (mamba, compressor_state)
+        )
         assert compressed_sparse.layer_names == [
             name
             for i in range(NUM_CACHE_TUPLES)
@@ -196,71 +212,70 @@ class TestCSALinearPacking:
         assert compressor_state.layer_names == [
             _compressor_state_name(i) for i in range(NUM_CACHE_TUPLES)
         ]
-        assert [len(group.layer_names) for group in mamba] == [3, 2, 2, 1]
-        assert all(not group.kv_cache_spec.tp_replicated for group in mamba[:-1])
-        assert mamba[-1].kv_cache_spec.tp_replicated
+        assert len(mamba.layer_names) == 8
         assert compressed_sparse.kv_cache_spec.prefix_cacheable
         assert not compressor_state.kv_cache_spec.prefix_cacheable
-        assert {
-            compressor_state.kv_cache_spec.kv_cache_specs[name].page_size_bytes
-            for name in compressor_state.layer_names
-        } == {COMPRESSED_PAGE_BYTES}
-        assert all(
-            group.kv_cache_spec.page_size_bytes == MAIN_KV_PAGE_BYTES for group in mamba
-        )
 
-    def test_shared_tensors_match_expected_memory_and_ownership(self):
+    def test_groups_overlay_one_spec_sized_allocation(self):
         config = _shared_layout_config()
         groups = get_kv_cache_groups(config, _make_csa_linear_specs())
 
         assert _get_kv_cache_bytes_per_block(groups) == BYTES_PER_BLOCK
         assert _max_memory_usage_bytes_from_groups(config, groups) == (
-            BYTES_PER_BLOCK * 6
+            BYTES_PER_BLOCK * len(groups)
         )
         kv_cache_config = get_kv_cache_config_from_groups(
             config,
             groups,
             available_memory=BYTES_PER_BLOCK * 32,
         )
-
         assert kv_cache_config.num_blocks == 32
-        assert {tensor.size for tensor in kv_cache_config.kv_cache_tensors} == {
-            BYTES_PER_BLOCK * 32
-        }
         assert all(
             tensor.block_stride == BYTES_PER_BLOCK
             for tensor in kv_cache_config.kv_cache_tensors
         )
 
         placements = _placements_by_layer(kv_cache_config)
-        mamba_groups = groups[2:]
+        raw_spec = _make_csa_linear_specs()[_compressor_state_name(0)]
+        assert isinstance(raw_spec, CircularBufferSpec)
         for index in range(NUM_CACHE_TUPLES):
-            main_placement = placements[_main_kv_name(index)]
-            for group in mamba_groups:
-                if index < len(group.layer_names):
-                    assert placements[group.layer_names[index]] == main_placement
-            assert (
-                placements[_compressed_name(index)]
-                == placements[_compressor_state_name(index)]
+            assert placements[_main_kv_name(index)] == (
+                index * MAIN_KV_PAGE_BYTES,
+                BYTES_PER_BLOCK,
+            )
+            assert placements[_compressed_name(index)] == (
+                NUM_CACHE_TUPLES * MAIN_KV_PAGE_BYTES + index * COMPRESSED_PAGE_BYTES,
+                BYTES_PER_BLOCK,
+            )
+            assert placements[_compressor_state_name(index)] == (
+                index * raw_spec.page_size_bytes,
+                BYTES_PER_BLOCK,
             )
 
-        views = _bind(kv_cache_config, "BLNHC")
-        for index in range(NUM_CACHE_TUPLES):
-            main_view = views[_main_kv_name(index)]
-            assert main_view.stride(0) * main_view.element_size() == BYTES_PER_BLOCK
-            for group in mamba_groups:
-                if index < len(group.layer_names):
-                    mamba_view = views[group.layer_names[index]]
-                    assert mamba_view.data_ptr() == main_view.data_ptr()
-                    assert (
-                        mamba_view.stride(0) * mamba_view.element_size()
-                        == BYTES_PER_BLOCK
-                    )
-            assert views[_compressed_name(index)].data_ptr() == (
-                views[_compressor_state_name(index)].data_ptr()
-            )
+        scheduler_config = generate_scheduler_kv_cache_config([kv_cache_config])
+        assert all(
+            not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            for group in scheduler_config.kv_cache_groups
+        )
+        assert any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in scheduler_config.kv_cache_groups
+        )
 
-    def test_prefix_hits_are_aligned_and_ignore_private_compressor_state(self):
+    def test_equal_page_sizes_still_use_spec_compatibility(self):
+        specs = _make_csa_linear_specs(num_tuples=1)
+        compressed = specs[_compressed_name(0)]
+        assert isinstance(compressed, MLAAttentionSpec)
+        specs[_compressed_name(0)] = replace(compressed, head_size=256)
+
+        groups = get_kv_cache_groups(_shared_layout_config(), specs)
+        assert len(groups) == 3
+        full_group = next(
+            group for group in groups if _main_kv_name(0) in group.layer_names
+        )
+        assert full_group.layer_names == [_main_kv_name(0), _compressed_name(0)]
+
+    def test_prefix_hits_respect_spec_compression_alignment(self):
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         config.cache_config.prefix_match_unit = 16
@@ -277,11 +292,22 @@ class TestCSALinearPacking:
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (16, 16)
 
         config.cache_config.prefix_match_unit = 2
-        with pytest.raises(ValueError, match="compression ratio"):
-            get_kv_cache_groups(
-                config,
-                _make_csa_linear_specs(num_tuples=1),
-            )
+        config.cache_config.mamba_cache_mode = "align"
+        specs = _make_csa_linear_specs(num_tuples=1)
+        specs = {
+            name: replace(spec, mamba_cache_mode="align")
+            if isinstance(spec, MambaSpec)
+            else spec
+            for name, spec in specs.items()
+        }
+        groups = get_kv_cache_groups(config, specs)
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config,
+            groups,
+            available_memory=2 * MAIN_KV_PAGE_BYTES,
+        )
+        with pytest.raises(ValueError, match="per-state compression"):
+            resolve_kv_cache_block_sizes(kv_cache_config, config)
 
 
 class TestDensePacking:
