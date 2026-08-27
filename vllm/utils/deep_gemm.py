@@ -464,11 +464,61 @@ def fp8_gemm_nt(*args, **kwargs):
     return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
-def fp8_einsum(*args, **kwargs):
+def _sm12x_fp8_scale_fp32(scale: torch.Tensor) -> torch.Tensor:
+    e8 = getattr(torch, "float8_e8m0fnu", None)
+    if scale.dtype == torch.uint8 or (e8 is not None and scale.dtype == e8):
+        b = scale.view(torch.uint8).to(torch.int32)
+        s = torch.ldexp(
+            torch.ones((), dtype=torch.float32, device=scale.device), b - 127
+        )
+        return torch.where(b == 0, torch.zeros_like(s), s)
+    if scale.dtype == torch.int32:
+        # Packed-UE8M0 (DeepGEMM SM10x/SM12x weight-scale layout): each int32
+        # word packs 4 consecutive K-block E8M0 scales, LSB = lowest K block,
+        # stored MN-major with logical shape [..., ceil(sf_k / 4)]. Unpack to
+        # the per-block FP32 scales so the SM12x einsum fallback can
+        # dequantize. The fp8_gemm_nt linear kernel consumes this packed
+        # layout directly, so only this dequant helper needs the unpack.
+        b0 = scale & 0xFF
+        b1 = (scale >> 8) & 0xFF
+        b2 = (scale >> 16) & 0xFF
+        b3 = (scale >> 24) & 0xFF
+        b = torch.stack([b0, b1, b2, b3], dim=-1).reshape(*scale.shape[:-1], -1)
+        s = torch.ldexp(
+            torch.ones((), dtype=torch.float32, device=scale.device), b - 127
+        )
+        return torch.where(b == 0, torch.zeros_like(s), s)
+    return scale.to(torch.float32)
+
+
+def fp8_einsum(subscripts, a_and_scale, b_and_scale, out, recipe=(1, 128, 128)):
+    if current_platform.is_device_capability_family(120):
+        a_fp8, a_scale = a_and_scale
+        w_fp8, w_scale = b_and_scale
+        a_scale_f32 = _sm12x_fp8_scale_fp32(a_scale)
+        if a_scale_f32.shape[-1] != a_fp8.shape[-1]:
+            a_scale_f32 = a_scale_f32.repeat_interleave(a_fp8.shape[-1] // a_scale_f32.shape[-1], dim=-1)
+        if a_scale_f32.dim() >= 2 and a_fp8.dim() >= 2 and a_scale_f32.shape[-2] != a_fp8.shape[-2]:
+            a_scale_f32 = a_scale_f32.repeat_interleave(a_fp8.shape[-2] // a_scale_f32.shape[-2], dim=-2)
+        a_dq = a_fp8.to(out.dtype) * a_scale_f32.to(out.dtype)
+        w_scale_f32 = _sm12x_fp8_scale_fp32(w_scale)
+        if w_scale_f32.shape[-1] != w_fp8.shape[-1]:
+            w_scale_f32 = w_scale_f32.repeat_interleave(w_fp8.shape[-1] // w_scale_f32.shape[-1], dim=-1)
+        if w_scale_f32.dim() >= 2 and w_fp8.dim() >= 2 and w_scale_f32.shape[-2] != w_fp8.shape[-2]:
+            w_scale_f32 = w_scale_f32.repeat_interleave(w_fp8.shape[-2] // w_scale_f32.shape[-2], dim=-2)
+        w_dq = w_fp8.to(out.dtype) * w_scale_f32.to(out.dtype)
+        b, h, r = a_dq.shape
+        if w_dq.dim() == 2 and out.dim() == 3 and w_dq.shape[0] == h * out.shape[2]:
+            w_dq = w_dq.view(h, out.shape[2], w_dq.shape[1])
+        elif w_dq.dim() == 2 and w_dq.shape[1] == h * r:
+            w_dq = w_dq.view(w_dq.shape[0], h, r)
+        res = torch.einsum(subscripts, a_dq, w_dq)
+        out.copy_(res)
+        return out
     _lazy_init()
     if _fp8_einsum_impl is None:
-        return _missing(*args, **kwargs)
-    return _fp8_einsum_impl(*args, **kwargs)
+        return _missing(subscripts, a_and_scale, b_and_scale, out, recipe)
+    return _fp8_einsum_impl(subscripts, a_and_scale, b_and_scale, out, recipe)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
