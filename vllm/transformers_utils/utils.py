@@ -61,9 +61,10 @@ def modelscope_list_repo_files(
 def _maybe_json_dict(path: str | PathLike) -> dict[str, str]:
     with open(path) as f:
         try:
-            return json.loads(f.read())
+            parsed = json.loads(f.read())
         except Exception:
             return dict[str, str]()
+    return parsed if isinstance(parsed, dict) else dict[str, str]()
 
 
 def _maybe_space_split_dict(path: str | PathLike) -> dict[str, str]:
