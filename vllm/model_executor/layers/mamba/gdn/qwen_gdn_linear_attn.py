@@ -906,11 +906,42 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        # When VLLM_BATCH_INVARIANT and decode-only: project each token via a
+        # separate GEMV so BS=N matches BS=1. GEMM vs GEMV uses different CUDA
+        # kernel variants with different FP accumulation order; the ~1e-7
+        # difference is amplified by the SSM recurrence to ~4e-5 per step.
+        _bi_decode = False
+        if envs.VLLM_BATCH_INVARIANT and num_tokens > 1:
+            _fc = get_forward_context()
+            _attn_raw = _fc.attn_metadata
+            if isinstance(_attn_raw, dict) and self.prefix in _attn_raw:
+                _meta = _attn_raw[self.prefix]
+                if isinstance(_meta, GDNAttentionMetadata):
+                    _bi_decode = (
+                        _meta.num_prefills == 0 and _meta.num_decodes > 0
+                    )
+        if _bi_decode:
+            mixed_qkvz = torch.cat(
+                [
+                    self.in_proj_qkvz(hidden_states[i : i + 1])[0]
+                    for i in range(num_tokens)
+                ],
+                dim=0,
+            )
+            ba = torch.cat(
+                [
+                    self.in_proj_ba(hidden_states[i : i + 1])[0]
+                    for i in range(num_tokens)
+                ],
+                dim=0,
+            )
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
+            and not envs.VLLM_BATCH_INVARIANT
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
