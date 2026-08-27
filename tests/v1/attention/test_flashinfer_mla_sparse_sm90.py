@@ -108,6 +108,9 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     impl, rows = make_impl(qk_rope, kv_dtype)
     state = FakeState(TOPK)
     monkeypatch.setattr(sm90_mod, "_SM90_STATE", state)
+    monkeypatch.setattr(
+        sm90_mod, "triton_convert_req_index_to_global_index", ref_convert
+    )
 
     # req with context 10 < topk: 8 valid + -1 padding.
     topk_rows = [
@@ -173,6 +176,10 @@ def test_plan_uses_state_params(monkeypatch):
     state.max_tokens = 4
     state.topk_width = TOPK
     state.kv_indices = torch.zeros(4 * TOPK)
+    state._arange_cpu = torch.arange(5, dtype=torch.int32)
+    state._qo_cpu = torch.empty(5, dtype=torch.int32)
+    state._kv_cpu = torch.empty(5, dtype=torch.int32)
+    state._lens_cpu = torch.full((4,), TOPK, dtype=torch.int32)
 
     state.plan(3, torch.tensor([2, 5, 7], dtype=torch.int32))
     assert wrapper.plan_args is not None
@@ -193,10 +200,13 @@ def test_kv_lens_host_formula():
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._index_topk = 2048
     builder._index_kpool = 4
+    builder._async_scheduling = False
     cam = SimpleNamespace(
         num_reqs=3,
         query_start_loc_cpu=torch.tensor([0, 5, 7, 10], dtype=torch.int32),
         seq_lens=torch.tensor([100, 9, 3000], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([100, 9, 3000], dtype=torch.int32),
+        positions=None,
     )
     num_rows, lens = builder._kv_lens_host(cam)
     assert num_rows == 10

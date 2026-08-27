@@ -114,9 +114,8 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # 576 = 512 NoPE + 64 RoPE (with-rope layout); 512 = 512 NoPE only
-        # (no-rope layout, qk_rope_head_dim == 0). Both share D_V = 512.
-        return [512, 576]
+        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
+        return [576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -932,12 +931,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             q = self.q_concat_buffer[: ql_nope.shape[0]]
-            if self.qk_rope_head_dim == 0:
-                # No RoPE component (d_qk == kv_lora_rank): q is the NoPE part
-                # alone. concat_mla_q requires rope_dim == 64, so copy directly.
-                q.copy_(ql_nope)
-            else:
-                ops.concat_mla_q(ql_nope, q_pe, q)
+            ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = q.shape[0]
 

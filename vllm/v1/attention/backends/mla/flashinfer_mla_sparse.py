@@ -119,9 +119,9 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
-            qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-            qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", 64)
-            kv_lora_rank = getattr(hf_text_config, "kv_lora_rank", 512)
+            qk_nope_head_dim = hf_text_config.qk_nope_head_dim
+            qk_rope_head_dim = hf_text_config.qk_rope_head_dim
+            kv_lora_rank = hf_text_config.kv_lora_rank
             if qk_rope_head_dim == 0:
                 # Native no-rope MLA: FlashInfer only ships the one shape
                 # (nope_mla_dimensions in flashinfer.mla._core).

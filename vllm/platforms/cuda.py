@@ -146,8 +146,8 @@ def _get_backend_priorities(
             )
             prefer_fi_sm90 = (
                 hf is not None
-                and getattr(hf, "qk_rope_head_dim", None) == 0
-                and getattr(hf, "index_topk", None) is not None
+                and hf.qk_rope_head_dim == 0
+                and hasattr(hf, "index_topk")
             )
             sparse_tail = [
                 AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,

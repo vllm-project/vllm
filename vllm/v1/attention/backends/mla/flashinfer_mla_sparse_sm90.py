@@ -148,9 +148,9 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
             hf = vllm_config.model_config.hf_text_config
             # The SM90 FA2/FA3 kernel covers ckv=512 with kpe in {0, 64}
             # (NoPE models and DeepSeek-style rope MLA alike).
-            if getattr(hf, "kv_lora_rank", 512) != 512:
+            if hf.kv_lora_rank != 512:
                 return "FLASHINFER_MLA_SPARSE_SM90 requires kv_lora_rank=512"
-            if getattr(hf, "qk_rope_head_dim", 0) not in (0, 64):
+            if hf.qk_rope_head_dim not in (0, 64):
                 return "FLASHINFER_MLA_SPARSE_SM90 requires qk_rope_head_dim in (0, 64)"
             if not hasattr(hf, "index_topk"):
                 return "FLASHINFER_MLA_SPARSE_SM90 requires a sparse model"
@@ -302,7 +302,9 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         hf_config = vllm_config.model_config.hf_text_config
         assert hf_config.index_topk is not None
         self._index_topk = int(hf_config.index_topk)
-        self._index_kpool = int(getattr(hf_config, "index_kpool", 1))
+        self._index_kpool = (
+            int(hf_config.index_kpool) if hasattr(hf_config, "index_kpool") else 1
+        )
 
     def _kv_lens_host(self, cam: CommonAttentionMetadata) -> tuple[int, torch.Tensor]:
         """Exact per-row KV lengths, host-side (the flashinfer wrapper bakes

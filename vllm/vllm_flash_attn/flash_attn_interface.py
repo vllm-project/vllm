@@ -214,7 +214,6 @@ def flash_attn_varlen_func(
     aux_tensors=None,
     aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
-    only_qv=False,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -380,7 +379,6 @@ def flash_attn_varlen_func(
             scheduler_metadata,
             num_splits,
             None,  # pack_gqa
-            only_qv,
             0,  # sm_margin
             s_aux,  # s_aux
             cp_world_size,
@@ -468,7 +466,7 @@ def compile_flash_attn_varlen_func_from_specs(
         raise NotImplementedError("FA4 compile-only wrapper does not support dropout")
     del deterministic
 
-    from vllm.vllm_flash_attn.cute.interface import (  # type: ignore[attr-defined]
+    from vllm.vllm_flash_attn.cute.interface import (
         compile_flash_attn_varlen_func_from_specs as _fa4_compile_flash_attn_varlen_func_from_specs,
     )
 

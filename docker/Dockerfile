@@ -752,7 +752,9 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
+# FlashInfer is installed separately from release assets below.
 RUN --mount=type=cache,target=/opt/uv/cache \
+    sed -i '/^flashinfer-\(python\|cubin\)==/d' /tmp/requirements-cuda.txt && \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' /tmp/requirements-cuda.txt; \
@@ -761,13 +763,24 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
+# Install FlashInfer from nightly release assets.
 # https://docs.flashinfer.ai/installation.html
-# From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.17
+ARG FLASHINFER_VERSION=0.6.18.dev20260819
+ARG FLASHINFER_RELEASE_TAG=nightly-v0.6.18-20260819
+ARG TARGETARCH
 RUN --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) FLASHINFER_WHEEL_ARCH="x86_64" ;; \
+      arm64) FLASHINFER_WHEEL_ARCH="aarch64" ;; \
+      *) echo "Unsupported FlashInfer wheel architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    FLASHINFER_CUDA_VERSION="cu$(echo "$CUDA_VERSION" | cut -d. -f1,2 | tr -d '.')"; \
+    FLASHINFER_RELEASE_URL="https://github.com/flashinfer-ai/flashinfer/releases/download/${FLASHINFER_RELEASE_TAG}"; \
+    uv pip install --system --no-deps \
+        "${FLASHINFER_RELEASE_URL}/flashinfer_python-${FLASHINFER_VERSION}-py3-none-any.whl" \
+        "${FLASHINFER_RELEASE_URL}/flashinfer_cubin-${FLASHINFER_VERSION}-py3-none-any.whl" \
+        "${FLASHINFER_RELEASE_URL}/flashinfer_jit_cache-${FLASHINFER_VERSION}%2B${FLASHINFER_CUDA_VERSION}-cp39-abi3-manylinux_2_28_${FLASHINFER_WHEEL_ARCH}.whl"
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
