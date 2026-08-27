@@ -392,34 +392,10 @@ class LazyLoader(ModuleType):
 # Optional dependency detection utilities
 @cache
 def _has_module(module_name: str) -> bool:
-    """Return True if *module_name* can be imported in the current environment.
-
-    Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
-    trial import to verify that native dependencies (shared libraries, etc.)
-    are also satisfied. Any failure during the trial import is treated as the
-    module being unavailable. The result is cached so that subsequent queries
-    for the same module incur no additional overhead.
-    """
-    try:
-        if importlib.util.find_spec(module_name) is None:
-            return False
-        importlib.import_module(module_name)
-    except Exception:
-        logger.warning(
-            "Module %s was found but failed to import", module_name, exc_info=True
-        )
-        return False
-    return True
-
-
-@cache
-def _has_module_spec(module_name: str) -> bool:
     """Return True if *module_name* is installed, without importing it.
 
-    Unlike [`_has_module`][vllm.utils.import_utils._has_module], this only
-    resolves the import spec. It therefore does not pay the import cost of
-    heavyweight modules, at the price of not verifying that native
-    dependencies (shared libraries, etc.) are satisfied. The result is cached.
+    This only resolves the import spec. Import errors from missing native
+    dependencies are raised when the module is actually used.
     """
     try:
         return importlib.util.find_spec(module_name) is not None
@@ -525,7 +501,7 @@ def has_tilelang() -> bool:
     callers must import it lazily at their point of use rather than relying
     on this function to have imported it already.
     """
-    if not _has_module_spec("tilelang"):
+    if not _has_module("tilelang"):
         return False
     # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
     from vllm.platforms import current_platform
