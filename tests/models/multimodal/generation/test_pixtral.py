@@ -16,7 +16,16 @@ from transformers import AutoProcessor
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.inputs import MultiModalDataBuiltins
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.model_executor.models.pixtral import _make_packed_sequence_metadata
+from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
+from vllm.model_executor.models.pixtral import (
+    PatchMerger,
+    PixtralForConditionalGeneration,
+    _flatten_pixtral_image_patches,
+    _make_packed_sequence_metadata,
+    _pad_pixtral_cu_seqlens,
+    _pad_pixtral_sequence_lengths,
+    get_sub_grids,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -157,6 +166,91 @@ def test_packed_sequence_metadata(backend: AttentionBackendEnum) -> None:
         assert sequence_lengths is None
 
 
+def test_pixtral_encoder_cudagraph_patch_layout() -> None:
+    patch_size = 4
+    images = [torch.randn(3, 8, 12), torch.randn(3, 4, 8)]
+    patch_conv = torch.nn.Conv2d(3, 5, patch_size, stride=patch_size, bias=False)
+
+    expected = torch.cat(
+        [
+            patch_conv(image.unsqueeze(0)).flatten(2).permute(0, 2, 1)
+            for image in images
+        ],
+        dim=1,
+    ).squeeze(0)
+    patches = _flatten_pixtral_image_patches(images, patch_size)
+    actual = patch_conv(patches).flatten(1)
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_pixtral_encoder_cudagraph_patch_merge_layout() -> None:
+    grid_sizes = [(2, 4), (4, 2)]
+    hidden_size = 3
+    patch_merger = PatchMerger.__new__(PatchMerger)
+    torch.nn.Module.__init__(patch_merger)
+    patch_merger.spatial_merge_size = 2
+    features = torch.arange(
+        sum(height * width for height, width in grid_sizes) * hidden_size,
+        dtype=torch.float32,
+    ).view(-1, hidden_size)
+
+    indices = patch_merger.make_merge_indices(grid_sizes, torch.device("cpu"))
+    actual = features[indices].permute(0, 2, 1).reshape(indices.shape[0], -1)
+    expected = torch.cat(
+        [
+            grid.view(-1, grid.shape[-1]).t()
+            for grid in get_sub_grids(features, grid_sizes, spatial_merge_size=2)
+        ]
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_pixtral_supports_encoder_cudagraph() -> None:
+    assert supports_encoder_cudagraph(PixtralForConditionalGeneration)
+
+
+def test_pixtral_encoder_cudagraph_pads_attention_tail() -> None:
+    src_cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+    dst_cu_seqlens = torch.empty(6, dtype=torch.int32)
+    _pad_pixtral_cu_seqlens(
+        dst_cu_seqlens,
+        src_cu_seqlens,
+        input_capacity=8,
+        attn_backend=AttentionBackendEnum.FLASH_ATTN,
+        flashinfer_offset_scale=1,
+    )
+
+    assert dst_cu_seqlens.tolist() == [0, 2, 5, 5, 5, 8]
+
+    src_sequence_lengths = torch.tensor([2, 3, 0, 0], dtype=torch.int32)
+    dst_sequence_lengths = torch.empty(8, dtype=torch.int32)
+    _pad_pixtral_sequence_lengths(
+        dst_sequence_lengths, src_sequence_lengths, input_capacity=8
+    )
+
+    assert dst_sequence_lengths.tolist() == [2, 3, 0, 0, 0, 0, 0, 3]
+
+
+def test_pixtral_encoder_cudagraph_pads_flashinfer_offsets() -> None:
+    src_qko = torch.tensor([0, 8] + [20] * 7, dtype=torch.int32)
+    src_v = torch.tensor([0, 24] + [60] * 7, dtype=torch.int32)
+    src_cu_seqlens = torch.cat((src_qko, src_v))
+    dst_cu_seqlens = torch.empty_like(src_cu_seqlens)
+
+    _pad_pixtral_cu_seqlens(
+        dst_cu_seqlens,
+        src_cu_seqlens,
+        input_capacity=8,
+        attn_backend=AttentionBackendEnum.FLASHINFER,
+        flashinfer_offset_scale=4,
+    )
+
+    assert dst_cu_seqlens[:9].tolist() == [0, 8] + [20] * 6 + [32]
+    assert dst_cu_seqlens[9:].tolist() == [0, 24] + [60] * 6 + [96]
+
+
 # For the test author to store golden output in JSON
 def _dump_outputs_w_logprobs(
     outputs: OutputsLogprobs,
@@ -249,7 +343,10 @@ def test_chat(
 
 @large_gpu_test(min_gb=16)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
+def test_chat_consolidated(
+    vllm_runner, dtype: str, local_asset_server, monkeypatch
+) -> None:
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
         FIXTURE_LOGPROBS_CHAT[MINISTRAL_3B_ID]
     )
@@ -261,7 +358,17 @@ def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
         config_format="mistral",
         max_model_len=8192,
         limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
+        compilation_config={
+            "cudagraph_mm_encoder": True,
+            "encoder_cudagraph_token_budgets": [4096],
+            "encoder_cudagraph_max_vision_items_per_batch": 4,
+        },
     ) as vllm_model:
+        engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+        encoder_cudagraph_manager = model_runner.encoder_cudagraph_manager
+        assert encoder_cudagraph_manager is not None
+
         outputs = []
         urls_all = [local_asset_server.url_for(u) for u in IMG_URLS]
         msgs = [
@@ -272,6 +379,8 @@ def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
         for msg in msgs:
             output = vllm_model.llm.chat(msg, sampling_params=SAMPLING_PARAMS)
             outputs.extend(output)
+
+        assert encoder_cudagraph_manager.graph_hits > 0
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
     for i in range(len(logprobs)):
