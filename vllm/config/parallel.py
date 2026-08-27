@@ -164,6 +164,16 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_sequence_parallel_moe: bool | None = None
+    """Enable sequence parallelism for MoE models.
+
+    When unset (default), the effective value is derived from
+    :attr:`all2all_backend`, :attr:`enable_expert_parallel`,
+    :attr:`tensor_parallel_size` and :attr:`data_parallel_size` (the legacy
+    heuristic). When set explicitly, it overrides the derived value so that
+    sequence parallelism can be enabled (or disabled) for any model with
+    ``tensor_parallel_size > 1``, dense models included.
+    """
     enable_batch_sharded_sampling: bool | None = None
     """Use sharded sampling across tensor parallel ranks. Each rank samples
     a slice of the batch instead of every rank sampling all of it. Currently
@@ -702,6 +712,8 @@ class ParallelConfig:
     #
     @property
     def use_sequence_parallel_moe(self) -> bool:
+        if self.enable_sequence_parallel_moe is not None:
+            return self.enable_sequence_parallel_moe
         return (
             self.all2all_backend
             in (
@@ -867,6 +879,11 @@ class ParallelConfig:
             * self.tensor_parallel_size
             * self.prefill_context_parallel_size
         )
+
+        if self.enable_sequence_parallel_moe and self.tensor_parallel_size == 1:
+            raise ValueError(
+                "enable_sequence_parallel_moe=True requires tensor_parallel_size > 1."
+            )
 
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")
