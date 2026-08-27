@@ -268,6 +268,36 @@ def _worker_fused_direct_matches_gather_insert(env: dict[str, str]) -> None:
     dist.destroy_process_group()
 
 
+def _worker_peer_fence_cudagraph(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    rank = int(env["RANK"])
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=int(env["WORLD_SIZE"])
+    )
+    from vllm.model_executor.layers.attention.pcp_direct_kv import PCPPeerCacheFence
+
+    device = torch.device(f"cuda:{rank}")
+    fence = PCPPeerCacheFence(dist.group.WORLD, device)
+    fence()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        fence()
+    dist.barrier()
+    for _ in range(4):
+        graph.replay()
+    torch.cuda.synchronize()
+    # Capture records but does not execute the increment. Four replays follow
+    # the eager warmup, so the device-resident epoch must now be five.
+    assert int(fence._epoch.item()) == 5
+
+    del graph
+    fence.close()
+    dist.destroy_process_group()
+
+
 def _worker_fused_direct_tp2_pcp2(env: dict[str, str]) -> None:
     update_environment_variables(env)
     global_rank = int(env["RANK"])
@@ -310,6 +340,11 @@ def _worker_fused_direct_tp2_pcp2(env: dict[str, str]) -> None:
         )
         destroy_model_parallel()
         destroy_distributed_environment()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2+ GPUs")
+def test_pcp_peer_cache_fence_cudagraph_replay():
+    _distributed_run(_worker_peer_fence_cudagraph, world_size=2)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2+ GPUs")

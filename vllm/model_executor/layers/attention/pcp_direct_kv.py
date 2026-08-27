@@ -47,15 +47,21 @@ def _trap_if_nonzero(value):
 
 
 @triton.jit
-def _publish_fence_kernel(
+def _peer_cache_fence_kernel(
     peer_ptrs,
-    epoch,
-    parity,
+    local_signal_ptr,
+    epoch_ptr,
     source_rank: tl.constexpr,
     world_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    MAX_SPINS: tl.constexpr,
 ):
-    destination_rank = tl.program_id(0)
-    if destination_rank < world_size:
+    # Keep the epoch on device so CUDA graph replay advances it on every launch.
+    epoch = tl.atomic_add(epoch_ptr, 1, sem="relaxed", scope="gpu") + 1
+    parity = epoch & 1
+
+    # System-scope release publishes this rank's preceding peer-cache writes.
+    for destination_rank in tl.static_range(0, world_size):
         dest_base = tl.load(peer_ptrs + destination_rank).to(tl.pointer_type(tl.int32))
         tl.atomic_xchg(
             dest_base + parity * world_size + source_rank,
@@ -63,20 +69,10 @@ def _publish_fence_kernel(
             sem="release",
             scope="sys",
         )
-
-
-@triton.jit
-def _wait_fence_kernel(
-    local_signal_ptr,
-    epoch,
-    parity,
-    world_size: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    MAX_SPINS: tl.constexpr,
-):
-    source_rank = tl.arange(0, BLOCK_SIZE)
-    mask = source_rank < world_size
-    signal_ptr = local_signal_ptr + parity * world_size + source_rank
+    # System-scope acquire waits until every peer has published the same epoch.
+    peer_rank = tl.arange(0, BLOCK_SIZE)
+    mask = peer_rank < world_size
+    signal_ptr = local_signal_ptr + parity * world_size + peer_rank
     observed = tl.atomic_add(signal_ptr, 0, mask=mask, sem="acquire", scope="sys")
     pending = tl.max(tl.where(mask & (observed != epoch), 1, 0))
     spins = 0
@@ -88,13 +84,13 @@ def _wait_fence_kernel(
 
 
 class PCPPeerCacheFence:
-    """Two-kernel release/acquire publication for one PCP group."""
+    """Device-epoch release/acquire publication for one PCP group."""
 
     def __init__(self, group: ProcessGroup, device: torch.device) -> None:
         self._group = group
         self._world_size = group.size()
         self._rank = group.rank()
-        self._epoch = 0
+        self._epoch = torch.zeros((1,), dtype=torch.int32, device=device)
         self._allocation = allocate_symm_mem_peer(
             (2, self._world_size),
             dtype=torch.int32,
@@ -106,19 +102,11 @@ class PCPPeerCacheFence:
         dist.barrier(group=group)
 
     def __call__(self) -> None:
-        self._epoch = self._epoch % 0x7FFFFFFE + 1
-        parity = self._epoch & 1
-        _publish_fence_kernel[(self._world_size,)](
+        _peer_cache_fence_kernel[(1,)](
             self._allocation.peer_ptrs,
-            self._epoch,
-            parity,
-            source_rank=self._rank,
-            world_size=self._world_size,
-        )
-        _wait_fence_kernel[(1,)](
             self._allocation.storage,
             self._epoch,
-            parity,
+            source_rank=self._rank,
             world_size=self._world_size,
             BLOCK_SIZE=triton.next_power_of_2(self._world_size),
             MAX_SPINS=_MAX_FENCE_SPINS,
