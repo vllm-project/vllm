@@ -1420,7 +1420,9 @@ class EngineArgs:
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
         if IS_SERVE_HELP:
-            processor_device_choices = ["auto", "cpu", "cuda", "tpu", "xpu"]
+            # Help must not resolve a concrete platform; show the full
+            # in-tree device set instead of the platform-derived one.
+            processor_device_choices = ["auto", "cpu", "cuda", "xpu"]
         else:
             from vllm.platforms import current_platform
 
@@ -1444,7 +1446,8 @@ class EngineArgs:
             "`--mm-tensor-ipc=torch_shm` can carry device tensors, since every "
             "other transport would copy the result back to the host and that "
             'copy costs more than it saves. "auto" resolves to "cpu" '
-            "everywhere else.",
+            "everywhere else. The accepted device set depends on the "
+            "current platform.",
         )
         multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",

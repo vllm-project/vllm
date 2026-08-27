@@ -1136,10 +1136,10 @@ class Platform:
     def __getattr__(self, key: str):
         # Pickle checks dunder methods like __getstate__. If we return None
         # for them, pickle treats it like a real value and tries to call it.
-        import torch
-
         if key.startswith("__") and key.endswith("__"):
             raise AttributeError(key)
+
+        import torch
 
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):

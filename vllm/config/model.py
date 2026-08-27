@@ -91,6 +91,8 @@ PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
+# Keep in sync with vllm.transformers_utils.config.ConfigFormat, redefined
+# here so the config tree does not import that module at annotation time.
 ConfigFormat = Literal["auto", "hf", "mistral"]
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {

@@ -24,6 +24,8 @@ from .utils.constants import (
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 
+# Keep in sync with vllm.entrypoints.chat_utils.ChatTemplateContentFormatOption,
+# redefined here so argument construction does not import chat_utils.
 ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
 
