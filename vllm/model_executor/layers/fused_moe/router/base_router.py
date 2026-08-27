@@ -25,9 +25,7 @@ if current_platform.is_cuda_alike():
     class EplbMapAndRecordKernel(
         VllmTritonJitKernel["EplbMapAndRecordKernel.CompileKey"]
     ):
-        def __init__(self) -> None:
-            self.block_size = 256
-            super().__init__()
+        BLOCK_SIZE = 256
 
         @dataclass(frozen=True)
         class CompileKey:
@@ -133,7 +131,7 @@ if current_platform.is_cuda_alike():
                 map_slots=triton_scalar_specialization_rep(map_slots),
                 out_size=triton_scalar_specialization_rep(out_size),
                 num_active_experts=triton_scalar_specialization_rep(num_active_experts),
-                block_size=self.block_size,
+                block_size=self.BLOCK_SIZE,
             )
 
         def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:

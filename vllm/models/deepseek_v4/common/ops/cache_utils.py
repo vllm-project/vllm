@@ -232,9 +232,7 @@ def quantize_and_insert_k_cache(
 class DequantizeAndGatherKCacheKernel(
     VllmTritonJitKernel["DequantizeAndGatherKCacheKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.num_workers = 128
-        super().__init__()
+    NUM_WORKERS = 128
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -446,7 +444,7 @@ class DequantizeAndGatherKCacheKernel(
     ) -> None:
         num_reqs = seq_lens.shape[0]
         self._launch(
-            (num_reqs, self.num_workers),
+            (num_reqs, self.NUM_WORKERS),
             out,
             out.stride(0),
             out.stride(1),
@@ -553,9 +551,7 @@ def compute_global_topk_indices_and_lens(
 class ComputeGlobalTopkIndicesAndLensKernel(
     VllmTritonJitKernel["ComputeGlobalTopkIndicesAndLensKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.triton_block_size = 1024
-        super().__init__()
+    TRITON_BLOCK_SIZE = 1024
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -694,7 +690,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             block_table.stride(0),
             block_size,
             is_valid_token,
-            TRITON_BLOCK_SIZE=self.triton_block_size,
+            TRITON_BLOCK_SIZE=self.TRITON_BLOCK_SIZE,
         )
 
 
@@ -756,9 +752,7 @@ def combine_topk_swa_indices(
 class CombineTopkSwaIndicesKernel(
     VllmTritonJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.num_workers = 256
-        super().__init__()
+    NUM_WORKERS = 256
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -959,7 +953,7 @@ class CombineTopkSwaIndicesKernel(
     ) -> None:
         num_reqs = seq_lens.shape[0]
         self._launch(
-            (num_reqs, self.num_workers),
+            (num_reqs, self.NUM_WORKERS),
             combined_indices,
             combined_indices.stride(0),
             combined_lens,

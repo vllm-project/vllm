@@ -65,9 +65,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
 class PrepareUniformDecodeKernel(
     VllmTritonJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.block_size = 1024
-        super().__init__()
+    BLOCK_SIZE = 1024
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -130,7 +128,7 @@ class PrepareUniformDecodeKernel(
 
     def get_warmup_keys(self) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
-            block_size=self.block_size,
+            block_size=self.BLOCK_SIZE,
             block_table_stride=(1, 2, 16),
             expanded_bt_stride=(1, 2, 16),
             max_decode_len=(1, 2, 16),
@@ -174,7 +172,7 @@ class PrepareUniformDecodeKernel(
             expanded_block_table.stride(0),
             decode_lens,
             max_decode_len,
-            BLOCK_SIZE=self.block_size,
+            BLOCK_SIZE=self.BLOCK_SIZE,
         )
 
 
@@ -296,9 +294,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
 class BuildPrefillChunkMetadataKernel(
     VllmTritonJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.block_size = 1024
-        super().__init__()
+    BLOCK_SIZE = 1024
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -427,7 +423,7 @@ class BuildPrefillChunkMetadataKernel(
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,
-            BLOCK_SIZE=self.block_size,
+            BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
             input_variant=(
                 TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
@@ -464,7 +460,7 @@ class BuildPrefillChunkMetadataKernel(
         self._launch(
             (num_reqs,),
             *args,
-            BLOCK_SIZE=self.block_size,
+            BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=COMPRESS_RATIO,
         )
 

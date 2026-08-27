@@ -661,7 +661,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
             metadata.decode_swa_indices,
             metadata.decode_swa_lens,
-            self.window_size,
+            metadata.decode_swa_indices.shape[-1],
             metadata.query_start_loc,
             metadata.seq_lens,
             metadata.token_to_req_indices,
@@ -853,14 +853,15 @@ class ComputeSWAIndicesAndLensKernel(
             triton_block_size=1024,
         )
 
-    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        scheduler_config = vllm_config.scheduler_config
-        if scheduler_config.max_num_batched_tokens <= 0:
-            return []
-        hf_config = vllm_config.model_config.hf_config
+    def get_warmup_keys(
+        self,
+        *,
+        window_size: int,
+        block_size: int,
+    ) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
-            window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
-            block_size=64,
+            window_size=window_size,
+            block_size=block_size,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -1010,25 +1011,22 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
     ) -> CompileKey:
         return self.CompileKey(
             window_size=window_size,
-            index_width=cdiv(window_size + num_speculative_tokens, 128) * 128,
+            index_width=get_dspark_swa_index_width(window_size, num_speculative_tokens),
             block_size=block_size,
             triton_block_size=1024,
         )
 
-    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        spec_config = vllm_config.speculative_config
-        if spec_config is None or not spec_config.use_dspark():
-            return []
-
-        scheduler_config = vllm_config.scheduler_config
-        if scheduler_config.max_num_batched_tokens <= 0:
-            return []
-
-        hf_config = vllm_config.model_config.hf_config
+    def get_warmup_keys(
+        self,
+        *,
+        window_size: int,
+        num_speculative_tokens: int,
+        block_size: int,
+    ) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
-            window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
-            num_speculative_tokens=spec_config.num_speculative_tokens,
-            block_size=64,
+            window_size=window_size,
+            num_speculative_tokens=num_speculative_tokens,
+            block_size=block_size,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:

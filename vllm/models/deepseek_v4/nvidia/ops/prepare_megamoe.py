@@ -26,10 +26,8 @@ from vllm.utils.math_utils import next_power_of_2
 class PrepareMegaMoeInputsKernel(
     VllmTritonJitKernel["PrepareMegaMoeInputsKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.block_k = 128
-        self.group_k = 32
-        super().__init__()
+    BLOCK_K = 128
+    GROUP_K = 32
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -228,7 +226,7 @@ class PrepareMegaMoeInputsKernel(
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         hidden_size = compile_key.hidden_size
         top_k = compile_key.top_k
-        x_scale_width = hidden_size // self.block_k
+        x_scale_width = hidden_size // self.BLOCK_K
         shared_rows = triton.cdiv(compile_key.shared_block_m, 128) * 128
         return dict(
             hidden_states=TritonWarmupTensor(torch.bfloat16, shape=(1, hidden_size)),
@@ -290,7 +288,7 @@ class PrepareMegaMoeInputsKernel(
             assert shared_block_m is not None
             if shared_block_m <= 0:
                 raise ValueError("MegaMoE shared_block_m must be positive.")
-            expected_sf_k = hidden_size // self.block_k
+            expected_sf_k = hidden_size // self.BLOCK_K
             if shared_x_sf.ndim != 2 or shared_x_sf.shape[1] != expected_sf_k:
                 raise ValueError(
                     "MegaMoE shared_x_sf must have shape "
@@ -304,7 +302,7 @@ class PrepareMegaMoeInputsKernel(
                     f"{required_rows}, got {shared_x_sf.shape[0]}."
                 )
 
-        block_k = self.block_k
+        block_k = self.BLOCK_K
         block_topk = triton.next_power_of_2(top_k)
         grid = (num_tokens, triton.cdiv(hidden_size, block_k))
         padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
@@ -339,7 +337,7 @@ class PrepareMegaMoeInputsKernel(
             hidden_size,
             top_k,
             BLOCK_K=block_k,
-            GROUP_K=self.group_k,
+            GROUP_K=self.GROUP_K,
             BLOCK_TOPK=block_topk,
             SHARED_BLOCK_M=shared_block_m or 1,
             num_warps=4,

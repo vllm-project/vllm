@@ -15,6 +15,7 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -62,10 +63,11 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_rank: int
         dcp_interleave: int
         num_warps: int
-        max_num_blocks_per_req: int
+        num_topk_tokens: int
+        block_table_stride: int
 
     @staticmethod
-    @triton.jit
+    @triton.jit(do_not_specialize=["max_num_blocks_per_req"])
     def kernel(
         req_id_ptr,  # int32 [num_tokens]
         block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
@@ -75,7 +77,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
         workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
         # shapes (compile-time where possible)
-        max_num_blocks_per_req: tl.constexpr,
+        max_num_blocks_per_req,
         BLOCK_SIZE: tl.constexpr,
         BLOCK_STRIDE_ROWS: tl.constexpr,
         BLOCK_N: tl.constexpr,  # tile width along columns
@@ -199,22 +201,21 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_INTERLEAVE: int,
         max_num_blocks_per_req: int,
     ) -> CompileKey:
-        single_tile = (
-            COUNT_VALID and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
-        )
+        tiling = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID)
         return self.CompileKey(
             block_size=BLOCK_SIZE,
             block_stride_rows=BLOCK_STRIDE_ROWS,
-            block_n=NUM_TOPK_TOKENS if single_tile else BLOCK_N,
+            block_n=tiling[1],
             has_prefill_workspace=HAS_PREFILL_WORKSPACE,
             count_valid=COUNT_VALID,
-            single_tile=single_tile,
+            single_tile=tiling[0],
             compact_to_front=COMPACT_TO_FRONT,
             dcp_size=DCP_SIZE,
             dcp_rank=DCP_RANK,
             dcp_interleave=DCP_INTERLEAVE,
-            num_warps=8 if single_tile else 4,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            num_warps=tiling[3],
+            num_topk_tokens=NUM_TOPK_TOKENS,
+            block_table_stride=triton_scalar_specialization_rep(max_num_blocks_per_req),
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
@@ -222,6 +223,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         dcp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
+        num_topk_tokens = vllm_config.model_config.hf_config.index_topk
         max_num_blocks = cdiv(
             vllm_config.model_config.max_model_len,
             block_size * dcp_size,
@@ -273,20 +275,19 @@ class ConvertReqIndexToGlobalIndexKernel(
             BLOCK_SIZE=block_size,
             BLOCK_STRIDE_ROWS=block_size,
             BLOCK_N=128,
-            NUM_TOPK_TOKENS=2048,
+            NUM_TOPK_TOKENS=num_topk_tokens,
             max_num_blocks_per_req=max_num_blocks_per_req,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        num_topk_tokens = compile_key.block_n if compile_key.single_tile else 2048
-        token_shape = (1, num_topk_tokens)
+        token_shape = (1, compile_key.num_topk_tokens)
         token_strides = (16, 1)
         return dict(
             req_id=int32_ptr,
             block_table=TritonWarmupTensor(
                 torch.int32,
-                shape=(1, compile_key.max_num_blocks_per_req),
+                shape=(1, compile_key.block_table_stride),
             ),
             token_indices=TritonWarmupTensor(
                 torch.int32,
@@ -305,11 +306,11 @@ class ConvertReqIndexToGlobalIndexKernel(
             prefill_workspace_starts=(
                 int32_ptr if compile_key.has_prefill_workspace else None
             ),
-            max_num_blocks_per_req=compile_key.max_num_blocks_per_req,
+            max_num_blocks_per_req=1,
             BLOCK_SIZE=compile_key.block_size,
             BLOCK_STRIDE_ROWS=compile_key.block_stride_rows,
             BLOCK_N=compile_key.block_n,
-            NUM_TOPK_TOKENS=num_topk_tokens,
+            NUM_TOPK_TOKENS=compile_key.num_topk_tokens,
             HAS_PREFILL_WORKSPACE=compile_key.has_prefill_workspace,
             COUNT_VALID=compile_key.count_valid,
             COMPACT_TO_FRONT=compile_key.compact_to_front,
@@ -340,20 +341,9 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
     ) -> None:
-        compile_key = self.dispatch(
-            max_num_blocks_per_req=max_num_blocks_per_req,
-            BLOCK_SIZE=BLOCK_SIZE,
-            BLOCK_STRIDE_ROWS=BLOCK_STRIDE_ROWS,
-            BLOCK_N=BLOCK_N,
-            NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
-            HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
-            COUNT_VALID=COUNT_VALID,
-            COMPACT_TO_FRONT=COMPACT_TO_FRONT,
-            DCP_SIZE=DCP_SIZE,
-            DCP_RANK=DCP_RANK,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
+        single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
+            NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID
         )
-        tiles_per_row = token_indices.shape[1] // compile_key.block_n
         self._launch(
             (req_id.shape[0], tiles_per_row),
             req_id,
@@ -364,24 +354,46 @@ class ConvertReqIndexToGlobalIndexKernel(
             prefill_workspace_request_ids,
             prefill_workspace_starts,
             max_num_blocks_per_req,
-            compile_key.block_size,
-            compile_key.block_stride_rows,
-            compile_key.block_n,
-            compile_key.has_prefill_workspace,
-            compile_key.count_valid,
-            compile_key.single_tile,
-            compile_key.compact_to_front,
-            compile_key.dcp_size,
-            compile_key.dcp_rank,
-            compile_key.dcp_interleave,
+            BLOCK_SIZE,
+            BLOCK_STRIDE_ROWS,
+            block_n,
+            HAS_PREFILL_WORKSPACE,
+            COUNT_VALID,
+            single_tile,
+            COMPACT_TO_FRONT,
+            DCP_SIZE,
+            DCP_RANK,
+            DCP_INTERLEAVE,
             block_table.stride(0),
             block_table.stride(1),
             token_indices.stride(0),
             token_indices.stride(1),
             out.stride(0),
             out.stride(1),
-            num_warps=compile_key.num_warps,
+            num_warps=num_warps,
         )
+
+
+def _remap_tiling(
+    NUM_TOPK_TOKENS: int, BLOCK_N: int, count_valid: bool
+) -> tuple[bool, int, int, int]:
+    """Pick the column tiling for the index remap kernel.
+
+    Counting the valid slots per row is the only reason the column tiles have to
+    talk to each other, so when counting give one program the whole row: the
+    count becomes an in-register reduction plus a plain store, needing neither
+    atomics nor a zero-initialized counter. The row is one ``tl.arange``, so this
+    needs a power-of-two width; other top-k sizes stay tiled and atomic.
+
+    Returns:
+        (single_tile, block_n, tiles_per_row, num_warps)
+    """
+    single_tile = (
+        count_valid and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
+    )
+    if single_tile:
+        return True, NUM_TOPK_TOKENS, 1, 8
+    return False, BLOCK_N, NUM_TOPK_TOKENS // BLOCK_N, 4
 
 
 def triton_convert_req_index_to_global_index(
@@ -447,12 +459,11 @@ def triton_convert_req_index_to_global_index(
     token_indices_c = token_indices.contiguous()
     out = torch.empty_like(token_indices_c)
 
-    # Allocate valid count buffer if needed (must be zero-initialized for atomics)
+    single_tile, _, _, _ = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, return_valid_counts)
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        valid_counts = torch.zeros(
-            num_tokens, dtype=torch.int32, device=token_indices.device
-        )
+        alloc = torch.empty if single_tile else torch.zeros
+        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
 
     # Prepare prefill pointers
     if HAS_PREFILL_WORKSPACE:
@@ -554,11 +565,11 @@ def triton_filter_and_convert_dcp_index(
     else:
         out = torch.empty_like(token_indices_c)
 
+    single_tile, _, _, _ = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, count_valid)
     valid_counts: torch.Tensor | None = None
     if count_valid:
-        valid_counts = torch.zeros(
-            num_tokens, dtype=torch.int32, device=token_indices.device
-        )
+        alloc = torch.empty if single_tile else torch.zeros
+        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
 
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,

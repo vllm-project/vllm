@@ -42,9 +42,7 @@ def can_use_dsv4_topk(
 
 
 class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
-    def __init__(self) -> None:
-        self.topk = 6
-        super().__init__()
+    TOP_K = 6
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -138,7 +136,7 @@ class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
         topk = vllm_config.model_config.hf_config.num_experts_per_tok
         if (
             num_experts not in (256, 384)
-            or topk != self.topk
+            or topk != self.TOP_K
             or not bool(getattr(hf_config, "norm_topk_prob", False))
             or getattr(hf_config, "scoring_func", None) != "sqrtsoftplus"
         ):
@@ -177,7 +175,7 @@ class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
         routed_scaling_factor: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens, num_experts = gating_output.shape
-        shape = (num_tokens, self.topk)
+        shape = (num_tokens, self.TOP_K)
         topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
         topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
         if num_tokens == 0:

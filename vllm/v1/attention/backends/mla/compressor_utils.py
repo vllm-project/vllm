@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
@@ -34,11 +35,10 @@ class CompressedSlotMappingKernel(
     class CompileKey:
         compress_ratio: int
         triton_block_size: int
-        block_table_stride: int
         block_size: int
 
     @staticmethod
-    @triton.jit
+    @triton.jit(do_not_specialize=["block_table_stride"])
     def kernel(
         # [num_tokens]
         slot_mapping_ptr,
@@ -86,13 +86,11 @@ class CompressedSlotMappingKernel(
         self,
         *,
         compress_ratio: int,
-        block_table_stride: int,
         block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
             compress_ratio=compress_ratio,
             triton_block_size=self.TRITON_BLOCK_SIZE,
-            block_table_stride=triton_scalar_specialization_rep(block_table_stride),
             block_size=triton_scalar_specialization_rep(block_size),
         )
 
@@ -103,9 +101,15 @@ class CompressedSlotMappingKernel(
         if not compress_ratios:
             return []
         return self._trace_dispatch(self.dispatch)(
-            compress_ratio=compress_ratios,
-            block_table_stride=(1, 2, 16),
-            block_size=(1, 2, 16),
+            zip_inputs(
+                *(
+                    dict(
+                        compress_ratio=ratio,
+                        block_size=vllm_config.cache_config.block_size // ratio,
+                    )
+                    for ratio in compress_ratios
+                )
+            )
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -114,10 +118,7 @@ class CompressedSlotMappingKernel(
             slot_mapping=TritonWarmupTensor(torch.int64),
             query_start_loc=int32_ptr,
             seq_lens=int32_ptr,
-            block_table=TritonWarmupTensor(
-                torch.int32,
-                shape=(1, compile_key.block_table_stride),
-            ),
+            block_table=int32_ptr,
             block_size=compile_key.block_size,
             compress_ratio=compile_key.compress_ratio,
         )

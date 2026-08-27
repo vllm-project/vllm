@@ -99,7 +99,8 @@ def test_convert_req_index_dispatch_matches_legacy_meta(
         dcp_rank=1,
         dcp_interleave=16,
         num_warps=expected_warps,
-        max_num_blocks_per_req=257,
+        num_topk_tokens=2048,
+        block_table_stride=triton_scalar_specialization_rep(257),
     )
 
 
@@ -250,8 +251,7 @@ def test_fused_inv_rope_warmup_uses_runtime_stride_classes(
         "scale_stride_k",
     )
     assert {
-        triton_scalar_specialization_rep(warmup_kwargs[name])
-        for name in stride_names
+        triton_scalar_specialization_rep(warmup_kwargs[name]) for name in stride_names
     } == {16}
 
 
