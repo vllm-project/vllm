@@ -171,7 +171,7 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        from vllm import _custom_ops as ops
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_gemma_rms_norm
 
         # Fall back to the native path if the fused gemma kernels are not
         # available in the installed vllm-xpu-kernels package.
@@ -181,14 +181,16 @@ class GemmaRMSNorm(CustomOp):
         # Pass the raw (bf16/fp16) weight; the +1 offset and the fp32 multiply
         # are folded into the kernel (matches forward_native numerics).
         if residual is not None:
-            ops.fused_add_gemma_rms_norm(
+            torch.ops.vllm.xpu_fused_add_gemma_rms_norm(
                 x, residual, self.weight.data, self.variance_epsilon
             )
             return x, residual
         # empty_like preserves x's strides, but the kernel requires a
         # contiguous out (unlike x, which it can handle non-contiguous).
         out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-        ops.gemma_rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        torch.ops.vllm.xpu_gemma_rms_norm(
+            out, x, self.weight.data, self.variance_epsilon
+        )
         return out
 
 

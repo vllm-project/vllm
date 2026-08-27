@@ -301,53 +301,6 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
-def gemma_rms_norm(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> None:
-    # GemmaRMSNorm: computes out = (x_normed_fp32 * (1 + weight.float())).to(dtype)
-    # with a raw (bf16/fp16) weight; the +1 offset and fp32 multiply are done
-    # in-kernel. See vllm-xpu-kernels gemma_rms_norm.
-    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
-
-
-def fused_add_gemma_rms_norm(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> None:
-    # Fused residual add + GemmaRMSNorm. Updates input and residual in place.
-    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
-
-
-try:
-
-    @register_fake("_C::gemma_rms_norm")
-    def _gemma_rms_norm_fake(
-        out: torch.Tensor,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        epsilon: float,
-    ) -> None:
-        return None
-
-    @register_fake("_C::fused_add_gemma_rms_norm")
-    def _fused_add_gemma_rms_norm_fake(
-        input: torch.Tensor,
-        residual: torch.Tensor,
-        weight: torch.Tensor,
-        epsilon: float,
-    ) -> None:
-        return None
-except (RuntimeError, AttributeError):
-    # Kernels package predates the gemma_* ops; forward_xpu guards availability
-    # and falls back to forward_native.
-    pass
-
-
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,
