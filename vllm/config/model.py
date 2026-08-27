@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import InitVar, field
-from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from functools import cache, cached_property
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast, get_args
 
-import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 import vllm.envs as envs
@@ -26,35 +27,12 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
-from vllm.transformers_utils.config import (
-    ConfigFormat,
-    checkpoint_has_lm_head,
-    get_config,
-    get_hf_image_processor_config,
-    get_hf_text_config,
-    get_pooling_config,
-    get_sentence_transformer_tokenizer_config,
-    is_encoder_decoder,
-    is_rope_parameters_nested,
-    try_get_dense_modules,
-    try_get_generation_config,
-    try_get_tokenizer_config,
-    uses_mrope,
-    uses_xdrope_dim,
-)
-from vllm.transformers_utils.model_arch_config_convertor import (
-    MODEL_ARCH_CONFIG_CONVERTORS,
-    ModelArchConfigConvertorBase,
-)
-from vllm.transformers_utils.repo_utils import resolve_revision
-from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
+    import torch
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
@@ -74,6 +52,11 @@ else:
     ParallelConfig = Any
     QuantizationMethods = str
     LogitsProcessor = Any
+
+if TYPE_CHECKING:
+    TorchDType: TypeAlias = torch.dtype
+else:
+    TorchDType: TypeAlias = object
 
 logger = init_logger(__name__)
 
@@ -108,6 +91,7 @@ PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
+ConfigFormat = Literal["auto", "hf", "mistral"]
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
@@ -166,7 +150,7 @@ class ModelConfig:
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
-    dtype: ModelDType | torch.dtype = "auto"
+    dtype: ModelDType | TorchDType = "auto"
     """Data type for model weights and activations:
 
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
@@ -542,6 +526,16 @@ class ModelConfig:
         mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
     ) -> None:
+        from vllm.platforms import current_platform
+        from vllm.transformers_utils.config import (
+            get_config,
+            get_hf_image_processor_config,
+            get_hf_text_config,
+            get_pooling_config,
+        )
+        from vllm.transformers_utils.repo_utils import resolve_revision
+        from vllm.transformers_utils.utils import maybe_model_redirect
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
@@ -892,6 +886,11 @@ class ModelConfig:
         return supports_mm
 
     def get_model_arch_config(self) -> ModelArchitectureConfig:
+        from vllm.transformers_utils.model_arch_config_convertor import (
+            MODEL_ARCH_CONFIG_CONVERTORS,
+            ModelArchConfigConvertorBase,
+        )
+
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
@@ -923,8 +922,22 @@ class ModelConfig:
             return value.lower()
         return value
 
+    @field_validator("dtype", mode="before")
+    @classmethod
+    def validate_dtype_before(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if value not in get_args(ModelDType):
+                raise ValueError(f"Unknown dtype: {value!r}")
+            return value
+
+        import torch
+
+        if not isinstance(value, torch.dtype):
+            raise ValueError(f"Unknown dtype: {value!r}")
+        return value
+
     @model_validator(mode="after")
-    def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
+    def validate_model_config_after(self: ModelConfig) -> ModelConfig:
         """Called after __post_init__"""
         if not isinstance(self.tokenizer, str):
             raise ValueError(
@@ -1071,6 +1084,10 @@ class ModelConfig:
             model: Model name or path
             tokenizer: Tokenizer name or path
         """
+        from vllm.transformers_utils.runai_utils import (
+            ObjectStorageModel,
+            is_runai_obj_uri,
+        )
 
         # Skip if model_weights is already set (model already pulled)
         if self.model_weights:
@@ -1112,6 +1129,10 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
+        from vllm.transformers_utils.config import (
+            get_sentence_transformer_tokenizer_config,
+        )
+
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
 
     def maybe_untie_word_embeddings(self) -> None:
@@ -1126,6 +1147,8 @@ class ModelConfig:
         Transformers makes the same decision in `PreTrainedModel.tie_weights`,
         where it can compare the two tensors directly.
         """
+        from vllm.transformers_utils.config import checkpoint_has_lm_head
+
         if not getattr(self.hf_config, "tie_word_embeddings", False):
             return
         if not checkpoint_has_lm_head(self.model, revision=self.revision):
@@ -1146,6 +1169,8 @@ class ModelConfig:
         self,
         architectures: list[str],
     ) -> RunnerType:
+        from vllm.transformers_utils.config import get_pooling_config
+
         registry = self.registry
 
         # Some Sentence Transformers models use *ForCausalLM archs
@@ -1329,6 +1354,8 @@ class ModelConfig:
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
+            from vllm.platforms import current_platform
+
             current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
@@ -1349,13 +1376,16 @@ class ModelConfig:
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
-        if unsupported_rocm and not self.enforce_eager and current_platform.is_rocm():
-            logger.warning(
-                "CUDA graph is not supported for %s on ROCm yet, fallback "
-                "to eager mode.",
-                self.model_arch_config.model_type,
-            )
-            self.enforce_eager = True
+        if unsupported_rocm and not self.enforce_eager:
+            from vllm.platforms import current_platform
+
+            if current_platform.is_rocm():
+                logger.warning(
+                    "CUDA graph is not supported for %s on ROCm yet, fallback "
+                    "to eager mode.",
+                    self.model_arch_config.model_type,
+                )
+                self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
         if not self.is_moe:
@@ -1689,6 +1719,8 @@ class ModelConfig:
         Returns:
             A dictionary containing the non-default generation config.
         """
+        from vllm.transformers_utils.config import try_get_generation_config
+
         if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
@@ -1805,6 +1837,8 @@ class ModelConfig:
     @cached_property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
+        from vllm.transformers_utils.config import is_encoder_decoder
+
         return is_encoder_decoder(self.hf_config)
 
     @cached_property
@@ -1837,10 +1871,14 @@ class ModelConfig:
 
     @property
     def uses_mrope(self) -> bool:
+        from vllm.transformers_utils.config import uses_mrope
+
         return uses_mrope(self.hf_config)
 
     @property
     def uses_xdrope_dim(self) -> int:
+        from vllm.transformers_utils.config import uses_xdrope_dim
+
         return uses_xdrope_dim(self.hf_config)
 
     @property
@@ -1968,6 +2006,8 @@ class ModelConfig:
           (the trainer computes logits in fp32).
         """
 
+        from vllm.platforms import current_platform
+
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
@@ -1986,6 +2026,8 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
+        from vllm.transformers_utils.config import try_get_dense_modules
+
         # Check for embedding_size set by model config (e.g., Voyage models)
         override = getattr(self.hf_config, "embedding_size", None)
         if override is not None:
@@ -2003,6 +2045,8 @@ class ModelConfig:
             self.runner_type == "pooling"
             and getattr(self.hf_config, "position_embedding_type", "") == "absolute"
         ):
+            from vllm.transformers_utils.config import try_get_tokenizer_config
+
             tokenizer_config = try_get_tokenizer_config(
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
@@ -2226,17 +2270,21 @@ def try_match_architecture_defaults(
     return None
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.float16,
-    "float16": torch.float16,
-    "float": torch.float32,
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-}
+@cache
+def _str_dtype_to_torch_dtype() -> dict[str, torch.dtype]:
+    import torch
+
+    return {
+        "half": torch.float16,
+        "float16": torch.float16,
+        "float": torch.float32,
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+    }
 
 
 def str_dtype_to_torch_dtype(type: str):
-    return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+    return _str_dtype_to_torch_dtype().get(type)
 
 
 # model_type -> reason
@@ -2249,6 +2297,8 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
 
 
 def _is_valid_dtype(model_type: str, dtype: torch.dtype):
+    import torch
+
     if model_type in _FLOAT16_NOT_SUPPORTED_MODELS and dtype == torch.float16:  # noqa: E501, SIM103
         return False
 
@@ -2256,6 +2306,8 @@ def _is_valid_dtype(model_type: str, dtype: torch.dtype):
 
 
 def _check_valid_dtype(model_type: str, dtype: torch.dtype):
+    import torch
+
     if model_type in _FLOAT16_NOT_SUPPORTED_MODELS and dtype == torch.float16:
         reason = _FLOAT16_NOT_SUPPORTED_MODELS[model_type]
         raise ValueError(
@@ -2271,6 +2323,10 @@ def _resolve_auto_dtype(
     *,
     is_pooling_model: bool,
 ):
+    import torch
+
+    from vllm.platforms import current_platform
+
     supported_dtypes = [
         dtype
         for dtype in current_platform.supported_dtypes
@@ -2318,6 +2374,12 @@ def _get_and_verify_dtype(
     revision: str | None = None,
     config_format: str | ConfigFormat = "hf",
 ) -> torch.dtype:
+    import torch
+
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        ModelArchConfigConvertorBase,
+    )
+
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
         config, model_id, revision=revision, config_format=config_format
     )
@@ -2333,9 +2395,10 @@ def _get_and_verify_dtype(
                 is_pooling_model=is_pooling_model,
             )
         else:
-            if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+            str_dtype_to_torch_dtype = _str_dtype_to_torch_dtype()
+            if dtype not in str_dtype_to_torch_dtype:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
-            torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+            torch_dtype = str_dtype_to_torch_dtype[dtype]
     elif isinstance(dtype, torch.dtype):
         torch_dtype = dtype
     else:
@@ -2360,15 +2423,20 @@ def _get_and_verify_dtype(
 def _get_head_dtype(
     config: PretrainedConfig, dtype: torch.dtype, runner_type: str
 ) -> torch.dtype:
+    import torch
+
+    from vllm.platforms import current_platform
+
     head_dtype: str | torch.dtype | None = getattr(config, "head_dtype", None)
 
     if head_dtype == "model":
         return dtype
     elif isinstance(head_dtype, str):
         head_dtype = head_dtype.lower()
-        if head_dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+        str_dtype_to_torch_dtype = _str_dtype_to_torch_dtype()
+        if head_dtype not in str_dtype_to_torch_dtype:
             raise ValueError(f"Unknown dtype: {head_dtype!r}")
-        return _STR_DTYPE_TO_TORCH_DTYPE[head_dtype]
+        return str_dtype_to_torch_dtype[head_dtype]
     elif isinstance(head_dtype, torch.dtype):
         return head_dtype
     elif head_dtype is None:
@@ -2392,6 +2460,9 @@ def _get_and_verify_max_len(
     encoder_config: dict[str, Any] | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
+    from vllm.platforms import current_platform
+    from vllm.transformers_utils.config import is_rope_parameters_nested
+
     (derived_max_model_len, max_len_key) = (
         model_arch_config.derived_max_model_len_and_key
     )

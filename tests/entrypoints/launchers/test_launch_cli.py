@@ -119,125 +119,6 @@ def _run_python(*args: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
-_RUNTIME_MODULES = (
-    "torch",
-    "vllm.env_override",
-    "vllm.entrypoints.cli.serve",
-    "vllm.entrypoints.launchers.cli_args",
-    "vllm.v1.executor",
-)
-
-
-def _run_import_light_help(argv: list[str]) -> str:
-    script = f"""
-import os
-import sys
-
-os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
-sys.argv = ["vllm", *{argv!r}]
-from vllm.entrypoints.cli.main import main
-
-try:
-    main()
-except SystemExit as exc:
-    assert exc.code == 0
-
-assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
-loaded = sorted(
-    prefix
-    for prefix in {_RUNTIME_MODULES!r}
-    if any(
-        name == prefix or name.startswith(f"{{prefix}}.") for name in sys.modules
-    )
-)
-assert not loaded, loaded
-"""
-    return _run_python("-c", script).stdout
-
-
-@pytest.mark.parametrize("argv", [["--help"], ["serve", "--help"]])
-def test_help_is_import_light(argv):
-    output = _run_import_light_help(argv)
-    if argv[0] != "serve":
-        return
-
-    for argument in (
-        "model_tag",
-        "--headless",
-        "--api-server-count",
-        "-asc",
-        "--config",
-        "--grpc",
-    ):
-        assert argument in output
-    for non_core_argument in ("--host", "--port", "--max-model-len"):
-        assert non_core_argument not in output
-    assert "Config Groups:" not in output
-    assert "vllm serve --help=all" in output
-
-
-def test_serve_help_all_uses_canonical_parser():
-    output = _run_python("-m", "vllm.entrypoints.cli.main", "serve", "--help=all")
-    for argument in ("model_tag", "--grpc", "--host", "--max-model-len"):
-        assert argument in output.stdout
-
-
-@pytest.mark.parametrize(
-    ("argv", "module_name"),
-    [
-        pytest.param(
-            ["serve", "--help=all"],
-            "vllm.entrypoints.cli.serve",
-            id="serve",
-        ),
-        pytest.param(
-            ["bench", "--help"],
-            "vllm.entrypoints.cli.benchmark.main",
-            id="bench",
-        ),
-    ],
-)
-def test_runtime_cli_sets_environment_before_loading_selected_command(
-    argv, module_name
-):
-    script = f"""
-import importlib.abc
-import os
-import sys
-
-os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
-
-class RuntimeImportOrderGuard(importlib.abc.MetaPathFinder):
-    seen = set()
-
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "torch":
-            self.seen.add("torch")
-            assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn"
-        if fullname == {module_name!r}:
-            self.seen.add("selected")
-            assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn"
-            assert "torch" in self.seen
-            assert "vllm.env_override" in sys.modules
-            assert "vllm.entrypoints.serve.utils.api_utils" not in sys.modules
-        return None
-
-guard = RuntimeImportOrderGuard()
-sys.meta_path.insert(0, guard)
-sys.argv = ["vllm", *{argv!r}]
-
-from vllm.entrypoints.cli.main import main
-
-try:
-    main()
-except SystemExit as exc:
-    assert exc.code == 0
-
-assert guard.seen == {{"torch", "selected"}}
-"""
-    _run_python("-c", script)
-
-
 def test_serve_parser_uses_explicit_args_not_host_sys_argv():
     from vllm.entrypoints.cli.serve import ServeSubcommand
 
@@ -256,6 +137,10 @@ def test_serve_parser_uses_explicit_args_not_host_sys_argv():
     "runtime_import",
     [
         pytest.param("import vllm.compilation.compiler_interface", id="compilation"),
+        pytest.param(
+            "import vllm.entrypoints.launchers.api_server.app_state",
+            id="api-server-state",
+        ),
         pytest.param("import vllm.v1.worker.gpu_model_runner", id="v1"),
         pytest.param("import vllm.v1.worker.gpu.model_runner", id="v2"),
         pytest.param("import vllm\nvllm.RequestOutput", id="lazy-export"),

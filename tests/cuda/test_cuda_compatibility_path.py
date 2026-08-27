@@ -6,6 +6,7 @@ Verifies the opt-in LD_LIBRARY_PATH manipulation for CUDA compat libs,
 including env var parsing, path detection, and deduplication.
 """
 
+import importlib.metadata
 import os
 from unittest.mock import patch
 
@@ -158,6 +159,18 @@ class TestCudaCompatibilityLdPathManipulation:
         assert parts[0] == str(compat_dir)
         assert parts.count(str(compat_dir)) == 1
 
+    def test_preserves_empty_ld_library_path_segment(self, monkeypatch, tmp_path):
+        """An empty path keeps the dynamic linker's current-directory entry."""
+        compat_dir = tmp_path / "compat"
+        compat_dir.mkdir()
+        monkeypatch.setenv("VLLM_ENABLE_CUDA_COMPATIBILITY", "1")
+        monkeypatch.setenv("VLLM_CUDA_COMPATIBILITY_PATH", str(compat_dir))
+        monkeypatch.setenv("LD_LIBRARY_PATH", f":{compat_dir}:/usr/lib")
+
+        _maybe_set_cuda_compatibility_path()
+
+        assert os.environ["LD_LIBRARY_PATH"] == f"{compat_dir}::/usr/lib"
+
     def test_already_at_front_is_noop(self, monkeypatch, tmp_path):
         """If compat path is already first, don't modify LD_LIBRARY_PATH."""
         compat_dir = tmp_path / "compat"
@@ -182,7 +195,7 @@ class TestGetTorchCudaVersion:
     def test_returns_none_when_torch_missing(self):
         """Should return None when torch is not importable."""
         with patch(
-            "vllm._environment.importlib.util.find_spec",
-            return_value=None,
+            "vllm.env_override.importlib.metadata.distribution",
+            side_effect=importlib.metadata.PackageNotFoundError,
         ):
             assert _get_torch_cuda_version() is None

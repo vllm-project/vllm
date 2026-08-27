@@ -16,7 +16,6 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
-from vllm.env_override import _apply_constrain_to_fx_strides_patch
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -285,7 +284,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
-        _apply_constrain_to_fx_strides_patch()
         compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
@@ -487,7 +485,6 @@ class InductorAdaptor(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
-        _apply_constrain_to_fx_strides_patch()
         compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
 

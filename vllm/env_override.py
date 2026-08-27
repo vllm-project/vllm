@@ -1,23 +1,185 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
+import ast
+import importlib.abc
+import importlib.machinery
+import importlib.metadata
 import os
+import sys
+from collections.abc import Callable
+from functools import cache
+from typing import Any, cast
 
-from vllm import _environment
-
-_get_torch_cuda_version = _environment._get_torch_cuda_version
-
-
-def _maybe_set_cuda_compatibility_path():
-    return _environment._maybe_set_cuda_compatibility_path(_get_torch_cuda_version)
+from packaging import version
 
 
-import torch
+def _get_torch_version_attr(name: str) -> Any | None:
+    """Read a literal from torch.version without importing Torch."""
+    try:
+        torch_version = importlib.metadata.distribution("torch").locate_file(
+            "torch/version.py"
+        )
+        for node in ast.parse(torch_version.read_text()).body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name
+            ):
+                return ast.literal_eval(node.value)
+    except (OSError, SyntaxError, ValueError, importlib.metadata.PackageNotFoundError):
+        pass
+    return None
 
-from vllm.logger import init_logger
-from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
 
-logger = init_logger(__name__)
+def _get_torch_cuda_version() -> str | None:
+    return cast(str | None, _get_torch_version_attr("cuda"))
+
+
+def get_torch_xpu_version() -> str | None:
+    return cast(str | None, _get_torch_version_attr("xpu"))
+
+
+def _maybe_set_cuda_compatibility_path(
+    get_torch_cuda_version: Callable[[], str | None] | None = None,
+) -> None:
+    """Set LD_LIBRARY_PATH for CUDA forward compatibility before Torch loads."""
+    enable = os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower() in (
+        "1",
+        "true",
+    )
+    if not enable:
+        return
+
+    cuda_compat_path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", "")
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        conda_prefix = os.environ.get("CONDA_PREFIX", "")
+        conda_compat = os.path.join(conda_prefix, "cuda-compat")
+        if conda_prefix and os.path.isdir(conda_compat):
+            cuda_compat_path = conda_compat
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        get_torch_cuda_version = get_torch_cuda_version or _get_torch_cuda_version
+        torch_cuda_version = get_torch_cuda_version()
+        if torch_cuda_version:
+            default_path = f"/usr/local/cuda-{torch_cuda_version}/compat"
+            if os.path.isdir(default_path):
+                cuda_compat_path = default_path
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        return
+
+    norm_path = os.path.normpath(cuda_compat_path)
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_paths = existing.split(os.pathsep) if existing else []
+    if ld_paths and ld_paths[0] and os.path.normpath(ld_paths[0]) == norm_path:
+        return
+
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+        [norm_path]
+        + [path for path in ld_paths if not path or os.path.normpath(path) != norm_path]
+    )
+
+
+def apply_pre_torch_environment() -> None:
+    """Apply process defaults that must precede importing Torch."""
+    _maybe_set_cuda_compatibility_path()
+    os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
+    os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+    os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
+    os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
+
+
+@cache
+def _installed_torch_version() -> version.Version:
+    try:
+        return version.parse(importlib.metadata.version("torch"))
+    except importlib.metadata.PackageNotFoundError:
+        return version.parse("0")
+
+
+def is_torch_equal_or_newer(target: str) -> bool:
+    return _installed_torch_version() >= version.parse(target)
+
+
+def is_torch_equal(target: str) -> bool:
+    assert target.count(".") == 2
+    torch_version = _installed_torch_version()
+    return torch_version >= version.parse(target) and (
+        version.parse(target + ".1") > torch_version
+    )
+
+
+_POST_IMPORT_PATCHES: dict[str, list[Callable[[], None]]] = {}
+
+
+class _PostImportPatchLoader(importlib.abc.Loader):
+    def __init__(self, loader: Any, module_name: str):
+        self._loader = loader
+        self._module_name = module_name
+
+    def create_module(self, spec):
+        create_module = getattr(self._loader, "create_module", None)
+        return create_module(spec) if create_module is not None else None
+
+    def exec_module(self, module) -> None:
+        self._loader.exec_module(module)
+        module.__loader__ = self._loader
+        if module.__spec__ is not None:
+            module.__spec__.loader = self._loader
+        _apply_post_import_patches(self._module_name)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._loader, name)
+
+
+class _PostImportPatchFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname not in _POST_IMPORT_PATCHES:
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is None or spec.loader is None:
+            return None
+        spec.loader = _PostImportPatchLoader(spec.loader, fullname)
+        return spec
+
+
+_POST_IMPORT_PATCH_FINDER: _PostImportPatchFinder | None = None
+
+
+def _apply_post_import_patches(module_name: str) -> None:
+    callbacks = _POST_IMPORT_PATCHES[module_name]
+    for callback in callbacks:
+        callback()
+    del _POST_IMPORT_PATCHES[module_name]
+
+    global _POST_IMPORT_PATCH_FINDER
+    if not _POST_IMPORT_PATCHES and _POST_IMPORT_PATCH_FINDER is not None:
+        sys.meta_path.remove(_POST_IMPORT_PATCH_FINDER)
+        _POST_IMPORT_PATCH_FINDER = None
+
+
+def _register_post_import_patch(module_name: str, callback: Callable[[], None]) -> None:
+    loaded_module = sys.modules.get(module_name)
+    if loaded_module is not None:
+        spec = getattr(loaded_module, "__spec__", None)
+        if spec is not None and getattr(spec, "_initializing", False):
+            raise RuntimeError(
+                f"Cannot register a patch while {module_name} is importing"
+            )
+        callback()
+        return
+
+    _POST_IMPORT_PATCHES.setdefault(module_name, []).append(callback)
+
+    global _POST_IMPORT_PATCH_FINDER
+    if _POST_IMPORT_PATCH_FINDER is None:
+        _POST_IMPORT_PATCH_FINDER = _PostImportPatchFinder()
+        path_finder_index = sys.meta_path.index(importlib.machinery.PathFinder)
+        sys.meta_path.insert(path_finder_index, _POST_IMPORT_PATCH_FINDER)
+
+
+apply_pre_torch_environment()
+
 
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
@@ -264,6 +426,7 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/_inductor/scheduler.py#L4712-L4724
     """Return True if we should partition the inductor graph on this node"""
 
+    import torch
     import torch._inductor.ir as ir
     from torch._inductor.scheduler import (
         BaseSchedulerNode,
@@ -367,35 +530,49 @@ def _update_scheduler_patched(self) -> None:
 # For more context, see https://github.com/vllm-project/vllm/issues/30905.
 def _patch_get_raw_stream_if_needed():
     """Workaround for TorchInductor autotune get_raw_stream() bug."""
-    from vllm.utils.torch_utils import is_torch_equal
+    import builtins
 
-    # Only apply the patch for torch 2.9.0 or 2.9.1
-    if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
-        import builtins
+    import torch
 
-        # Check if CUDA functionality is available without initializing CUDA
-        # _cuda_getCurrentRawStream only exists in CUDA builds of PyTorch
-        if hasattr(torch._C, "_cuda_getCurrentRawStream"):
-            from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
+    # _cuda_getCurrentRawStream only exists in CUDA builds of PyTorch.
+    if hasattr(torch._C, "_cuda_getCurrentRawStream"):
+        from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
 
-            builtins.get_raw_stream = _get_raw_stream  # type: ignore[attr-defined]
+        builtins.get_raw_stream = _get_raw_stream  # type: ignore[attr-defined]
 
 
-_patch_get_raw_stream_if_needed()
-
-if is_torch_equal("2.9.0"):
-    from torch._inductor.codegen.wrapper import PythonWrapperCodegen
-    from torch._inductor.graph import GraphLowering
+def _apply_torch_2_9_config_patch() -> None:
+    import torch._inductor.config as inductor_config
     from torch.utils._config_module import _Config, _ConfigEntry
 
-    # `custom_should_partition_ops` is a new config after 2.9.0. So this would
+    # `custom_should_partition_ops` is a new config after 2.9.0. So this does
     # not overwrite any user configs.
-    torch._inductor.config._config["custom_should_partition_ops"] = _ConfigEntry(
+    inductor_config._config["custom_should_partition_ops"] = _ConfigEntry(
         _Config(default=[])
     )
 
+
+def _apply_torch_2_9_wrapper_patch() -> None:
+    from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
+
+
+def _apply_torch_2_9_graph_patch() -> None:
+    from torch._inductor.graph import GraphLowering
+
     GraphLowering._update_scheduler = _update_scheduler_patched
+
+
+if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
+    _register_post_import_patch("torch", _patch_get_raw_stream_if_needed)
+
+if is_torch_equal("2.9.0"):
+    _register_post_import_patch("torch._inductor.config", _apply_torch_2_9_config_patch)
+    _register_post_import_patch(
+        "torch._inductor.codegen.wrapper", _apply_torch_2_9_wrapper_patch
+    )
+    _register_post_import_patch("torch._inductor.graph", _apply_torch_2_9_graph_patch)
 
 # ===================================================
 # torch <2.12 GraphCaptureOutput.get_runtime_env monkeypatch
@@ -416,26 +593,22 @@ if is_torch_equal("2.9.0"):
 # Upstream issue: https://github.com/pytorch/pytorch/issues/175973
 
 
-_constrain_to_fx_strides_patched = False
-
-
 def _apply_constrain_to_fx_strides_patch():
     """Patch lowering.constrain_to_fx_strides globally. Safe to call
     multiple times; only the first call does anything.
     Only applies for torch >= 2.11 and < 2.12."""
-    global _constrain_to_fx_strides_patched
-    if _constrain_to_fx_strides_patched:
-        return
-    _constrain_to_fx_strides_patched = True
-
     if not is_torch_equal_or_newer("2.11.0.dev") or is_torch_equal_or_newer(
         "2.12.0.dev"
     ):
         return
 
+    import torch
     import torch._inductor.ir as _ir
     import torch._inductor.lowering as _lowering
     from torch._inductor.virtualized import V as _V
+
+    if getattr(_lowering.constrain_to_fx_strides, "_vllm_patched", False):
+        return
 
     def _patched(fx_node, *args, **kwargs):
         def apply_constraint(arg, fx_arg):
@@ -458,13 +631,23 @@ def _apply_constrain_to_fx_strides_patch():
         return args, kwargs
 
     _lowering.constrain_to_fx_strides = _patched
+    _patched._vllm_patched = True  # type: ignore[attr-defined]
 
 
-if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0.dev"):
+if is_torch_equal_or_newer("2.11.0.dev") and not is_torch_equal_or_newer("2.12.0.dev"):
+    _register_post_import_patch(
+        "torch._inductor.lowering", _apply_constrain_to_fx_strides_patch
+    )
+
+
+def _apply_graph_capture_output_patch() -> None:
     import builtins as _builtins
     import pickle
 
     from torch._dynamo.convert_frame import GraphCaptureOutput
+
+    if getattr(GraphCaptureOutput.get_runtime_env, "_vllm_patched", False):
+        return
 
     _original_get_runtime_env = GraphCaptureOutput.get_runtime_env
 
@@ -491,7 +674,14 @@ if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0.dev
                     runtime_env.used_globals[ref] = getattr(_builtins, ref)
         return runtime_env
 
+    _patched_get_runtime_env._vllm_patched = True  # type: ignore[attr-defined]
     GraphCaptureOutput.get_runtime_env = _patched_get_runtime_env
+
+
+if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0.dev"):
+    _register_post_import_patch(
+        "torch._dynamo.convert_frame", _apply_graph_capture_output_patch
+    )
 
 # ===================================================
 # torch 2.10 FxGraphCachePickler.dumps ValueError fix
@@ -530,17 +720,15 @@ def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
 
 def _patch_fxgraphcache_pickle_if_needed():
     """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
-
-    if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
-        return
-
     from torch._inductor.codecache import BypassFxGraphCache, FxGraphCachePickler
 
     _apply_fxgraphcache_pickle_patch(FxGraphCachePickler, BypassFxGraphCache)
 
 
-_patch_fxgraphcache_pickle_if_needed()
+if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.11.0"):
+    _register_post_import_patch(
+        "torch._inductor.codecache", _patch_fxgraphcache_pickle_if_needed
+    )
 
 # ===================================================
 # torch 2.11 Inductor cpp codegen indirect_assert scalar-mask fix
@@ -628,33 +816,9 @@ def _patch_cpp_indirect_assert_if_needed():
     if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
         return
 
-    import sys
-
-    target_name = "torch._inductor.codegen.cpp"
-    if target_name in sys.modules:
-        _apply_cpp_indirect_assert_patch()
-        return
-
-    import importlib.abc
-
-    class _CppCodegenPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_cpp_indirect_assert_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _CppCodegenPatchFinder())
+    _register_post_import_patch(
+        "torch._inductor.codegen.cpp", _apply_cpp_indirect_assert_patch
+    )
 
 
 _patch_cpp_indirect_assert_if_needed()
@@ -740,34 +904,39 @@ def _patch_inductor_fallback_allow_list() -> None:
     if base is None or getattr(base, "_vllm_patched", False):
         return
 
-    _lowering.FALLBACK_ALLOW_LIST = _VllmFallbackAllowList(base)
+    patched = _VllmFallbackAllowList(base)
+    lowering = cast(Any, _lowering)
+    lowering.FALLBACK_ALLOW_LIST = patched
 
     # torch/_inductor/graph.py imports the symbol at module load time:
     #   from torch._inductor.lowering import FALLBACK_ALLOW_LIST
     # so we also need to overwrite the local binding in the graph module if
     # it has already been imported.
-    try:
-        from torch._inductor import graph as _graph
-
-        if hasattr(_graph, "FALLBACK_ALLOW_LIST"):
-            _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
-    except ImportError:
-        pass
+    graph = sys.modules.get("torch._inductor.graph")
+    if graph is not None and hasattr(graph, "FALLBACK_ALLOW_LIST"):
+        cast(Any, graph).FALLBACK_ALLOW_LIST = patched
 
 
-_patch_inductor_fallback_allow_list()
+_register_post_import_patch(
+    "torch._inductor.lowering", _patch_inductor_fallback_allow_list
+)
+
 
 # ============================================================
 # Triton Autotuner determinism
 # ============================================================
 # Replace the Autotuner.run so it always pick the first running configuration.
 # Useful to eliminate autotune variability leading to non determinism.
-if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
-    "1",
-    "true",
-):
+def _install_force_first_config() -> None:
     from vllm.triton_utils.force_first_config import (
         install as _install_force_first_config,
     )
 
     _install_force_first_config()
+
+
+if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
+    "1",
+    "true",
+):
+    _register_post_import_patch("triton.runtime.autotuner", _install_force_first_config)

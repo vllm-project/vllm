@@ -41,6 +41,24 @@ CLI_COMMANDS = {
     ),
 }
 
+
+def cli_env_setup() -> None:
+    """Set the CLI-only multiprocessing default before runtime imports."""
+    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+        logging.getLogger(__name__).debug(
+            "Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'"
+        )
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def is_serve_help(argv: list[str]) -> bool:
+    options = argv[: argv.index("--")] if "--" in argv else argv
+    command = next((arg for arg in options if not arg.startswith("-")), None)
+    return command == "serve" and any(
+        option in ("-h", "--help") or option.startswith("--help=") for option in options
+    )
+
+
 VLLM_SUBCMD_PARSER_EPILOG = (
     "For full list:            vllm {subcmd} --help=all\n"
     "For a section:            vllm {subcmd} --help=ModelConfig    "
@@ -57,15 +75,6 @@ Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
 --help=ModelConfig, --help=Frontend)
   Use `--help=all` to show all available flags at once.
 """
-
-
-def cli_env_setup() -> None:
-    """Set process defaults shared by all CLI runtime commands."""
-    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
-        logging.getLogger(__name__).debug(
-            "Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'"
-        )
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def add_serve_core_args(parser: _ParserT) -> _ParserT:
@@ -104,9 +113,3 @@ def add_serve_core_args(parser: _ParserT) -> _ParserT:
         "server. Requires: pip install vllm[grpc].",
     )
     return parser
-
-
-def is_plain_help(argv: list[str]) -> bool:
-    return any(arg in ("-h", "--help") for arg in argv) and not any(
-        arg.startswith("--help=") for arg in argv
-    )

@@ -1,9 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import uuid
+from __future__ import annotations
 
-import torch
+import uuid
+from typing import TYPE_CHECKING, TypeAlias
+
+if TYPE_CHECKING:
+    import torch
+
+    TorchModule: TypeAlias = torch.nn.Module
+    TorchTensor: TypeAlias = torch.Tensor
+else:
+    TorchModule: TypeAlias = object
+    TorchTensor: TypeAlias = object
 
 MASK_64_BITS = (1 << 64) - 1
 
@@ -13,8 +23,8 @@ def random_uuid() -> str:
 
 
 def length_from_prompt_token_ids_or_embeds(
-    prompt_token_ids: list[int] | torch.Tensor | None,
-    prompt_embeds: torch.Tensor | None,
+    prompt_token_ids: list[int] | TorchTensor | None,
+    prompt_embeds: TorchTensor | None,
 ) -> int:
     """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
@@ -36,7 +46,7 @@ def length_from_prompt_token_ids_or_embeds(
         return prompt_token_len
 
 
-def is_moe_layer(module: torch.nn.Module) -> bool:
+def is_moe_layer(module: TorchModule) -> bool:
     # TODO(bnell): Should use isinstance but can't due to circular dependencies.
     def _check_bases(cls):
         if cls.__name__ == "MoERunnerInterface":

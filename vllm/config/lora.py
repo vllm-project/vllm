@@ -2,24 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, get_args
 
-import torch
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import ModelConfig
     from vllm.config.cache import CacheConfig
 else:
     ModelConfig = Any
     CacheConfig = Any
+
+if TYPE_CHECKING:
+    TorchDType: TypeAlias = torch.dtype
+else:
+    TorchDType: TypeAlias = object
 
 logger = init_logger(__name__)
 
@@ -44,7 +49,7 @@ class LoRAConfig:
     max_cpu_loras: int | None = None
     """Maximum number of LoRAs to store in CPU memory. Must be >= than
     `max_loras`."""
-    lora_dtype: torch.dtype | LoRADType = "auto"
+    lora_dtype: LoRADType | TorchDType = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     target_modules: list[str] | None = None
     """Restrict LoRA to specific module suffixes (e.g., ["o_proj", "qkv_proj"]).
@@ -115,6 +120,8 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        from vllm.platforms import current_platform
+
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
@@ -132,7 +139,23 @@ class LoRAConfig:
             envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
 
+    @field_validator("lora_dtype")
+    @classmethod
+    def _validate_lora_dtype(cls, value: object) -> object:
+        if isinstance(value, str):
+            if value not in get_args(LoRADType):
+                raise ValueError(f"Unknown LoRA dtype: {value}")
+            return value
+
+        import torch
+
+        if not isinstance(value, torch.dtype):
+            raise ValueError("lora_dtype must be a string or torch.dtype")
+        return value
+
     def verify_with_model_config(self, model_config: ModelConfig):
+        import torch
+
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):

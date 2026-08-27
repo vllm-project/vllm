@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Range,
     config,
@@ -19,10 +18,8 @@ from vllm.config.utils import (
     hash_factors,
 )
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -247,6 +244,8 @@ class PassConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
+        from vllm.platforms import current_platform
+
         # Handle deprecation and defaults
 
         if not self.eliminate_noops:
@@ -906,6 +905,13 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
+        from vllm.compilation.passes.inductor_pass import (
+            CallableInductorPass,
+            InductorPass,
+        )
+        from vllm.platforms import current_platform
+        from vllm.utils.torch_utils import is_torch_equal_or_newer
+
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924

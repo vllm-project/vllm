@@ -16,7 +16,8 @@ from transformers.models.llama4.configuration_llama4 import (
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 
-from vllm.config.model import ModelConfig, get_hf_text_config
+from vllm.config.model import ModelConfig
+from vllm.transformers_utils.config import get_hf_text_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,

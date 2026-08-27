@@ -8,12 +8,8 @@ from .version import __version__, __version_tuple__  # isort:skip
 
 import typing
 
-from vllm._environment import (
-    apply_pre_torch_environment,
-    apply_runtime_environment,
-)
-
-apply_pre_torch_environment()
+# Import-light pre-Torch settings and post-import patch registrations.
+import vllm.env_override  # noqa: F401
 
 MODULE_ATTRS = {
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
@@ -68,7 +64,6 @@ else:
         from importlib import import_module
 
         if name in MODULE_ATTRS:
-            apply_runtime_environment()
             module_name, attr_name = MODULE_ATTRS[name].split(":")
             module = import_module(module_name, __package__)
             return getattr(module, attr_name)
