@@ -403,3 +403,27 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def test_deepseek_v4_rejects_empty_developer_content():
+    with pytest.raises(ValueError):
+        _tokenizer().apply_chat_template(
+            [{"role": "developer", "content": ""}],
+            tokenize=False,
+            enable_thinking=True,
+            reasoning_effort="low",
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"thinking_mode": "bogus"},
+        {"thinking_mode": "thinking", "reasoning_effort": "turbo"},
+    ],
+)
+def test_deepseek_v4_encode_messages_rejects_invalid_arguments(kwargs):
+    from vllm.tokenizers.deepseek_v4_encoding import encode_messages
+
+    with pytest.raises(ValueError):
+        encode_messages([{"role": "user", "content": "Hello"}], **kwargs)

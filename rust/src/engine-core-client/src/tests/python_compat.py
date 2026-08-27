@@ -354,7 +354,8 @@ inline_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
@@ -377,7 +378,8 @@ multipart_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
