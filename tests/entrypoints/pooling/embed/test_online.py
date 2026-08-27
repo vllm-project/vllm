@@ -297,6 +297,37 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_padding(client: openai.AsyncOpenAI, model_name: str):
+    input_texts = ["Hello"]
+
+    async def prompt_tokens(**extra_body):
+        response = await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body=extra_body,
+        )
+        embeddings = EmbeddingResponse.model_validate(response.model_dump(mode="json"))
+        assert len(embeddings.data) == 1
+        return embeddings.usage.prompt_tokens
+
+    unpadded = await prompt_tokens()
+    padded = await prompt_tokens(padding="max_length")
+
+    # Models trained with a fixed sequence length and no attention mask need
+    # this; without it their embeddings are not comparable.
+    assert padded > unpadded
+    assert await prompt_tokens(padding="do_not_pad") == unpadded
+
+    with pytest.raises(openai.BadRequestError):
+        await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body={"padding": "longest"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
