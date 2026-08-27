@@ -100,6 +100,30 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             )
 
 
+def test_collect_detailed_traces_accepts_legacy_comma_string():
+    # The CLI advertises comma-joined values (e.g. `model,worker`) in its
+    # choices, so `--collect-detailed-traces model,worker` arrives here as
+    # `["model,worker"]`. It must be split into individual modules instead of
+    # being rejected against the per-element Literal.
+    endpoint = "http://localhost:4317"
+    config = ObservabilityConfig(
+        collect_detailed_traces=["model,worker"],
+        otlp_traces_endpoint=endpoint,
+    )
+    assert config.collect_detailed_traces == ["model", "worker"]
+
+    # Already-split lists and invalid values keep their existing behaviour.
+    assert ObservabilityConfig(
+        collect_detailed_traces=["all"],
+        otlp_traces_endpoint=endpoint,
+    ).collect_detailed_traces == ["all"]
+    with pytest.raises(ValidationError):
+        ObservabilityConfig(
+            collect_detailed_traces=["bogus"],
+            otlp_traces_endpoint=endpoint,
+        )
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
