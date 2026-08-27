@@ -198,9 +198,15 @@ class TestGetTorchCudaVersion:
             assert _get_torch_cuda_version() == "13.0"
 
     def test_returns_none_when_torch_missing(self):
-        """Should return None when torch is not importable."""
-        with patch(
-            "vllm.env_override.importlib.metadata.distribution",
-            side_effect=importlib.metadata.PackageNotFoundError,
+        """Should return None when neither discovery route finds torch."""
+        with (
+            patch(
+                "vllm.env_override.importlib.metadata.distribution",
+                side_effect=importlib.metadata.PackageNotFoundError,
+            ),
+            patch(
+                "vllm.env_override.importlib.util.find_spec",
+                return_value=None,
+            ),
         ):
             assert _get_torch_cuda_version() is None
