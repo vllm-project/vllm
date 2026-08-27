@@ -79,7 +79,12 @@ class DispatchPooler(Pooler):
         self,
         new_classifier: ClassifierFn,
     ) -> None:
-        for pooler in self.poolers_by_task.values():
+        """Replaces the classifier to the LoRA-wrapped version."""
+        for task, pooler in self.poolers_by_task.items():
+            if task not in {"classify"}:
+                # Now LoRA only supports classification tasks,
+                # so we only replace the classifier for "classify" task.
+                continue
             head = getattr(pooler, "head", None)
             if head is not None and hasattr(head, "classifier"):
                 head.classifier = new_classifier
