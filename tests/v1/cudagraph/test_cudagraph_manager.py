@@ -17,8 +17,11 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.device_communicators import pynccl_allocator
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 pytestmark = pytest.mark.cpu_test
 
@@ -110,6 +113,56 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+
+
+def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
+    num_reqs = 32
+    num_tokens = 56
+    pcp_world_size = 2
+    input_buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
+
+    pcp_block_tables = SimpleNamespace(
+        num_kv_cache_groups=1,
+        input_block_tables=(torch.zeros(num_reqs * 2, 1, dtype=torch.int32),),
+    )
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        max_num_reqs=num_reqs,
+        max_num_tokens=num_tokens,
+        block_tables=pcp_block_tables,
+    )
+
+    block_tables = MagicMock()
+    block_tables.cp_size = 1
+    block_tables.get_dummy_block_tables.return_value = ()
+    block_tables.get_dummy_slot_mappings.return_value = torch.zeros(
+        1, num_tokens, dtype=torch.int64
+    )
+    model_state = MagicMock()
+    model_state.prepare_attn.return_value = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    gpu_cudagraph_utils.prepare_inputs_to_capture(
+        num_reqs,
+        num_tokens,
+        model_state,
+        input_buffers,
+        block_tables,
+        [],
+        kv_cache_config,
+        full_cudagraph=False,
+        pcp_manager=pcp_manager,
+    )
+
+    slot_mappings = model_state.prepare_attn.call_args.args[3]
+    assert slot_mappings.shape == (1, num_tokens * pcp_world_size)
+    block_tables.get_dummy_slot_mappings.assert_not_called()
 
 
 _DECODE_QUERY_LEN = 3
