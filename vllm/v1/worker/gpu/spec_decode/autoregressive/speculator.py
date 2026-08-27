@@ -14,7 +14,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
@@ -219,7 +219,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -279,7 +279,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             max_query_len,
             input_batch.has_prefill,
         )
-        prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
             num_tokens_padded,
@@ -287,6 +287,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            dp_sync=dp_sync,
+        )
+        num_tokens_across_dp = (
+            prefill_batch_sync.num_tokens_across_dp
+            if prefill_batch_sync is not None
+            else None
         )
 
         self._prepare_eplb_forward(num_tokens)
@@ -328,7 +334,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
-        decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
             num_reqs,
@@ -336,6 +342,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+        )
+        num_tokens_across_dp = (
+            decode_batch_sync.num_tokens_across_dp
+            if decode_batch_sync is not None
+            else None
         )
 
         self.on_multi_step_decode_begin(num_reqs)
