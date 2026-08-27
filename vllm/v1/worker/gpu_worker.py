@@ -111,11 +111,10 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
     """Memory in bytes to size the KV cache from when profiling measured a
     release on ROCm, or None to keep what profiling measured.
 
-    The measurement is the drop in free device memory across startup, so it
-    comes out negative when anything else on the device released memory
-    meanwhile. Torch reserved is process local, so it stands in as a lower
-    bound instead of refusing to start. ROCm only, where the AMD CI groups hit
-    this, the same sampling caution as #45490.
+    The measurement is the drop in free device memory across startup, so it comes
+    out negative when anything else on the device released memory meanwhile. Torch
+    reserved is process local, so it stands in as a lower bound instead of refusing
+    to start. Kept to ROCm, where the AMD CI groups hit this, following #45490.
     """
     if profile_result.total_consumed >= 0 or not current_platform.is_rocm():
         return None
