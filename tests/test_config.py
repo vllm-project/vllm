@@ -32,6 +32,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
@@ -344,6 +345,41 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
 
     assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
     assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
+
+
+def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
+    """Cudagraph memory profiling uses a minimal KV cache, so the Mamba
+    block-count guard must only fire for the real cache sizing."""
+    kv_cache_config = SimpleNamespace(has_mamba_layers=True, num_blocks=4)
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    with pytest.raises(ValueError, match="exceeds available Mamba cache blocks"):
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            AttentionCGSupport.ALWAYS,
+            "FakeAttentionBackend",
+            uniform_decode_query_len=1,
+            use_v2_model_runner=True,
+            tensor_parallel_size=1,
+            kv_cache_config=kv_cache_config,
+            max_num_reqs=256,
+        )
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        uniform_decode_query_len=1,
+        use_v2_model_runner=True,
+        tensor_parallel_size=1,
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=256,
+        is_profiling=True,
+    )
+    assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 @pytest.mark.parametrize(
@@ -714,6 +750,10 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
 
 def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+def test_all2all_backend_has_portable_default():
+    assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -2098,6 +2138,126 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
 
     actual_model = mock_model_config_cls.call_args.kwargs["model"]
     assert actual_model == s3_url
+
+
+def _make_qwen3_omni_dspark_configs():
+    text_config = SimpleNamespace(
+        hidden_size=2048,
+        num_hidden_layers=48,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        vocab_size=152064,
+    )
+    target_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            model_type="qwen3_omni_moe",
+            architectures=["Qwen3OmniMoeForConditionalGeneration"],
+            thinker_config=SimpleNamespace(text_config=text_config),
+        ),
+        hf_text_config=text_config,
+        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        get_hidden_size=lambda: 2048,
+        get_total_num_hidden_layers=lambda: 48,
+        get_vocab_size=lambda: 152064,
+    )
+    draft_hf_config = SimpleNamespace(
+        model_type="qwen3",
+        architectures=["Qwen3OmniDSparkModel"],
+        hidden_size=2048,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        block_size=7,
+        target_hidden_size=2048,
+        target_layer_ids=[1, 9, 17, 25, 33],
+        use_aux_hidden_state=True,
+        markov_rank=64,
+        markov_head_type="vanilla",
+        sample_from_anchor=True,
+        dspark_bonus_anchor=False,
+        vocab_size=152064,
+        draft_vocab_size=32000,
+        mask_token_id=151669,
+        rope_parameters={"rope_type": "default", "rope_theta": 1000000.0},
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=draft_hf_config,
+        architectures=["Qwen3OmniDSparkModel"],
+    )
+    return target_model_config, draft_model_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_checkpoint_contract_is_accepted():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_rejects_generic_qwen3_architecture():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.architectures = ["Qwen3DSparkModel"]
+    draft_config.architectures = ["Qwen3DSparkModel"]
+
+    with pytest.raises(ValueError, match="must be converted first"):
+        _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("block_size", 5, "trained block_size"),
+        ("target_hidden_size", 4096, "target_hidden_size"),
+        ("hidden_size", 4096, "draft hidden_size"),
+        ("num_attention_heads", 16, "num_attention_heads"),
+        ("num_key_value_heads", 8, "num_key_value_heads"),
+        ("head_dim", 64, "head_dim"),
+        ("target_layer_ids", [7, 48], "zero-based text-layer"),
+        ("target_layer_ids", [23, 7], "strictly increasing"),
+        ("use_aux_hidden_state", False, "use_aux_hidden_state=true"),
+        ("markov_rank", 0, "markov_rank"),
+        ("markov_head_type", "gated", "markov_head_type='vanilla'"),
+        ("sample_from_anchor", False, "sample_from_anchor=true"),
+        ("dspark_bonus_anchor", True, "dspark_bonus_anchor=false"),
+        ("vocab_size", 0, "input vocab_size must be a positive integer"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_rejects_incompatible_checkpoint_fields(field, value, error):
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    setattr(draft_config.hf_config, field, value)
+
+    with pytest.raises(ValueError, match=error):
+        _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_rejects_mrope_draft_positions():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.rope_parameters["mrope_section"] = [24, 20, 20]
+
+    with pytest.raises(ValueError, match="logical 1-D RoPE"):
+        _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_allows_draft_only_noise_token_row():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.vocab_size = 152065
+    draft_config.hf_config.draft_vocab_size = 152064
+    draft_config.hf_config.mask_token_id = 152064
+
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_allows_smaller_input_vocabulary():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.vocab_size = 151936
+    draft_config.hf_config.mask_token_id = 151669
+
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
 
 
 def test_ir_op_priority_default():
