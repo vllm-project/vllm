@@ -22,6 +22,7 @@ from vllm.parser.glm47_moe import (
     Glm47MoeParser,
     glm47_moe_config,
 )
+from vllm.parser.utils import resolve_enable_thinking
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -38,13 +39,7 @@ class Ling3Parser(Glm47MoeParser):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("thinking", None)
-        enable_thinking = chat_kwargs.get("enable_thinking", None)
-        self.thinking_enabled = (
-            True
-            if thinking is None and enable_thinking is None
-            else bool(thinking) or bool(enable_thinking)
-        )
+        self.thinking_enabled = resolve_enable_thinking(chat_kwargs, default=True)
         parser_config = replace(
             glm47_moe_config(thinking=self.thinking_enabled),
             name="ling3",
