@@ -3,6 +3,7 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import contextlib
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -540,7 +541,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                with contextlib.suppress(TypeError):
+                    msg["tool_calls"] = list(tool_calls)
             reasoning_content = msg.pop("reasoning_content", None)
             if reasoning_content is not None and msg.get("reasoning") is None:
                 msg["reasoning"] = reasoning_content
@@ -972,8 +974,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         f" in `tool_choice`! {correct_usage_message}",
                         parameter="tool_choice.function.name",
                     )
-                for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
+                tools = data["tools"]
+                if not isinstance(tools, list):
+                    return data
+                for tool in tools:
+                    if not isinstance(tool, dict):
+                        return data
+                    tool_function = tool.get("function")
+                    if not isinstance(tool_function, dict):
+                        return data
+                    if tool_function.get("name") == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
@@ -1009,6 +1019,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         messages = data.get("messages", [])
+        if not isinstance(messages, list):
+            return data
         for msg in messages:
             # Check if this is a system message
             if isinstance(msg, dict) and msg.get("role") == "system":
