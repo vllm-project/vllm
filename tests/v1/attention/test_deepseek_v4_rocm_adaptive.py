@@ -13,8 +13,8 @@ from vllm.models.deepseek_v4.amd.rocm import (
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadataBuilder,
     DeepseekV4IndexerBackend,
+    DeepseekV32IndexerMetadataBuilder,
 )
 
 
@@ -70,8 +70,7 @@ def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPat
 
     assert DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch()
     assert (
-        DeepseekV4IndexerBackend.get_builder_cls()
-        is DeepseekV32IndexerMetadataBuilder
+        DeepseekV4IndexerBackend.get_builder_cls() is DeepseekV32IndexerMetadataBuilder
     )
     assert indexer._use_flattening(adaptive_config)
     assert (
