@@ -703,14 +703,14 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         # MTP layers are loaded by the MTP head, not by the target model. They
         # appear as model.mtp_layers.<i>.* and as the layer ids past the backbone.
         mtp_start = self.config.num_hidden_layers
-        skip_prefixes = ["model.mtp_layers."] + [
-            f"model.layers.{mtp_start + i}."
-            for i in range(getattr(self.config, "num_nextn_predict_layers", 0))
-        ]
+        drop_prefixes: dict[str, str | None] = {"model.mtp_layers.": None}
+        for i in range(getattr(self.config, "num_nextn_predict_layers", 0)):
+            drop_prefixes[f"model.layers.{mtp_start + i}."] = None
         if self.config.tie_word_embeddings:
-            skip_prefixes.append("lm_head.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+            drop_prefixes["lm_head."] = None
+        drop_mapper = WeightsMapper(orig_to_new_prefix=drop_prefixes)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop_mapper)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

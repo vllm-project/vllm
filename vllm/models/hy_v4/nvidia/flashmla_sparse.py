@@ -204,9 +204,10 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             attn_sink=attn_sink,
         )
 
-        # Slice output back to actual head count if we padded
+        # Slice output and lse back to actual head count if we padded
         if actual_num_heads < padded_num_heads:
             out = out[:, :, :actual_num_heads, :]
+            lse = lse[:, :actual_num_heads, :]
 
         return out, lse
 
@@ -216,43 +217,48 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        needs_padding = self.num_heads % self.prefill_padding != 0
-        kernel_heads = self.prefill_padding if needs_padding else q.shape[1]
-        attn_sink = self._sinks_for_query(q, head_dim=1, kernel_heads=kernel_heads)
-
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
-        # 64 on hopper and 128 on blackwell
-        if needs_padding:
-            assert self.prefill_padding % self.num_heads == 0
+        # 64 on hopper and 128 on blackwell. Pad from q's head count, not
+        # self.num_heads: under DCP the heads are all-gathered before this.
+        actual_num_heads = q.shape[1]
+        padded_num_heads = (
+            (actual_num_heads + self.prefill_padding - 1)
+            // self.prefill_padding
+            * self.prefill_padding
+        )
+        attn_sink = self._sinks_for_query(q, head_dim=1, kernel_heads=padded_num_heads)
+
+        if actual_num_heads < padded_num_heads:
             logger.warning_once(
-                f"Padding num_heads from {self.num_heads} to "
-                f"{self.prefill_padding} for BF16 sparse prefill kernel"
+                f"Padding num_heads from {actual_num_heads} to "
+                f"{padded_num_heads} for BF16 sparse prefill kernel"
             )
             # Zero (not new_empty) the padded lanes: topk_indices is shared by
             # all heads, so the kernel reduces across the head group and NaNs
             # from uninitialized memory would leak into the real heads.
-            q_padded = q.new_zeros((q.shape[0], self.prefill_padding, q.shape[2]))
-            q_padded[:, : self.num_heads, :] = q
+            q_padded = q.new_zeros((q.shape[0], padded_num_heads, q.shape[2]))
+            q_padded[:, :actual_num_heads, :] = q
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_fwd(
+        output, _, lse = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
             self.softmax_scale,
             attn_sink=attn_sink,
             topk_length=topk_length,
-        )[0]
+        )
 
-        output = output[:, : self.num_heads, :]
-        return output
+        output = output[:, :actual_num_heads, :]
+        lse = lse[:, :actual_num_heads]
+        return output, lse
 
 
 class HYV4FlashMLASparseBackend(FlashMLASparseBackend):
