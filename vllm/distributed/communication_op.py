@@ -28,50 +28,6 @@ def tensor_model_parallel_reduce_scatter(
     return get_tp_group().reduce_scatter(input_, dim)
 
 
-def _custom_sequence_parallel_collective(
-    name: str, input_: torch.Tensor
-) -> torch.Tensor | None:
-    device_communicator = get_tp_group().device_communicator
-    if device_communicator is None:
-        return None
-    collective = getattr(device_communicator, name, None)
-    return None if collective is None else collective(input_)
-
-
-def sequence_parallel_all_gather(input_: torch.Tensor) -> torch.Tensor:
-    """Gather token shards across the tensor-parallel group.
-
-    Sequence parallelism keeps the token dimension sharded between linear
-    layers; column-parallel layers re-gather it right before the matrix
-    multiplication.
-    """
-    output = _custom_sequence_parallel_collective("custom_all_gather", input_)
-    if output is None:
-        output = tensor_model_parallel_all_gather(input_, dim=0)
-    return output
-
-
-def sequence_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
-    """Sum partial results and scatter them along the token dimension.
-
-    The token count must already be a multiple of the tensor-parallel size:
-    the model runner pads to TP alignment, and this function deliberately does
-    not pad so invalid shapes fail fast in eager mode.
-    """
-    tp_size = get_tp_group().world_size
-    assert input_.shape[0] % tp_size == 0, (
-        f"sequence_parallel_reduce_scatter got {input_.shape[0]} tokens with "
-        f"tensor_parallel_size={tp_size}; token count must be a multiple of "
-        "the tensor parallel size (the model runner should pad to TP "
-        "alignment before the forward pass)."
-    )
-
-    output = _custom_sequence_parallel_collective("custom_reduce_scatter", input_)
-    if output is not None:
-        return output
-    return tensor_model_parallel_reduce_scatter(input_, dim=0)
-
-
 def tensor_model_parallel_gather(
     input_: torch.Tensor, dst: int = 0, dim: int = -1
 ) -> torch.Tensor | None:

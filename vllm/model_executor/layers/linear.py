@@ -15,11 +15,10 @@ from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    sequence_parallel_all_gather,
-    sequence_parallel_reduce_scatter,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -619,7 +618,7 @@ class ColumnParallelLinear(LinearBase):
 
     def prepare_input(self, input_: torch.Tensor) -> torch.Tensor:
         if self.sequence_parallel and self.tp_size > 1:
-            return sequence_parallel_all_gather(input_)
+            return tensor_model_parallel_all_gather(input_, dim=0)
         return input_
 
     def extra_repr(self) -> str:
@@ -1799,7 +1798,7 @@ class RowParallelLinear(LinearBase):
         if not self.reduce_results or self.tp_size == 1:
             return output_parallel
         if self.sequence_parallel:
-            return sequence_parallel_reduce_scatter(output_parallel)
+            return tensor_model_parallel_reduce_scatter(output_parallel, dim=0)
         return tensor_model_parallel_all_reduce(output_parallel)
 
     def extra_repr(self) -> str:

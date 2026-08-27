@@ -69,14 +69,16 @@ def test_column_parallel_linear_gathers_sequence_shards(monkeypatch) -> None:
     local_input = torch.arange(8, dtype=torch.float32).view(2, 4)
     gathered_input = torch.cat([local_input, local_input + 8], dim=0)
     all_gather = Mock(return_value=gathered_input)
-    monkeypatch.setattr(linear_module, "sequence_parallel_all_gather", all_gather)
+    monkeypatch.setattr(
+        linear_module, "tensor_model_parallel_all_gather", all_gather
+    )
 
     layer = _column_layer()
     _fill_weights(layer)
 
     output = layer(local_input)
 
-    all_gather.assert_called_once_with(local_input)
+    all_gather.assert_called_once_with(local_input, dim=0)
     torch.testing.assert_close(output, gathered_input @ layer.weight.T)
 
 
@@ -84,7 +86,9 @@ def test_column_parallel_linear_keeps_shards_without_sequence_parallel(
     monkeypatch,
 ) -> None:
     all_gather = Mock(side_effect=AssertionError("unexpected all-gather"))
-    monkeypatch.setattr(linear_module, "sequence_parallel_all_gather", all_gather)
+    monkeypatch.setattr(
+        linear_module, "tensor_model_parallel_all_gather", all_gather
+    )
 
     layer = _column_layer(sequence_parallel=False)
     _fill_weights(layer)
@@ -106,7 +110,7 @@ def test_row_parallel_linear_reduce_scatters_sequence_shards(monkeypatch) -> Non
     all_reduce = Mock(side_effect=AssertionError("unexpected all-reduce"))
     monkeypatch.setattr(
         linear_module,
-        "sequence_parallel_reduce_scatter",
+        "tensor_model_parallel_reduce_scatter",
         reduce_scatter,
     )
     monkeypatch.setattr(
@@ -117,7 +121,7 @@ def test_row_parallel_linear_reduce_scatters_sequence_shards(monkeypatch) -> Non
 
     output = layer(input_parallel)
 
-    reduce_scatter.assert_called_once_with(output_parallel)
+    reduce_scatter.assert_called_once_with(output_parallel, dim=0)
     all_reduce.assert_not_called()
     torch.testing.assert_close(output, local_output)
 
@@ -134,7 +138,7 @@ def test_row_parallel_linear_keeps_all_reduce_by_default(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         linear_module,
-        "sequence_parallel_reduce_scatter",
+        "tensor_model_parallel_reduce_scatter",
         reduce_scatter,
     )
 
