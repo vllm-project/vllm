@@ -693,6 +693,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             )
             self.hisparse_cache.decode_batch = (
                 attn_metadata is not None
+                and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
                 and attn_metadata.max_query_len == 1
                 and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
             )
