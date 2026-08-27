@@ -834,10 +834,7 @@ class GemmRsAr:
             num_ctas,
         )
         if self.all_reduce:
-            # AttnRes may retain output past the next workspace reuse.
-            # A future kernel could overlap this copy using an extra warp or
-            # the communication warp.
-            return self.partial[:M].clone()
+            return self.partial[:M]
         assert output is not None
         return output
 

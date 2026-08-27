@@ -164,9 +164,12 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
         return False
 
     parallel_config = vllm_config.parallel_config
+    config = vllm_config.model_config.hf_text_config
     tp_size = parallel_config.tensor_parallel_size
     if parallel_config.use_ubatching:
         reason = "ubatching is enabled"
+    elif all_reduce and config.attn_res_block_size is None:
+        reason = "AttnRes is disabled"
     elif vllm_config.model_config.dtype != torch.bfloat16:
         reason = "the model dtype is not BF16"
     elif not current_platform.is_cuda():
@@ -186,7 +189,6 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
 
     from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
 
-    config = vllm_config.model_config.hf_text_config
     try:
         init_gemm_rs_ar(
             max_M=vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1097,8 +1099,16 @@ class KimiDecoderLayer(nn.Module):
             hidden_states = hidden_states[: positions.shape[0]]
             M = hidden_states.shape[0]
 
-        # Attention.
         hidden_states = self._run_self_attn(positions, hidden_states)
+        if self.use_attn_res and self.is_block_write_layer:
+            gemm_rs_ar = getattr(self.self_attn, "gemm_rs_ar", None)
+            if (
+                gemm_rs_ar is not None
+                and not self.use_sequence_parallel
+                and gemm_rs_ar.should_run(hidden_states)
+            ):
+                # block-write layers retain this beyond the next workspace reuse
+                hidden_states = hidden_states.clone()
 
         # GEMM-RS returns the local sequence shard; standard O-proj preserves M.
         if self.use_sequence_parallel and hidden_states.shape[0] == M:
