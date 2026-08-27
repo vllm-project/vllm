@@ -132,3 +132,27 @@ class TestDeepseekOCREmptyImagesCrop:
                     "image_size": 1024,  # Wrong! Tensor has 640
                 },
             )
+
+
+class TestDeepseekOCRInputValidation:
+    """Bare ``assert`` used to validate user input here returned HTTP 500
+    (AssertionError) instead of HTTP 400 (ValueError) and disappeared under
+    ``python -O``, silently corrupting the tokenized sequence. See #53850.
+    """
+
+    def test_mismatched_image_count_raises_value_error(self, processor):
+        """Two ``<image>`` tokens with one image must raise ValueError, not
+        AssertionError (which would yield HTTP 500 and, under ``-O``, silently
+        drop the middle text segment)."""
+        image = Image.new("RGB", (100, 100), color="red")
+        with pytest.raises(ValueError, match="does not match number of images"):
+            processor(prompt="<image> and <image>", images=[image])
+
+    def test_missing_prompt_raises_value_error(self, processor):
+        image = Image.new("RGB", (100, 100), color="red")
+        with pytest.raises(ValueError, match="prompt and images"):
+            processor(prompt=None, images=[image])
+
+    def test_missing_images_raises_value_error(self, processor):
+        with pytest.raises(ValueError, match="prompt and images"):
+            processor(prompt="<image>\nDescribe this image.", images=None)

@@ -32,8 +32,10 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
+    WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
+    layerwise_groups,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -1359,6 +1361,13 @@ class TestTrainerClients:
             {"gpu": ("args",)}
         ]
 
+        client.update_weights([{"ipc_handles": {"gpu": ("args",)}}, {"names": []}])
+        sent = captured["json"]["update_info"]
+        assert sent[1] == {"names": []}
+        assert pickle.loads(base64.b64decode(sent[0]["ipc_handles_pickled"])) == {
+            "gpu": ("args",)
+        }
+
     def test_http_client_passes_through_nccl_update_info(self, monkeypatch):
         """NCCL update_info has only JSON-native fields and passes unchanged."""
         captured = {}
@@ -1410,6 +1419,162 @@ class TestModuleSource:
         assert [m.name for m in meta] == [name for name, _ in pairs]
         assert [m.dtype for m in meta] == [t.dtype for _, t in pairs]
         assert [m.shape for m in meta] == [tuple(t.shape) for _, t in pairs]
+
+
+class TestWeightSourceGroupContract:
+    """`groups()` / `iter_groups()` on the WeightSource ABC. Groups are what
+    backends gather and free by, so the default must agree with
+    `layerwise_groups` over `metadata()`, restricted to what this rank holds."""
+
+    class _Source(WeightSource):
+        """Minimal source over an ordered (name, tensor) list, optionally holding
+        only some names (in which case it iterates only their groups)."""
+
+        def __init__(self, names, held=None, reverse=False):
+            self._pairs = [(n, torch.full((2,), float(i))) for i, n in enumerate(names)]
+            self._held = held
+            self._reverse = reverse
+
+        def metadata(self):
+            return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
+
+        def held_names(self):
+            return self._held
+
+        def __iter__(self):
+            pairs = self._pairs
+            if self._held is not None:
+                keep = set(self._held)
+                pairs = [(n, t) for n, t in pairs if n in keep]
+            return iter(list(reversed(pairs)) if self._reverse else pairs)
+
+    def _source(self, names, held=None, reverse=False):
+        return self._Source(names, held, reverse)
+
+    def test_groups_defaults_to_the_layerwise_partition(self):
+        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
+        assert self._source(names).groups() == layerwise_groups(names)
+
+    def test_groups_keeps_only_groups_holding_a_held_name(self):
+        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
+        held = ["model.layers.0.a", "model.layers.1.a"]
+        assert self._source(names, held=held).groups() == [
+            ["model.layers.0.a"],
+            ["model.layers.1.a"],
+        ]
+
+    def test_groups_keeps_a_partially_held_group_whole(self):
+        """One held name selects the WHOLE group, unheld members included.
+
+        A group is the collective unit, so its membership has to be
+        rank-uniform: a rank that narrowed it to what it holds would disagree
+        with its peers about which names group *g* covers, and the gather would
+        desynchronize. Selection is per group, but only whole groups; the
+        per-name split is the backend's, via owner sets. This is the
+        foreign-expert shape under expert parallelism — a rank holds some
+        experts of a layer, not all of them.
+        """
+        names = ["model.layers.0.a", "model.layers.0.b", "model.layers.1.a"]
+        held = ["model.layers.0.a"]
+        assert self._source(names, held=held).groups() == [
+            ["model.layers.0.a", "model.layers.0.b"],
+        ]
+
+    def test_groups_order_follows_metadata_not_the_declaration(self):
+        """The declaration is a SET of names; the groups it selects still come
+        out in metadata order, so each pairs with the right ``iter_groups()``
+        batch however the source listed them."""
+        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
+        source = self._source(
+            names, held=["model.layers.1.a", "model.layers.0.a", "model.layers.1.a"]
+        )
+        assert source.groups() == [["model.layers.0.a"], ["model.layers.1.a"]]
+        assert [ns for ns, _ in source.iter_groups()] == [
+            ["model.layers.0.a"],
+            ["model.layers.1.a"],
+        ]
+
+    def test_iter_groups_batches_the_stream_per_group(self):
+        names = ["embed.w", "model.layers.0.a", "model.layers.0.b", "norm.w"]
+        batches = list(self._source(names).iter_groups())
+        assert [ns for ns, _ in batches] == [
+            ["embed.w"],
+            ["model.layers.0.a", "model.layers.0.b"],
+            ["norm.w"],
+        ]
+        assert all(len(ns) == len(ts) for ns, ts in batches)
+
+    def test_iter_groups_yields_the_tensors_iteration_produced(self):
+        names = ["model.layers.0.a", "model.layers.0.b"]
+        (batch,) = list(self._source(names).iter_groups())
+        _names, tensors = batch
+        assert [float(t[0]) for t in tensors] == [0.0, 1.0]
+
+    def test_iter_groups_yields_only_held_groups(self):
+        names = ["embed.w", "model.layers.0.a", "model.layers.1.a"]
+        batches = list(self._source(names, held=["model.layers.1.a"]).iter_groups())
+        assert [ns for ns, _ in batches] == [["model.layers.1.a"]]
+
+    def test_out_of_order_iteration_raises(self):
+        """Materializing is usually a collective, so a rank that iterates out of
+        order deadlocks its peers -- fail loudly instead."""
+        source = self._source(["model.layers.0.a", "model.layers.0.b"], reverse=True)
+        with pytest.raises(RuntimeError, match="iteration order must match"):
+            list(source.iter_groups())
+
+    def test_a_source_may_override_iter_groups(self):
+        """The extension point: materialize a whole group in one step instead of
+        one generator resume per tensor."""
+        calls = []
+
+        class _Batched(TestWeightSourceGroupContract._Source):
+            def iter_groups(self):
+                for group in self.groups():
+                    calls.append(len(group))
+                    yield group, [torch.zeros(2) for _ in group]
+
+        source = _Batched(["model.layers.0.a", "model.layers.0.b"])
+        assert [ns for ns, _ in source.iter_groups()] == [
+            ["model.layers.0.a", "model.layers.0.b"]
+        ]
+        assert calls == [2]
+
+
+class TestDeferredProcessingContract:
+    """`defers_processing` and `drain_pending` are two halves of one contract: a
+    caller that takes over the update tail (running its own
+    `finalize_layerwise_reload` instead of going through `finish_weight_update`)
+    reads the flag and calls the method. Both must be answerable on any engine, or
+    that caller ends up reaching through a getattr."""
+
+    def _engines(self):
+        return {
+            name: loader()
+            for name, loader in WeightTransferEngineFactory._registry.items()
+        }
+
+    def test_every_engine_declares_whether_it_defers(self):
+        for name, cls in self._engines().items():
+            assert isinstance(cls.defers_processing, bool), name
+
+    def test_every_engine_can_be_drained(self):
+        """The default is a no-op, so a caller never has to check whether the
+        method exists before calling it."""
+        for name, cls in self._engines().items():
+            assert callable(cls.drain_pending), name
+
+    def test_the_default_is_not_to_defer(self):
+        assert WeightTransferEngine.defers_processing is False
+
+    def test_a_synchronous_engine_drains_as_a_no_op(self):
+        engine = object.__new__(WeightTransferEngineFactory._registry["nccl"]())
+        engine.drain_pending()  # must not raise, and must not need any state
+
+    def test_the_rdt_engine_defers_and_overrides_the_drain(self):
+        """The one engine the contract exists for."""
+        cls = WeightTransferEngineFactory._registry["sharded_rdt"]()
+        assert cls.defers_processing is True
+        assert cls.drain_pending is not WeightTransferEngine.drain_pending
 
 
 class TestTrainerFactory:
