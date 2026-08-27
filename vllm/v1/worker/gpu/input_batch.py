@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -213,7 +214,7 @@ def set_dummy_context(
     context_len: int,
     num_kv_blocks: int,
     max_model_len: int,
-    input_block_tables: tuple[torch.Tensor, ...] | None = None,
+    input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
     """Give each dummy request context_len of context, used when profiling step cost."""
     if input_block_tables is None:
