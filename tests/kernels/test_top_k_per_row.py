@@ -1254,6 +1254,51 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("next_n", [1, 2])
+@torch.inference_mode()
+def test_persistent_topk_falls_back_on_low_smem_device(next_n: int) -> None:
+    """Oversubscribed persistent top-k must work without 128 KiB shared memory."""
+    torch.set_default_device("cuda:0")
+    set_random_seed(0)
+
+    props = torch.cuda.get_device_properties(0)
+    if props.shared_memory_per_block_optin >= 128 * 1024:
+        pytest.skip("FilteredTopK is available on this device")
+
+    top_k = 512
+    radix = 256
+    fixed_smem = ((radix + radix + 5) * 4 + 15) & ~15
+    max_chunk = ((props.shared_memory_per_block_optin - fixed_smem) // 4 // 4) * 4
+    # More CTA chunks than even two resident blocks per SM can accommodate.
+    # The persistent dispatcher must route this shape to top_k_per_row_decode.
+    stride = 3 * props.multi_processor_count * max_chunk
+    seq_len = 32769
+    if stride <= seq_len:
+        pytest.skip("Device cannot construct the oversubscribed test shape")
+
+    logits = torch.randn(next_n, stride, dtype=torch.float32, device="cuda")
+    lengths = torch.full((1, next_n), seq_len, dtype=torch.int32, device="cuda")
+    if next_n == 1:
+        lengths = lengths.reshape(1)
+    indices = torch.full((next_n, top_k), -1, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend(
+        "persistent_topk",
+        logits,
+        lengths,
+        indices,
+        top_k,
+        max_seq_len=stride,
+        next_n=next_n,
+    )
+    torch.accelerator.synchronize()
+
+    for row in range(next_n):
+        expected = logits[row, :seq_len].topk(top_k).indices
+        assert set(indices[row].cpu().tolist()) == set(expected.cpu().tolist())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
