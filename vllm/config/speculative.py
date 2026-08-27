@@ -599,8 +599,6 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        if self.method == "mtp" and self.draft_model_config is not None:
-            factors.append(self.draft_model_config.compute_hash())
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -608,6 +606,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
+            "mtp" 
         )
         factors.append(uses_aux_hidden_states)
 
