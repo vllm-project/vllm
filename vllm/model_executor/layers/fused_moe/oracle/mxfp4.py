@@ -119,8 +119,6 @@ class Mxfp4MoeBackend(Enum):
     VLLM_CUTLASS_MXFP4_MXFP4 = "VLLM_CUTLASS_MXFP4_MXFP4"
     # ROCm AITER backends
     AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
-    # ROCm AITER backends
-    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
     # Keep the legacy name as an alias while the ROCm split backend rename settles.
     AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
