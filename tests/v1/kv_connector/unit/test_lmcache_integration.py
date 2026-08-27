@@ -41,7 +41,9 @@ def assumes(obj, attr, is_callable=False, is_instance_of=None):
         if isinstance(attr_value, property):
             fget = attr_value.fget
             assert fget is not None, f"Property {obj}.{attr} has no fget"
-            sig = inspect.signature(fget)
+            # eval_str resolves PEP 563 string annotations, which any module
+            # using `from __future__ import annotations` produces.
+            sig = inspect.signature(fget, eval_str=True)
             ret_anno = sig.return_annotation
             assert ret_anno is not inspect._empty, (
                 f"Property {obj}.{attr} has no return annotation"
