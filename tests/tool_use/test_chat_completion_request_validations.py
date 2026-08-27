@@ -194,3 +194,33 @@ def test_invalid_structured_outputs_type_rejected():
                 "structured_outputs": 3,
             }
         )
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        3,
+        [{"role": "assistant", "content": "", "tool_calls": 3}],
+    ],
+)
+def test_invalid_messages_type_rejected(messages):
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(
+            {"messages": messages, "model": "facebook/opt-125m"}
+        )
+
+
+@pytest.mark.parametrize("tools", [3, [3], [{}]])
+def test_invalid_tools_type_rejected_with_named_tool_choice(tools):
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": tools,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            }
+        )
