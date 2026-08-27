@@ -311,6 +311,32 @@ def find_tool_name(
     return False
 
 
+def find_tool_parameters(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    """Find a tool by name and return its parameters dict, or None.
+
+    Returns None when *tools* is empty/None, *tool_name* is absent, or the
+    matching tool has ``parameters`` set to None. Callers must not collapse
+    those cases into one label.
+    """
+    if not tools:
+        return None
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, params in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return params
+            continue
+        if not _is_function_tool(tool):
+            continue
+        name, params = _extract_tool_info(tool)
+        if name == tool_name:
+            return params
+    return None
+
+
 def _get_tool_schema_from_name_and_params(
     name: str, params: dict[str, Any] | None
 ) -> dict:
