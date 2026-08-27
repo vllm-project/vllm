@@ -356,3 +356,33 @@ def test_dispatch_matches_get_warmup_keys_expansion(
             use_deep_gemm=True,
         )
         assert k in key_set, f"token={t} produced key {k} not in warmup set"
+
+
+@pytest.mark.parametrize("use_deep_gemm", [False, True])
+def test_mhc_pre_compile_warms_prenorm_only_for_fallback(
+    use_deep_gemm: bool,
+) -> None:
+    wrapper = MhcPreKernel()
+    wrapper._constants = _DEFAULT_CONSTANTS
+    key = MhcPreKernel.CompileKey(
+        hidden_size=7168,
+        hc_mult=4,
+        n_splits=1,
+        use_norm_weight=True,
+        use_deep_gemm=use_deep_gemm,
+        is_broadcast=False,
+    )
+
+    with (
+        mock.patch("vllm.model_executor.kernels.mhc.warmup._compile_and_cache"),
+        mock.patch("vllm.model_executor.kernels.mhc.warmup._compile_mhc_post"),
+        mock.patch(
+            "vllm.model_executor.kernels.mhc.warmup._compile_hc_prenorm_gemm"
+        ) as compile_prenorm,
+    ):
+        wrapper.compile(key)
+
+    if use_deep_gemm:
+        compile_prenorm.assert_not_called()
+    else:
+        compile_prenorm.assert_called_once_with(7168, 4)
