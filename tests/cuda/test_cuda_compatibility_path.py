@@ -186,11 +186,10 @@ class TestCudaCompatibilityLdPathManipulation:
 class TestGetTorchCudaVersion:
     """Test _get_torch_cuda_version() helper."""
 
-    def test_returns_string_when_torch_available(self):
-        """Should return a CUDA version string like '12.8'."""
-        version = _get_torch_cuda_version()
-        # torch is installed in vllm's environment
-        assert version is None or isinstance(version, str)
+    def test_matches_installed_torch(self):
+        """Should agree with the installed torch's own torch.version.cuda."""
+        torch = pytest.importorskip("torch")
+        assert _get_torch_cuda_version() == torch.version.cuda
 
     def test_returns_none_when_torch_missing(self):
         """Should return None when torch is not importable."""

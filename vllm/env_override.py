@@ -5,22 +5,49 @@ import ast
 import importlib.abc
 import importlib.machinery
 import importlib.metadata
+import importlib.util
+import logging
 import os
 import sys
 from collections.abc import Callable
 from functools import cache
+from pathlib import Path
 from typing import Any, cast
 
 from packaging import version
 
 
+def _torch_version_source() -> str | None:
+    """Locate torch/version.py without importing Torch."""
+    try:
+        return (
+            importlib.metadata.distribution("torch")
+            .locate_file("torch/version.py")
+            .read_text()
+        )
+    except (OSError, importlib.metadata.PackageNotFoundError):
+        pass
+    # Editable and plain-PYTHONPATH torch installs may carry no usable
+    # distribution metadata; fall back to the import system's resolution.
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or spec.origin is None:
+        return None
+    try:
+        return Path(spec.origin).with_name("version.py").read_text()
+    except OSError:
+        return None
+
+
 def _get_torch_version_attr(name: str) -> Any | None:
     """Read a literal from torch.version without importing Torch."""
+    source = _torch_version_source()
+    if source is None:
+        return None
     try:
-        torch_version = importlib.metadata.distribution("torch").locate_file(
-            "torch/version.py"
-        )
-        for node in ast.parse(torch_version.read_text()).body:
+        for node in ast.parse(source).body:
             if (
                 isinstance(node, ast.Assign)
                 and len(node.targets) == 1
@@ -28,7 +55,7 @@ def _get_torch_version_attr(name: str) -> Any | None:
                 and node.targets[0].id == name
             ):
                 return ast.literal_eval(node.value)
-    except (OSError, SyntaxError, ValueError, importlib.metadata.PackageNotFoundError):
+    except (SyntaxError, ValueError):
         pass
     return None
 
@@ -37,9 +64,7 @@ def _get_torch_cuda_version() -> str | None:
     return cast(str | None, _get_torch_version_attr("cuda"))
 
 
-def _maybe_set_cuda_compatibility_path(
-    get_torch_cuda_version: Callable[[], str | None] | None = None,
-) -> None:
+def _maybe_set_cuda_compatibility_path() -> None:
     """Set LD_LIBRARY_PATH for CUDA forward compatibility before Torch loads."""
     enable = os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower() in (
         "1",
@@ -55,8 +80,7 @@ def _maybe_set_cuda_compatibility_path(
         if conda_prefix and os.path.isdir(conda_compat):
             cuda_compat_path = conda_compat
     if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        get_torch_cuda_version = get_torch_cuda_version or _get_torch_cuda_version
-        torch_cuda_version = get_torch_cuda_version()
+        torch_cuda_version = _get_torch_cuda_version()
         if torch_cuda_version:
             default_path = f"/usr/local/cuda-{torch_cuda_version}/compat"
             if os.path.isdir(default_path):
@@ -134,9 +158,29 @@ class _PostImportPatchFinder(importlib.abc.MetaPathFinder):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
+            # An editable or custom finder later in sys.meta_path may own a
+            # registered top-level target that PathFinder cannot resolve.
+            spec = self._find_spec_after_self(fullname, path, target)
+        if spec is None or spec.loader is None:
             return None
         spec.loader = _PostImportPatchLoader(spec.loader, fullname)
         return spec
+
+    def _find_spec_after_self(self, fullname, path, target):
+        seen_self = False
+        for finder in list(sys.meta_path):
+            if finder is self:
+                seen_self = True
+                continue
+            if not seen_self or finder is importlib.machinery.PathFinder:
+                continue
+            finder_find_spec = getattr(finder, "find_spec", None)
+            if finder_find_spec is None:
+                continue
+            spec = finder_find_spec(fullname, path, target)
+            if spec is not None:
+                return spec
+        return None
 
 
 _POST_IMPORT_PATCH_FINDER: _PostImportPatchFinder | None = None
@@ -159,9 +203,15 @@ def _register_post_import_patch(module_name: str, callback: Callable[[], None]) 
     if loaded_module is not None:
         spec = getattr(loaded_module, "__spec__", None)
         if spec is not None and getattr(spec, "_initializing", False):
-            raise RuntimeError(
-                f"Cannot register a patch while {module_name} is importing"
+            # The current import cannot be intercepted, and running the
+            # callback against a half-initialized module is not safe. The
+            # pre-registry code degraded to a guarded no-op here; keep that
+            # behavior, minus the silence.
+            logging.getLogger(__name__).warning(
+                "Skipping post-import patch for %s: the module is currently importing",
+                module_name,
             )
+            return
         callback()
         return
 
@@ -170,8 +220,11 @@ def _register_post_import_patch(module_name: str, callback: Callable[[], None]) 
     global _POST_IMPORT_PATCH_FINDER
     if _POST_IMPORT_PATCH_FINDER is None:
         _POST_IMPORT_PATCH_FINDER = _PostImportPatchFinder()
-        path_finder_index = sys.meta_path.index(importlib.machinery.PathFinder)
-        sys.meta_path.insert(path_finder_index, _POST_IMPORT_PATCH_FINDER)
+        try:
+            finder_index = sys.meta_path.index(importlib.machinery.PathFinder)
+        except ValueError:
+            finder_index = 0
+        sys.meta_path.insert(finder_index, _POST_IMPORT_PATCH_FINDER)
 
 
 apply_pre_torch_environment()
