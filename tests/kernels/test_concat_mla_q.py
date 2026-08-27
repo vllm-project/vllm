@@ -34,6 +34,17 @@ def test_concat_mla_q_contiguous(num_tokens, num_heads, nope_dim, rope_dim, dtyp
     torch.testing.assert_close(q_out, ref, atol=0, rtol=0)
 
 
+def test_concat_mla_q_padded_output_heads():
+    """The fused concat can write directly into a head-padded workspace."""
+    ql_nope = torch.randn(4, 8, 512, dtype=torch.bfloat16, device="cuda")
+    q_pe = torch.randn(4, 8, 64, dtype=torch.bfloat16, device="cuda")
+    q_out = torch.empty(4, 64, 576, dtype=torch.bfloat16, device="cuda")
+
+    ops.concat_mla_q(ql_nope, q_pe, q_out)
+
+    torch.testing.assert_close(q_out[:, :8], torch.cat((ql_nope, q_pe), dim=-1))
+
+
 @pytest.mark.parametrize("num_tokens", [t for t in NUM_TOKENS if t > 1])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("nope_dim", NOPE_DIM)
