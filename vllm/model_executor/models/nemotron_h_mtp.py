@@ -360,12 +360,12 @@ class NemotronHMTP(nn.Module, SupportsPP):
         )
 
         speculative_config = vllm_config.speculative_config
-        self.use_private_lm_head = (
+        self.has_own_lm_head = (
             speculative_config is not None
             and speculative_config.method == "mtp"
             and not speculative_config.mtp_share_lm_head
         )
-        lm_head_quant_config = self.quant_config if self.use_private_lm_head else None
+        lm_head_quant_config = self.quant_config if self.has_own_lm_head else None
 
         # The proposer replaces a shared temporary head with the target head.
         # A private head stays draft-owned and must therefore be constructed
@@ -376,7 +376,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
             quant_config=lm_head_quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        if self.use_private_lm_head:
+        if self.has_own_lm_head:
             quant_name = (
                 self.quant_config.get_name()
                 if self.quant_config is not None
@@ -460,14 +460,14 @@ class NemotronHMTP(nn.Module, SupportsPP):
             # Full checkpoints contain an lm_head even when MTP will share the
             # already-loaded target head. Skip that representation unless this
             # draft explicitly owns a private head.
-            if "lm_head" in name and not self.use_private_lm_head:
+            if "lm_head" in name and not self.has_own_lm_head:
                 continue
             # Only process MTP weights - skip all non-MTP weights
             if (
                 not name.startswith("mtp.")
                 and "embeddings" not in name
                 and not (
-                    self.use_private_lm_head and name.startswith("lm_head.")
+                    self.has_own_lm_head and name.startswith("lm_head.")
                 )
             ):
                 continue
@@ -566,7 +566,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        if self.use_private_lm_head:
+        if self.has_own_lm_head:
             loaded_lm_head_params = {
                 name for name in loaded_params if name.startswith("lm_head.")
             }
