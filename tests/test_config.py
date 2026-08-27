@@ -347,6 +347,41 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
     assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
 
 
+def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
+    """Cudagraph memory profiling uses a minimal KV cache, so the Mamba
+    block-count guard must only fire for the real cache sizing."""
+    kv_cache_config = SimpleNamespace(has_mamba_layers=True, num_blocks=4)
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    with pytest.raises(ValueError, match="exceeds available Mamba cache blocks"):
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            AttentionCGSupport.ALWAYS,
+            "FakeAttentionBackend",
+            uniform_decode_query_len=1,
+            use_v2_model_runner=True,
+            tensor_parallel_size=1,
+            kv_cache_config=kv_cache_config,
+            max_num_reqs=256,
+        )
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        uniform_decode_query_len=1,
+        use_v2_model_runner=True,
+        tensor_parallel_size=1,
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=256,
+        is_profiling=True,
+    )
+    assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
 @pytest.mark.parametrize(
     ("model_config", "expected"),
     [
@@ -715,6 +750,10 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
 
 def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+def test_all2all_backend_has_portable_default():
+    assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
