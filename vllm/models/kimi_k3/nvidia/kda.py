@@ -153,6 +153,8 @@ def is_fused_kda_decode_supported(
     input_dtype: torch.dtype,
     conv_state_dtype: torch.dtype,
 ) -> bool:
+    # The fused kernel handles both conv-state cache layouts (SD and DS); the
+    # inner strides are selected from the tensor at launch time.
     if (
         num_heads not in (12, 24, 48, 96)
         or head_dim != 128
@@ -160,7 +162,6 @@ def is_fused_kda_decode_supported(
         or num_spec != 0
         or input_dtype != torch.bfloat16
         or conv_state_dtype != torch.bfloat16
-        or is_conv_state_dim_first()
         or not hasattr(torch.ops._C, "fused_kda_decode")
     ):
         return False
@@ -658,7 +659,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
 
         assert isinstance(attn_metadata_raw, dict)
-        attn_metadata_narrowed = attn_metadata_raw[self.prefix]
+        attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
+        if attn_metadata_narrowed is None:
+            return
         assert isinstance(attn_metadata_narrowed, KimiK3KDAMetadata)
         m = attn_metadata_narrowed
         has_initial_state = m.has_initial_state
