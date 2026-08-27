@@ -137,6 +137,19 @@ class AsyncLLM(EngineClient):
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
+        # Launch the multimodal warmup in the background so it overlaps
+        # engine-core initialization (model loading, started below). Must be
+        # after InputProcessor: its MultiModalBudget runs a synchronous MM
+        # processing pass (get_dummy_mm_inputs -> processor.apply), and the HF
+        # processor's Numba parallel kernels (e.g. Kimi-K2.5 vision fused) are
+        # not thread-safe — launching the warmup thread any earlier would run
+        # it concurrently with that pass and abort. The MM warmup is
+        # frontend-only (sends no engine_core requests) and only needs the
+        # renderer. Joined by reset_mm_cache / warmup / shutdown so the
+        # mm_processor_cache is never touched concurrently by the warmup and
+        # the serving path.
+        renderer.start_mm_warmup_in_background()
+
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
@@ -339,8 +352,9 @@ class AsyncLLM(EngineClient):
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
                 "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+                "is deprecated and will be removed in the future. You should "
+                "instead pass the outputs of Renderer.render_cmpl() or "
+                "Renderer.render_chat()."
             )
 
             request = prompt
@@ -955,6 +969,10 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
+        # Join any background MM warmup before clearing: the mm_processor_cache
+        # is not designed for concurrent access, so the warmup's apply/clear
+        # must have finished before we clear here.
+        self.renderer._join_mm_warmup()
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
