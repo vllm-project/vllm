@@ -370,11 +370,10 @@ class PCPManager:
             return num_local_reqs
         if input_batch.has_prefill:
             raise RuntimeError("PCP FULL graphs require a decode-only batch.")
-        if padded_num_reqs < num_local_reqs:
-            raise RuntimeError(
-                "PCP graph request capacity is smaller than the rank-local batch: "
-                f"{padded_num_reqs} < {num_local_reqs}."
-            )
+        assert padded_num_reqs >= num_local_reqs, (
+            "PCP graph request capacity must cover the rank-local batch: "
+            f"{padded_num_reqs} < {num_local_reqs}."
+        )
         return padded_num_reqs
 
     @property
@@ -635,7 +634,7 @@ class PCPManager:
         num_tokens: int,
         max_query_len: int | None = None,
     ) -> tuple[InputBatch, tuple[torch.Tensor, ...], torch.Tensor]:
-        """Prepare persistent PCP buffers for CUDA graph capture."""
+        """Prepare persistent PCP buffers for graph capture and dummy runs."""
         assert self._input_buffers is not None
         assert self._local_block_tables is not None
         input_batch = InputBatch.make_dummy(

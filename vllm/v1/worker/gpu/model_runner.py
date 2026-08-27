@@ -1594,10 +1594,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
-            if (
-                self.pcp_manager is not None
-                and batch_desc.cg_mode == CUDAGraphMode.FULL
-            ):
+            if self.pcp_manager is not None:
                 input_batch, block_tables, slot_mappings = (
                     self.pcp_manager.prepare_inputs_to_capture(
                         dummy_num_reqs,
@@ -1623,14 +1620,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             elif block_tables is None:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
-                if context_len:
-                    set_dummy_context(
-                        input_batch,
-                        self.block_tables,
-                        context_len,
-                        self.kv_cache_config.num_blocks,
-                        self.max_model_len,
-                    )
+            if not skip_attn_for_dummy_run and context_len:
+                assert block_tables is not None
+                set_dummy_context(
+                    input_batch,
+                    self.block_tables,
+                    context_len,
+                    self.kv_cache_config.num_blocks,
+                    self.max_model_len,
+                    input_block_tables=block_tables,
+                )
 
         attn_metadata = None
         slot_mappings_by_layer = None

@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.v1.worker.gpu.input_batch import set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 pytestmark = pytest.mark.cpu_test
@@ -72,7 +73,7 @@ def test_full_graph_rejects_insufficient_request_capacity():
         has_prefill=False,
     )
 
-    with pytest.raises(RuntimeError, match="request capacity"):
+    with pytest.raises(AssertionError, match="request capacity"):
         PCPManager._resolve_num_reqs_after_padding(input_batch, 1, 2)
 
 
@@ -109,3 +110,45 @@ def test_full_capture_uses_pcp_persistent_buffers(monkeypatch):
     )
     assert torch.count_nonzero(block_tables[0]) == 0
     assert slot_mappings.shape == (1, 8)
+
+
+def test_dummy_context_updates_pcp_local_block_tables(monkeypatch):
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    manager._local_block_tables = (torch.ones((8, 4), dtype=torch.int32),)
+    monkeypatch.setattr(
+        manager,
+        "get_dummy_slot_mappings",
+        lambda num_tokens: torch.full((1, num_tokens * 2), -1, dtype=torch.int64),
+    )
+    input_batch, local_block_tables, _ = manager.prepare_inputs_to_capture(
+        num_reqs=2,
+        num_tokens=2,
+        max_query_len=1,
+    )
+    global_block_table = torch.full((4, 4), -1, dtype=torch.int32)
+    block_tables = SimpleNamespace(
+        input_block_tables=(global_block_table,),
+        kernel_block_sizes=(2,),
+        blocks_per_kv_block=(1,),
+    )
+
+    set_dummy_context(
+        input_batch,
+        block_tables,
+        context_len=3,
+        num_kv_blocks=16,
+        max_model_len=16,
+        input_block_tables=local_block_tables,
+    )
+
+    torch.testing.assert_close(
+        local_block_tables[0][:2, :2],
+        torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+    )
+    assert torch.all(global_block_table == -1)
