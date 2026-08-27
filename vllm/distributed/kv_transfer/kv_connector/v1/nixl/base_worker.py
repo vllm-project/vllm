@@ -1157,11 +1157,11 @@ class NixlBaseConnectorWorker:
             if isinstance(layer_spec, MambaSpec):
                 physical_ratio = self._physical_blocks_per_logical_kv_block
                 block_len = physical_page_size // physical_ratio
-                block_stride = (
-                    physical_page_size
-                    if cache.ndim == 1
-                    else cache.stride(0) * cache.element_size()
-                )
+                block_stride = physical_page_size
+                if self._is_csa_linear and cache.ndim != 1:
+                    # CSA-linear packs multiple cache owners in each block, so
+                    # state views advance by the packed block stride.
+                    block_stride = cache.stride(0) * cache.element_size()
                 assert block_stride % physical_ratio == 0
                 region_specs = [
                     (cache.data_ptr(), block_len, block_stride // physical_ratio)
@@ -1184,7 +1184,8 @@ class NixlBaseConnectorWorker:
                     and cache.stride(1) == cache.shape[2] * cache.shape[3]
                 )
                 if storage_is_block_major and (
-                    (packed_storage and is_mla_region) or not hnc_contiguous
+                    (packed_storage and is_mla_region)
+                    or (not hnc_contiguous and not self._is_csa_linear)
                 ):
                     # Packed MLA layouts transfer the complete storage row.
                     storage_block_len = storage.nbytes() // num_blocks
