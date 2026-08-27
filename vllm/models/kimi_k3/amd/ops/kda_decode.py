@@ -3,12 +3,15 @@
 """ROCm entry points for the fused Kimi-K3 KDA decode kernel.
 
 The kernel in ``csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu``
-replaces, for a pure non-speculative decode batch, the three Triton launches
-and two copies the AMD KDA layer otherwise runs per layer: the packed causal
-conv1d update, the recurrent delta-rule step, and the gated output RMSNorm.
+replaces, for a pure decode batch (one token per sequence, or DSpark spec
+decode with qlen = 1+num_spec), the three Triton launches and two copies the
+AMD KDA layer otherwise runs per layer: the packed causal conv1d update, the
+recurrent delta-rule step, and the gated output RMSNorm.
 
 The kernel wants a width-major conv weight and an fp32 norm weight, so both are
-staged once at load time by the weight loaders below.
+staged once at load time by the weight loaders below. Spec decode is the same
+op: a qlen loop, ``state_len = width-1+num_spec`` conv cache, 2-D SSM indices,
+and ``num_accepted_tokens``.
 """
 
 from collections.abc import Callable
@@ -22,8 +25,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 logger = init_logger(__name__)
 
 # Head counts the kernel is instantiated for (Kimi-K3 has 96 KDA heads, so this
-# covers TP1/2/4/8).
+# covers TP1/2/4/8). Spec is capped at DSpark K=2 (qlen=3, conv state_len=5).
 SUPPORTED_NUM_HEADS = (12, 24, 48, 96)
+MAX_NUM_SPEC = 2
 
 
 def is_fused_kda_decode_supported(
@@ -41,16 +45,38 @@ def is_fused_kda_decode_supported(
         num_heads not in SUPPORTED_NUM_HEADS
         or head_dim != 128
         or conv_width != 4
-        or num_spec != 0
+        or num_spec > MAX_NUM_SPEC
         or input_dtype != torch.bfloat16
         or conv_state_dtype != torch.bfloat16
         or is_conv_state_dim_first()
-        or not hasattr(torch.ops._C, "fused_kda_decode")
+        or not _has_fused_kda_decode_op()
     ):
         return False
     # gfx950 (MI355X) and gfx942 (MI325X): both CDNA, sharing the wave64 / DPP /
     # bf16 primitives the kernel relies on.
     return on_gfx950() or on_gfx942()
+
+
+def _has_fused_kda_decode_op() -> bool:
+    if hasattr(torch.ops._C, "fused_kda_decode"):
+        return True
+    try:
+        import fused_kda_decode_plugin  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def fused_kda_decode(*args, **kwargs):
+    """Call the fused op, preferring an overlay plugin when _C is the 1-token schema."""
+    try:
+        import fused_kda_decode_plugin as plug
+
+        return plug.fused_kda_decode(*args, **kwargs)
+    except ImportError:
+        from vllm import _custom_ops as ops
+
+        return ops.fused_kda_decode(*args, **kwargs)
 
 
 def make_decode_conv1d_weight_loader(
