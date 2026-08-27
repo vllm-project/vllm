@@ -237,6 +237,16 @@ class OffloadingManager(ABC):
         """
         pass
 
+    def get_load_source(self, key: OffloadKey, req_context: ReqContext) -> str:
+        """Return the cache tier that supplied a successful lookup.
+
+        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        managers can override it to retain the origin across asynchronous
+        promotion into a primary tier. The default keeps out-of-tree managers
+        compatible while making unknown provenance explicit.
+        """
+        return "external"
+
     @abstractmethod
     def prepare_load(
         self,

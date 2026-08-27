@@ -140,6 +140,10 @@ class CPUOffloadingManager(OffloadingManager):
         return LookupResult.HIT
 
     @override
+    def get_load_source(self, key: OffloadKey, req_context: ReqContext) -> str:
+        return "cpu"
+
+    @override
     def prepare_load(
         self,
         keys: Collection[OffloadKey],
