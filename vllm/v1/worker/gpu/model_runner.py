@@ -920,6 +920,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.block_tables,
                     self.attn_groups,
                     self.kv_cache_config,
+                    pcp_manager=self.pcp_manager,
                     has_lora=self.lora_config is not None,
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
