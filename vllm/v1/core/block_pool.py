@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -28,6 +30,12 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Prefix-cache debug: gated by VLLM_DEBUG_PREFIX_CACHE=1. Aggregates per group so
+# a 1M-token run logs a handful of lines, not one per block.
+_DBG_PREFIX_CACHE = bool(os.environ.get("VLLM_DEBUG_PREFIX_CACHE"))
+_DBG_PUBLISHED: dict[int, int] = defaultdict(int)
+_DBG_EVICTED: dict[int, int] = defaultdict(int)
 
 
 class BlockHashToBlockMap:
@@ -297,6 +305,20 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+
+        if _DBG_PREFIX_CACHE:
+            newly = num_full_blocks - num_cached_blocks
+            prev = _DBG_PUBLISHED[kv_cache_group_id]
+            _DBG_PUBLISHED[kv_cache_group_id] = prev + newly
+            # Log only when a group first publishes, then every 10k blocks, so
+            # a "never published" group stays conspicuous by its absence.
+            if prev == 0 or _DBG_PUBLISHED[kv_cache_group_id] // 10000 != prev // 10000:
+                logger.info(
+                    "[dbg-pc] publish: group_id=%d +%d blocks (cumulative=%d)",
+                    kv_cache_group_id,
+                    newly,
+                    _DBG_PUBLISHED[kv_cache_group_id],
+                )
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -690,6 +712,16 @@ class BlockPool:
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
+
+        if _DBG_PREFIX_CACHE and block.block_hash is not None:
+            gid = get_group_id(block.block_hash)
+            _DBG_EVICTED[gid] += 1
+            if _DBG_EVICTED[gid] % 10000 == 1:
+                logger.info(
+                    "[dbg-pc] evict: group_id=%d cumulative_evicted=%d",
+                    gid,
+                    _DBG_EVICTED[gid],
+                )
 
         evicted_hashes = self._remove_cached_block_hashes(block)
         if not evicted_hashes:

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -28,6 +29,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Prefix-cache debug: gated by VLLM_DEBUG_PREFIX_CACHE=1. One line per request.
+_DBG_PREFIX_CACHE = bool(os.environ.get("VLLM_DEBUG_PREFIX_CACHE"))
 
 
 def _validate_prefix_cache_retention_interval(
@@ -834,6 +838,24 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )
+        if _DBG_PREFIX_CACHE:
+            per_group = [
+                (
+                    idx,
+                    type(spec).__name__,
+                    list(group_ids),
+                    max(hit_length_by_group[g] for g in group_ids),
+                )
+                for idx, (spec, group_ids, _, _) in enumerate(self.attention_groups)
+            ]
+            logger.info(
+                "[dbg-pc] lookup: max_len=%d reconciled_hit=%d longest_any=%d "
+                "per_group(idx,spec,gids,hit)=%s",
+                max_cache_hit_length,
+                hit_length,
+                longest_hit_length,
+                per_group,
+            )
         return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
 
     def find_longest_cache_hit_per_group(
