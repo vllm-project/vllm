@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -88,19 +92,17 @@ def _compile_combine_topk_swa_indices_kernel(
 
 def _warmup_hisparse_index_conversion(runner: "V2GPUModelRunner") -> None:
     from vllm.v1.attention.backends.mla.sparse_utils import (
-        triton_convert_req_index_to_global_index,
+        _convert_req_index_to_global_index_kernel,
+        _remap_tiling,
     )
 
     topk_tokens = runner.vllm_config.model_config.hf_config.index_topk
-    req_ids = torch.zeros(1, dtype=torch.int32, device=runner.device)
-    topk_indices = torch.full(
-        (1, topk_tokens),
-        -1,
-        dtype=torch.int32,
-        device=runner.device,
-    )
-    prefill_request_ids = torch.zeros_like(req_ids)
-    prefill_workspace_starts = torch.zeros_like(req_ids)
+    req_ids = TritonWarmupTensor(torch.int32)
+    topk_indices = TritonWarmupTensor(torch.int32, shape=(1, topk_tokens))
+    out = TritonWarmupTensor(torch.int32, shape=(1, topk_tokens))
+    valid_counts = TritonWarmupTensor(torch.int32)
+    prefill_request_ids = TritonWarmupTensor(torch.int32)
+    prefill_workspace_starts = TritonWarmupTensor(torch.int32)
 
     attention_strides: dict[int, set[int]] = {}
     for layer in runner.vllm_config.compilation_config.static_forward_context.values():
@@ -118,38 +120,48 @@ def _warmup_hisparse_index_conversion(runner: "V2GPUModelRunner") -> None:
         runner.kernel_block_sizes,
         strict=True,
     ):
-        # Real tensors preserve the block-table width and stride
-        # specializations used by Triton's runtime cache.
+        max_num_blocks_per_req = block_table.shape[1]
+        block_table_desc = TritonWarmupTensor(
+            torch.int32, shape=(1, max_num_blocks_per_req)
+        )
         block_strides = attention_strides.get(block_size, set()) | {block_size}
         for block_stride in block_strides:
-            kwargs = dict(
-                BLOCK_SIZE=block_size,
-                BLOCK_STRIDE_ROWS=block_stride,
-                NUM_TOPK_TOKENS=topk_tokens,
-            )
-            triton_convert_req_index_to_global_index(
-                req_ids,
-                block_table[:1],
-                topk_indices,
-                **kwargs,
-            )
-            triton_convert_req_index_to_global_index(
-                req_ids,
-                block_table[:1],
-                topk_indices,
-                return_valid_counts=True,
-                **kwargs,
-            )
-            triton_convert_req_index_to_global_index(
-                req_ids,
-                block_table[:1],
-                topk_indices,
-                HAS_PREFILL_WORKSPACE=True,
-                prefill_workspace_request_ids=prefill_request_ids,
-                prefill_workspace_starts=prefill_workspace_starts,
-                return_valid_counts=True,
-                **kwargs,
-            )
+            for has_prefill, count_valid in (
+                (False, False),
+                (False, True),
+                (True, True),
+            ):
+                single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
+                    topk_tokens, 128, count_valid
+                )
+                _convert_req_index_to_global_index_kernel.warmup(
+                    req_ids,
+                    block_table_desc,
+                    topk_indices,
+                    out,
+                    valid_counts if count_valid else None,
+                    prefill_request_ids if has_prefill else None,
+                    prefill_workspace_starts if has_prefill else None,
+                    max_num_blocks_per_req,
+                    block_size,
+                    block_stride,
+                    block_n,
+                    has_prefill,
+                    count_valid,
+                    single_tile,
+                    False,
+                    1,
+                    0,
+                    1,
+                    triton_scalar_specialization_rep(block_table_desc.stride()[0]),
+                    triton_scalar_specialization_rep(block_table_desc.stride()[1]),
+                    triton_scalar_specialization_rep(topk_indices.stride()[0]),
+                    triton_scalar_specialization_rep(topk_indices.stride()[1]),
+                    triton_scalar_specialization_rep(out.stride()[0]),
+                    triton_scalar_specialization_rep(out.stride()[1]),
+                    num_warps=num_warps,
+                    grid=(1, tiles_per_row),
+                )
 
 
 def sparse_mla_triton_warmup(worker: "Worker") -> None:
