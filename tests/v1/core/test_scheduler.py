@@ -2500,6 +2500,41 @@ def test_kv_connector_honors_skip_reading_prefix_cache():
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
 
 
+def test_kv_connector_records_external_cache_hit_sources(monkeypatch):
+    block_size = 16
+    num_matched_tokens = 2 * block_size
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=num_matched_tokens,
+            is_async=False,
+        ),
+        block_size=block_size,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=2 * num_matched_tokens,
+        block_size=block_size,
+    )[0]
+    assert scheduler.connector is not None
+    get_sources = Mock(return_value=[("p2p", block_size), ("cpu", block_size)])
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_external_cache_hit_sources",
+        get_sources,
+    )
+
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    get_sources.assert_called_once_with(request, num_matched_tokens)
+    assert request.prefill_stats is not None
+    assert request.prefill_stats.external_cached_token_sources == [
+        ("p2p", block_size),
+        ("cpu", block_size),
+    ]
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """Test whether Scheduler with KVConnector schedules tokens, allocates

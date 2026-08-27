@@ -509,6 +509,27 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> list[tuple[str, int]]:
+        """Describe the source of externally cached prompt tokens.
+
+        The returned segments must be in prompt-token order, contain stable,
+        bounded source labels, and sum to ``num_external_tokens``. The
+        scheduler calls this only after accepting the external hit returned by
+        :meth:`get_num_new_matched_tokens`, so connectors should report the
+        source that actually supplied those tokens rather than a speculative
+        lookup result.
+
+        Connectors that cannot provide finer attribution use the conservative
+        ``external`` source supplied by this default implementation.
+        """
+        if num_external_tokens == 0:
+            return []
+        return [("external", num_external_tokens)]
+
     @abstractmethod
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

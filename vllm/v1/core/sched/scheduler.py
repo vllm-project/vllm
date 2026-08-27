@@ -924,6 +924,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_external_computed_tokens = 0
+                external_cached_token_sources: list[tuple[str, int]] | None = None
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
@@ -1037,10 +1038,21 @@ class Scheduler(SchedulerInterface):
                     # Track first scheduled prefill, not post-preemption repeat prefills
                     if request.prefill_stats and request.num_preemptions <= 0:
                         assert num_computed_tokens <= request.num_prompt_tokens
+                        if num_external_computed_tokens and isinstance(
+                            self.connector, KVConnectorBase_V1
+                        ):
+                            external_cached_token_sources = (
+                                self.connector.get_external_cache_hit_sources(
+                                    request, num_external_computed_tokens
+                                )
+                            )
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
+                            external_cached_token_sources=(
+                                external_cached_token_sources
+                            ),
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
@@ -3236,6 +3248,18 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+
+                prefill_stats = request.prefill_stats
+                if prefill_stats is not None:
+                    valid_external_tokens = max(
+                        0,
+                        min(
+                            prefill_stats.num_external_cached_tokens,
+                            request.num_computed_tokens
+                            - prefill_stats.num_local_cached_tokens,
+                        ),
+                    )
+                    prefill_stats.truncate_external_cached_tokens(valid_external_tokens)
 
                 affected_req_ids.add(request.request_id)
 
