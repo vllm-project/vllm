@@ -1405,12 +1405,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
             if envs.VLLM_BATCH_INVARIANT:
-                # Process each prefill sequence independently so BS=1 and
+                # Process each non-spec sequence independently so BS=1 and
                 # BS=N give bitwise-identical per-sequence conv states.
+                # non_spec_query_start_loc covers ALL non-spec sequences
+                # (both prefill and decode in mixed batches).
                 device = mixed_qkv_non_spec_T.device
                 cu_list = non_spec_query_start_loc.tolist()
+                num_non_spec_seqs = non_spec_query_start_loc.numel() - 1
                 chunks = []
-                for _pi in range(attn_metadata.num_prefills):
+                for _pi in range(num_non_spec_seqs):
                     _ps = cu_list[_pi]
                     _pe = cu_list[_pi + 1]
                     _chunk_T = mixed_qkv_non_spec_T[:, _ps:_pe]
