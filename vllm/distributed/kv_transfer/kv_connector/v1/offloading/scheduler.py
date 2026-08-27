@@ -590,8 +590,9 @@ class OffloadingConnectorScheduler:
         sliding_window_groups.sort(key=_sliding_window_sort_key, reverse=True)
 
         # used by _lookup
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
-        self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
@@ -1092,6 +1093,71 @@ class OffloadingConnectorScheduler:
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
         return num_hit_tokens, bool(num_hit_tokens)
+
+    def get_external_cache_hit_sources(
+        self,
+        request: Request,
+        num_external_tokens: int,
+    ) -> list[tuple[str, int]]:
+        """Return ordered token counts by the tier that supplied each hit.
+
+        Full-attention groups provide a direct token-to-offload-key mapping.
+        When several such groups back the same token range, disagreement is
+        reported as ``mixed`` instead of crediting one tier arbitrarily.
+        Models without a full-attention group retain the conservative
+        ``external`` fallback because a sliding-window state can represent
+        more tokens than the chunks physically loaded.
+        """
+        if num_external_tokens == 0:
+            return []
+        if not self._full_attention_groups:
+            return [("external", num_external_tokens)]
+
+        req_status = self._req_status[request.request_id]
+        start = req_status.num_locally_computed_tokens
+        end = start + num_external_tokens
+        boundaries = {start, end}
+        for group_idx in self._full_attention_groups:
+            tokens_per_chunk = self.config.kv_group_configs[group_idx].tokens_per_chunk
+            boundary = ((start // tokens_per_chunk) + 1) * tokens_per_chunk
+            while boundary < end:
+                boundaries.add(boundary)
+                boundary += tokens_per_chunk
+
+        ordered_boundaries = sorted(boundaries)
+        segments: list[tuple[str, int]] = []
+        for segment_start, segment_end in zip(
+            ordered_boundaries, ordered_boundaries[1:]
+        ):
+            sources: set[str] = set()
+            for group_idx in self._full_attention_groups:
+                group_config = self.config.kv_group_configs[group_idx]
+                partial_boundary = req_status.partial_tail_boundary
+                if partial_boundary is not None and segment_start >= round_down(
+                    partial_boundary, group_config.tokens_per_chunk
+                ):
+                    key = self._make_boundary_key(request, group_idx, partial_boundary)
+                else:
+                    chunk_idx = segment_start // group_config.tokens_per_chunk
+                    group_keys = req_status.group_states[group_idx].offload_keys
+                    if chunk_idx >= len(group_keys):
+                        sources.add("external")
+                        continue
+                    key = group_keys[chunk_idx]
+
+                source = self.manager.get_load_source(key, req_status.req_context)
+                sources.add(
+                    source if isinstance(source, str) and source else "external"
+                )
+
+            source = next(iter(sources)) if len(sources) == 1 else "mixed"
+            num_tokens = segment_end - segment_start
+            if segments and segments[-1][0] == source:
+                previous_source, previous_tokens = segments[-1]
+                segments[-1] = (previous_source, previous_tokens + num_tokens)
+            else:
+                segments.append((source, num_tokens))
+        return segments
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int

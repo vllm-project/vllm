@@ -525,6 +525,23 @@ class TestTieringOffloadingManager:
         # Next lookup should succeed
         assert count_hits(self.manager, chunks) == 3
 
+        # The request that caused the promotion retains the secondary origin.
+        assert all(
+            self.manager.get_load_source(block, _CTX) == "example" for block in blocks
+        )
+
+        # A later request sees the blocks as ordinary CPU-primary hits.
+        later_context = ReqContext(req_id="later")
+        self.manager.on_new_request(later_context)
+        assert all(
+            self.manager.lookup(block, later_context) is LookupResult.HIT
+            for block in blocks
+        )
+        assert all(
+            self.manager.get_load_source(block, later_context) == "cpu"
+            for block in blocks
+        )
+
     @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),
         [
@@ -571,6 +588,14 @@ class TestTieringOffloadingManager:
         assert [
             self.primary_tier.lookup(chunk, _CTX) for chunk in chunks
         ] == expected_results
+        expected_source_keys = (
+            set()
+            if successful_indices is None
+            else {blocks[i] for i in successful_indices}
+        )
+        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
+            expected_source_keys
+        )
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample per tier and chunk."""
@@ -1315,6 +1340,7 @@ class TestTieringOffloadingManager:
         # Orchestrator state cleared.
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
+        assert self.manager._request_load_sources == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
 

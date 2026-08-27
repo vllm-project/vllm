@@ -576,6 +576,102 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     assert 42 in loaded
 
 
+def test_external_cache_hit_sources_preserve_partial_tail_origin():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(req_status) == 28
+
+    def get_load_source(key, req_context):
+        block_hash = get_offload_block_hash(key)
+        return "p2p" if block_hash == b"h3" else "cpu"
+
+    scheduler.manager.get_load_source.side_effect = get_load_source
+
+    assert scheduler.get_external_cache_hit_sources(request, 28) == [
+        ("p2p", 16),
+        ("cpu", 12),
+    ]
+
+
+def test_external_cache_hit_sources_report_mixed_full_attention_groups(
+    request_runner,
+):
+    block_size = 4
+    groups = [
+        KVCacheGroupSpec(
+            [f"layer{group_idx}"],
+            FullAttentionSpec(
+                block_size=block_size * (group_idx + 1),
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        )
+        for group_idx in range(2)
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=groups,
+    )
+    scheduler = runner.connector_scheduler
+    request = MagicMock(request_id="mixed")
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=request,
+        req_context=ReqContext(req_id=request.request_id),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.BLOCK_LEVEL),
+    )
+    for group_idx, group_state in enumerate(req_status.group_states):
+        group_state.offload_keys = [
+            make_offload_key(f"h{chunk_idx}".encode(), group_idx)
+            for chunk_idx in range(2 // (group_idx + 1))
+        ]
+    scheduler._req_status[request.request_id] = req_status
+    runner.manager.get_load_source.side_effect = lambda key, req_context: (
+        "cpu" if get_offload_group_idx(key) == 0 else "p2p"
+    )
+
+    assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == [
+        ("mixed", 2 * block_size)
+    ]
+
+
+def test_external_cache_hit_sources_fall_back_for_sliding_window_only(
+    request_runner,
+):
+    block_size = 4
+    groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            SlidingWindowSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=2 * block_size,
+            ),
+        )
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=groups,
+    )
+    request = MagicMock(request_id="sliding")
+
+    assert runner.connector_scheduler.get_external_cache_hit_sources(
+        request, 2 * block_size
+    ) == [("external", 2 * block_size)]
+    runner.manager.get_load_source.assert_not_called()
+
+
 def test_partial_lookup_requires_every_cache_group():
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
