@@ -1414,7 +1414,7 @@ def _sparse_attn_prefill_ragged_kernel(
 
         kv = tl.load(
             kv_ptr
-            + safe_slot[:, None] * kv_stride_n
+            + safe_slot[:, None].to(tl.int64) * kv_stride_n
             + dim_offsets[None, :] * kv_stride_d,
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
