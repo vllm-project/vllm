@@ -11,7 +11,6 @@ from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
@@ -562,27 +561,6 @@ class MPClient(EngineCoreClient):
                     self.ctx, output_address, zmq.PULL
                 )
 
-                # Report bound endpoints back so the parent can forward
-                # them to engines (mirrors the DPCoordinator pattern).
-                actual_address_pipe: Connection | None = client_addresses.get(
-                    "actual_address_pipe"
-                )
-                if actual_address_pipe is not None:
-                    try:
-                        actual_input = self.input_socket.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode()
-                        actual_output = self.resources.output_socket.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode()
-                        actual_address_pipe.send(
-                            {
-                                "input_address": actual_input,
-                                "output_address": actual_output,
-                            }
-                        )
-                    finally:
-                        actual_address_pipe.close()
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)

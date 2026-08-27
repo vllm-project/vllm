@@ -64,11 +64,9 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
 
 
 # Module-level stub worker for the Ray-DP regression test. Must be importable
-# by ``multiprocessing.spawn`` (no closures, no nesting). Mirrors the worker
-# in ``tests/entrypoints/test_api_server_process_manager.py``.
-def _bind_and_report_worker(listen_address, sock, args, client_config):
-    """Bind ROUTER/PULL with a kernel-assigned port, report the actual
-    endpoints back via ``actual_address_pipe``, then exit."""
+# by ``multiprocessing.spawn`` (no closures, no nesting).
+def _bind_worker(listen_address, sock, args, client_config):
+    """Bind the concrete ROUTER/PULL endpoints, then exit."""
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(
@@ -77,22 +75,8 @@ def _bind_and_report_worker(listen_address, sock, args, client_config):
         out_sock = make_zmq_socket(
             ctx, client_config["output_address"], zmq.PULL, bind=True
         )
-        try:
-            pipe = client_config["actual_address_pipe"]
-            try:
-                pipe.send(
-                    {
-                        "input_address": in_sock.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        "output_address": out_sock.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode(),
-                    }
-                )
-            finally:
-                pipe.close()
-        finally:
-            in_sock.close(linger=0)
-            out_sock.close(linger=0)
+        in_sock.close(linger=0)
+        out_sock.close(linger=0)
     finally:
         ctx.term()
 
@@ -290,11 +274,10 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
     # Mirror run_multi_api_server's address-allocation logic. The Ray DP
     # carve-out forces pre-allocation so the addresses pickled into engine
     # actors at .remote() time are real, not ``tcp://host:0``.
-    is_ray_dp = vllm_config.parallel_config.data_parallel_backend == "ray"
     addresses = get_engine_zmq_addresses(
         vllm_config,
         num_api_servers=2,
-        defer_api_server_ports=not is_ray_dp,
+        defer_api_server_ports=False,
     )
 
     sock = socket.socket()
@@ -320,17 +303,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
                 num_servers=2,
                 input_addresses=addresses.inputs,
                 output_addresses=addresses.outputs,
-                target_server_fn=_bind_and_report_worker,
+                target_server_fn=_bind_worker,
             )
-
-            # run_multi_api_server skips ``gather_actual_addresses`` for
-            # Ray DP (addresses are already real). Mirror that.
-            if not is_ray_dp:
-                actual_inputs, actual_outputs = (
-                    api_server_manager.gather_actual_addresses(timeout=15.0)
-                )
-                addresses.inputs = actual_inputs
-                addresses.outputs = actual_outputs
 
             # Snapshot what each Ray actor actually holds.
             actors = (
