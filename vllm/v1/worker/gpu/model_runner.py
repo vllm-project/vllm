@@ -1342,12 +1342,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-            padded_num_reqs=(
-                batch_desc.num_reqs
-                if batch_desc.cg_mode == CUDAGraphMode.FULL
-                else None
-            ),
+            batch_desc,
         )
 
     def prepare_attn(

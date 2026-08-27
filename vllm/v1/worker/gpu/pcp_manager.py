@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -20,6 +21,9 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
 )
 from vllm.v1.worker.gpu.states import RequestState
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 logger = init_logger(__name__)
 
@@ -738,11 +742,18 @@ class PCPManager:
 def maybe_partition_pcp_batch(
     manager: PCPManager | None,
     input_batch: InputBatch,
-    padded_num_tokens: int | None = None,
-    padded_num_reqs: int | None = None,
+    batch_desc: "BatchExecutionDescriptor",
 ) -> InputBatch:
     if manager is None:
         return input_batch
+
+    padded_num_tokens = None
+    padded_num_reqs = None
+    if batch_desc.cg_mode != CUDAGraphMode.NONE:
+        padded_num_tokens = batch_desc.num_tokens
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            padded_num_reqs = batch_desc.num_reqs
+
     return manager.partition_batch(
         input_batch,
         padded_num_tokens=padded_num_tokens,

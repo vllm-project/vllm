@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
@@ -107,3 +111,37 @@ def test_graph_padding_cannot_be_smaller_than_largest_pcp_rank(monkeypatch):
             query_start_loc_np=np.arange(4, dtype=np.int32),
             padded_num_tokens=2,
         )
+
+
+@pytest.mark.parametrize(
+    ("cg_mode", "num_reqs", "expected_tokens", "expected_reqs"),
+    [
+        (CUDAGraphMode.NONE, 4, None, None),
+        (CUDAGraphMode.PIECEWISE, None, 8, None),
+        (CUDAGraphMode.FULL, 4, 8, 4),
+    ],
+)
+def test_partition_padding_is_derived_from_batch_descriptor(
+    cg_mode, num_reqs, expected_tokens, expected_reqs
+):
+    manager = MagicMock()
+    input_batch = MagicMock()
+    manager.partition_batch.return_value = input_batch
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=8,
+        num_reqs=num_reqs,
+    )
+
+    result = pcp_manager_module.maybe_partition_pcp_batch(
+        manager,
+        input_batch,
+        batch_desc,
+    )
+
+    assert result is input_batch
+    manager.partition_batch.assert_called_once_with(
+        input_batch,
+        padded_num_tokens=expected_tokens,
+        padded_num_reqs=expected_reqs,
+    )
