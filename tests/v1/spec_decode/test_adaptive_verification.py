@@ -275,3 +275,80 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
     # (request, position) keys, so the kernel can mask rows the compacted
     # device layout no longer has room for.
     assert mapping == [0, 1, 2, 3, 4, 5, 6]
+
+
+def make_profiling_manager(
+    max_num_reqs: int = 128,
+    max_num_batched_tokens: int = 16384,
+    num_speculative_steps: int = 7,
+) -> AdaptiveVerificationManager:
+    manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager.req_states = SimpleNamespace(
+        max_num_batched_tokens=max_num_batched_tokens, max_num_reqs=max_num_reqs
+    )
+    manager.num_speculative_steps = num_speculative_steps
+    manager.num_bonus_tokens = 1
+    return manager
+
+
+def test_profile_split_left_alone_while_the_step_still_fits_in_decode():
+    # 128 requests x (1 + 7) queries is the largest decode step, so at or below
+    # it the caller's even split is already the real shape.
+    manager = make_profiling_manager()
+    assert manager.profile_batch_split(1024) is None
+    assert manager.profile_batch_split(512) is None
+
+
+def test_profile_split_shapes_the_surplus_above_decode_as_prefill(monkeypatch):
+    # The case from the report: max_num_seqs=128, k=7, ctx=8192, 16384 tokens.
+    # An even split would time 128 requests of 128 queries each, which no
+    # decode step can be; the surplus over 128 * 8 has to be prefill.
+    monkeypatch.setattr(
+        adaptive_module.envs, "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", 8192
+    )
+    manager = make_profiling_manager()
+
+    split = manager.profile_batch_split(16384)
+
+    assert split is not None
+    assert sum(split) == 16384
+    assert len(split) == 128
+    # 126 decode requests keep the real decode query length; the two prefill
+    # slots absorb everything else.
+    assert split[:126] == [8] * 126
+    assert split[126:] == [7688, 7688]
+
+
+def test_profiled_tail_batches_are_shapes_the_scheduler_can_produce(monkeypatch):
+    monkeypatch.setattr(
+        adaptive_module.envs, "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", 8192
+    )
+    max_num_reqs = 128
+    decode_query_len = 8
+    manager = make_profiling_manager(max_num_reqs=max_num_reqs)
+    capture_sizes = [8, 1024]
+
+    for batch in manager.batches_to_profile(capture_sizes):
+        num_tokens = batch["num_tokens"]
+        split = batch.get("num_scheduled_tokens_per_req")
+        if num_tokens in capture_sizes or num_tokens <= max_num_reqs * decode_query_len:
+            # Captured shapes must keep the even split the graph was captured
+            # with, and decode-sized steps are already realistic.
+            assert split is None
+            continue
+        assert split is not None
+        assert sum(split) == num_tokens
+        assert len(split) <= max_num_reqs
+        assert min(split) > 0
+        # Every request is either a real decode query or a prefill chunk. The
+        # even split this replaces gave all 128 requests num_tokens / 128
+        # queries, so there would be no decode requests left at all.
+        decode_lens = [n for n in split if n <= decode_query_len]
+        prefill_lens = [n for n in split if n > decode_query_len]
+        assert decode_lens == [decode_query_len] * len(decode_lens)
+        assert len(decode_lens) >= 1
+        assert len(prefill_lens) >= 1
+        assert len(decode_lens) + len(prefill_lens) == max_num_reqs
+        # Prefill chunks stay near-equal and within one scheduler step.
+        assert max(prefill_lens) - min(prefill_lens) <= 1
+        assert max(prefill_lens) <= manager.req_states.max_num_batched_tokens

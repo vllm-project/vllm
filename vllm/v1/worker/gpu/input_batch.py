@@ -119,7 +119,14 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        num_scheduled_tokens: np.ndarray | None = None,
     ) -> "InputBatch":
+        """Build a dummy batch of *num_tokens* over *num_reqs* requests.
+
+        The tokens are spread evenly unless *num_scheduled_tokens* pins an
+        explicit per-request split, which callers use when the uniform shape
+        would not be one the scheduler can produce.
+        """
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
@@ -129,21 +136,30 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        # Distribute the remainder evenly so that no dummy request exceeds
+        # seq_len equals to query_len. Without an explicit split, distribute the
+        # remainder evenly so that no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
-        # accept any split with non-empty slots, so this shape works for them
-        # too; attention metadata is built from the promised max_query_len.
-        base_tokens = num_tokens // num_reqs
-        num_extra = num_tokens % num_reqs
-        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
-        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
-        if num_extra > 0:
-            num_scheduled_tokens[-num_extra:] += 1
+        # accept any split with non-empty slots, so either shape works for them;
+        # attention metadata is built from the promised max_query_len.
+        if num_scheduled_tokens is None:
+            base_tokens = num_tokens // num_reqs
+            num_extra = num_tokens % num_reqs
+            max_split = base_tokens + (num_extra > 0)
+            assert max_query_len is None or max_split <= max_query_len
+            num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+            if num_extra > 0:
+                num_scheduled_tokens[-num_extra:] += 1
+            input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
+            input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
+        else:
+            num_scheduled_tokens = num_scheduled_tokens.astype(np.int32, copy=True)
+            assert num_scheduled_tokens.shape == (num_reqs,)
+            assert num_scheduled_tokens.min() > 0
+            max_split = int(num_scheduled_tokens.max())
+            assert max_query_len is None or max_split <= max_query_len
+            input_buffers.seq_lens[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
-        # seq_len equals to query_len
-        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
-        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]

@@ -680,6 +680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = False,
         uniform_decode: bool = False,
         context_len: int = 0,
+        num_scheduled_tokens_per_req: list[int] | None = None,
         skip_eplb: bool = False,
         is_profile: bool = False,
         **kwargs,
@@ -699,12 +700,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
-        # Distribute the remainder evenly so no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
-        num_tokens_per_request = [
-            num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
-            for i in range(num_reqs)
-        ]
+        if num_scheduled_tokens_per_req is not None:
+            # An explicit split, for callers that need the dummy batch to have a
+            # specific shape rather than a uniform one (e.g. adaptive
+            # verification profiling a mixed decode/prefill step).
+            assert not uniform_decode
+            num_tokens_per_request = list(num_scheduled_tokens_per_req)
+            num_reqs = len(num_tokens_per_request)
+            assert num_reqs <= self.max_num_reqs
+            assert all(n > 0 for n in num_tokens_per_request)
+        else:
+            # Distribute the remainder evenly so no dummy request exceeds
+            # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+            num_tokens_per_request = [
+                num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
+                for i in range(num_reqs)
+            ]
 
         assert sum(num_tokens_per_request) == num_tokens
         num_scheduled_tokens = {
@@ -1099,7 +1110,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
 
         if dummy_run:
-            # Dummy batches are uniform by construction.
+            # Dummy batches are uniform unless the caller pinned a split, and
+            # get_uniform_decode_token_count returns None for those.
             return None, get_uniform_decode_token_count(
                 num_reqs, num_toks, max_query_len, has_prefill=False
             )
@@ -1594,11 +1606,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # Honour the caller's split when cudagraph dispatch did not pad or
+            # reshape the batch; otherwise the shape belongs to the descriptor
+            # and make_dummy falls back to its even split.
+            dummy_split = None
+            if dummy_num_reqs == num_reqs and batch_desc.num_tokens == num_toks:
+                dummy_split = np.fromiter(
+                    scheduler_output.num_scheduled_tokens.values(),
+                    dtype=np.int32,
+                    count=num_reqs,
+                )
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
+                num_scheduled_tokens=dummy_split,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
