@@ -602,7 +602,9 @@ def triton_kernel_moe_forward(
                 # v3.6+ topk returns a SparseMatrix whose construction already
                 # computed the bitmatrix and its metadata; reuse it instead of
                 # re-packing the bitmatrix and recomputing the metadata in
-                # make_routing_data.
+                # make_routing_data. Only the monolithic path reaches this reuse;
+                # the modular OAITritonExperts (expert-parallel) path calls
+                # make_routing_data directly.
                 routing_data, gather_idx, scatter_idx = routing_data_from_sparse_topk(
                     topk_result, gating_output.shape[-1]
                 )
