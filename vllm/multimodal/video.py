@@ -211,6 +211,24 @@ class VideoBackend(VideoLoader):
         ).tolist()
 
     @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
+
+        return OpenCVVideoBackendMixin.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num,
+            frame_recovery=frame_recovery,
+        )
+
+    @classmethod
     def load_bytes(
         cls,
         data: bytes,
@@ -691,6 +709,8 @@ class Glm5NextVideoBackend(VideoBackend):
     ``max_frames`` -> frame cap, ``temporal_patch_size`` (default 2).
     """
 
+    _SEEK_GAP_THRESHOLD: ClassVar[int] = 64
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -712,6 +732,57 @@ class Glm5NextVideoBackend(VideoBackend):
             max_frame_count=kwargs.get("max_frames"),
             temporal_patch_size=kwargs.get("temporal_patch_size", 2),
         )
+
+    @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        if frame_recovery:
+            return super().read_frames(
+                cap, frame_idx, total_frames_num, frame_recovery=frame_recovery
+            )
+
+        wanted = sorted(set(frame_idx))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(wanted), height, width, 3), dtype=np.uint8)
+        valid_frame_indices: list[int] = []
+        current: int | None = None
+        for target in wanted:
+            gap = target - current if current is not None else None
+            if gap is not None and 2 <= gap <= cls._SEEK_GAP_THRESHOLD:
+                for _ in range(gap - 1):
+                    if not cap.grab():
+                        current = None
+                        break
+                else:
+                    current = target - 1
+            if current != target - 1:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                current = target - 1
+            ok, frame = cap.read()
+            if ok:
+                frames[len(valid_frame_indices)] = cv2.cvtColor(
+                    frame, cv2.COLOR_BGR2RGB
+                )
+                valid_frame_indices.append(target)
+                current = target
+            else:
+                current = None
+
+        valid_num_frames = len(valid_frame_indices)
+        if valid_num_frames < len(wanted):
+            logger.warning(
+                "GLM video loading expected %d sampled frames but only loaded %d.",
+                len(wanted),
+                valid_num_frames,
+            )
+        return frames[:valid_num_frames], valid_frame_indices
 
 
 @VIDEO_LOADER_REGISTRY.register(

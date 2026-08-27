@@ -2713,7 +2713,7 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     )
 
 
-def new_mla_spec(cache_dtype_str=None, block_size: int = 128):
+def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=block_size,

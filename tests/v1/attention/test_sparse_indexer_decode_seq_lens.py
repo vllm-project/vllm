@@ -18,7 +18,16 @@ expansion consequences via the pure-torch expand/append pair that the fused
 kernel is documented to replicate.
 """
 
+import pytest
 import torch
+
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm() or current_platform.is_xpu():
+    pytest.skip(
+        "GLM-5.3-Flash is not supported on ROCm or XPU.",
+        allow_module_level=True,
+    )
 
 # Bootstrap the glm5next package before entering the indexer module: its
 # kpool_compress import runs glm5next/__init__, which pulls model ->
