@@ -713,6 +713,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_scheduler_output = SchedulerOutput.make_empty()
         dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
         dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
+        if uniform_decode and self.speculative_config is not None:
+            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            dummy_scheduler_output.scheduled_spec_decode_tokens = {
+                req_id: [-1] * (n - num_bonus_tokens)
+                for req_id, n in num_scheduled_tokens.items()
+            }
 
         # Disable any use of KVConnector for dummy runs.
         self.kv_connector.set_disabled(True)
@@ -1547,6 +1553,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # when encoder inputs are scheduled, because this step updates
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
+
+        if self.speculative_config is not None:
+            # A verifier FULL graph captures model-wide branch topology, not
+            # only its tensor shape. Do not let a same-shape short prefill
+            # select that graph.
+            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+            is_target_verifier_batch = bool(draft_tokens) and all(
+                num_tokens > num_bonus_tokens
+                and len(draft_tokens.get(req_id, ())) == num_tokens - num_bonus_tokens
+                for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items()
+            )
+            if (
+                uniform_tok_count is not None
+                and uniform_tok_count > num_bonus_tokens
+                and not is_target_verifier_batch
+            ):
+                uniform_tok_count = None
 
         batch_desc, dp_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
