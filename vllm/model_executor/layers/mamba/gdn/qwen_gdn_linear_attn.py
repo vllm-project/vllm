@@ -911,6 +911,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # kernel variants with different FP accumulation order; the ~1e-7
         # difference is amplified by the SSM recurrence to ~4e-5 per step.
         _bi_decode = False
+        _bi_prefill_cu = None
+        _bi_num_prefill_seqs = 0
         if envs.VLLM_BATCH_INVARIANT and num_tokens > 1:
             _fc = get_forward_context()
             _attn_raw = _fc.attn_metadata
@@ -920,6 +922,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     _bi_decode = (
                         _meta.num_prefills == 0 and _meta.num_decodes > 0
                     )
+                    # For pure-prefill batches, project per-sequence so the
+                    # GEMM M dimension matches the BS=1 case. Different M
+                    # values cause cublas to select different algorithms with
+                    # different FP accumulation, producing ~1e-3 logprob drift.
+                    if (
+                        not _bi_decode
+                        and _meta.num_prefills > 0
+                        and _meta.num_decodes == 0
+                        and _meta.non_spec_query_start_loc is not None
+                    ):
+                        _bi_prefill_cu = _meta.non_spec_query_start_loc
+                        _bi_num_prefill_seqs = _meta.num_prefills
         if _bi_decode:
             mixed_qkvz = torch.cat(
                 [
@@ -933,6 +947,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.in_proj_ba(hidden_states[i : i + 1])[0]
                     for i in range(num_tokens)
                 ],
+                dim=0,
+            )
+        elif _bi_prefill_cu is not None:
+            _cu = _bi_prefill_cu.tolist()
+            mixed_qkvz = torch.cat(
+                [self.in_proj_qkvz(hidden_states[_cu[i] : _cu[i + 1]])[0]
+                 for i in range(_bi_num_prefill_seqs)],
+                dim=0,
+            )
+            ba = torch.cat(
+                [self.in_proj_ba(hidden_states[_cu[i] : _cu[i + 1]])[0]
+                 for i in range(_bi_num_prefill_seqs)],
                 dim=0,
             )
         else:
