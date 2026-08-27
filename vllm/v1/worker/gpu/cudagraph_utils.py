@@ -31,6 +31,7 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -377,7 +378,9 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(graph, self.pool):
+                        with torch.cuda.graph(
+                            graph, self.pool, stream=current_stream()
+                        ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
@@ -750,7 +753,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         all_wrappers: list[Any] = []
         original_pools: dict[int, Any] = {}
         speculator = getattr(runner, "speculator", None)
-        spec_managers: list[tuple[str, CudaGraphManager]] = []
+        spec_manager_names: list[str] = []
         try:
             if not manager.needs_capture():
                 return 0
@@ -766,8 +769,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                 original_pools[id(wrapper)] = wrapper.graph_pool
                 wrapper.graph_pool = throwaway_pool
             if speculator is not None:
-                spec_managers = [
-                    (name, value)
+                spec_manager_names = [
+                    name
                     for name, value in vars(speculator).items()
                     if isinstance(value, CudaGraphManager)
                 ]
@@ -796,8 +799,11 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # Drop the speculator's cudagraph managers; the real
             # initialize_kv_cache re-creates them. Their profiling graphs
             # release the throwaway pool here rather than after the real init.
-            for name, _ in spec_managers:
+            for name in spec_manager_names:
                 setattr(speculator, name, None)
+            # Drop local references before teardown detaches the runner's
+            # manager and flushes the allocator.
+            del manager
             _teardown_profiling_state(runner)
     finally:
         platform_cls._global_graph_pool = saved_global_pool
@@ -866,6 +872,7 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
             layer.kv_cache = (
                 torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
             )
+            del kv_cache
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()
