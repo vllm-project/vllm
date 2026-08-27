@@ -1003,20 +1003,18 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 parameter="image_embeds",
             )
 
+        embeds: torch.Tensor | dict[str, torch.Tensor] | None
         if isinstance(image_embeds, dict):
             embeds = {
                 k: self._connector.fetch_image_embedding(v)
                 for k, v in image_embeds.items()
             }
-            placeholder = self._tracker.add("image_embeds", (embeds, uuid))
+        elif isinstance(image_embeds, str):
+            embeds = self._connector.fetch_image_embedding(image_embeds)
+        else:
+            embeds = None
 
-        if isinstance(image_embeds, str):
-            embedding = self._connector.fetch_image_embedding(image_embeds)
-            placeholder = self._tracker.add("image_embeds", (embedding, uuid))
-
-        if image_embeds is None:
-            placeholder = self._tracker.add("image_embeds", (None, uuid))
-
+        placeholder = self._tracker.add("image_embeds", (embeds, uuid))
         self._add_placeholder("image", placeholder)
 
     def parse_audio_embeds(

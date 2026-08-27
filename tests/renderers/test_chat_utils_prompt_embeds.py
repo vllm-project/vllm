@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import io
+from collections import defaultdict
 from typing import Final
 from unittest import mock
 
@@ -23,6 +24,8 @@ from vllm.entrypoints.chat_utils import (
     MM_PARSER_MAP,
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    AsyncMultiModalContentParser,
+    MultiModalContentParser,
     parse_chat_messages,
     parse_chat_messages_async,
 )
@@ -575,3 +578,64 @@ async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     assert mask.count(False) == LEN_SYS + LEN_USR
     assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_SYS], t_sys)
     assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_USR], t_usr)
+
+
+def _image_embeds_parsers():
+    mm_config = mock.MagicMock()
+    mm_config.enable_mm_embeds = True
+    model_config = mock.MagicMock()
+    model_config.get_multimodal_config.return_value = mm_config
+
+    sync_conn = mock.MagicMock()
+    sync_conn.fetch_image_embedding.return_value = "embedding"
+
+    async def _fetch(_):
+        return "embedding"
+
+    async_conn = mock.MagicMock()
+    async_conn.fetch_image_embedding_async = _fetch
+
+    class _Sync(MultiModalContentParser):
+        def __init__(self):
+            self._placeholder_storage = defaultdict(list)
+            self._tracker = mock.MagicMock()
+            self._tracker.add.return_value = "<ph>"
+
+        @property
+        def model_config(self):
+            return model_config
+
+        @property
+        def _connector(self):
+            return sync_conn
+
+    class _Async(AsyncMultiModalContentParser):
+        def __init__(self):
+            self._placeholder_storage = defaultdict(list)
+            self._tracker = mock.MagicMock()
+            self._tracker.add.return_value = "<ph>"
+
+        @property
+        def model_config(self):
+            return model_config
+
+        @property
+        def _connector(self):
+            return async_conn
+
+    return _Sync(), _Async()
+
+
+@pytest.mark.parametrize(
+    "image_embeds",
+    ["ZW1iZWQ=", {"a": "ZW1iZWQ="}, None, 123, ["ZW1iZWQ="]],
+    ids=["str", "dict", "none", "int", "list"],
+)
+@pytest.mark.asyncio
+async def test_image_embeds_sync_and_async_parsers_agree(image_embeds):
+    sync_parser, async_parser = _image_embeds_parsers()
+
+    sync_parser.parse_image_embeds(image_embeds)
+    await async_parser._image_embeds_with_uuid_async(image_embeds, None)
+
+    assert sync_parser._tracker.add.call_count == 1
