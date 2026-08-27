@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import is_interleaved, set_default_rope_theta
+from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -322,7 +322,7 @@ class NanbeigeModel(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
-        if is_interleaved(vllm_config.model_config.hf_text_config):
+        if len(set(getattr(config, "layer_types", []))) > 1:
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
                 "This model uses sliding window but `max_window_layers` = {} "
@@ -373,6 +373,18 @@ class NanbeigeModel(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            value = hidden_states + residual if residual is not None else hidden_states.clone()
+            aux_hidden_states.append(value)
+        return aux_hidden_states
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -392,14 +404,16 @@ class NanbeigeModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        num_physical_layers = self.end_layer - self.start_layer
         for loop_idx in range(self.loops_num):
             for idx, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)
             ):
-                hidden_states, residual = layer(positions, hidden_states, residual, loop_idx=loop_idx)
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
+                logical_layer_idx = loop_idx * num_physical_layers + idx
+                aux_hidden_states = self._maybe_add_hidden_state(
+                    aux_hidden_states, logical_layer_idx, hidden_states, residual
                 )
+                hidden_states, residual = layer(positions, hidden_states, residual, loop_idx=loop_idx)
 
             if loop_idx < self.loops_num - 1:
                 if residual is not None:
@@ -555,9 +569,5 @@ class NanbeigeForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-

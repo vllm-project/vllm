@@ -714,6 +714,13 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         ]
 
 
+class NanbeigeModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        num_hidden_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+        num_loops = getattr(self.hf_text_config, "num_loops", 1)
+        return num_hidden_layers * num_loops
+
+
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def _language_config(self) -> PretrainedConfig:
         return self.hf_config.language_config
@@ -784,6 +791,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "moss_audio": MossAudioModelArchConfigConvertor,
+    "nanbeige": NanbeigeModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
