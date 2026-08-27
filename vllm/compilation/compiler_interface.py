@@ -477,7 +477,7 @@ class InductorAdaptor(CompilerInterface):
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
         triton_cache = os.path.join(self.base_cache_dir, "triton_cache")
         os.makedirs(triton_cache, exist_ok=True)
-        os.environ["TRITON_CACHE_DIR"] = triton_cache
+        os.environ.setdefault("TRITON_CACHE_DIR", triton_cache)
 
     def compile(
         self,
