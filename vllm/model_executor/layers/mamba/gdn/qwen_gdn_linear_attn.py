@@ -259,8 +259,25 @@ def fi_chunk_gated_delta_rule(
 
 
 def _aiter_flydsl_chunk_gated_delta_rule(**kwargs):
+    from aiter.ops.flydsl.linear_attention_prefill_kernels import (
+        gdn_prepare_flydsl_supported,
+    )
     from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
 
+    if kwargs["cu_seqlens"] is not None and kwargs["prefill_metadata"] is None:
+        raise RuntimeError(
+            "AITER FlyDSL GDN prefill requires reusable varlen prefill metadata."
+        )
+    if not gdn_prepare_flydsl_supported(kwargs["k"], kwargs["v"]):
+        raise RuntimeError(
+            "AITER FlyDSL GDN prepare does not support the runtime input shape, "
+            "dtype, or device."
+        )
+    logger.info_once(
+        "Dispatching AITER FlyDSL GDN prefill "
+        "(prepare=flydsl, chunk=flydsl, indexed_state_pool=%s).",
+        kwargs["initial_state_indices"] is not None,
+    )
     return chunk_gated_delta_rule_opt_vk(**kwargs)
 
 
