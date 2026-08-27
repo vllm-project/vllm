@@ -382,6 +382,92 @@ def test_flashinfer_standalone_workspace_size(
     assert create_workspace.call_args.args[3] == expected
 
 
+def _mock_flashinfer_allreduce_init(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(flashinfer_all_reduce, "fi_ar_available", True)
+    monkeypatch.setattr(
+        flashinfer_all_reduce.current_platform, "is_cuda", lambda: True
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce.dist, "get_world_size", lambda group: 8
+    )
+    monkeypatch.setattr(flashinfer_all_reduce.dist, "get_rank", lambda group: 0)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_resolve_fi_ar_backend",
+        Mock(return_value=("mnnvl", False)),
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_get_tuned_standalone_max_size",
+        Mock(return_value=64 * flashinfer_all_reduce.MiB - 1),
+    )
+
+
+@pytest.mark.parametrize("explicit_size_mb", [2.0, None])
+def test_flashinfer_standalone_explicit_override_precedes_tuning(
+    monkeypatch: pytest.MonkeyPatch, explicit_size_mb: float | None
+) -> None:
+    _mock_flashinfer_allreduce_init(monkeypatch)
+    pass_config = Mock(fi_allreduce_fusion_max_size_mb=explicit_size_mb)
+    pass_config.flashinfer_max_size.return_value = 2 * flashinfer_all_reduce.MiB
+    config = Mock()
+    config.compilation_config.pass_config = pass_config
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "get_current_vllm_config_or_none",
+        lambda: config,
+    )
+
+    comm = flashinfer_all_reduce.FlashInferAllReduce(Mock(), "cuda:0")
+
+    if explicit_size_mb is not None:
+        assert comm.max_workspace_size == 2 * flashinfer_all_reduce.MiB
+        pass_config.flashinfer_max_size.assert_called_once_with(8)
+    else:
+        assert comm.max_workspace_size == 64 * flashinfer_all_reduce.MiB - 1
+        pass_config.flashinfer_max_size.assert_not_called()
+
+
+def test_flashinfer_explicit_two_mib_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comm = object.__new__(flashinfer_all_reduce.FlashInferAllReduce)
+    comm.disabled = False
+    comm.world_size = 8
+    comm.rank = 0
+    comm.group = Mock()
+    comm.max_workspace_size = 2 * flashinfer_all_reduce.MiB
+    comm.max_num_tokens = 0
+    workspace = Mock()
+    workspace.is_buffer_size_sufficient.return_value = True
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_fi_ar_workspace", Mock(return_value=workspace)
+    )
+    within = Mock(
+        is_cuda=True,
+        dtype=torch.bfloat16,
+        nbytes=146 * 7168 * 2,
+        shape=(146, 7168),
+    )
+    outside = Mock(
+        is_cuda=True,
+        dtype=torch.bfloat16,
+        nbytes=147 * 7168 * 2,
+        shape=(147, 7168),
+    )
+    within.is_contiguous.return_value = True
+    outside.is_contiguous.return_value = True
+
+    assert comm.should_use_fi_ar(within)
+    assert not comm.should_use_fi_ar(outside)
+    workspace.is_buffer_size_sufficient.assert_called_once_with(
+        tp_size=8,
+        num_tokens=146,
+        hidden_dim=7168,
+        dtype=torch.bfloat16,
+    )
+
+
 def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
     output = torch.empty(2)
     fi_ar_comm = Mock(disabled=False)
