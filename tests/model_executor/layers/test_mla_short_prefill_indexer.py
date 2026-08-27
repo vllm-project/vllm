@@ -44,7 +44,10 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
     with pytest.raises(BatchStateRefreshed):
         DeepseekV32Attention._sparse_indexer_and_attn(
             layer,
+            torch.empty(1, dtype=torch.long),
             torch.empty(1, 1),
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1, 1),
             None,
             None,
             None,
