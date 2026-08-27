@@ -7,7 +7,7 @@ import inspect
 import os
 import traceback
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 from vllm.logger import init_logger
@@ -52,9 +52,17 @@ except ImportError:
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
 
+_GLOBAL_TRACER_PROVIDER: Any = None
+
 
 def is_otel_available() -> bool:
     return _IS_OTEL_AVAILABLE
+
+
+def _get_tracer(name: str = __name__) -> Tracer:
+    if _GLOBAL_TRACER_PROVIDER is not None:
+        return _GLOBAL_TRACER_PROVIDER.get_tracer(name)
+    return trace.get_tracer(name)
 
 
 def init_otel_tracer(
@@ -74,6 +82,7 @@ def init_otel_tracer(
     os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
 
     resource_attrs = {}
+    resource_attrs["service.name"] = instrumenting_module_name
     resource_attrs["vllm.instrumenting_module_name"] = instrumenting_module_name
     resource_attrs["vllm.process_id"] = str(os.getpid())
     if extra_attributes:
@@ -83,7 +92,10 @@ def init_otel_tracer(
     trace_provider = TracerProvider(resource=resource)
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
-    set_tracer_provider(trace_provider)
+    with suppress(Exception):
+        set_tracer_provider(trace_provider)
+    global _GLOBAL_TRACER_PROVIDER
+    _GLOBAL_TRACER_PROVIDER = trace_provider
 
     atexit.register(trace_provider.shutdown)
 
@@ -91,12 +103,17 @@ def init_otel_tracer(
     return tracer
 
 
-def get_span_exporter(endpoint):
+def get_span_exporter(endpoint: str):
+    # Normalize endpoint: strip grpc:// prefix if present for OTLPGrpcExporter
+    clean_endpoint = endpoint
+    if clean_endpoint.startswith("grpc://"):
+        clean_endpoint = clean_endpoint[len("grpc://") :]
+
     protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
     if protocol == "grpc":
-        exporter = OTLPGrpcExporter(endpoint=endpoint, insecure=True)
+        exporter = OTLPGrpcExporter(endpoint=clean_endpoint, insecure=True)
     elif protocol == "http/protobuf":
-        exporter = OTLPHttpExporter(endpoint=endpoint)
+        exporter = OTLPHttpExporter(endpoint=clean_endpoint)
     else:
         raise ValueError(f"Unsupported OTLP protocol '{protocol}' is configured")
     return exporter
@@ -146,7 +163,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
-        tracer = trace.get_tracer(module_name)
+        tracer = _get_tracer(module_name)
         ctx = _get_smart_context()
         with (
             tracer.start_as_current_span(
@@ -161,7 +178,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     @functools.wraps(func)
     def sync_wrapper(*args, **kwargs):
-        tracer = trace.get_tracer(module_name)
+        tracer = _get_tracer(module_name)
         ctx = _get_smart_context()
         with (
             tracer.start_as_current_span(
@@ -189,7 +206,7 @@ def manual_instrument_otel(
     if not _IS_OTEL_AVAILABLE:
         return
 
-    tracer = trace.get_tracer(__name__)
+    tracer = _get_tracer(__name__)
     # Use provided context, or fall back to smart context detection
     ctx = context if context is not None else _get_smart_context()
 
@@ -208,6 +225,46 @@ def manual_instrument_otel(
         span.end(end_time=end_time)
     else:
         span.end()
+
+
+def start_request_span_otel(
+    span_name: str,
+    start_time: int,
+    attributes: dict[str, Any] | None = None,
+    context: Context | None = None,
+    kind: Any = None,
+) -> tuple[Any, dict[str, str] | None]:
+    """Start an OpenTelemetry span and inject its context into a carrier dict.
+
+    Returns:
+        (span, trace_headers): The active span object and a dict of W3C
+        trace headers (e.g. {'traceparent': ...}) representing this span's
+        context for propagation to downstream workers/subsystems.
+    """
+    if not _IS_OTEL_AVAILABLE:
+        return None, None
+
+    tracer = _get_tracer(__name__)
+    ctx = context if context is not None else _get_smart_context()
+
+    span_kwargs: dict[str, Any] = {
+        "name": span_name,
+        "context": ctx,
+        "start_time": start_time,
+    }
+    if kind is not None:
+        span_kwargs["kind"] = kind
+
+    span = tracer.start_span(**span_kwargs)
+    if attributes:
+        span.set_attributes(attributes)
+
+    # Inject the new span's context into W3C trace headers
+    carrier: dict[str, str] = {}
+    span_ctx = trace.set_span_in_context(span)
+    TraceContextTextMapPropagator().inject(carrier, context=span_ctx)
+
+    return span, carrier
 
 
 def _get_smart_context() -> Context | None:
