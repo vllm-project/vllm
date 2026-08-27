@@ -739,7 +739,7 @@ class MoRIIOConnectorScheduler:
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
-            local_block_ids: BlockIds = [list(g) for g in blocks.get_block_ids()]
+            local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
             # Snapshot params now so chunked-prefill build_connector_meta
             # can recover them on the final chunk even if the live
@@ -2526,10 +2526,9 @@ class MoRIIOConnectorWorker:
             self.remote_dp_size_local = int(meta.remote_dp_size_local)
         else:
             self.remote_dp_size_local = int(meta.remote_dp_size)
-        # WRITE mode is single-group (hybrid WRITE is rejected at scheduler
-        # init); the engine write path consumes flat block-id lists, so unwrap
-        # the single group here.
-        local_block_ids = meta.local_block_ids[0] if meta.local_block_ids else []
+        # WRITE does not support HMA, so unwrap blocks into flat lists.
+        # remote_block_ids can itself be empty so need to be careful when unwrapping.
+        local_block_ids = meta.local_block_ids[0]
         remote_block_ids = meta.remote_block_ids[0] if meta.remote_block_ids else []
         self.schedule_write_blocks(
             request_id=req_id,
