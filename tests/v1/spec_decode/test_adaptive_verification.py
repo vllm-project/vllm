@@ -110,7 +110,9 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
 
 def test_profiled_batches_seed_cost_curves_via_consumer():
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
-    manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
+    manager.req_states = SimpleNamespace(
+        max_num_batched_tokens=4096, max_num_reqs=64, max_model_len=4096
+    )
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
     curves: dict[str, list[tuple[int, float]]] = {}
@@ -143,6 +145,39 @@ def test_profiled_batches_seed_cost_curves_via_consumer():
     # count they would land inside the captured range and, once made monotonic,
     # smear that eager cost across every larger request count.
     assert curves["draft"] == [(1, 1.0), (128, 1.0)]
+
+
+def test_tail_profile_batches_mix_decode_and_prefill_shapes(monkeypatch):
+    monkeypatch.setattr(
+        adaptive_module.envs, "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", 8192
+    )
+    cases = [
+        (128, 16384, 1024, 126, [7688, 7688]),
+        # One chunk would be 8192 surplus + 8 freed decode tokens.
+        (128, 9216, 1024, 126, [4104, 4104]),
+        # A small request budget must become a schedulable prefill-only batch.
+        (2, 16384, 16, 0, [8192, 8192]),
+    ]
+    for max_reqs, max_tokens, capture_size, num_decode, prefill in cases:
+        manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+        manager.req_states = SimpleNamespace(
+            max_num_batched_tokens=max_tokens,
+            max_num_reqs=max_reqs,
+            max_model_len=8192,
+        )
+        manager.num_speculative_steps = 7
+        manager.num_bonus_tokens = 1
+        batches = {
+            batch["num_tokens"]: batch
+            for batch in manager.batches_to_profile([capture_size])
+        }
+
+        assert "num_scheduled_tokens_per_req" not in batches[capture_size]
+        batch = batches[max_tokens]
+        scheduled = batch["num_scheduled_tokens_per_req"]
+        assert batch["num_context_reqs"] == num_decode
+        assert scheduled == [8] * num_decode + prefill
+        assert sum(scheduled) == max_tokens
 
 
 def test_compact_batch_preserves_totals_and_bounds():

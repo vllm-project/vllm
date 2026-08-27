@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -170,7 +171,9 @@ class AdaptiveVerificationManager:
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
 
-    def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
+    def batches_to_profile(
+        self, capture_sizes: list[int]
+    ) -> Iterator[dict[str, int | list[int]]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
@@ -187,12 +190,39 @@ class AdaptiveVerificationManager:
                 size = min(size * 2, max_num_tokens)
                 tail_sizes.add(size)
             tail_sizes -= set(capture_sizes)
+        max_num_reqs = self.req_states.max_num_reqs
+        decode_query_len = self.num_speculative_steps + self.num_bonus_tokens
+        max_decode_tokens = max_num_reqs * decode_query_len
+        profile_context_len = envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+        max_prefill_tokens = min(
+            profile_context_len or self.req_states.max_model_len,
+            self.req_states.max_model_len,
+        )
         for num_tokens in capture_sizes + sorted(tail_sizes):
+            batch: dict[str, int | list[int]] = {
+                "num_tokens": num_tokens,
+                "context_len": profile_context_len,
+            }
+            surplus = num_tokens - max_decode_tokens
+            prefill_capacity = max_prefill_tokens - decode_query_len
+            if num_tokens in tail_sizes and surplus > 0:
+                if prefill_capacity <= 0:
+                    continue
+                num_prefill_reqs = min(cdiv(surplus, prefill_capacity), max_num_reqs)
+                num_decode_reqs = max_num_reqs - num_prefill_reqs
+                prefill_tokens = num_tokens - num_decode_reqs * decode_query_len
+                base_tokens, num_extra = divmod(prefill_tokens, num_prefill_reqs)
+                if base_tokens + (num_extra > 0) > max_prefill_tokens:
+                    continue
+                batch["num_scheduled_tokens_per_req"] = [
+                    decode_query_len
+                ] * num_decode_reqs + [
+                    base_tokens + (i >= num_prefill_reqs - num_extra)
+                    for i in range(num_prefill_reqs)
+                ]
+                batch["num_context_reqs"] = num_decode_reqs
             for _ in range(_PROFILE_REPLAYS):
-                yield {
-                    "num_tokens": num_tokens,
-                    "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
-                }
+                yield batch
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
