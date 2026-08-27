@@ -651,8 +651,9 @@ class MessageQueue:
 
     def _long_wait_log_args(self, role: str, metadata_buffer, waited_s: float):
         memory_fence()
-        reader_flags = list(metadata_buffer[1 : self.buffer.n_reader + 1])
-        written_flag = metadata_buffer[0]
+        metadata_snapshot = list(metadata_buffer[: self.buffer.n_reader + 1])
+        written_flag = metadata_snapshot[0]
+        reader_flags = metadata_snapshot[1:]
         read_count = sum(reader_flags)
         if self._is_writer:
             wait_reason = "awaiting_readers"
