@@ -24,23 +24,24 @@
 # limitations under the License.
 """Inference-only K2Horizon model compatible with HuggingFace weights."""
 
+import math
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import Any
-import math
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
-    get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
@@ -50,13 +51,25 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.config import (
+    _get_config_dtype_str,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _get_config_quant_dtype,
+    _prepare_expert_assignment,
+    dispatch_fused_moe_kernel,
+    try_get_optimal_moe_config,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
-    ColumnParallelLinear
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -69,9 +82,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.sequence import IntermediateTensors
-
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
@@ -88,22 +98,10 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
-
-from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.config import (
-    _get_config_dtype_str,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input,
-)
+from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    _get_config_quant_dtype,
-    try_get_optimal_moe_config,
-    _prepare_expert_assignment,
-    dispatch_fused_moe_kernel
-)
 
 logger = init_logger(__name__)
 
@@ -131,8 +129,9 @@ def calc_router_weights(
     if score_func == "softmax":
         routing_scores = F.softmax(router_logits, dim=-1, dtype=torch.float32)
     else:
-        assert score_func == "sigmoid", \
+        assert score_func == "sigmoid", (
             f"Unsupported router score function: {score_func}"
+        )
         routing_scores = torch.sigmoid(router_logits.to(torch.float32))
 
     selection_scores = routing_scores
@@ -205,9 +204,7 @@ def fused_mova_impl(
     )
 
     intermediate_cache1 = torch.empty(
-        (M, top_k_num, N),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype
+        (M, top_k_num, N), device=hidden_states.device, dtype=hidden_states.dtype
     )
 
     if hidden_states.dtype == torch.bfloat16:
@@ -296,7 +293,8 @@ class K2HorizonRMSNorm(RMSNorm):
 
         orig_shape = x.shape
         x_grouped = x.reshape(-1, self.n_groups, self.group_size).reshape(
-            -1, self.group_size)
+            -1, self.group_size
+        )
         y_grouped = torch.empty_like(x_grouped)
 
         # Reuse vLLM's RMSNorm CUDA kernel on each group.
@@ -407,19 +405,20 @@ class K2HorizonSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
         if self.gate.bias is not None:
-            self.gate.bias = nn.Parameter(
-                self.gate.bias.float(), requires_grad=False)
+            self.gate.bias = nn.Parameter(self.gate.bias.float(), requires_grad=False)
 
         self.num_shared_experts = config.num_shared_experts
         if config.num_shared_experts > 0:
             self.shared_experts = K2HorizonMLP(
                 hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size * config.num_shared_experts,
+                intermediate_size=config.moe_intermediate_size
+                * config.num_shared_experts,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
                 expert_gate=None,
-                prefix=f"{prefix}.shared_experts")
+                prefix=f"{prefix}.shared_experts",
+            )
         else:
             self.shared_experts = None
 
@@ -552,13 +551,11 @@ class K2HorizonAttention(nn.Module):
         self.query_key_norm = query_key_norm
         if self.query_key_norm:
             self.q_norm = K2HorizonRMSNorm(
-                hidden_size=self.q_size,
-                n_groups=self.num_heads,
-                eps=rms_norm_eps)
+                hidden_size=self.q_size, n_groups=self.num_heads, eps=rms_norm_eps
+            )
             self.k_norm = K2HorizonRMSNorm(
-                hidden_size=self.kv_size,
-                n_groups=self.num_kv_heads,
-                eps=rms_norm_eps)
+                hidden_size=self.kv_size, n_groups=self.num_kv_heads, eps=rms_norm_eps
+            )
 
         self.gate_func = gate_func
         if self.gate_func is not None:
@@ -567,7 +564,7 @@ class K2HorizonAttention(nn.Module):
                 self.total_num_heads * self.head_dim,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.gate_proj"
+                prefix=f"{prefix}.gate_proj",
             )
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -592,15 +589,24 @@ class K2HorizonAttention(nn.Module):
 
             q_rope, q_nope = torch.split(
                 split_to_interleaved(q),
-                split_size_or_sections=[self.rope_head_dim, self.head_dim - self.rope_head_dim],
-                dim=-1)
+                split_size_or_sections=[
+                    self.rope_head_dim,
+                    self.head_dim - self.rope_head_dim,
+                ],
+                dim=-1,
+            )
             k_rope, k_nope = torch.split(
                 split_to_interleaved(k),
-                split_size_or_sections=[self.rope_head_dim, self.head_dim - self.rope_head_dim],
-                dim=-1)
+                split_size_or_sections=[
+                    self.rope_head_dim,
+                    self.head_dim - self.rope_head_dim,
+                ],
+                dim=-1,
+            )
 
             q_rope, k_rope = self.rotary_emb(
-                positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope))
+                positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope)
+            )
 
             q = interleaved_to_split(
                 torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
@@ -614,10 +620,10 @@ class K2HorizonAttention(nn.Module):
 
         if self.gate_func is not None:
             gate, _ = self.gate_proj(hidden_states)
-            if self.gate_func == 'silu':
+            if self.gate_func == "silu":
                 gate = F.silu(gate)
             else:
-                assert self.gate_func == 'softplus'
+                assert self.gate_func == "softplus"
                 gate = F.softplus(gate, beta=math.log(2))
 
             attn_output = attn_output * gate
@@ -749,13 +755,11 @@ class K2HorizonMoVAAttention(nn.Module):
         self.query_key_norm = query_key_norm
         if self.query_key_norm:
             self.q_norm = K2HorizonRMSNorm(
-                hidden_size=self.q_size,
-                n_groups=self.num_heads,
-                eps=rms_norm_eps)
+                hidden_size=self.q_size, n_groups=self.num_heads, eps=rms_norm_eps
+            )
             self.k_norm = K2HorizonRMSNorm(
-                hidden_size=self.kv_size,
-                n_groups=self.num_kv_heads,
-                eps=rms_norm_eps)
+                hidden_size=self.kv_size, n_groups=self.num_kv_heads, eps=rms_norm_eps
+            )
 
         self.gate_func = gate_func
         if self.gate_func is not None:
@@ -764,17 +768,19 @@ class K2HorizonMoVAAttention(nn.Module):
                 self.total_num_heads * self.head_dim,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.gate_proj"
+                prefix=f"{prefix}.gate_proj",
             )
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        w1_shape = torch.Size([
-            self.num_experts,
-            self.total_num_kv_heads * self.head_dim,
-            hidden_size,
-        ])
+        w1_shape = torch.Size(
+            [
+                self.num_experts,
+                self.total_num_kv_heads * self.head_dim,
+                hidden_size,
+            ]
+        )
         config_dtype = _get_config_dtype_str(
             use_fp8_w8a8=False,
             use_int8_w8a16=False,
@@ -799,10 +805,12 @@ class K2HorizonMoVAAttention(nn.Module):
             router_bias=router_bias,
             score_func=self.router_score_func,
             top_k=self.num_experts_per_tok,
-            scaling_factor=self.router_scaling_factor)
+            scaling_factor=self.router_scaling_factor,
+        )
 
         w1 = torch.stack(
-            [expert.weight for expert in self.v_experts], dim=0).contiguous()
+            [expert.weight for expert in self.v_experts], dim=0
+        ).contiguous()
 
         v = fused_mova_impl(
             config=self.fused_mova_config,
@@ -837,15 +845,24 @@ class K2HorizonMoVAAttention(nn.Module):
 
             q_rope, q_nope = torch.split(
                 split_to_interleaved(q),
-                split_size_or_sections=[self.rope_head_dim, self.head_dim - self.rope_head_dim],
-                dim=-1)
+                split_size_or_sections=[
+                    self.rope_head_dim,
+                    self.head_dim - self.rope_head_dim,
+                ],
+                dim=-1,
+            )
             k_rope, k_nope = torch.split(
                 split_to_interleaved(k),
-                split_size_or_sections=[self.rope_head_dim, self.head_dim - self.rope_head_dim],
-                dim=-1)
+                split_size_or_sections=[
+                    self.rope_head_dim,
+                    self.head_dim - self.rope_head_dim,
+                ],
+                dim=-1,
+            )
 
             q_rope, k_rope = self.rotary_emb(
-                positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope))
+                positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope)
+            )
 
             q = interleaved_to_split(
                 torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
@@ -859,10 +876,10 @@ class K2HorizonMoVAAttention(nn.Module):
 
         if self.gate_func is not None:
             gate, _ = self.gate_proj(hidden_states)
-            if self.gate_func == 'silu':
+            if self.gate_func == "silu":
                 gate = F.silu(gate)
             else:
-                assert self.gate_func == 'softplus'
+                assert self.gate_func == "softplus"
                 gate = F.softplus(gate, beta=math.log(2))
 
             attn_output = attn_output * gate
@@ -953,12 +970,14 @@ class K2HorizonDecoderLayer(nn.Module):
         self.input_layernorm = K2HorizonRMSNorm(
             hidden_size=config.hidden_size,
             n_groups=config.layernorm_num_groups,
-            eps=config.rms_norm_eps)
+            eps=config.rms_norm_eps,
+        )
 
         self.post_attention_layernorm = K2HorizonRMSNorm(
             hidden_size=config.hidden_size,
             n_groups=config.layernorm_num_groups,
-            eps=config.rms_norm_eps)
+            eps=config.rms_norm_eps,
+        )
 
     def forward(
         self,
@@ -973,10 +992,7 @@ class K2HorizonDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -1019,7 +1035,8 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
         self.norm = K2HorizonRMSNorm(
             hidden_size=config.hidden_size,
             n_groups=config.layernorm_num_groups,
-            eps=config.rms_norm_eps)
+            eps=config.rms_norm_eps,
+        )
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -1114,7 +1131,7 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
 
             # QK norm weights
             if name.endswith(".self_attn.q_norm.weight") or name.endswith(
-                    ".self_attn.k_norm.weight"
+                ".self_attn.k_norm.weight"
             ):
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -1135,7 +1152,9 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                         else:
                             num_kv_head_replicas = tp_size // num_kv_heads
                             kv_rank = tp_rank // num_kv_head_replicas
-                            loaded_weight = loaded_weight.chunk(num_kv_heads, dim=0)[kv_rank]
+                            loaded_weight = loaded_weight.chunk(num_kv_heads, dim=0)[
+                                kv_rank
+                            ]
 
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -1160,7 +1179,9 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     else:
                         num_kv_head_replicas = tp_size // num_kv_heads
                         kv_rank = tp_rank // num_kv_head_replicas
-                        loaded_weight = loaded_weight.chunk(num_kv_heads, dim=0)[kv_rank]
+                        loaded_weight = loaded_weight.chunk(num_kv_heads, dim=0)[
+                            kv_rank
+                        ]
 
                 # weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 default_weight_loader(param, loaded_weight)
@@ -1179,44 +1200,53 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if "mlp.experts" in name:
                     continue
-                if ".self_attn." in name and param_name == 'gate_up_proj':
-                    assert weight_name == 'gate_proj'
+                if ".self_attn." in name and param_name == "gate_up_proj":
+                    assert weight_name == "gate_proj"
                     continue
-                if '.self_attn.' in name and param_name == 'qkv_proj':
-                    if name.replace(weight_name, param_name) not in params_dict:
-                        if is_pp_missing_parameter(name, self):
-                            continue
+                if (
+                    ".self_attn." in name
+                    and param_name == "qkv_proj"
+                    and name.replace(weight_name, param_name) not in params_dict
+                ):
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
+                        continue
+
+                    assert weight_name in ["q_proj", "k_proj"]
+
+                    # MoVA k_proj
+                    if weight_name == "k_proj":
                         if name not in params_dict:
                             continue
+                        if is_pp_missing_parameter(name, self):
+                            continue
 
-                        assert weight_name in ['q_proj', 'k_proj']
+                        param = params_dict[name]
+                        tp_rank = get_tensor_model_parallel_rank()
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_kv_heads = self.config.num_key_value_heads
 
-                        # MoVA k_proj
-                        if weight_name == 'k_proj':
-                            if name not in params_dict:
-                                continue
-                            if is_pp_missing_parameter(name, self):
-                                continue
+                        if loaded_weight.shape != param.shape:
+                            if num_kv_heads >= tp_size:
+                                loaded_weight = loaded_weight.chunk(tp_size, dim=0)[
+                                    tp_rank
+                                ]
+                            else:
+                                num_kv_head_replicas = tp_size // num_kv_heads
+                                kv_rank = tp_rank // num_kv_head_replicas
+                                loaded_weight = loaded_weight.chunk(
+                                    num_kv_heads, dim=0
+                                )[kv_rank]
 
-                            param = params_dict[name]
-                            tp_rank = get_tensor_model_parallel_rank()
-                            tp_size = get_tensor_model_parallel_world_size()
-                            num_kv_heads = self.config.num_key_value_heads
+                        # weight_loader = getattr(
+                        #     param, "weight_loader", default_weight_loader
+                        # )
+                        default_weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+                        break
 
-                            if loaded_weight.shape != param.shape:
-                                if num_kv_heads >= tp_size:
-                                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                                else:
-                                    num_kv_head_replicas = tp_size // num_kv_heads
-                                    kv_rank = tp_rank // num_kv_head_replicas
-                                    loaded_weight = loaded_weight.chunk(num_kv_heads, dim=0)[kv_rank]
-
-                            # weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                            default_weight_loader(param, loaded_weight)
-                            loaded_params.add(name)
-                            break
-
-                        continue
+                    continue
 
                 name = name.replace(weight_name, param_name)
 
