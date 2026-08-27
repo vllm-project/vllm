@@ -22,18 +22,6 @@ def local_num_offload_blocks(capacity_bytes: int, total_bytes_per_block: int) ->
     return max(1, capacity_bytes // total_bytes_per_block)
 
 
-def view_complete_kv_cache_regions(
-    raw: torch.Tensor,
-    num_blocks: int,
-    block_bytes: int,
-) -> torch.Tensor:
-    """View complete KV cache regions while excluding storage padding."""
-    region_bytes = num_blocks * block_bytes
-    num_regions = raw.numel() // region_bytes
-    assert num_regions > 0
-    return raw[: num_regions * region_bytes].view(num_regions, num_blocks, block_bytes)
-
-
 def sync_num_offload_blocks_across_workers(num_offload_blocks: int) -> int:
     """All-reduce MIN so every rank allocates the same offload pool size."""
     if not dist.is_initialized():
