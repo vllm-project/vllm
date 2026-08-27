@@ -11,6 +11,7 @@ import pytest
 import requests
 
 from tests.entrypoints.serve.dev.rlhf.conftest import (
+    MODEL_NAME,
     cached_tokens,
     completion_with_cache_details,
     gen,
@@ -22,8 +23,6 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     server,
     start_stream,
 )
-
-MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
@@ -45,8 +44,7 @@ def server_url(use_v2):
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
                 "--enable-sleep-mode",
-                "--enforce-eager",
-            ]
+            ],
         ) as url,
     ):
         yield url
