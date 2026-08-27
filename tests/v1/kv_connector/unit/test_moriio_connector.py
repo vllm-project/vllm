@@ -748,11 +748,11 @@ def _read_scheduler(
 
 
 def test_hma_blocks_per_sw_two_groups():
-    """A Full + SlidingWindow config engages HMA and computes a per-group
-    sliding-window block budget (0 for the full group)."""
+    """A Full + SlidingWindow config runs with HMA and computes block budgets
+    correctly"""
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     assert scheduler._is_hma_required is True
-    # cdiv(32, 16) + 1 == 3 for the sliding-window group; 0 for full attention.
+    # cdiv(32, 16) + 1 == 3 for the sliding-window group, 0 for full attention.
     assert scheduler.blocks_per_sw == [0, 3]
 
 
@@ -816,14 +816,14 @@ def test_token_count_basis_uses_full_attention_group():
     """Chunked-prefill token counting must use an unclipped full-attention
     group (blocks_per_sw == 0), not a clipped sliding-window group."""
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
-    # Group 0 is the full-attention group; group 1 is sliding-window (clipped).
+    # Group 0 is the full-attention group
     assert scheduler._full_attn_group_idx == 0
     assert scheduler._full_attn_block_size == 16
 
 
 def test_get_exchange_clipped_blocks_clips_only_sw_group():
-    """get_exchange_clipped_blocks keeps the full group intact and clips the
-    sliding-window group to its in-window tail."""
+    """get_exchange_clipped_blocks keeps the full attn group intact and clips the
+    sliding-window group to its window tail."""
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     full = [10, 11, 12, 13, 14]
     sw = [20, 21, 22, 23, 24]
@@ -834,12 +834,12 @@ def test_get_exchange_clipped_blocks_clips_only_sw_group():
 
 def test_metadata_hma_block_ids_preserved_per_group():
     """add_new_req stores per-group (BlockIds) block lists unchanged for both
-    the recv (read) and save (write) legs, so the hybrid group structure
-    reaches the worker intact."""
+    read and write, so the hybrid group structure is retained."""
     metadata = MoRIIOConnectorMetadata()
 
-    # Full-attention group (6 blocks) + a sliding-window group already clipped
-    # to its in-window tail (3 blocks).
+    # Assume:
+    # - Full-attention group (6 blocks) +
+    # - sliding-window group already clipped to its window tail (3 blocks).
     fa_blocks = [0, 1, 2, 3, 4, 5]
     sw_blocks = [10, 11, 12]
     local_block_ids = [fa_blocks, sw_blocks]
@@ -853,7 +853,7 @@ def test_metadata_hma_block_ids_preserved_per_group():
         "remote_block_ids": remote_block_ids,
     }
 
-    # Recv (read) leg: both local and remote ids stay per-group.
+    # Read mode: both local and remote ids stay per-group.
     metadata.add_new_req(
         request_id="recv-req",
         local_block_ids=local_block_ids,
@@ -863,8 +863,8 @@ def test_metadata_hma_block_ids_preserved_per_group():
     assert recv_meta.local_block_ids == [fa_blocks, sw_blocks]
     assert recv_meta.remote_block_ids == remote_block_ids
 
-    # Save (write) leg: the decode peer allocates its own blocks, so
-    # remote_block_ids may be empty; the local per-group structure is kept.
+    # Write mode: the decode peer allocates its own blocks, so #remote_block_ids may
+    # be empty, Local group structure is kept.
     metadata.add_new_req(
         request_id="save-req",
         local_block_ids=local_block_ids,
@@ -881,7 +881,7 @@ def test_metadata_hma_block_ids_preserved_per_group():
 
 
 def test_single_group_path_unchanged():
-    """A non-hybrid single-group config does not engage HMA and never clips."""
+    """A full attn config does not enable HMA and never clips blocks."""
     scheduler = _read_scheduler(_make_test_kv_cache_config())
     assert scheduler._is_hma_required is False
     assert scheduler.blocks_per_sw == [0]
@@ -904,8 +904,7 @@ def test_hybrid_write_mode_rejected():
 
 
 def test_worker_layer_to_group_routing(mock_parallel_groups):
-    """The worker maps every layer to its KV cache group so the READ path can
-    select that group's (per-group) block-id list."""
+    """The worker maps every layer to its KV cache group correctly."""
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     with set_current_vllm_config(vllm_config):
         worker = FakeMoRIIOConnectorWorker(
