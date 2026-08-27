@@ -141,6 +141,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
 )
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -1839,6 +1840,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+
+        # Pure prefill still has PCP-local target auxiliary states and slot
+        # mappings here. Project only this rank's DSpark context shard, then
+        # publish those physical draft-cache rows to every PCP replica.
+        if (
+            self.pcp_manager is not None
+            and self.pcp_manager.direct_kv_enabled
+            and isinstance(self.speculator, DSparkSpeculator)
+            and self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and aux_hidden_states is not None
+            and slot_mappings_by_layer is not None
+            and input_batch.has_prefill
+            and input_batch.is_prefilling_np.all()
+        ):
+            with use_workspace_lane(self._draft_workspace_lane):
+                self.speculator.precompute_pcp_context_kv(
+                    input_batch,
+                    aux_hidden_states,
+                    slot_mappings_by_layer,
+                )
+            aux_hidden_states = None
 
         # Last rank: sample tokens
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(

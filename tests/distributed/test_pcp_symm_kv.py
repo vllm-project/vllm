@@ -298,6 +298,83 @@ def _worker_peer_fence_cudagraph(env: dict[str, str]) -> None:
     dist.destroy_process_group()
 
 
+def _worker_copy_strided_cache_rows(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    rank = int(env["RANK"])
+    world_size = int(env["WORLD_SIZE"])
+    torch.cuda.set_device(rank)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+    from vllm.distributed.device_communicators.symm_mem import allocate_symm_mem_peer
+    from vllm.model_executor.layers.attention.pcp_direct_kv import (
+        PCPPeerCacheFence,
+        copy_pcp_cache_rows_to_peers,
+    )
+
+    device = torch.device(f"cuda:{rank}")
+    block_size = 4
+    num_blocks = 4
+    num_heads = 3
+    head_nbytes = 17
+    token_stride = head_nbytes
+    head_stride = block_size * token_stride + 7
+    block_stride = num_heads * head_stride + 11
+    prefix = 37
+    suffix = 31
+    cache_span = (
+        (num_blocks - 1) * block_stride
+        + (num_heads - 1) * head_stride
+        + (block_size - 1) * token_stride
+        + head_nbytes
+    )
+    allocation = allocate_symm_mem_peer(
+        (prefix + cache_span + suffix,), torch.uint8, device, dist.group.WORLD
+    )
+    guard = 0xA5
+    allocation.storage.fill_(guard)
+    cache = torch.as_strided(
+        allocation.storage[prefix:],
+        (num_blocks, num_heads, block_size, head_nbytes),
+        (block_stride, head_stride, token_stride, 1),
+    )
+
+    local_slots = torch.tensor(
+        [rank * 2, rank * 2 + 1, -1, num_blocks * block_size],
+        dtype=torch.int64,
+        device=device,
+    )
+    for local_slot in (rank * 2, rank * 2 + 1):
+        cache[local_slot // block_size, :, local_slot % block_size].fill_(rank + 1)
+    fence = PCPPeerCacheFence(dist.group.WORLD, device)
+    copy_pcp_cache_rows_to_peers(
+        cache,
+        local_slots,
+        allocation.peer_ptrs_for_view(cache),
+        rank,
+        token_dim=2,
+        segment_dim=1,
+    )
+    fence()
+    torch.cuda.synchronize()
+
+    expected = torch.full_like(allocation.storage, guard)
+    expected_cache = torch.as_strided(
+        expected[prefix:],
+        cache.shape,
+        cache.stride(),
+    )
+    for source_rank in range(world_size):
+        for source_slot in (source_rank * 2, source_rank * 2 + 1):
+            expected_cache[
+                source_slot // block_size, :, source_slot % block_size
+            ].fill_(source_rank + 1)
+    assert torch.equal(allocation.storage, expected)
+
+    fence.close()
+    allocation.close()
+    dist.destroy_process_group()
+
+
 def _worker_fused_direct_tp2_pcp2(env: dict[str, str]) -> None:
     update_environment_variables(env)
     global_rank = int(env["RANK"])
@@ -345,6 +422,11 @@ def _worker_fused_direct_tp2_pcp2(env: dict[str, str]) -> None:
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2+ GPUs")
 def test_pcp_peer_cache_fence_cudagraph_replay():
     _distributed_run(_worker_peer_fence_cudagraph, world_size=2)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2+ GPUs")
+def test_copy_strided_cache_rows_to_pcp_peers():
+    _distributed_run(_worker_copy_strided_cache_rows, world_size=2)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2+ GPUs")

@@ -83,6 +83,45 @@ def _peer_cache_fence_kernel(
     _trap_if_nonzero(pending)
 
 
+@triton.jit
+def _copy_cache_rows_to_peers_kernel(
+    peer_ptrs,
+    slot_mapping,
+    source_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    num_physical_rows: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    cache_block_stride_bytes: tl.constexpr,
+    cache_token_stride_bytes: tl.constexpr,
+    segment_stride_bytes: tl.constexpr,
+    segment_nbytes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    segment_idx = tl.program_id(1)
+    byte_offset = tl.program_id(2) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    slot = tl.load(slot_mapping + token_idx)
+    valid_slot = (slot >= 0) & (slot < num_physical_rows)
+    block_idx = slot // cache_block_size
+    block_offset = slot % cache_block_size
+    row_offset = (
+        block_idx * cache_block_stride_bytes
+        + block_offset * cache_token_stride_bytes
+        + segment_idx * segment_stride_bytes
+        + byte_offset
+    )
+    mask = valid_slot & (byte_offset < segment_nbytes)
+
+    source_base = tl.load(peer_ptrs + source_rank).to(tl.pointer_type(tl.uint8))
+    value = tl.load(source_base + row_offset, mask=mask, other=0)
+    for peer_rank in tl.static_range(0, world_size):
+        if peer_rank != source_rank:
+            destination_base = tl.load(peer_ptrs + peer_rank).to(
+                tl.pointer_type(tl.uint8)
+            )
+            tl.store(destination_base + row_offset, value, mask=mask)
+
+
 class PCPPeerCacheFence:
     """Device-epoch release/acquire publication for one PCP group."""
 
@@ -157,6 +196,106 @@ def get_layer_peer_ptrs(layer_name: str) -> torch.Tensor | None:
     if not _STATE.enabled:
         return None
     return _STATE.layer_peer_ptrs.get(layer_name)
+
+
+def copy_pcp_cache_rows_to_peers(
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    peer_ptrs: torch.Tensor,
+    source_rank: int,
+    token_dim: int,
+    segment_dim: int | None = None,
+) -> None:
+    """Copy locally produced physical cache rows to every PCP replica."""
+    if not cache.is_cuda or not slot_mapping.is_cuda or not peer_ptrs.is_cuda:
+        raise ValueError("PCP cache-row publication requires CUDA tensors")
+    if not 0 < token_dim < cache.ndim:
+        raise ValueError(
+            f"Invalid token dimension {token_dim} for {tuple(cache.shape)}"
+        )
+    if segment_dim is not None and (
+        not 0 < segment_dim < cache.ndim or segment_dim == token_dim
+    ):
+        raise ValueError(
+            f"Invalid segment dimension {segment_dim} for {tuple(cache.shape)}"
+        )
+    if slot_mapping.ndim != 1:
+        raise ValueError("PCP cache-row slot mapping must be one-dimensional")
+
+    # Packed caches use one contiguous segment per token. Head-major attention
+    # caches use one contiguous content segment per head and token.
+    payload_dims = [
+        dim for dim in range(1, cache.ndim) if dim != token_dim and dim != segment_dim
+    ]
+    segment_elements = 1
+    for dim in sorted(payload_dims, key=cache.stride):
+        size = cache.shape[dim]
+        if size != 1 and cache.stride(dim) != segment_elements:
+            raise ValueError("PCP cache-row segments must be contiguous")
+        segment_elements *= size
+    if cache.stride(token_dim) < segment_elements:
+        raise ValueError("PCP cache token segments overlap")
+    if segment_dim is None:
+        segment_count = 1
+        segment_stride = 0
+    else:
+        segment_count = cache.shape[segment_dim]
+        segment_stride = cache.stride(segment_dim)
+        if segment_stride < segment_elements:
+            raise ValueError("PCP cache row segments overlap")
+
+    world_size = peer_ptrs.numel()
+    if world_size <= 1 or slot_mapping.numel() == 0:
+        return
+    if not 0 <= source_rank < world_size:
+        raise ValueError(
+            f"PCP source rank {source_rank} is outside world size {world_size}"
+        )
+
+    block = 256
+    cache_block_size = cache.shape[token_dim]
+    segment_nbytes = segment_elements * cache.element_size()
+    _copy_cache_rows_to_peers_kernel[
+        (
+            slot_mapping.numel(),
+            segment_count,
+            triton.cdiv(segment_nbytes, block),
+        )
+    ](
+        peer_ptrs,
+        slot_mapping,
+        source_rank=source_rank,
+        world_size=world_size,
+        num_physical_rows=cache.shape[0] * cache_block_size,
+        cache_block_size=cache_block_size,
+        cache_block_stride_bytes=cache.stride(0) * cache.element_size(),
+        cache_token_stride_bytes=cache.stride(token_dim) * cache.element_size(),
+        segment_stride_bytes=segment_stride * cache.element_size(),
+        segment_nbytes=segment_nbytes,
+        BLOCK_SIZE=block,
+    )
+
+
+def publish_pcp_cache_rows(
+    layer_name: str,
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    token_dim: int,
+    segment_dim: int | None = None,
+) -> None:
+    if not _STATE.enabled:
+        raise RuntimeError("PCP direct-KV is not active")
+    peer_ptrs = _STATE.layer_peer_ptrs.get(layer_name)
+    if peer_ptrs is None:
+        raise RuntimeError(f"No PCP peer cache pointers registered for {layer_name}")
+    copy_pcp_cache_rows_to_peers(
+        cache,
+        slot_mapping,
+        peer_ptrs,
+        _STATE.rank,
+        token_dim,
+        segment_dim,
+    )
 
 
 def publish_pcp_direct_kv() -> None:
