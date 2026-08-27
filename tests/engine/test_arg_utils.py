@@ -408,8 +408,6 @@ def test_attention_config():
             "FLASH_ATTN",
             "--attention-config.flash_attn_version",
             "3",
-            "--attention-config.use_prefill_decode_attention",
-            "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
             "--attention-config.use_trtllm_attention",
@@ -423,7 +421,6 @@ def test_attention_config():
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASH_ATTN"
     assert engine_args.attention_config.flash_attn_version == 3
-    assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
     assert engine_args.attention_config.use_trtllm_attention is True
     assert engine_args.attention_config.disable_flashinfer_q_quantization is True
@@ -433,7 +430,6 @@ def test_attention_config():
         [
             "--attention-config="
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
             '"use_trtllm_attention": false, '
             '"disable_flashinfer_q_quantization": false}',
@@ -444,7 +440,6 @@ def test_attention_config():
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASHINFER"
     assert engine_args.attention_config.flash_attn_version == 2
-    assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
     assert engine_args.attention_config.use_trtllm_attention is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
@@ -899,7 +894,7 @@ class TestDpDeviceIdSharding:
         against its inherited device-control env var."""
         import argparse
 
-        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
             tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
@@ -911,7 +906,7 @@ class TestDpDeviceIdSharding:
         """User-provided --device-ids are sharded across DP children."""
         import argparse
 
-        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
             tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]

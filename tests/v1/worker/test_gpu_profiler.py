@@ -112,6 +112,34 @@ def test_max_iterations(default_profiler_config):
     # Should have stopped now
     assert profiler._running is False
     assert profiler.stop_call_count == 1
+    # And fully reset, not just paused -- a later start_profile must not be a
+    # permanent no-op just because max_iterations already fired once.
+    assert profiler._active is False
+    assert profiler._active_iteration_count == 0
+    assert profiler._profiling_for_iters == 0
+
+
+def test_restart_after_max_iterations(default_profiler_config):
+    """A start_profile after an auto-stop must actually restart, not be
+    silently ignored (regression test: auto-stop used to leave _active
+    True forever, so start() always bailed out early)."""
+    default_profiler_config.max_iterations = 2
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+
+    profiler.start()
+    profiler.step()
+    profiler.step()
+    profiler.step()  # exceeds max, auto-stops
+    assert profiler._running is False
+    assert profiler.start_call_count == 1
+
+    profiler.start()
+    assert profiler._active is True
+    assert profiler._running is True
+    assert profiler.start_call_count == 2
+
+    profiler.step()
+    assert profiler._running is True
 
 
 def test_delayed_start_and_max_iters(default_profiler_config):

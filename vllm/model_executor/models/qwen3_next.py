@@ -8,7 +8,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -18,9 +17,12 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
+)
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -41,7 +43,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -73,8 +75,6 @@ from .utils import (
     maybe_prefix,
 )
 
-logger = init_logger(__name__)
-
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -88,26 +88,6 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         and not getattr(config, "mlp_only_layers", [])
         and getattr(config, "decoder_sparse_step", 1) == 1
     )
-
-
-def _is_shared_expert_fse_compatible(quant_config) -> bool:
-    """Check if shared expert can be fused with routed experts.
-
-    FSE requires that shared and routed expert weights use the same
-    quantization format. Returns False when the shared expert is
-    excluded from quantization (e.g. float32 shared in an MXFP4 model)
-    or has a different quant spec than routed experts.
-    """
-    if quant_config is None:
-        return True
-    # Quark stores its full config dict in quant_config.quant_config
-    raw_config = getattr(quant_config, "quant_config", None)
-    if not isinstance(raw_config, dict):
-        return True
-    exclude = raw_config.get("exclude", [])
-    if not exclude:
-        return True
-    return not any("shared_expert." in str(e) for e in exclude)
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
@@ -157,15 +137,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        _fse_requested = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        _fse_enabled = _fse_requested and _is_shared_expert_fse_compatible(quant_config)
-        if _fse_requested and not _fse_enabled:
-            logger.warning(
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-                "shared expert has a different quantization spec than routed "
-                "experts. Falling back to non-fused shared expert path."
+        self.is_fused_shared_expert_enabled = False
+        if config.shared_expert_intermediate_size > 0:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config,
+                prefix,
+                shared_expert_name="shared_expert",
             )
-        if _fse_enabled or config.shared_expert_intermediate_size <= 0:
+
+        if (
+            self.is_fused_shared_expert_enabled
+            or config.shared_expert_intermediate_size <= 0
+        ):
             self.shared_expert = None
         else:
             self.shared_expert = Qwen3NextMLP(
@@ -193,6 +176,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=1 if self.shared_expert is None else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_gate=self.shared_expert_gate
             if self.shared_expert is None
             else None,
@@ -316,14 +300,26 @@ class Qwen3NextAttention(nn.Module):
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
-        # TODO: support MRoPE
         mm_config = model_config.multimodal_config if model_config else None
         text_only = mm_config is None or mm_config.language_model_only
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
+        supports_mrope = bool(
+            type(self.rotary_emb) is MRotaryEmbedding
+            and mrope_section
+            and len(mrope_section) == 3
+            and sum(mrope_section) == self.rotary_emb.rotary_dim // 2
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+        )
+        supports_dtype = getattr(self.rotary_emb, "dtype", None) in (
+            torch.float16,
+            torch.bfloat16,
+        )
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
-            and text_only
+            and supports_dtype
+            and (text_only or supports_mrope)
         )
 
     def _project_qkv_gate(
@@ -341,22 +337,28 @@ class Qwen3NextAttention(nn.Module):
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            # mRoPE passes positions as (3, n_tokens) for T/H/W. Fusion is only
-            # enabled text-only, where the three rows are identical, so taking
-            # the T row is exact. (1D positions pass through.)
-            pos = positions[0] if positions.ndim == 2 else positions
+            if positions.ndim == 2 and not getattr(
+                self.rotary_emb, "mrope_section", None
+            ):
+                positions = positions[0]
             q, k, gate = fused_qk_rmsnorm_rope_gate(
                 q_gate,
                 k,
-                self.q_norm.weight.float() + 1.0,
-                self.k_norm.weight.float() + 1.0,
+                self.q_norm.weight,
+                self.k_norm.weight,
                 self.rotary_emb.cos_sin_cache,
-                pos,
+                positions,
                 self.q_norm.variance_epsilon,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
                 self.rotary_emb.rotary_dim,
+                norm_beta=1.0,
+                mrope_section=(
+                    getattr(self.rotary_emb, "mrope_section", None)
+                    if positions.ndim == 2
+                    else None
+                ),
             )
             return q, k, v, gate
 
@@ -599,6 +601,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            Qwen3NextSparseMoeBlock,
+            "mlp",
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -678,6 +685,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
+            enabled=self.is_fused_shared_expert_enabled,
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -737,6 +745,9 @@ class Qwen3NextForCausalLM(
     IsHybrid,
     SupportsEagle3,
 ):
+    # MTP weights are loaded by the draft model, not this one.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -843,5 +854,5 @@ class Qwen3NextForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

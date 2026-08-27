@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
@@ -60,7 +61,7 @@ class BaseSpeculator(ABC):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -132,11 +133,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=vllm_config.model_config.head_dtype,
+            dtype, fill = self.draft_logits_spec(vllm_config)
+            self.draft_logits = torch.full(
+                (
+                    self.max_num_reqs,
+                    self.num_speculative_steps,
+                    self.vocab_size,
+                ),
+                fill,
+                dtype=dtype,
                 device=device,
             )
 
@@ -292,6 +297,13 @@ class DraftModelSpeculator(BaseSpeculator):
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
+
+    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
+        """Dtype and fill for the cached proposal distribution.
+
+        Speculators that write only a subset of columns each step override this.
+        """
+        return vllm_config.model_config.head_dtype, 0.0
 
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
