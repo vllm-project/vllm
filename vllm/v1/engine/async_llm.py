@@ -491,16 +491,9 @@ class AsyncLLM(EngineClient):
             child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            try:
-                await self._add_request(
-                    child_request, prompt_text, parent_request, idx, queue
-                )
-            except EnginePausedError:
-                # Reject atomically: aborting the parent reclaims already
-                # admitted children and the parent bookkeeping, so the
-                # request id is immediately reusable.
-                await self.abort(parent_request.request_id, internal=True)
-                raise
+            await self._add_request(
+                child_request, prompt_text, parent_request, idx, queue
+            )
         return queue
 
     async def _add_request(
@@ -519,6 +512,11 @@ class AsyncLLM(EngineClient):
         # Admission gate, past every await in the submission path: a pause
         # landing while inputs were being processed is still caught here.
         if self._reject_while_paused is not None:
+            if parent_req is not None:
+                # Reject atomically: aborting the parent reclaims any
+                # children admitted before the pause landed mid fan-out,
+                # so the request id is immediately reusable.
+                await self.abort(parent_req.request_id, internal=True)
             raise EnginePausedError(
                 f"Generation is paused (mode={self._reject_while_paused!r}); "
                 "retry after resume."
