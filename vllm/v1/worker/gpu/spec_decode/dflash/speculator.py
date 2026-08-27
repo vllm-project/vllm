@@ -31,6 +31,24 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def all_draft_builders_skip_safe(attn_groups: list[list[AttentionGroup]]) -> bool:
+    """Whether every draft attention metadata builder allows skipping a
+    build whose result would be discarded (FULL cudagraph replay).
+
+    Fail-closed: False when there are no builders or any builder does not
+    declare ``supports_skip_draft_rebuild``.
+    """
+    builders = [
+        builder
+        for groups in attn_groups
+        for group in groups
+        for builder in group.metadata_builders
+    ]
+    return bool(builders) and all(
+        builder.supports_skip_draft_rebuild for builder in builders
+    )
+
+
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
@@ -183,6 +201,16 @@ class DFlashSpeculator(DraftModelSpeculator):
         ]
         assert self.draft_kv_cache_group_ids, "No draft attention groups found."
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
+
+        # Under FULL replay the freshly built draft metadata / slot-mapping
+        # dict is discarded (run_fullgraph reads only persistent input
+        # buffers), so the rebuild may be skipped when no builder restages
+        # persistent state in build() and DCP does not need
+        # dcp_local_seq_lens refreshed on the way in. Fail-closed.
+        self._skip_draft_rebuild_on_full_replay = (
+            all_draft_builders_skip_safe(self.attn_groups)
+            and self.block_tables.cp_size == 1
+        )
 
         # Per-group context slot buffers for the precompute (one row per group).
         self._context_slot_mappings = torch.zeros(
@@ -456,29 +484,39 @@ class DFlashSpeculator(DraftModelSpeculator):
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
 
-        # Rebuild the draft attention metadata even when replaying the FULL
-        # graph so that any attention metadata builder state is updated.
-        draft_attn_metadata = self._build_draft_attn_metadata(
-            num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_padded=num_tokens_padded,
-            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-            step=self.num_query_per_req,
-            causal=self._group_causal,
-        )
-        draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
-            self.block_tables.slot_mappings[:, :num_tokens_padded],
-            self.kv_cache_config,
-        )
-
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # The built metadata / slot-mapping dict would be discarded here
+            # (the captured graph reads only persistent input buffers), so
+            # skip the rebuild when every builder declared it side-effect
+            # free; otherwise rebuild purely for its builder-state updates.
+            if not self._skip_draft_rebuild_on_full_replay:
+                self._build_draft_attn_metadata(
+                    num_reqs=num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
         else:
+            draft_attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_tokens_padded,
+                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
+            )
+            draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
+                self.block_tables.slot_mappings[:, :num_tokens_padded],
+                self.kv_cache_config,
+            )
             self._generate_draft(
                 num_reqs,
                 num_tokens_padded,
