@@ -62,7 +62,6 @@ def _read_int_file(path: str) -> int | None:
         return None
 
 
-@cache
 def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
     """Return (limit, usage) in bytes from cgroup, or (None, None).
 
@@ -90,6 +89,37 @@ def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
         return v1_limit, v1_usage
 
     return None, None
+
+
+def check_cgroup_memory_available(
+    required_bytes: int,
+    allocation_name: str,
+) -> None:
+    """Raise if a memory allocation would exceed the cgroup limit.
+
+    Args:
+        required_bytes: Bytes required by the allocation.
+        allocation_name: Human-readable name used in the error message.
+
+    Raises:
+        RuntimeError: If the cgroup has a finite limit and insufficient
+            memory remains for the allocation.
+    """
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return
+
+    cgroup_available = max(0, cgroup_limit - (cgroup_usage or 0))
+    if required_bytes <= cgroup_available:
+        return
+
+    mib = 1 << 20
+    raise RuntimeError(
+        f"Insufficient cgroup memory for {allocation_name}: "
+        f"{required_bytes / mib:.0f} MiB required, "
+        f"{cgroup_available / mib:.0f} MiB available under the "
+        f"{cgroup_limit / mib:.0f} MiB limit."
+    )
 
 
 def get_memory_affinity(pid: int = 0) -> list[int]:

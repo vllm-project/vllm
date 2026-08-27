@@ -826,12 +826,13 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     monkeypatch.setattr(region.os, "open", mock_open)
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    mock_check = MagicMock(
+        side_effect=RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+    )
     monkeypatch.setattr(
         region,
         "check_shm_free_space",
-        lambda *a, **kw: (_ for _ in ()).throw(
-            RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
-        ),
+        mock_check,
     )
 
     with pytest.raises(RuntimeError, match="Insufficient space"):
@@ -845,6 +846,10 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+    mock_check.assert_called_once_with(
+        4 * PAGE_SIZE,
+        allocation_name="CPU KV offload shared region in /dev/shm",
+    )
 
 
 def test_ftruncate_failure_cleans_up_creator(monkeypatch):
