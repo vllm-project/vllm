@@ -256,6 +256,7 @@ _EMBEDDING_MODELS = {
         "llava_next",
         "LlavaNextForConditionalGeneration",
     ),
+    "MiniCPMRobotTrackModel": ("minicpm_robottrack", "MiniCPMRobotTrackModel"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
