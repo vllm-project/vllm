@@ -1079,7 +1079,7 @@ class AiterMLAHelper:
 
         bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through
         ``mla_gluon``'s 4-D MTP entry (``q`` shaped ``[batch, qlen, nhead, dim]``)
-        with ``use_2d_view=True``. fp8 has one via the q-row fold and must not
+        with ``use_2d_view=False``. fp8 has one via the q-row fold and must not
         come here: the MTP path hands Gluon the batch size its fp8 regime
         asserts against. A predicate rather than inline in forward_mqa so the
         builder sees the same answer the impl acts on.

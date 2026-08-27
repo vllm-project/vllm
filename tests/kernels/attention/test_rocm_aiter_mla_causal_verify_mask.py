@@ -5,7 +5,7 @@
 When ``num_heads < 16`` the ROCm AITER MLA backend cannot use the ASM decode
 kernel for a multi-token block, so ``AiterMLAImpl.forward_mqa`` routes verify
 through ``mla_gluon``'s native 4-D MTP entry (``q`` shaped
-``[batch, qlen, nhead, dim]`` with ``use_2d_view=True``). aiter applies the
+``[batch, qlen, nhead, dim]`` with ``use_2d_view=False``). aiter applies the
 causal tail internally: position ``t`` attends KV ``[0, seq_len - qlen + t]``.
 
 The test drives the real builder and ``forward_mqa`` over a multi-token decode
