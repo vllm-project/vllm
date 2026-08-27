@@ -359,6 +359,15 @@ class LoRAModelManager:
         )
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
+            if isinstance(module, ClassificationHeadWithLoRA):
+                full_module = self._get_module_to_save_weights(lora_model, module_name)
+                if full_module is None:
+                    module.reset_module_to_save(index)
+                else:
+                    module.set_module_to_save(
+                        index, full_module.weight, full_module.bias
+                    )
+
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
@@ -1210,7 +1219,7 @@ class LoRAModelManager:
         self, lora_model: LoRAModel, module_name: str
     ) -> LoRAFullModuleWeights | None:
         weights = lora_model.get_module_to_save(module_name)
-        if weights is not None or not self.is_pooling_model:
+        if weights is not None:
             return weights
 
         unprefixed_module_name = module_name.removeprefix("model.")
