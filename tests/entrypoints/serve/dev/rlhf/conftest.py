@@ -60,6 +60,11 @@ _DUMMY_ARGS = [
     "dummy",
 ]
 
+# Name the server registers the model under; requests must use this
+# name (vLLM does not serve the load-time model name once
+# --served-model-name is set).
+SERVED_MODEL_NAME = "m"
+
 
 # ---------------------------------------------------------------------------
 # Server harness
@@ -78,6 +83,7 @@ def _warm_up(url: str) -> None:
 
 @contextmanager
 def server(
+    model: str,
     extra_args=None,
     port: int = 8770,
     timeout: float = 180.0,
@@ -86,15 +92,14 @@ def server(
     """Launch a vLLM server with the dev router; yield its base URL.
 
     Args:
+        model:           Model to serve; each test module passes its own.
         extra_args:      Additional CLI flags appended after the base args.
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
 
-    The model is selected via the VLLM_TEST_MODEL environment variable
-    (MODEL_NAME) and served under the fixed name "m". The base args pin
-    eager execution (``--enforce-eager``); callers can add further flags
-    via ``extra_args``.
+    The base args pin eager execution (``--enforce-eager``); callers can
+    add further flags via ``extra_args``.
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
@@ -103,11 +108,11 @@ def server(
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        MODEL_NAME,
+        model,
         "--port",
         str(port),
         "--served-model-name",
-        "m",
+        SERVED_MODEL_NAME,
         *(base + (extra_args or [])),
     ]
     proc = subprocess.Popen(
