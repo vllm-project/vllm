@@ -663,7 +663,7 @@ def test_snapshot_private_path_and_link_remap_security(
     [("tcp", "external established TCP"), ("io_uring", "kernel.io_uring_disabled=1")],
 )
 def test_snapshot_rejects_unsafe_process_state_before_criu(
-    monkeypatch: pytest.MonkeyPatch, blocked_state: str, message: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_state: str, message: str
 ):
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
@@ -684,4 +684,107 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
     )
     monkeypatch.setattr(tools, "_tcp_records", lambda: (tcp_record,))
     with pytest.raises(SnapshotCreateError, match=message):
-        tools.inventory(100)
+        tools.inventory(100, tmp_path)
+
+
+def test_snapshot_manifest_records_external_cache_files(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    recorded = (
+        (str(tmp_path / "kernel.so"), "b" * 64),
+        (str(tmp_path / "launcher.lock"), "locked"),
+    )
+    write_manifest_atomic(artifact, _manifest(external_cache_files=recorded))
+
+    assert read_manifest(artifact).external_cache_files == recorded
+
+    # A manifest written before this field existed still loads.
+    legacy = _manifest().model_dump(mode="json")
+    del legacy["external_cache_files"]
+    (artifact / "manifest.json").write_text(json.dumps(legacy))
+
+    assert read_manifest(artifact).external_cache_files == ()
+
+
+def test_snapshot_inventory_records_open_generated_cache_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    lock = cache_root / "launcher.lock"
+    lock.write_bytes(b"held by pid 100")
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"weights")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    (artifact / "child.log.lock").write_bytes(b"")
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    targets = {
+        100: (str(kernel), str(weights), "socket:[41]"),
+        101: (str(lock), str(cache_root), str(artifact / "child.log.lock")),
+        102: (f"{cache_root / 'evicted.so'} (deleted)",),
+    }
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101, 102))
+    monkeypatch.setattr(tools, "_descriptor_targets", lambda pid: targets[pid])
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("101, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+    monkeypatch.setattr(tools, "current_identity", lambda _uuid: _runtime_identity())
+
+    manifest = tools.make_manifest(
+        argparse.Namespace(
+            model_tag="Qwen/Qwen3-0.6B",
+            revision=_MODEL_REVISION,
+            served_model_name=None,
+            tokenizer_revision=None,
+        ),
+        ("Qwen/Qwen3-0.6B",),
+        tools.inventory(100, artifact),
+        _oracle(),
+        artifact,
+    )
+
+    # Weights, sockets, the cache directory itself, files inside the artifact,
+    # and deleted targets that CRIU remaps are all left out.
+    assert manifest.external_cache_files == (
+        (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
+        (str(lock), "locked"),
+    )
+
+
+def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    kernel = tmp_path / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    lock = tmp_path / "launcher.lock"
+    lock.write_bytes(b"held by pid 100")
+    manifest = _manifest(
+        external_cache_files=(
+            (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
+            (str(lock), "locked"),
+        )
+    )
+    artifact = _local_restore_artifact(tmp_path)
+    before = {path.name: path.read_bytes() for path in artifact.iterdir()}
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
+
+    kernel.write_bytes(b"recompiled kernel")
+    with pytest.raises(SnapshotRestoreError, match="changed since capture") as changed:
+        tools.restore(artifact, manifest)
+    assert str(kernel) in str(changed.value)
+
+    # Restoring the digest gets past the first entry, so the lock file is only
+    # checked for existence: the second failure proves the first one passed.
+    kernel.write_bytes(b"compiled kernel")
+    lock.unlink()
+    with pytest.raises(SnapshotRestoreError, match="vanished since capture") as gone:
+        tools.restore(artifact, manifest)
+    assert str(lock) in str(gone.value)
+
+    assert {path.name: path.read_bytes() for path in artifact.iterdir()} == before

@@ -30,8 +30,9 @@ Snapshots currently require:
   directories and mutable revisions are not supported.
 - Enough disk for the artifact, with the same installed vLLM package, model
   files, container filesystem, and generated-cache paths available at restore.
-  Generated-cache files are neither copied into the artifact nor inventoried;
-  removing or replacing one can permanently invalidate the artifact.
+  Generated-cache files are not copied into the artifact. The manifest
+  fingerprints the ones the captured tree holds open, so restore fails early
+  and names the file when one is removed or replaced.
 
 The official `vllm/vllm-openai` Linux x86-64 image includes the snapshot
 runtime. It still requires a compatible host driver, kernel, and privileges.

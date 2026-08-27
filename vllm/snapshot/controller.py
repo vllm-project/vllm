@@ -68,7 +68,7 @@ def create_snapshot(
         child_argv = _child_engine_argv(args, engine_argv)
         root_pid = toolset.launch_child(target, child_argv)
         oracle = toolset.wait_ready(target, root_pid)
-        inventory = toolset.inventory(root_pid)
+        inventory = toolset.inventory(root_pid, target)
         toolset.dump(target, inventory)
         toolset.verify_dead(inventory)
         manifest = toolset.make_manifest(args, child_argv, inventory, oracle, target)

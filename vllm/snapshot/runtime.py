@@ -17,6 +17,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from collections.abc import Iterable
@@ -55,6 +56,30 @@ _COMMON_CRIU_OPTIONS = (
     "--file-locks",
 )
 
+_CACHE_REMEDY = "recreate the snapshot or restore with the same cache state"
+# Recorded instead of a digest for files whose content is volatile by design.
+_CACHE_LOCKED = "locked"
+
+
+def _generated_cache_prefixes() -> tuple[str, ...]:
+    """Path prefixes of the generated caches an engine process keeps open.
+
+    vLLM redirects Inductor and Triton under ``VLLM_CACHE_ROOT`` when it
+    compiles, but a process can still hold their upstream defaults open.
+    """
+    import vllm.envs as envs
+
+    return tuple(
+        os.path.expanduser(root).rstrip(os.sep)
+        for root in (
+            envs.VLLM_CACHE_ROOT,
+            os.environ.get("TRITON_CACHE_DIR") or "~/.triton/cache",
+            os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+            or os.path.join(tempfile.gettempdir(), "torchinductor_"),
+            "~/.cache/flashinfer",
+        )
+    )
+
 
 def _error_detail(error: BaseException) -> str:
     message = str(error)
@@ -73,6 +98,7 @@ class ProcessInventory:
     process_tree: tuple[int, ...]
     cuda_holders: tuple[int, ...]
     gpu_uuid: str
+    external_cache_files: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -295,7 +321,50 @@ class LocalSnapshotTools:
                 )
         return tuple(records)
 
-    def inventory(self, root_pid: int) -> ProcessInventory:
+    def _cache_fingerprint(self, path: Path) -> str | None:
+        """Digest a cache file, or mark the ones whose content is volatile."""
+        try:
+            if not stat.S_ISREG(path.stat().st_mode):
+                return None
+        except OSError:
+            return None
+        if path.name.endswith(".lock"):
+            return _CACHE_LOCKED
+        try:
+            return self._sha256(path)
+        except OSError:
+            return _CACHE_LOCKED
+
+    def _external_cache_files(
+        self, process_tree: tuple[int, ...], artifact: Path
+    ) -> tuple[tuple[str, str], ...]:
+        """Fingerprint the generated-cache files the captured tree holds open.
+
+        CRIU reopens these by path on restore, so a JIT cache that rotates
+        between capture and restore fails the restore permanently. Recording
+        them lets restore fail early and name the file that changed. Files
+        inside the artifact are excluded: they belong to the snapshot itself.
+        Deleted targets are excluded too, because CRIU remaps those links.
+        """
+        prefixes = _generated_cache_prefixes()
+        artifact_prefix = f"{os.path.abspath(artifact)}{os.sep}"
+        candidates: set[str] = set()
+        for pid in process_tree:
+            for target in self._descriptor_targets(pid):
+                if target.endswith(" (deleted)") or target.startswith(artifact_prefix):
+                    continue
+                if target.endswith(".lock") or target.startswith(prefixes):
+                    candidates.add(target)
+        recorded = (
+            (path, self._cache_fingerprint(Path(path))) for path in sorted(candidates)
+        )
+        return tuple(
+            (path, fingerprint)
+            for path, fingerprint in recorded
+            if fingerprint is not None
+        )
+
+    def inventory(self, root_pid: int, artifact: Path) -> ProcessInventory:
         process_tree = self._tree_pids(root_pid)
         cuda_rows = self._cuda_process_rows()
         cuda_holders = tuple(
@@ -318,6 +387,7 @@ class LocalSnapshotTools:
             process_tree=process_tree,
             cuda_holders=cuda_holders,
             gpu_uuid=gpu_uuid,
+            external_cache_files=self._external_cache_files(process_tree, artifact),
         )
 
     def _gpu_uuid_for_pids(self, pids: tuple[int, ...], rows: tuple[str, ...]) -> str:
@@ -672,6 +742,7 @@ class LocalSnapshotTools:
             engine_argv=engine_argv,
             process_tree=inventory.process_tree,
             cuda_holders=inventory.cuda_holders,
+            external_cache_files=inventory.external_cache_files,
             oracle_token_ids=oracle.token_ids,
             oracle_text=oracle.text,
             oracle_sampled_token_logprob=oracle.sampled_token_logprob,
@@ -884,6 +955,34 @@ class LocalSnapshotTools:
             ) from primary
         raise primary
 
+    def _verify_external_cache_files(self, manifest: SnapshotManifest) -> None:
+        """Reject a rotated generated cache before CRIU reopens it by path.
+
+        Like the PID probe above this reports a stale host early rather than
+        guarding it: CRIU stays authoritative for a cache replaced afterwards.
+        """
+        for path, fingerprint in manifest.external_cache_files:
+            target = Path(path)
+            if not target.is_file():
+                raise SnapshotRestoreError(
+                    f"external cache file vanished since capture: {path}; "
+                    f"{_CACHE_REMEDY}"
+                )
+            if fingerprint == _CACHE_LOCKED:
+                continue
+            try:
+                current = self._sha256(target)
+            except OSError as error:
+                raise SnapshotRestoreError(
+                    f"external cache file is unreadable since capture: {path}; "
+                    f"{_CACHE_REMEDY}"
+                ) from error
+            if current != fingerprint:
+                raise SnapshotRestoreError(
+                    f"external cache file changed since capture: {path}; "
+                    f"{_CACHE_REMEDY}"
+                )
+
     def restore(self, artifact: Path, manifest: SnapshotManifest) -> int:
         # This is necessarily a best-effort TOCTOU check. CRIU restore and the
         # rollback below remain authoritative if a PID is claimed after it.
@@ -899,6 +998,7 @@ class LocalSnapshotTools:
                     f"captured PID availability probe failed: {pid}"
                 ) from error
             raise SnapshotRestoreError(f"captured PID is already occupied: {pid}")
+        self._verify_external_cache_files(manifest)
         expected_root_pid = manifest.process_tree[0]
         (artifact / "release.json").unlink(missing_ok=True)
         pidfile = artifact / "restored.pid"

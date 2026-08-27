@@ -61,6 +61,7 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
     engine_argv: tuple[str, ...]
     process_tree: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     cuda_holders: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
+    external_cache_files: tuple[tuple[str, str], ...] = ()
     oracle_token_ids: Annotated[
         tuple[_OracleTokenId, ...], Field(min_length=1, max_length=1)
     ]
