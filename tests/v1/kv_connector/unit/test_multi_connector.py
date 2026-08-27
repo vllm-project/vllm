@@ -198,6 +198,17 @@ def mc() -> MultiConnector:
     return mc
 
 
+def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
+    request = MagicMock(request_id="request")
+    mc._requests_to_connector[request.request_id] = 1
+    mc._connectors[1].get_external_cache_hit_sources.return_value = [("disk", 32)]
+
+    assert mc.get_external_cache_hit_sources(request, 32) == [("disk", 32)]
+    mc._connectors[1].get_external_cache_hit_sources.assert_called_once_with(
+        request, 32
+    )
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
