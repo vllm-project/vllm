@@ -47,6 +47,10 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import (
+    flashinfer_fused_kda_decode_packed,
+    has_flashinfer_fused_kda_decode_packed,
+)
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -171,6 +175,73 @@ def is_fused_kda_decode_supported(
         or current_platform.is_device_capability_family(100)
         or current_platform.is_device_capability_family(120)
     )
+
+
+def is_flashinfer_fused_kda_spec_decode_supported(
+    num_heads: int,
+    head_dim: int,
+    conv_width: int,
+    num_spec: int,
+    input_dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    recurrent_state_dtype: torch.dtype,
+    lower_bound: float | None,
+    use_recoverssm: bool,
+) -> bool:
+    return (
+        has_flashinfer_fused_kda_decode_packed()
+        and current_platform.is_device_capability_family(100)
+        and num_heads in (12, 24, 32, 48, 96)
+        and head_dim == 128
+        and conv_width == 4
+        and 1 <= num_spec <= 7
+        and input_dtype == torch.bfloat16
+        and conv_state_dtype == torch.bfloat16
+        and recurrent_state_dtype == torch.float32
+        and lower_bound is not None
+        and lower_bound < 0
+        and not use_recoverssm
+        and not is_conv_state_dim_first()
+    )
+
+
+def resolve_kda_spec_decode_backend(
+    backend: str,
+    num_heads: int,
+    head_dim: int,
+    conv_width: int,
+    num_spec: int,
+    input_dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    recurrent_state_dtype: torch.dtype,
+    lower_bound: float | None,
+    use_recoverssm: bool,
+) -> str:
+    if backend not in ("auto", "vllm", "flashinfer"):
+        raise ValueError(f"Unsupported KDA speculative decode backend: {backend}")
+    supported = is_flashinfer_fused_kda_spec_decode_supported(
+        num_heads,
+        head_dim,
+        conv_width,
+        num_spec,
+        input_dtype,
+        conv_state_dtype,
+        recurrent_state_dtype,
+        lower_bound,
+        use_recoverssm,
+    )
+    if backend == "flashinfer" and not supported:
+        raise RuntimeError(
+            "FlashInfer packed fused KDA decode requires its "
+            "fused_kda_decode_packed API, CUDA SM10x, bfloat16 inputs and "
+            "convolution state, float32 recurrent state, D=128, W=4, a "
+            "bounded gate, 1-7 speculative tokens, a supported head count, "
+            "the SD convolution-state layout, and RecoverSSM disabled."
+        )
+    if supported and backend != "vllm":
+        logger.info_once("Using FlashInfer packed fused KDA speculative decode.")
+        return "flashinfer"
+    return "vllm"
 
 
 def is_flashkda_supported(
@@ -418,6 +489,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
+        self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
+        if self.gate_lower_bound is not None:
+            assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
+                "KDA gate lower bound must be in "
+                f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
+                f"Got {self.gate_lower_bound}."
+            )
         assert kda_config.get("use_full_rank_gate", False), (
             "KimiK3DeltaAttention requires a full-rank gate"
         )
@@ -471,17 +549,37 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
         # Keep a width-major copy for fused decode without changing the layout
         # consumed by the prefill and fallback decode kernels.
-        conv_state_dtype = self.get_state_dtype()[0]
-        decode_conv1d_weight = None
-        if is_fused_kda_decode_supported(
+        conv_state_dtype, recurrent_state_dtype, *_ = self.get_state_dtype()
+        additional_config = vllm_config.additional_config
+        spec_decode_backend = (
+            additional_config.get("kda_spec_decode_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
+        self.kda_spec_decode_backend = resolve_kda_spec_decode_backend(
+            spec_decode_backend,
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
-        ):
-            logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
+            recurrent_state_dtype,
+            self.gate_lower_bound,
+            self.use_recoverssm,
+        )
+        use_vllm_fused_decode = is_fused_kda_decode_supported(
+            self.local_num_heads,
+            self.head_dim,
+            self.conv_size,
+            self.num_spec,
+            vllm_config.model_config.dtype,
+            conv_state_dtype,
+        )
+        decode_conv1d_weight = None
+        if use_vllm_fused_decode or self.kda_spec_decode_backend == "flashinfer":
+            if use_vllm_fused_decode:
+                logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
             decode_conv1d_weight = torch.empty(
                 3,
                 self.conv_size,
@@ -510,15 +608,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         set_weight_attrs(self.A_log, {"weight_loader": a_log_weight_loader(0)})
 
-        self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
-        if self.gate_lower_bound is not None:
-            assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
-                "KDA gate lower bound must be in "
-                f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
-                f"Got {self.gate_lower_bound}."
-            )
-
-        additional_config = vllm_config.additional_config
         backend = (
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -685,8 +774,41 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_state = conv_state.transpose(-1, -2)
 
         if (
+            self.kda_spec_decode_backend == "flashinfer"
+            and has_spec_decode
+            and m.num_prefills == 0
+            and m.num_decodes == 0
+        ):
+            assert self.decode_conv1d_weight is not None
+            assert self.decode_norm_weight is not None
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            assert num_accepted_tokens is not None
+            assert self.gate_lower_bound is not None
+            flashinfer_fused_kda_decode_packed(
+                x=mixed_qkv,
+                weight=self.decode_conv1d_weight,
+                conv_state=conv_state,
+                raw_gate=g1,
+                raw_beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                state_indices=spec_state_indices_tensor,
+                query_start_loc=spec_query_start_loc,
+                num_accepted_tokens=num_accepted_tokens,
+                state=recurrent_state,
+                output_gate=g2[:num_actual_tokens],
+                norm_weight=self.decode_norm_weight,
+                lower_bound=self.gate_lower_bound,
+                norm_eps=self.o_norm.eps,
+                output=core_attn_out[:, :num_actual_tokens],
+            )
+            return
+
+        if (
             self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
+            and self.num_spec == 0
             and not has_spec_decode
             and m.num_prefills == 0
             and m.num_decodes > 0

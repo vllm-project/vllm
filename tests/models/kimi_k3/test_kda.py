@@ -22,11 +22,15 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
+    KimiK3DeltaAttention,
     _flashkda_prefill,
     _store_cache_checkpoints_kernel,
+    is_flashinfer_fused_kda_spec_decode_supported,
     is_flashkda_supported,
     is_fused_kda_decode_supported,
+    resolve_kda_spec_decode_backend,
 )
+from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadata
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
 from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
@@ -71,6 +75,59 @@ def test_kda_warmup_skips_missing_metadata(monkeypatch):
     empty = torch.empty(0, device=DEVICE)
 
     assert layer._forward(empty, empty, empty, empty, empty) is None
+
+
+def test_resolve_kda_spec_decode_backend(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.is_flashinfer_fused_kda_spec_decode_supported",
+        lambda *args: True,
+    )
+    args = (12, 128, 4, 6, torch.bfloat16, torch.bfloat16, torch.float32, -5.0)
+    assert resolve_kda_spec_decode_backend("auto", *args, False) == "flashinfer"
+    assert resolve_kda_spec_decode_backend("vllm", *args, False) == "vllm"
+    assert resolve_kda_spec_decode_backend("flashinfer", *args, False) == "flashinfer"
+
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.is_flashinfer_fused_kda_spec_decode_supported",
+        lambda *args: False,
+    )
+    assert resolve_kda_spec_decode_backend("auto", *args, False) == "vllm"
+    with pytest.raises(RuntimeError, match="fused_kda_decode_packed"):
+        resolve_kda_spec_decode_backend("flashinfer", *args, False)
+
+
+def test_flashinfer_kda_spec_decode_capability_rejects_recoverssm():
+    assert not is_flashinfer_fused_kda_spec_decode_supported(
+        num_heads=12,
+        head_dim=128,
+        conv_width=4,
+        num_spec=6,
+        input_dtype=torch.bfloat16,
+        conv_state_dtype=torch.bfloat16,
+        recurrent_state_dtype=torch.float32,
+        lower_bound=-5.0,
+        use_recoverssm=True,
+    )
+
+
+def test_flashinfer_kda_spec_decode_capability_rejects_dim_first_state(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.is_conv_state_dim_first",
+        lambda: True,
+    )
+    assert not is_flashinfer_fused_kda_spec_decode_supported(
+        num_heads=12,
+        head_dim=128,
+        conv_width=4,
+        num_spec=6,
+        input_dtype=torch.bfloat16,
+        conv_state_dtype=torch.bfloat16,
+        recurrent_state_dtype=torch.float32,
+        lower_bound=-5.0,
+        use_recoverssm=False,
+    )
 
 
 def test_kda_recoverssm_config_state_layout():
@@ -1070,6 +1127,192 @@ def test_fused_kda_decode_correctness(
     torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
     torch.testing.assert_close(conv_actual, conv_ref, atol=0, rtol=0)
     torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
+
+
+@torch.inference_mode()
+def test_flashinfer_fused_kda_spec_decode_integration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    if not is_flashinfer_fused_kda_spec_decode_supported(
+        num_heads=12,
+        head_dim=128,
+        conv_width=4,
+        num_spec=6,
+        input_dtype=torch.bfloat16,
+        conv_state_dtype=torch.bfloat16,
+        recurrent_state_dtype=torch.float32,
+        lower_bound=-5.0,
+        use_recoverssm=False,
+    ):
+        pytest.skip("FlashInfer packed fused KDA decode is not supported")
+
+    torch.manual_seed(20260820)
+    H, D, W, T = 12, 128, 4, 7
+    hidden_size = H * D
+    num_rows = 10
+    num_slots = 16
+
+    x = torch.randn(num_rows, 3 * hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    conv_weight = 0.1 * torch.randn(
+        3 * hidden_size, W, dtype=torch.float32, device=DEVICE
+    )
+    fused_weight = conv_weight.view(3, hidden_size, W).transpose(1, 2).contiguous()
+    raw_gate = torch.randn(1, num_rows, H, D, dtype=torch.bfloat16, device=DEVICE)
+    raw_beta = torch.randn(1, num_rows, H, dtype=torch.bfloat16, device=DEVICE)
+    output_gate = torch.randn(num_rows, H, D, dtype=torch.bfloat16, device=DEVICE)
+    A_log = 0.5 * torch.randn(H, dtype=torch.float32, device=DEVICE)
+    dt_bias = 0.1 * torch.randn(hidden_size, dtype=torch.float32, device=DEVICE)
+    norm_weight = torch.randn(D, dtype=torch.float32, device=DEVICE)
+    norm_eps = 1e-5
+    state_indices = torch.tensor(
+        [
+            list(range(1, T + 1)),
+            list(range(T + 1, 2 * T + 1)),
+            [0] * T,
+        ],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    query_start_loc = torch.tensor([0, 7, 10, 10], dtype=torch.int32, device=DEVICE)
+    num_accepted_tokens = torch.tensor([1, 4, 1], dtype=torch.int32, device=DEVICE)
+    conv_seed = (
+        0.1
+        * torch.randn(
+            num_slots,
+            T + W - 2,
+            3 * hidden_size,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+    ).transpose(1, 2)
+    state_seed = 0.01 * torch.randn(
+        num_slots, H, D, D, dtype=torch.float32, device=DEVICE
+    )
+    metadata = KimiK3KDAMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=2,
+        num_spec_decode_tokens=num_rows,
+        num_actual_tokens=num_rows,
+        spec_query_start_loc=query_start_loc,
+        spec_state_indices_tensor=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda.get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"test.layer": metadata}),
+    )
+
+    def clone_strided(tensor: torch.Tensor) -> torch.Tensor:
+        clone = torch.empty_strided(
+            tensor.shape, tensor.stride(), dtype=tensor.dtype, device=tensor.device
+        )
+        clone.copy_(tensor)
+        return clone
+
+    def composed_reference(
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+    ) -> torch.Tensor:
+        mixed_qkv = causal_conv1d_update(
+            x,
+            conv_state,
+            conv_weight,
+            bias=None,
+            activation="silu",
+            conv_state_indices=state_indices[:, 0],
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            max_query_len=T,
+            validate_data=False,
+            out=torch.empty_like(x),
+        )
+        q, k, v = mixed_qkv.view(num_rows, 3, H, D).unbind(1)
+        recurrent_out, _ = fused_recurrent_kda(
+            q=q.unsqueeze(0),
+            k=k.unsqueeze(0),
+            v=v.unsqueeze(0),
+            raw_g=raw_gate,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=-5.0,
+            initial_state=recurrent_state,
+            cu_seqlens=query_start_loc,
+            ssm_state_indices=state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+        recurrent_float = recurrent_out.float()
+        return (
+            recurrent_float
+            * torch.rsqrt(
+                recurrent_float.square().mean(dim=-1, keepdim=True) + norm_eps
+            )
+            * norm_weight
+            * output_gate.float().sigmoid().unsqueeze(0)
+        ).to(torch.bfloat16)
+
+    def run_flashinfer(
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        layer = SimpleNamespace(
+            prefix="test.layer",
+            kv_cache=(conv_state.transpose(-1, -2), recurrent_state),
+            kda_spec_decode_backend="flashinfer",
+            decode_conv1d_weight=fused_weight,
+            decode_norm_weight=norm_weight,
+            gate_lower_bound=-5.0,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            o_norm=SimpleNamespace(eps=norm_eps),
+        )
+        KimiK3DeltaAttention._forward(
+            layer,
+            mixed_qkv=x,
+            g1=raw_gate,
+            g2=output_gate,
+            beta=raw_beta,
+            core_attn_out=output,
+        )
+        return output
+
+    expected_conv = clone_strided(conv_seed)
+    expected_state = state_seed.clone()
+    expected = composed_reference(expected_conv, expected_state)
+    actual_conv = clone_strided(conv_seed)
+    actual_state = state_seed.clone()
+    output = torch.empty_like(expected)
+    actual = run_flashinfer(actual_conv, actual_state, output)
+
+    assert actual.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=3e-2)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=3e-2)
+    assert torch.count_nonzero(actual[:, :7]) > 0
+    torch.testing.assert_close(actual_state[0], state_seed[0], atol=0, rtol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run_flashinfer(actual_conv, actual_state, output)
+
+    actual_conv.copy_(conv_seed)
+    actual_state.copy_(state_seed)
+    query_start_loc.copy_(torch.tensor([0, 6, 10, 10], device=DEVICE))
+    num_accepted_tokens.copy_(torch.tensor([3, 2, 1], device=DEVICE))
+    expected_conv.copy_(conv_seed)
+    expected_state.copy_(state_seed)
+    expected = composed_reference(expected_conv, expected_state)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    assert captured.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=3e-2)
+    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=3e-2)
 
 
 def test_fused_kda_decode_rejects_speculative_conv_state():
