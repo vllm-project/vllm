@@ -70,7 +70,19 @@ class TestGetMLAPrefillBackend:
     def test_no_device_capability_returns_flash_attn(self):
         vllm_config = _make_vllm_config()
 
-        with patch("vllm.platforms.current_platform") as mock_platform:
+        class FlashAttnBackend:
+            @staticmethod
+            def get_name():
+                return "FLASH_ATTN"
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(
+                MLAPrefillBackendEnum.FLASH_ATTN,
+                "get_class",
+                return_value=FlashAttnBackend,
+            ),
+        ):
             mock_platform.get_device_capability.return_value = None
             mock_platform.is_cpu.return_value = False
 
@@ -89,6 +101,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -107,6 +120,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -120,6 +134,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=10, minor=0
             )
@@ -162,6 +177,7 @@ class TestGetMLAPrefillBackend:
                 return_value=3,
             ),
         ):
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
