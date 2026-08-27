@@ -685,6 +685,7 @@ def _make_mock_worker_for_desc_ids(
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
     worker._conv_decomp = None
+    worker._mamba_region_indices = []
     if has_mamba:
         from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
             MambaConvSplitInfo,

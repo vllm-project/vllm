@@ -141,6 +141,24 @@ class VideoLoader:
         return source
 
     @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
+
+        return OpenCVVideoBackendMixin.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num,
+            frame_recovery=frame_recovery,
+        )
+
+    @classmethod
     @abstractmethod
     def load_bytes(
         cls,
@@ -209,24 +227,6 @@ class VideoBackend(VideoLoader):
         return np.linspace(
             0, total_frames_num - 1, num_frames_to_sample, dtype=int
         ).tolist()
-
-    @classmethod
-    def read_frames(
-        cls,
-        cap: "cv2.VideoCapture",
-        frame_idx: list[int],
-        total_frames_num: int,
-        *,
-        frame_recovery: bool = False,
-    ) -> tuple[npt.NDArray, list[int]]:
-        from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
-
-        return OpenCVVideoBackendMixin.read_frames(
-            cap,
-            frame_idx,
-            total_frames_num,
-            frame_recovery=frame_recovery,
-        )
 
     @classmethod
     def load_bytes(
