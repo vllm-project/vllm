@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
@@ -376,27 +377,47 @@ class FlashInferAllReduce:
         if self.world_size == 1:
             return
 
-        default_max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
-            self.world_size
+        # A user override is shared with the allreduce-RMS fusion pass and must
+        # take precedence over standalone topology tuning. Without an override,
+        # retain the tuned standalone cutoff and then the pass default.
+        vllm_config = get_current_vllm_config_or_none()
+        pass_config = (
+            vllm_config.compilation_config.pass_config
+            if vllm_config is not None
+            else None
         )
-        if not default_max_size_mb:
-            logger.warning(
-                "FlashInfer All Reduce is disabled because it "
-                "is not supported for world_size=%d.",
-                self.world_size,
-            )
-            return
+        explicit_max_size = None
+        if (
+            pass_config is not None
+            and pass_config.fi_allreduce_fusion_max_size_mb is not None
+        ):
+            explicit_max_size = pass_config.flashinfer_max_size(self.world_size)
+
+        default_max_size_mb = (
+            PassConfig.default_fi_allreduce_fusion_max_size_mb().get(self.world_size)
+        )
         backend, _ = _resolve_fi_ar_backend()
         tuned_max_size = _get_tuned_standalone_max_size(
             self.world_size,
             backend,
             self.group,
         )
-        self.max_workspace_size = (
-            tuned_max_size
-            if tuned_max_size is not None
-            else int(default_max_size_mb * MiB)
-        )
+        if explicit_max_size is not None:
+            max_workspace_size = explicit_max_size
+        elif tuned_max_size is not None:
+            max_workspace_size = tuned_max_size
+        elif default_max_size_mb:
+            max_workspace_size = int(default_max_size_mb * MiB)
+        else:
+            max_workspace_size = None
+        if not max_workspace_size:
+            logger.warning(
+                "FlashInfer All Reduce is disabled because it "
+                "is not supported for world_size=%d.",
+                self.world_size,
+            )
+            return
+        self.max_workspace_size = int(max_workspace_size)
         self.max_num_tokens = 0
         self.disabled = False
 
