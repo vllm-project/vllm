@@ -36,6 +36,7 @@ import pybase64 as base64
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 from ..conftest import SERVED_MODEL_NAME
@@ -58,26 +59,58 @@ class RoutingShape:
     num_experts: int
 
 
-# Expected geometry shared by every scenario: both the tiny MoE model and
-# the layer-reduced model matrix use 2 layers / top-2 / 8 experts.
+# Expected geometry for the tiny MoE model used by the parallel scenario.
 ROUTING_SHAPE = RoutingShape(num_layers=2, num_experts_per_tok=2, num_experts=8)
 
-# Shared tiny geometry for the model matrix (dummy weights, so only the
-# HF config is fetched). Field names are generation-specific; adjust per
-# family once verified on a real machine.
-REDUCED_OVERRIDES = {
-    "num_hidden_layers": 2,
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One model-matrix entry: checkpoint and its reduction config."""
+
+    model: str
+    overrides: dict[str, int]
+
+
+# Common tiny geometry for the layer-reduced model matrix (dummy weights,
+# so only the HF config is fetched); each family adds its own expert-count
+# field name.
+_REDUCED_BASE = {
+    "num_hidden_layers": 4,
     "hidden_size": 128,
     "intermediate_size": 256,
     "num_attention_heads": 4,
     "num_key_value_heads": 2,
-    "n_routed_experts": 8,
     "num_experts_per_tok": 2,
 }
+QWEN3_5_OVERRIDES = {**_REDUCED_BASE, "num_experts": 8}
+# DeepSeek-V4-Flash cannot run on H100 (Blackwell sm_12.3+ MHC/DeepGEMM);
+# keeps its own field names for when a Blackwell box is available.
+DEEPSEEK_V4_OVERRIDES = {**_REDUCED_BASE, "n_routed_experts": 8}
 
-MODEL_NAMES = [
-    pytest.param("codecho/Qwen3.5-35B-A3B-text-only", id="qwen3.5-moe"),
-    pytest.param("deepseek-ai/DeepSeek-V4-Flash", id="deepseek-v4-flash"),
+REDUCED_SHAPE = RoutingShape(num_layers=4, num_experts_per_tok=2, num_experts=8)
+
+MODEL_SPECS = [
+    pytest.param(
+        ModelSpec("codecho/Qwen3.5-35B-A3B-text-only", QWEN3_5_OVERRIDES),
+        id="qwen3.5-moe",
+    ),
+    pytest.param(
+        ModelSpec("deepseek-ai/DeepSeek-V4-Flash", DEEPSEEK_V4_OVERRIDES),
+        id="deepseek-v4-flash",
+        # The flashinfer sparse (MHC) path supports capability major 10
+        # and 12 (see DeepseekV4FlashInferSparse.supports_compute_capability).
+        marks=pytest.mark.skipif(
+            not (
+                current_platform.is_cuda()
+                and (
+                    current_platform.is_device_capability_family(100)
+                    or current_platform.is_device_capability_family(120)
+                )
+            ),
+            reason="DeepSeek-V4-Flash requires a Blackwell GPU "
+            "(sm_10x/sm_12x, MHC/DeepGEMM)",
+        ),
+    ),
 ]
 
 
@@ -110,7 +143,9 @@ def use_v2(request):
     return request.param
 
 
-@pytest.fixture(scope="module")
+# Function-scoped on purpose: each server is torn down before the next
+# starts, so their GPU reservations never stack up.
+@pytest.fixture()
 def scale_out_server(use_v2):
     """TITO server with TP=2 + DP=2 (needs 4 GPUs)."""
     if torch.cuda.device_count() < 4:
@@ -128,18 +163,19 @@ def scale_out_server(use_v2):
         yield url
 
 
-@pytest.fixture(scope="module", params=MODEL_NAMES)
+@pytest.fixture(params=MODEL_SPECS)
 def models_server(request):
     """Completions server per layer-reduced model, MRV2 only (dummy weights)."""
+    spec = request.param
     extra_args = [
         "--enable-return-routed-experts",
         "--load-format",
         "dummy",
         "--hf-overrides",
-        json.dumps(REDUCED_OVERRIDES),
+        json.dumps(spec.overrides),
     ]
-    with _launch(request.param, extra_args, True) as url:
-        yield url
+    with _launch(spec.model, extra_args, True) as url:
+        yield url, REDUCED_SHAPE
 
 
 class TestRoutedExperts:
@@ -166,8 +202,9 @@ class TestRoutedExperts:
 
     def test_completions_routed_experts_models(self, models_server):
         """/v1/completions returns routed_experts for the model matrix."""
+        url, shape = models_server
         response = openai.OpenAI(
-            base_url=f"{models_server}/v1", api_key="EMPTY", max_retries=0
+            base_url=f"{url}/v1", api_key="EMPTY", max_retries=0
         ).completions.create(
             model=SERVED_MODEL_NAME,
             prompt="Hello, world",
@@ -178,4 +215,4 @@ class TestRoutedExperts:
         choice = response.model_dump()["choices"][0]
 
         assert choice["token_ids"] is not None
-        assert_valid_routed_experts(choice["routed_experts"], ROUTING_SHAPE)
+        assert_valid_routed_experts(choice["routed_experts"], shape)
