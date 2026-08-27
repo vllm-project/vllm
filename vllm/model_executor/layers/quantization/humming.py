@@ -60,6 +60,23 @@ if TYPE_CHECKING:
     )
 
 
+def _register_sleep_buffer(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> torch.Tensor:
+    existing = layer._buffers.get(name)
+    if existing is None:
+        layer.register_buffer(name, tensor, persistent=False)
+        return tensor
+    if (
+        existing.shape != tensor.shape
+        or existing.dtype != tensor.dtype
+        or existing.device != tensor.device
+    ):
+        raise RuntimeError(f"Cannot replace sleep-managed Humming buffer {name}")
+    existing.copy_(tensor)
+    return existing
+
+
 def prepare_param(tensor, name, extra_attrs):
     extra_attrs = extra_attrs.copy()
     scale_type = extra_attrs.pop("scale_type", None)
@@ -568,7 +585,17 @@ class HummingLinearMethod(LinearMethodBase):
             setattr(layer, name, param)
 
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = _register_sleep_buffer(
+            layer,
+            "_humming_locks",
+            torch.zeros(1024, dtype=torch.int32, device=layer.weight.device),
+        )
+
+    def post_weights_wake_up(self, layer: torch.nn.Module) -> None:
+        self.locks.zero_()
+
+    def post_weights_reload(self, layer: torch.nn.Module) -> None:
+        self.locks = layer._buffers["_humming_locks"]
 
     def apply(
         self,
@@ -773,6 +800,24 @@ class HummingMoEMethod(FusedMoEMethodBase):
             self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        experts = self.moe_kernel.fused_experts
+        experts.locks = _register_sleep_buffer(
+            layer, "_humming_moe_locks", experts.locks
+        )
+
+    def prepare_for_reload(self, layer: RoutedExperts) -> None:
+        self.processed = False
+
+    def post_weights_wake_up(self, layer: RoutedExperts) -> None:
+        if self.moe_kernel is not None:
+            self.moe_kernel.fused_experts.locks.zero_()
+
+    def post_weights_reload(self, layer: RoutedExperts) -> None:
+        super().post_weights_reload(layer)
+        if self.moe_kernel is not None:
+            self.moe_kernel.fused_experts.locks = layer._buffers[
+                "_humming_moe_locks"
+            ]
 
     def apply(
         self,

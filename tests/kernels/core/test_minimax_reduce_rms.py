@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MiniMax QK RMS-norm: NCCL reference vs Lamport fused kernel."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -18,6 +20,40 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
+
+
+def test_lamport_workspace_reset_restores_protocol_state(monkeypatch):
+    from vllm.model_executor.layers.minimax_rms_norm import lamport_workspace
+
+    sentinel_resets = []
+    monkeypatch.setattr(
+        lamport_workspace,
+        "_lamport_fill_neg_zero",
+        lambda ptr, size: sentinel_resets.append((ptr, size)),
+    )
+    owner = object.__new__(lamport_workspace.LamportWorkspace)
+    owner.world_size = 2
+    owner.comm_size = 16
+    owner._lamport = SimpleNamespace(local_ptr=123, serialize=lambda: [11, 22])
+    owner._flag_buf = torch.tensor([7, 8, 9], dtype=torch.int32)
+    owner._layout_buf = torch.tensor([99, 99], dtype=torch.int64)
+    owner._workspace = torch.full((8,), -1, dtype=torch.int64)
+
+    owner.reset()
+
+    assert sentinel_resets == [(123, 48)]
+    assert torch.equal(owner._flag_buf, torch.zeros(3, dtype=torch.int32))
+    assert torch.equal(owner._layout_buf, torch.tensor([0, 16]))
+    assert owner._workspace.tolist() == [
+        0,
+        0,
+        0,
+        0,
+        11,
+        22,
+        owner._flag_buf.data_ptr(),
+        owner._layout_buf.data_ptr(),
+    ]
 
 
 @ensure_current_vllm_config()
