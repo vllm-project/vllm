@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -97,7 +98,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -143,7 +144,9 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             draft_attn_metadata,
             self.vllm_config,
             num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
+            num_tokens_across_dp=(
+                dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            ),
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             slot_mapping=draft_slot_mappings,
             is_padding=input_batch.is_padding[:num_tokens],
