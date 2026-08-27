@@ -3,23 +3,26 @@
 
 import torch
 
-import vllm.envs as envs
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tp_group,
     model_parallel_is_initialized,
 )
-from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_max_and_sumexp,
 )
 
-logger = init_logger(__name__)
-
 # The feature is a log-odds, log(q / (1 - q)), which a row carrying all of its
 # mass on one token sends to infinity. Clamp it symmetrically.
 _MAX_LOG_ODDS = 40.0
+
+# Cold-start coefficients: the median slope and intercept fitted online across
+# DeepSeek-V4-Flash, Muse-Glimmer-30B, MiMo-V2.5-Pro, Inkling and Kimi-K2.5.
+# Log-loss is flat near the optimum, so one starting point serves all of them
+# and a real fit replaces it within a refit or two.
+_INIT_SLOPE = 0.5
+_INIT_BIAS = -0.2
 
 
 @triton.jit
@@ -289,26 +292,26 @@ def _predict_kernel(
         other=0.0,
     )
 
-    # The feature, logit(q(m)) for the row's most likely token m, is:
-    #   q(m) = e^m / Σ_z e^z
-    #   logit(q(m)) = log(q(m) / (1 - q(m)))
-    #               = m - log(Σ_{z≠m} e^z).
-    # It scores the draft *distribution*, not the token drawn from it, so it is
+    # The feature, logit(q(m*)) for the row's max draft logit, m*, is:
+    #   q(x) = e^(x - m*) / Σ_z e^(z - m*)
+    #   logit(q(m*)) = log(q(m*) / (1 - q(m*)))
+    #   	= m* - log(Σ_{z≠m*} e^(z - m*)).
+    # It scores the draft distribution, not the token drawn from it, so it is
     # a function of the prefix alone. Trimming a draft therefore never
     # conditions on the token being trimmed, and rejection sampling stays
     # lossless. Scoring the drawn token instead would select on the proposal
     # and bias the emitted distribution toward the drafter's confident modes.
-    global_max = tl.max(maxes, axis=0)
 
     # Rescale each block's partial to the global max and sum. The most likely
     # token contributes exactly e^(m - m) = 1, so removing it leaves the sum
     # over every other token.
+    global_max = tl.max(maxes, axis=0)
     total_sumexp = tl.sum(
         tl.where(blocks_mask, sumexps * tl.exp(maxes - global_max), 0.0), axis=0
     )
     complement_sumexp = tl.maximum(total_sumexp - 1.0, 0.0)
 
-    # Shifted by m, the numerator is e^0 = 1, so the feature is just the
+    # Shifted by m*, the numerator is e^(m* - m*) = 1, so the feature is just the
     # negated complement log-sum-exponential. Clamp to the min/max log-odds.
     feature = -tl.log(complement_sumexp)
     feature = tl.minimum(tl.maximum(feature, -MAX_LOG_ODDS), MAX_LOG_ODDS)
@@ -333,15 +336,12 @@ class OnlineAcceptanceEstimator:
     2. ``predict`` runs inside the captured draft graph, turning this step's
        draft logits into acceptance probabilities for adaptive verification.
 
-    For the first few refits the estimator reports ``needs_full_verification``;
-    callers verify whole draft blocks during that window so the labels it learns
-    from are not censored by its own trimming.
+    Trimming starts immediately: survival is a running product of sigmoids, so it
+    decreases with draft position whatever the coefficients are, and an unfitted
+    estimator degrades to uniform-depth truncation rather than to anything harmful.
     """
 
-    # Adaptive verification is skipped for this many refits before the estimator
-    # is considered trained enough to trim drafts.
-    NUM_WARMUP_REFITS = envs.VLLM_ACCEPTANCE_ESTIMATOR_NUM_WARMUP_REFITS
-    # After warmup, refit every this many steps, accumulating samples in between.
+    # Refit every this many steps, accumulating samples in between.
     REFIT_INTERVAL = 100
     # Newton steps are damped by n / (n + DAMPING_OBSERVATIONS), so a round
     # carrying this many observations moves a parameter half of a full step. It
@@ -381,9 +381,10 @@ class OnlineAcceptanceEstimator:
         self.coefficients = torch.zeros(
             2, -(-num_speculative_steps // 4) * 4, dtype=torch.float32, device=device
         )
-        self.coefficients[1, :num_speculative_steps].fill_(1.5)
+        self.coefficients[0, :num_speculative_steps].fill_(_INIT_SLOPE)
+        self.coefficients[1, :num_speculative_steps].fill_(_INIT_BIAS)
 
-        # Holds logit(q_sampled), which is used as the feature for the logistic.
+        # Holds logit(max q), which is used as the feature for the logistic.
         # Stored in stable slots keyed by persistent request-state index.
         self.features = torch.zeros(
             max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
@@ -417,11 +418,6 @@ class OnlineAcceptanceEstimator:
         self.counts = torch.zeros(
             num_speculative_steps, dtype=torch.float32, device=device
         )
-
-    @property
-    def needs_full_verification(self) -> bool:
-        """Whether callers must still verify whole draft blocks."""
-        return self._refits < self.NUM_WARMUP_REFITS
 
     def step(
         self,
@@ -474,12 +470,6 @@ class OnlineAcceptanceEstimator:
             self.coefficients.copy_(tensor_model_parallel_all_reduce(self.coefficients))
 
         self._refits += 1
-        if self._refits == self.NUM_WARMUP_REFITS:
-            logger.info(
-                "Acceptance estimator fitted after %d steps. Adaptive "
-                "verification is now active.",
-                self._refits * self.REFIT_INTERVAL,
-            )
 
     def predict(
         self,
