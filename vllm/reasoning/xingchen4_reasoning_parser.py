@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright The TeleChat Authors.
+# Copyright The XingChen Authors.
 #
-# Reasoning parser plugin for TeleChat models.
+# Reasoning parser plugin for XingChen4 models.
 # Usage:
 #   vllm serve <model> \
-#       --reasoning-parser telechat \
-#       --reasoning-parser-plugin telechat_reasoning_parser.py
+#       --reasoning-parser xingchen4 \
+#       --reasoning-parser-plugin xingchen4_reasoning_parser.py
 
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -27,9 +27,9 @@ START_THINK = "<think>"
 END_THINK = "</think>"
 
 
-@ReasoningParserManager.register_module("telechat4")
-class TeleChat4ReasoningParser(ReasoningParser):
-    """Reasoning parser for TeleChat models.
+@ReasoningParserManager.register_module("xingchen4")
+class XingChen4ReasoningParser(ReasoningParser):
+    """Reasoning parser for xingchen4 models.
 
     NOTE: the chat template injects the ``<think>`` / ``</think>`` markers into
     the *prompt* via ``add_generation_prompt``; the model itself does not emit
@@ -47,7 +47,7 @@ class TeleChat4ReasoningParser(ReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         if not self.model_tokenizer:
             raise ValueError(
-                "TeleChat4ReasoningParser requires a valid tokenizer."
+                "XingChen4ReasoningParser requires a valid tokenizer."
             )
 
         # Per-request flag, refreshed in ``adjust_request``. When the caller
@@ -64,12 +64,12 @@ class TeleChat4ReasoningParser(ReasoningParser):
 
         if start_id is None:
             raise RuntimeError(
-                f"TeleChat4ReasoningParser: '{self.start_token}' not found "
+                f"XingChen4ReasoningParser: '{self.start_token}' not found "
                 "in tokenizer vocabulary."
             )
         if end_id is None:
             raise RuntimeError(
-                f"TeleChat4ReasoningParser: '{self.end_token}' not found "
+                f"XingChen4ReasoningParser: '{self.end_token}' not found "
                 "in tokenizer vocabulary."
             )
 

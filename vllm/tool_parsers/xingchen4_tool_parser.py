@@ -177,10 +177,10 @@ def _partial_suffix_len(text: str, token: str) -> int:
     return 0
 
 
-class TeleChat4ToolParser(ToolParser):
-    """Tool call parser for TeleChat4 models.
+class XingChen4ToolParser(ToolParser):
+    """Tool call parser for XingChen4 models.
 
-    Used when ``--enable-auto-tool-choice --tool-call-parser telechat4``
+    Used when ``--enable-auto-tool-choice --tool-call-parser xingchen4``
     is specified.
 
     Supports two tool-call formats:

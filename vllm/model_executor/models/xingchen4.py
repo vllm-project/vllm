@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Inference-only Telechat4 model.
+"""Inference-only XingChen4 model.
 
-Telechat4 reuses the DeepSeek-V2/V3 backbone (MLA attention, MoE block,
+XingChen4 reuses the DeepSeek-V2/V3 backbone (MLA attention, MoE block,
 optional DSA indexer) and replaces the standard residual connection with
 Manifold-constrained Hyper-Connections (mHC): the residual stream is expanded
 into ``num_residual_streams`` parallel streams that are mixed by
@@ -11,7 +11,7 @@ projection.
 The mHC math is identical to DeepSeek-V4's, so instead of private kernels this
 implementation reuses the shared, platform-dispatched ops from
 ``vllm.model_executor.layers.mhc`` (``mhc_pre`` / ``mhc_post``).
-A local custom op (``telechat4_transpose_contiguous``) ensures the transposed
+A local custom op (``XingChen4_transpose_contiguous``) ensures the transposed
 ``comb_mix`` is C-contiguous for the tilelang ``mhc_post`` kernel in a way that
 ``torch.compile`` cannot elide.
 Checkpoint-to-op parameter mapping:
@@ -80,19 +80,19 @@ if os.getenv("USE_FLAGOS") == "1":
         "moe_sum",
     ]
     flag_gems.only_enable(record=False, include=FLAG_GEMS_CONFIG)
-    logger.info("telechat4: Flaggems is enabled.")
+    logger.info("XingChen4: Flaggems is enabled.")
 
 # comb_mix must be transposed and C-contiguous for the mhc_post tilelang
 # kernel (requires strides[-1] == 1).  Wrapping transpose+contiguous in a
 # custom op prevents torch.compile from eliding the .contiguous() call,
 # which it would otherwise do since the downstream MHCPostOp is opaque.
 
-def _telechat4_transpose_contiguous(x: torch.Tensor) -> torch.Tensor:
+def _xingchen4_transpose_contiguous(x: torch.Tensor) -> torch.Tensor:
     """Transpose last two dims and enforce C-contiguity."""
     return x.transpose(-1, -2).contiguous()
 
 
-def _telechat4_transpose_contiguous_fake(x: torch.Tensor) -> torch.Tensor:
+def _xingchen4_transpose_contiguous_fake(x: torch.Tensor) -> torch.Tensor:
     """Abstract impl for torch.compile / meta tracing."""
     shape = list(x.shape)
     shape[-1], shape[-2] = shape[-2], shape[-1]
@@ -100,22 +100,22 @@ def _telechat4_transpose_contiguous_fake(x: torch.Tensor) -> torch.Tensor:
 
 
 direct_register_custom_op(
-    op_name="telechat4_transpose_contiguous",
-    op_func=_telechat4_transpose_contiguous,
+    op_name="xingchen4_transpose_contiguous",
+    op_func=_xingchen4_transpose_contiguous,
     mutates_args=[],
-    fake_impl=_telechat4_transpose_contiguous_fake,
+    fake_impl=_xingchen4_transpose_contiguous_fake,
 )
 
 
-def _telechat4_ensure_contiguous(x: torch.Tensor) -> torch.Tensor:
+def _xingchen4_ensure_contiguous(x: torch.Tensor) -> torch.Tensor:
     """Dispatch to the registered custom op (opaque to torch.compile)."""
-    return torch.ops.vllm.telechat4_transpose_contiguous(x)
+    return torch.ops.vllm.xingchen4_transpose_contiguous(x)
 
 
 # ============================== mHC adapter ==============================
 
 
-class Telechat4MHC(nn.Module):
+class XingChen4MHC(nn.Module):
     """mHC (Manifold-constrained Hyper-Connections) wrapper.
 
     Delegates computation to MHCPreOp and MHCPostOp, which dispatch to
@@ -194,7 +194,7 @@ class Telechat4MHC(nn.Module):
             # clamp_max=self.h_res_clamp_max,
         )
         # Transpose and ensure C-contiguity via custom op (see comment above).
-        comb_mix = _telechat4_ensure_contiguous(comb_mix)
+        comb_mix = _xingchen4_ensure_contiguous(comb_mix)
         # layer_input: [nt, C], comb_mix: [nt, n, n], post_mix: [nt, n, 1]
         return layer_input, comb_mix, post_mix
 
@@ -258,7 +258,7 @@ def _get_llama_4_scaling(
 # ============================ Decoder Layer ============================
 
 
-class Telechat4DecoderLayer(nn.Module):
+class XingChen4DecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -343,8 +343,8 @@ class Telechat4DecoderLayer(nn.Module):
         self.n = getattr(config, "num_residual_streams", 1)
         self.enable_mhc = self.n > 1
         if self.enable_mhc:
-            self.attn_hc = Telechat4MHC(config)
-            self.ffn_hc = Telechat4MHC(config)
+            self.attn_hc = XingChen4MHC(config)
+            self.ffn_hc = XingChen4MHC(config)
 
     def forward(
         self,
@@ -436,7 +436,7 @@ class Telechat4DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Telechat4Model(nn.Module):
+class XingChen4Model(nn.Module):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -447,7 +447,7 @@ class Telechat4Model(nn.Module):
         self.config = config
         self.device = current_platform.device_type
 
-        # Backward compatibility: older Telechat4 configs describe RoPE with
+        # Backward compatibility: older XingChen4 configs describe RoPE with
         # `rope_scaling` while vLLM's DeepSeek attention expects
         # `rope_parameters`. TODO: drop this once the released config.json
         # natively provides `rope_parameters`.
@@ -496,7 +496,7 @@ class Telechat4Model(nn.Module):
                 if hasattr(config, _attr) and getattr(config, _attr) is None:
                     delattr(config, _attr)
                     logger.info(
-                        "telechat4: non-DSA checkpoint has stale '%s' "
+                        "xingchen4: non-DSA checkpoint has stale '%s' "
                         "set to None; deleted to prevent false DSA "
                         "detection.", _attr)
 
@@ -512,7 +512,7 @@ class Telechat4Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Telechat4DecoderLayer(
+            lambda prefix: XingChen4DecoderLayer(
                 vllm_config,
                 prefix,
                 topk_indices_buffer=topk_indices_buffer,
@@ -533,6 +533,7 @@ class Telechat4Model(nn.Module):
 
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
         qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
+        self.is_fused_shared_expert_enabled = False
         self.use_mha = config.model_type == "deepseek" or all(
             dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim))
         self.num_redundant_experts = (
@@ -545,7 +546,7 @@ class Telechat4Model(nn.Module):
             model_dtype = vllm_config.model_config.dtype
             if model_dtype != torch.bfloat16:
                 raise ValueError(
-                    "Telechat4 mHC (num_residual_streams > 1) requires "
+                    "XingChen4 mHC (num_residual_streams > 1) requires "
                     f"bfloat16, got {model_dtype}. The shared mHC ops in "
                     "vllm.model_executor.layers.mhc are bf16-only.")
             # In mHC mode the inter-layer tensor is n*hidden_size wide and
@@ -553,7 +554,7 @@ class Telechat4Model(nn.Module):
             # intermediate-tensor plumbing does not support.
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 raise NotImplementedError(
-                    "Telechat4 mHC (num_residual_streams > 1) does not "
+                    "XingChen4 mHC (num_residual_streams > 1) does not "
                     "support pipeline parallelism yet.")
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -573,7 +574,7 @@ class Telechat4Model(nn.Module):
                 if input_ids is None:
                     raise ValueError(
                         "Either input_ids or inputs_embeds must be provided "
-                        "to Telechat4Model.forward")
+                        "to XingChen4Model.forward")
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
@@ -624,7 +625,7 @@ class Telechat4Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        """Load Telechat4 weights.
+        """Load XingChen4 weights.
 
         1. Pre-process: merge alpha_{pre,post,res} into hc_scale (float32).
         2. Name remapping: mapping_weight -> hc_fn, bias -> hc_base.
@@ -724,14 +725,14 @@ class Telechat4Model(nn.Module):
 # ============================ Causal LM ============================
 
 
-class TeleChat4ForCausalLM(DeepseekV2ForCausalLM):
-    model_cls = Telechat4Model
+class XingChen4ForCausalLM(DeepseekV2ForCausalLM):
+    model_cls = XingChen4Model
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def set_moe_parameters(self):
-        """Override for Telechat4DecoderLayer (not a DeepseekV2DecoderLayer
+        """Override for XingChen4DecoderLayer (not a DeepseekV2DecoderLayer
         instance)."""
         self.expert_weights = []
         self.num_expert_groups = getattr(self.config, "n_group", 1)
