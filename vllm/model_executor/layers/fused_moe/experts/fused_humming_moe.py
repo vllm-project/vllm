@@ -541,6 +541,15 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 "down_output",
             ]
 
+            # Note: The fused SITU+FP8 quant goes gate_up_output ->
+            #        quanted_down_input directly, never materializing
+            #        activation_output. Dropping activation_output from the chain
+            #        flips the even/odd workspace 2-coloring below so
+            #        gate_up_output and quanted_down_input land
+            #        on DIFFERENT workspaces.
+            if self.fused_situ_quant_enabled(activation):
+                required_buffers.remove("activation_output")
+
         # batched moe use down_output as output
         if not self.is_batched():
             required_buffers.append("output")
