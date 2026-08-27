@@ -920,10 +920,6 @@ class MoRIIOConnectorScheduler:
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
 
                 if new_block_ids is not None:
-                    # WRITE mode is single-group (hybrid WRITE is rejected at
-                    # init), but keep the per-group shape consistent so all
-                    # block-id lists are BlockIds.
-                    new_group_ids = [list(g) for g in new_block_ids]
                     # A non-disagg request (no kv_transfer_params, e.g. smoke
                     # test) is never registered in _reqs_need_pending_save;
                     # indexing it unconditionally would KeyError and crash the
@@ -932,8 +928,8 @@ class MoRIIOConnectorScheduler:
                         continue
                     req, existing_blocks = self._reqs_need_pending_save[req_id]
                     updated_blocks = [
-                        existing_blocks[g] + new_group_ids[g]
-                        for g in range(len(new_group_ids))
+                        existing_blocks[g] + new_block_ids[g]
+                        for g in range(len(new_block_ids))
                     ]
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
                     saved_tokens = (
@@ -1058,10 +1054,8 @@ class MoRIIOConnectorScheduler:
         ):
             return False, None
 
-        # Per-group prefill blocks, with sliding-window groups clipped to the
-        # in-window tail the decode leg needs to pull.
+        # On producer
         computed_block_ids = self.get_exchange_clipped_blocks(block_ids)
-        # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = any(len(group) > 0 for group in computed_block_ids)
 
         if delay_free_blocks:
@@ -1216,15 +1210,11 @@ class MoRIIOConnectorWorker:
         self.is_producer = self.kv_transfer_config.is_kv_producer
         self.kv_cache_config = kv_cache_config
         self.layer_to_spec = build_layer_to_spec(kv_cache_config)
-        # Map every layer to its KV cache group index so the READ path can pick
-        # the block-id list for that layer's group (hybrid sliding-window
-        # models keep separate per-group block tables).
         self.layer_to_group: dict[str, int] = {
             layer_name: group_idx
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
             for layer_name in group.layer_names
         }
-        self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1866,12 +1856,8 @@ class MoRIIOConnectorWorker:
                 self.block_size,
             )
             self.block_size = first_geometry.block_size
-        # Representative block length in bytes. Under the hybrid KV cache
-        # manager, sliding-window and full-attention groups can have different
-        # block_size (in tokens) but the page-size unifier keeps block_len (in
-        # bytes) and num_blocks uniform across groups, so a single advertised
-        # scalar is valid. Per-layer geometry (self.block_lens) drives the
-        # actual transfer offsets.
+        # block size in bytes. under hma, all layers have the same block size in bytes,
+        # (also verified at runtime) so it's safe to advertise this scalar to the peer.
         self.block_len = first_geometry.block_len
         self.kv_cache_shape = first_kv_cache.shape
         self.block_shape = block_shape
@@ -1883,9 +1869,6 @@ class MoRIIOConnectorWorker:
 
         for layer_name in kv_caches:
             geometry = self._get_layer_transfer_geometry(layer_name)
-            # block_size (tokens) may legitimately differ per group under the
-            # hybrid KV cache manager; block_len (bytes) must not, since it is
-            # advertised as a single scalar alongside a uniform num_blocks.
             if geometry.block_len != self.block_len:
                 raise ValueError(
                     "MoRIIO KV cache block length mismatch for layer "
