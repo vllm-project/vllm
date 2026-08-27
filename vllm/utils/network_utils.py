@@ -11,6 +11,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +24,23 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class ZmqListener:
+    """A supervisor-bound listener that a ZMQ socket can adopt."""
+
+    address: str
+    socket: socket.socket
+
+    def close(self) -> None:
+        self.socket.close()
+
+    def cleanup(self) -> None:
+        self.close()
+        if self.address.startswith("ipc://"):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.address.removeprefix("ipc://"))
 
 
 def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
@@ -315,8 +333,12 @@ def make_zmq_socket(
     identity: bytes | None = None,
     linger: int | None = None,
     router_handover: bool = False,
+    listener: socket.socket | None = None,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
-    """Make a ZMQ socket with the proper bind/connect semantics."""
+    """Make a ZMQ socket with the proper bind/connect semantics.
+
+    When supplied, ``listener`` is detached and its fd moves to libzmq.
+    """
 
     mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
@@ -332,6 +354,8 @@ def make_zmq_socket(
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
+    if listener is not None and not bind:
+        raise ValueError("An inherited ZMQ listener requires bind=True")
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -354,6 +378,9 @@ def make_zmq_socket(
     if socket_type == zmq.XPUB:
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
 
+    if listener is not None:
+        socket.setsockopt(zmq.USE_FD, listener.detach())
+
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
     scheme, host, _ = split_zmq_path(path)
@@ -366,6 +393,44 @@ def make_zmq_socket(
         socket.connect(path)
 
     return socket
+
+
+def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
+    """Bind and listen on a raw socket for later ZMQ adoption."""
+
+    scheme, host, port = split_zmq_path(path)
+    if scheme == "tcp":
+        family = socket.AF_INET6 if is_valid_ipv6_address(host) else socket.AF_INET
+        bind_address: str | tuple[str, int] = (host, int(port))
+    elif scheme == "ipc":
+        family = socket.AF_UNIX
+        bind_address = path.removeprefix("ipc://")
+        os.makedirs(os.path.dirname(bind_address), exist_ok=True)
+    else:
+        raise ValueError(f"Cannot inherit a {scheme} ZMQ listener")
+
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        mem = psutil.virtual_memory()
+        if mem.total / 1024**3 > 32 and mem.available / 1024**3 > 16:
+            buf_size = int(0.5 * 1024**3)
+            if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buf_size)
+            if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buf_size)
+
+        listener.bind(bind_address)
+        listener.listen()
+        if scheme == "tcp":
+            path = get_tcp_uri(host, listener.getsockname()[1])
+        return ZmqListener(address=path, socket=listener)
+    except BaseException:
+        listener.close()
+        if scheme == "ipc":
+            assert isinstance(bind_address, str)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(bind_address)
+        raise
 
 
 @contextlib.contextmanager

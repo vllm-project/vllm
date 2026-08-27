@@ -23,9 +23,10 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
-    get_open_port,
+    ZmqListener,
     get_open_zmq_ipc_path,
     get_tcp_uri,
+    make_zmq_listener,
     zmq_socket_ctx,
 )
 from vllm.utils.system_utils import get_mp_context
@@ -96,6 +97,27 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+
+
+@dataclass
+class EngineZmqListeners:
+    inputs: list[ZmqListener]
+    outputs: list[ZmqListener]
+
+    @property
+    def addresses(self) -> EngineZmqAddresses:
+        return EngineZmqAddresses(
+            inputs=[listener.address for listener in self.inputs],
+            outputs=[listener.address for listener in self.outputs],
+        )
+
+    def cleanup(self) -> None:
+        for listener in (*self.inputs, *self.outputs):
+            listener.cleanup()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
 
 @dataclass
@@ -1039,19 +1061,14 @@ class CoreEngineActorManager:
 def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
-    *,
-    defer_api_server_ports: bool = True,
 ) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication.
+    """Create ZMQ endpoint templates for engine-client communication.
 
-    By default each TCP address is a ``tcp://host:0`` placeholder; the
+    Each TCP address is a ``tcp://host:0`` placeholder; the
     consumer (API-server child or single-process ``MPClient``) binds, then
     recovers the kernel-assigned port via ``getsockopt(zmq.LAST_ENDPOINT)``
-    and writes it back into ``addresses`` before the engine handshake.
-
-    Set ``defer_api_server_ports=False`` only when the consumer cannot
-    report a bound port back (e.g. the Rust front-end). IPC paths are
-    unaffected."""
+    before the engine handshake. Cross-process frontends use
+    ``get_engine_zmq_listeners`` to bind these templates in the supervisor."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -1076,12 +1093,38 @@ def get_engine_zmq_addresses(
     def _addr() -> str:
         if client_local_only:
             return get_open_zmq_ipc_path()
-        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+        return get_tcp_uri(host, 0)
 
     return EngineZmqAddresses(
         inputs=[_addr() for _ in range(num_api_servers)],
         outputs=[_addr() for _ in range(num_api_servers)],
     )
+
+
+def get_engine_zmq_listeners(
+    vllm_config: VllmConfig,
+    num_api_servers: int = 1,
+) -> EngineZmqListeners:
+    """Bind frontend transport listeners before launching engines."""
+
+    addresses = get_engine_zmq_addresses(
+        vllm_config,
+        num_api_servers,
+    )
+    inputs: list[ZmqListener] = []
+    outputs: list[ZmqListener] = []
+    try:
+        inputs.extend(
+            make_zmq_listener(address, zmq.ROUTER) for address in addresses.inputs
+        )
+        outputs.extend(
+            make_zmq_listener(address, zmq.PULL) for address in addresses.outputs
+        )
+        return EngineZmqListeners(inputs=inputs, outputs=outputs)
+    except BaseException:
+        for listener in (*inputs, *outputs):
+            listener.cleanup()
+        raise
 
 
 FrontendProcess = BaseProcess | _SubprocessWrapper

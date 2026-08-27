@@ -4,6 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -327,8 +329,8 @@ pub async fn connect_handshake(
 /// identities are synthesized from contiguous rank order instead of being
 /// discovered through a Rust-owned handshake.
 pub async fn connect_bootstrapped(
-    input_address: &str,
-    output_address: &str,
+    input_listener: OwnedFd,
+    output_listener: OwnedFd,
     engine_start_index: u32,
     engine_count: usize,
     ready_timeout: Duration,
@@ -354,10 +356,12 @@ pub async fn connect_bootstrapped(
     }
 
     let mut input_socket = RouterSocket::new();
-    let input_address = input_socket.bind(input_address).await?.to_string();
+    let input_address =
+        input_socket.bind_listener(adopt_listener(input_listener)?).await?.to_string();
 
     let mut output_socket = PullSocket::new();
-    let output_address = output_socket.bind(output_address).await?.to_string();
+    let output_address =
+        output_socket.bind_listener(adopt_listener(output_listener)?).await?.to_string();
 
     let engines = wait_for_input_registrations(
         &mut input_socket,
@@ -382,6 +386,29 @@ pub async fn connect_bootstrapped(
         coordinator: None,
         input_send,
         output_socket,
+    })
+}
+
+fn adopt_listener(fd: OwnedFd) -> Result<zeromq::Listener> {
+    let socket: socket2::Socket = fd.into();
+    let domain = socket.domain()?;
+    socket.set_nonblocking(true)?;
+
+    if domain == socket2::Domain::IPV4 || domain == socket2::Domain::IPV6 {
+        let listener: std::net::TcpListener = socket.into();
+        return Ok(zeromq::Listener::Tcp(tokio::net::TcpListener::from_std(
+            listener,
+        )?));
+    }
+    if domain == socket2::Domain::UNIX {
+        let listener: StdUnixListener = socket.into();
+        return Ok(zeromq::Listener::Ipc(tokio::net::UnixListener::from_std(
+            listener,
+        )?));
+    }
+
+    Err(Error::InvalidClientConfig {
+        message: format!("unsupported inherited listener domain {domain:?}"),
     })
 }
 
@@ -603,7 +630,10 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::bind_local_sockets;
+    use zeromq::RouterSocket;
+    use zeromq::prelude::Socket;
+
+    use super::{adopt_listener, bind_local_sockets};
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
@@ -613,5 +643,20 @@ mod tests {
         assert!(input_address.starts_with("tcp://127.0.0.1:"));
         assert!(output_address.starts_with("tcp://127.0.0.1:"));
         assert_ne!(input_address, output_address);
+    }
+
+    #[tokio::test]
+    async fn inherited_tcp_listener_is_adopted_without_rebinding() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+        let expected = listener.local_addr().expect("listener address");
+        let mut router = RouterSocket::new();
+
+        let endpoint = router
+            .bind_listener(adopt_listener(listener.into()).expect("adopt listener"))
+            .await
+            .expect("bind inherited listener");
+
+        assert_eq!(endpoint.to_string(), format!("tcp://{expected}"));
+        assert!(router.close().await.is_empty());
     }
 }

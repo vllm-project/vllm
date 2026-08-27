@@ -313,14 +313,10 @@ def run_multi_api_server(args: argparse.Namespace):
         None
     )
 
-    from vllm.v1.engine.utils import get_engine_zmq_addresses
+    from vllm.v1.engine.utils import get_engine_zmq_listeners
 
-    # Cross-process frontends require concrete addresses before launch.
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers,
-        defer_api_server_ports=False,
-    )
+    zmq_listeners = get_engine_zmq_listeners(vllm_config, num_api_servers)
+    addresses = zmq_listeners.addresses
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses
@@ -344,8 +340,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 binary_path=rust_frontend_path,
                 sock=sock,
                 args=args,
-                input_address=addresses.inputs[0],
-                output_address=addresses.outputs[0],
+                input_listener=zmq_listeners.inputs[0],
+                output_listener=zmq_listeners.outputs[0],
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,
                 data_parallel_size=parallel_config.data_parallel_size,
@@ -358,8 +354,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 sock=sock,
                 args=args,
                 num_servers=num_api_servers,
-                input_addresses=addresses.inputs,
-                output_addresses=addresses.outputs,
+                input_listeners=zmq_listeners.inputs,
+                output_listeners=zmq_listeners.outputs,
                 stats_update_address=stats_update_address,
                 tensor_queue=engine_launch.tensor_queue,
             )

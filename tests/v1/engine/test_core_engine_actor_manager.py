@@ -20,7 +20,7 @@ from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     EngineZmqAddresses,
-    get_engine_zmq_addresses,
+    get_engine_zmq_listeners,
     launch_core_engines,
 )
 from vllm.v1.utils import APIServerProcessManager
@@ -70,10 +70,18 @@ def _bind_worker(listen_address, sock, args, client_config):
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(
-            ctx, client_config["input_address"], zmq.ROUTER, bind=True
+            ctx,
+            client_config["input_address"],
+            zmq.ROUTER,
+            bind=True,
+            listener=client_config["input_listener"],
         )
         out_sock = make_zmq_socket(
-            ctx, client_config["output_address"], zmq.PULL, bind=True
+            ctx,
+            client_config["output_address"],
+            zmq.PULL,
+            bind=True,
+            listener=client_config["output_listener"],
         )
         in_sock.close(linger=0)
         out_sock.close(linger=0)
@@ -242,17 +250,9 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
     ``launch_core_engines`` Ray branch pickles ``addresses`` into each engine
     actor at ``.remote()`` time, and ``EngineCoreActorMixin._perform_handshakes``
     is a no-op, so the actor uses that pickled snapshot for the rest of its
-    life. If ``run_multi_api_server`` allocates ``addresses`` as
-    ``tcp://host:0`` placeholders (its default), the actors hold placeholders
-    forever and DEALER-connect to port 0 — ZMQ ``connect`` is async and does
-    not raise, so the failure mode is a deterministic hang.
-
-    The Ray-DP carve-out in ``run_multi_api_server`` forces
-    ``defer_api_server_ports=False`` when ``data_parallel_backend == "ray"``
-    so addresses are pre-allocated in the driver and Ray pickles real ports
-    into each actor. This test mirrors that call-site logic and asserts the
-    actors hold real (non-placeholder) endpoints. If the carve-out is
-    removed without an alternative fix, the test fails.
+    life. The supervisor therefore binds the frontend listeners before actor
+    construction and Ray pickles their resolved endpoints. This test asserts
+    that each actor holds real (non-placeholder) endpoints.
     """
     created_placement_groups: list[Any] = []
 
@@ -274,11 +274,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
     # Mirror run_multi_api_server's address-allocation logic. The Ray DP
     # carve-out forces pre-allocation so the addresses pickled into engine
     # actors at .remote() time are real, not ``tcp://host:0``.
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers=2,
-        defer_api_server_ports=False,
-    )
+    listeners = get_engine_zmq_listeners(vllm_config, num_api_servers=2)
+    addresses = listeners.addresses
 
     sock = socket.socket()
     engine_manager: CoreEngineActorManager | None = None
@@ -301,8 +298,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
                 sock=sock,
                 args="test_args",
                 num_servers=2,
-                input_addresses=addresses.inputs,
-                output_addresses=addresses.outputs,
+                input_listeners=listeners.inputs,
+                output_listeners=listeners.outputs,
                 target_server_fn=_bind_worker,
             )
 

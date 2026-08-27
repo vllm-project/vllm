@@ -8,7 +8,9 @@ import time
 from unittest.mock import patch
 
 import pytest
+import zmq
 
+from vllm.utils.network_utils import make_zmq_listener, make_zmq_socket
 from vllm.v1.utils import (
     APIServerProcessManager,
     wait_for_completion_or_failure,
@@ -26,6 +28,33 @@ def mock_run_api_server_worker(listen_address, sock, args, client_config=None):
     print("Mock worker completed successfully")
 
 
+def _adopt_zmq_listener_worker(listen_address, sock, args, client_config):
+    ctx = zmq.Context()
+    router = make_zmq_socket(
+        ctx,
+        client_config["input_address"],
+        zmq.ROUTER,
+        bind=True,
+        listener=client_config["input_listener"],
+    )
+    pull = make_zmq_socket(
+        ctx,
+        client_config["output_address"],
+        zmq.PULL,
+        bind=True,
+        listener=client_config["output_listener"],
+    )
+    try:
+        identity, payload = router.recv_multipart()
+        assert payload == b"input"
+        assert pull.recv() == b"output"
+        router.send_multipart([identity, b"ok"])
+    finally:
+        router.close(linger=0)
+        pull.close(linger=0)
+        ctx.term()
+
+
 @pytest.fixture
 def api_server_args():
     """Fixture to provide arguments for APIServerProcessManager."""
@@ -36,15 +65,11 @@ def api_server_args():
         "sock": sock,
         "args": "test_args",  # Simple string to avoid pickling issues
         "num_servers": 3,
-        "input_addresses": [
-            "tcp://127.0.0.1:5001",
-            "tcp://127.0.0.1:5002",
-            "tcp://127.0.0.1:5003",
+        "input_listeners": [
+            make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER) for _ in range(3)
         ],
-        "output_addresses": [
-            "tcp://127.0.0.1:6001",
-            "tcp://127.0.0.1:6002",
-            "tcp://127.0.0.1:6003",
+        "output_listeners": [
+            make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL) for _ in range(3)
         ],
         "stats_update_address": "tcp://127.0.0.1:7000",
     }
@@ -67,6 +92,13 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
     try:
         # Verify the manager was initialized correctly
         assert len(manager.processes) == 3
+        assert all(
+            listener.socket.fileno() == -1
+            for listener in (
+                *args["input_listeners"],
+                *args["output_listeners"],
+            )
+        )
 
         # Verify all processes are running
         for proc in manager.processes:
@@ -90,6 +122,44 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
         # Verify all processes were terminated
         for proc in manager.processes:
             assert not proc.is_alive()
+
+
+def test_api_server_child_adopts_inherited_zmq_listeners():
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    input_address = input_listener.address
+    output_address = output_listener.address
+    http_socket = socket.socket()
+    manager = APIServerProcessManager(
+        target_server_fn=_adopt_zmq_listener_worker,
+        listen_address="localhost:8000",
+        sock=http_socket,
+        args="test_args",
+        num_servers=1,
+        input_listeners=[input_listener],
+        output_listeners=[output_listener],
+    )
+
+    ctx = zmq.Context()
+    dealer = make_zmq_socket(
+        ctx, input_address, zmq.DEALER, bind=False, identity=b"test"
+    )
+    push = make_zmq_socket(ctx, output_address, zmq.PUSH, bind=False)
+    dealer.setsockopt(zmq.RCVTIMEO, 30_000)
+    try:
+        assert input_listener.socket.fileno() == -1
+        assert output_listener.socket.fileno() == -1
+        dealer.send(b"input")
+        push.send(b"output")
+        assert dealer.recv() == b"ok"
+        manager.processes[0].join(timeout=10)
+        assert manager.processes[0].exitcode == 0
+    finally:
+        manager.shutdown()
+        dealer.close(linger=0)
+        push.close(linger=0)
+        ctx.term()
+        http_socket.close()
 
 
 @patch("vllm.v1.utils.run_api_server_worker_proc", mock_run_api_server_worker)
@@ -301,6 +371,8 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
             return 0
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
         with caplog.at_level("INFO", logger="vllm.v1.utils"):
@@ -308,8 +380,8 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
                 binary_path="/nonexistent/vllm-rs",
                 sock=sock,
                 args=args,
-                input_address="ipc:///tmp/in",
-                output_address="ipc:///tmp/out",
+                input_listener=input_listener,
+                output_listener=output_listener,
                 engine_start_index=0,
                 engine_count=1,
                 data_parallel_size=1,

@@ -550,15 +550,21 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queue = client_addresses.get("tensor_queue")
+                input_listener = client_addresses.get("input_listener")
+                output_listener = client_addresses.get("output_listener")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
+                    listener=input_listener,
                 )
                 self.resources.output_socket = make_zmq_socket(
-                    self.ctx, output_address, zmq.PULL
+                    self.ctx,
+                    output_address,
+                    zmq.PULL,
+                    listener=output_listener,
                 )
 
             else:

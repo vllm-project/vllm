@@ -2,11 +2,14 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
 use itertools::Itertools;
+use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
@@ -29,6 +32,81 @@ mod state;
 mod stream;
 
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
+
+/// An inherited listener descriptor that can be consumed exactly once across
+/// cloned server configuration values.
+#[derive(Clone)]
+pub struct InheritedZmqListener(Arc<InheritedZmqListenerState>);
+
+struct InheritedZmqListenerState(Mutex<Option<RawFd>>);
+
+impl Drop for InheritedZmqListenerState {
+    fn drop(&mut self) {
+        if let Some(fd) = self.0.get_mut().take()
+            && fd >= 0
+        {
+            // SAFETY: An unconsumed descriptor is still uniquely owned here.
+            // It has not yet been validated as a listening socket.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+impl InheritedZmqListener {
+    /// Register a uniquely owned listening descriptor inherited from the
+    /// supervisor.
+    pub fn new(fd: RawFd) -> Self {
+        Self(Arc::new(InheritedZmqListenerState(Mutex::new(Some(fd)))))
+    }
+
+    pub(crate) fn take(&self) -> Result<OwnedFd> {
+        let fd = self.0.0.lock().take().ok_or_else(|| Error::InvalidClientConfig {
+            message: "inherited ZMQ listener was already consumed".to_string(),
+        })?;
+        // SAFETY: The Python supervisor passes a unique inherited descriptor,
+        // and the shared Option above permits exactly one ownership transfer.
+        if fd < 0 {
+            return Err(Error::InvalidClientConfig {
+                message: format!("invalid inherited ZMQ listener fd {fd}"),
+            });
+        }
+        // Validate the raw descriptor before constructing an OwnedFd. This
+        // keeps malformed CLI input on the normal configuration-error path.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            return Err(Error::InvalidClientConfig {
+                message: format!("inherited ZMQ listener fd {fd} is not open"),
+            });
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn raw_fd(&self) -> Option<RawFd> {
+        *self.0.0.lock()
+    }
+}
+
+impl fmt::Debug for InheritedZmqListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("InheritedZmqListener").field(&self.raw_fd()).finish()
+    }
+}
+
+impl PartialEq for InheritedZmqListener {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for InheritedZmqListener {}
+
+impl Serialize for InheritedZmqListener {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str("<inherited-zmq-listener>")
+    }
+}
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
@@ -53,16 +131,13 @@ pub enum TransportMode {
         local_output_address: Option<String>,
     },
 
-    /// The Python supervisor has already chosen the frontend transport
-    /// addresses, and the Rust process only needs to bind them and wait for
-    /// engine registration frames.
+    /// The Python supervisor has already bound the frontend transport
+    /// listeners. Rust adopts them and waits for engine registration frames.
     Bootstrapped {
-        /// Input ROUTER socket address that engines will connect to for
-        /// requests.
-        input_address: String,
-        /// Output PULL socket address that engines will connect to for
-        /// responses.
-        output_address: String,
+        /// Input ROUTER listener inherited from the supervisor.
+        input_listener: InheritedZmqListener,
+        /// Output PULL listener inherited from the supervisor.
+        output_listener: InheritedZmqListener,
         /// First data-parallel engine rank expected to register on this
         /// transport.
         engine_start_index: u32,
@@ -321,8 +396,8 @@ impl EngineCoreClient {
             }
 
             TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener,
+                output_listener,
                 engine_start_index,
                 engine_count,
                 ready_timeout,
@@ -333,8 +408,8 @@ impl EngineCoreClient {
                 }
 
                 transport::connect_bootstrapped(
-                    input_address,
-                    output_address,
+                    input_listener.take()?,
+                    output_listener.take()?,
                     *engine_start_index,
                     *engine_count,
                     *ready_timeout,
