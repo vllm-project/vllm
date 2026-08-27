@@ -1726,6 +1726,41 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+def test_long_prefill_threshold_does_not_truncate_spec_decode_padding():
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        long_prefill_token_threshold=2,
+        enable_prefix_caching=True,
+        block_size=1,
+    )
+    r1, r2 = create_requests(
+        num_requests=2,
+        num_tokens=33,
+        same_prompt=True,
+        max_tokens=16,
+        block_size=1,
+    )
+
+    scheduler.add_request(r1)
+    prompt_tokens = r1.num_tokens
+    while r1.num_computed_tokens < prompt_tokens:
+        out = scheduler.schedule()
+        finishes_prefill = (
+            r1.num_computed_tokens + out.num_scheduled_tokens[r1.request_id]
+            >= prompt_tokens
+        )
+        _model_output(scheduler, out, [[100]] if finishes_prefill else [[]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1]
+    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span
