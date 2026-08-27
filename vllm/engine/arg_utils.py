@@ -324,7 +324,7 @@ def _compute_kwargs(
                 if default.default_factory is None:
                     default = default.default
                 elif not instantiate_default_factories:
-                    default = None
+                    default = argparse.SUPPRESS
                 else:
                     # VllmConfig's Fields have default_factory set to config classes.
                     # These could emit logs on init, which would be confusing.
@@ -333,7 +333,11 @@ def _compute_kwargs(
                     with suppress_logging():
                         default = cast(Callable[[], Any], default_factory)()
         elif field.default_factory is not MISSING:
-            default = field.default_factory() if instantiate_default_factories else None
+            default = (
+                field.default_factory()
+                if instantiate_default_factories
+                else argparse.SUPPRESS
+            )
 
         # Get the help text for the field
         name = field.name
