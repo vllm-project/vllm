@@ -53,7 +53,8 @@ from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    get_engine_zmq_addresses,
+    EngineZmqAddresses,
+    get_engine_zmq_bind_addresses,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -569,26 +570,28 @@ class MPClient(EngineCoreClient):
 
             else:
                 # Engines are managed by this client.
-                addresses = get_engine_zmq_addresses(vllm_config)
+                bind_addresses = get_engine_zmq_bind_addresses(vllm_config)
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
-                    addresses.inputs[0],
+                    bind_addresses.inputs[0],
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
-                    self.ctx, addresses.outputs[0], zmq.PULL
+                    self.ctx, bind_addresses.outputs[0], zmq.PULL
                 )
 
-                # Resolve ``tcp://host:0`` placeholders to bound endpoints
-                # before engines DEALER-connect. No-op for IPC.
-                addresses.inputs[0] = self.input_socket.getsockopt(
-                    zmq.LAST_ENDPOINT
-                ).decode()
-                addresses.outputs[0] = self.resources.output_socket.getsockopt(
-                    zmq.LAST_ENDPOINT
-                ).decode()
+                # EngineZmqAddresses contains only endpoints resolved by the
+                # sockets that own the bind operation.
+                addresses = EngineZmqAddresses(
+                    inputs=[self.input_socket.getsockopt(zmq.LAST_ENDPOINT).decode()],
+                    outputs=[
+                        self.resources.output_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                    ],
+                )
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses

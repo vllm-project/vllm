@@ -345,7 +345,7 @@ def test_external_process_monitoring(api_server_args):
         WORKER_RUNTIME_SECONDS = prev_worker_runtime
 
 
-def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
+def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
     """The Rust frontend command carries every non-default arg as JSON.
     Credentials must not reach the log line."""
     import subprocess as subprocess_mod
@@ -375,7 +375,7 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
-        with caplog.at_level("INFO", logger="vllm.v1.utils"):
+        with patch("vllm.v1.utils.logger.info") as log_info:
             RustFrontendProcessManager(
                 binary_path="/nonexistent/vllm-rs",
                 sock=sock,
@@ -389,8 +389,10 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     finally:
         sock.close()
 
-    message = caplog.text
+    log_format, *log_args = log_info.call_args.args
+    message = log_format % tuple(log_args)
     assert "Launching Rust frontend:" in message
     assert hf_token not in message
     assert api_key not in message
     assert '"hf_token": "***"' in message
+    assert '"api_key": "***"' in message

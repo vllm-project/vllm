@@ -406,19 +406,14 @@ fn adopt_listener(fd: RawFd) -> Result<zeromq::Listener> {
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let socket: socket2::Socket = fd.into();
     let domain = socket.domain()?;
-    socket.set_nonblocking(true)?;
 
     if domain == socket2::Domain::IPV4 || domain == socket2::Domain::IPV6 {
         let listener: std::net::TcpListener = socket.into();
-        return Ok(zeromq::Listener::Tcp(tokio::net::TcpListener::from_std(
-            listener,
-        )?));
+        return Ok(listener.into());
     }
     if domain == socket2::Domain::UNIX {
         let listener: StdUnixListener = socket.into();
-        return Ok(zeromq::Listener::Ipc(tokio::net::UnixListener::from_std(
-            listener,
-        )?));
+        return Ok(listener.into());
     }
 
     Err(Error::InvalidClientConfig {

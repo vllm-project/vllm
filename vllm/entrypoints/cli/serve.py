@@ -313,9 +313,9 @@ def run_multi_api_server(args: argparse.Namespace):
         None
     )
 
-    from vllm.v1.engine.utils import get_engine_zmq_listeners
+    from vllm.v1.engine.utils import bind_engine_zmq_listeners
 
-    zmq_listeners = get_engine_zmq_listeners(vllm_config, num_api_servers)
+    zmq_listeners = bind_engine_zmq_listeners(vllm_config, num_api_servers)
     addresses = zmq_listeners.addresses
 
     with launch_core_engines(

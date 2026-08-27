@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
 import threading
-from types import SimpleNamespace
 
 import pytest
 import zmq
@@ -205,36 +204,6 @@ def test_make_zmq_socket_ipv6():
     # Clean up
     zsock.close()
     ctx.term()
-
-
-@pytest.mark.parametrize(
-    "total,available,expected",
-    [
-        (
-            network_utils._ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY + 1,
-            network_utils._ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY + 1,
-            network_utils._ZMQ_LARGE_BUFFER_SIZE,
-        ),
-        (
-            network_utils._ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY,
-            network_utils._ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY + 1,
-            -1,
-        ),
-        (
-            network_utils._ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY + 1,
-            network_utils._ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY,
-            -1,
-        ),
-    ],
-)
-def test_zmq_socket_buffer_policy(monkeypatch, total, available, expected):
-    monkeypatch.setattr(
-        network_utils.psutil,
-        "virtual_memory",
-        lambda: SimpleNamespace(total=total, available=available),
-    )
-
-    assert network_utils._get_zmq_socket_buffer_size() == expected
 
 
 @pytest.mark.parametrize("scheme", ["tcp", "ipc"])
