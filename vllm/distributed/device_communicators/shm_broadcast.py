@@ -101,7 +101,7 @@ def to_bytes_big(value: int, size: int) -> bytes:
 
 
 LONG_WAIT_TIME_LOG_MSG = (
-    "No available shared memory broadcast block found "
+    "Shared memory broadcast has not made progress "
     "in %d seconds. This typically happens "
     "when some processes are hanging or doing some "
     "time-consuming work (e.g. compilation, "

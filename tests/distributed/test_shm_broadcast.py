@@ -662,7 +662,7 @@ def test_warning_logs(caplog_vllm):
         warning_messages = [
             record.message
             for record in caplog_vllm.records
-            if "No available shared memory broadcast block found in 0 seconds"
+            if "Shared memory broadcast has not made progress in 0 seconds"
             in record.message
         ]
         assert warning_messages
@@ -687,7 +687,7 @@ def test_warning_logs(caplog_vllm):
         with pytest.raises(TimeoutError):
             reader.dequeue(timeout=0.01, indefinite=True)
         assert all(
-            "No available shared memory broadcast block found in 0 seconds"
+            "Shared memory broadcast has not made progress in 0 seconds"
             not in record.message
             for record in caplog_vllm.records
         )
@@ -725,7 +725,7 @@ def test_writer_warning_log_includes_wait_state(caplog_vllm):
             warning_messages = [
                 record.message
                 for record in caplog_vllm.records
-                if "No available shared memory broadcast block found in 0 seconds"
+                if "Shared memory broadcast has not made progress in 0 seconds"
                 in record.message
             ]
             assert warning_messages
