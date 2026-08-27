@@ -128,6 +128,32 @@ def test_select_tcpstore_port_non_dp_uses_random(monkeypatch):
     assert RayExecutorV2._select_tcpstore_port(None, master_port=29500) == 54321
 
 
+def test_colocated_tcpstore_ports_differ():
+    """Two or more replicas on one host can collide on the same TCPStore port.
+    Their ports must differ and never be a low system port.
+    """
+    ports = []
+    real_select = RayExecutorV2._select_tcpstore_port
+
+    def record(local_dp_rank, master_port):
+        port = real_select(local_dp_rank, master_port)
+        ports.append(port)
+        return port
+
+    with patch.object(RayExecutorV2, "_select_tcpstore_port", staticmethod(record)):
+        first = RayExecutorV2(vllm_config=create_vllm_config())
+        try:
+            second = RayExecutorV2(vllm_config=create_vllm_config())
+            try:
+                assert len(ports) == 2
+                assert min(ports) >= 1024
+                assert ports[0] != ports[1]
+            finally:
+                second.shutdown()
+        finally:
+            first.shutdown()
+
+
 def test_select_tcpstore_port_full_window_uses_random(monkeypatch):
     """A fully occupied window falls back to a random port."""
 
