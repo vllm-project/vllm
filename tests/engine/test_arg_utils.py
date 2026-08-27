@@ -46,6 +46,27 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+def test_watermark_config_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"algorithm":"gumbel","key":42,"prf":"hmac_sha256"}',
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.algorithm == "gumbel"
+    assert config.key == 42
+    assert config.context_width == 4
+    assert config.prf == "hmac_sha256"
+    assert not config.supports_speculative_decoding
+
+
 @pytest.mark.parametrize(
     ("type_hint", "type", "expected"),
     [

@@ -70,6 +70,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
+from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -427,18 +429,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
-            self.sampler = Sampler(
-                max_num_reqs=self.max_num_reqs,
-                vocab_size=self.vocab_size,
-                device=self.device,
-                req_states=self.req_states,
-                logprobs_mode=self.model_config.logprobs_mode,
-                num_speculative_tokens=self.decode_query_len,
-                use_fp64_gumbel=self.model_config.use_fp64_gumbel,
-                enable_trace_replay=self.model_config.enable_trace_replay,
-                reasoning_config=self.vllm_config.reasoning_config,
-                return_sampling_mask=self.model_config.return_sampling_mask,
-            )
+            sampler_kwargs: dict[str, Any] = {
+                "max_num_reqs": self.max_num_reqs,
+                "vocab_size": self.vocab_size,
+                "device": self.device,
+                "req_states": self.req_states,
+                "logprobs_mode": self.model_config.logprobs_mode,
+                "num_speculative_tokens": self.decode_query_len,
+                "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
+                "enable_trace_replay": self.model_config.enable_trace_replay,
+                "reasoning_config": self.vllm_config.reasoning_config,
+                "return_sampling_mask": self.model_config.return_sampling_mask,
+            }
+            if self.vllm_config.watermark_config is None:
+                self.sampler = Sampler(**sampler_kwargs)
+            else:
+                watermarker = create_watermarker(self.vllm_config.watermark_config)
+                self.sampler = GPUWatermarkSampler(watermarker, **sampler_kwargs)
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:

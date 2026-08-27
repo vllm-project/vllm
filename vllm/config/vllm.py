@@ -50,6 +50,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
+from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -391,6 +392,8 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    watermark_config: WatermarkConfig | None = None
+    """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
     """Diffusion LLM (dLLM) configuration."""
 
@@ -642,6 +645,9 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if getattr(self, "watermark_config", None) is not None:
+            return True
+
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -1123,6 +1129,15 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
 
+        if (
+            self.watermark_config is not None
+            and self.speculative_config is not None
+            and not self.watermark_config.supports_speculative_decoding
+        ):
+            raise ValueError(
+                f"The {self.watermark_config.algorithm} watermarking algorithm "
+                "does not support speculative decoding."
+            )
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()

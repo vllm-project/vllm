@@ -26,6 +26,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+    WatermarkConfig,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -2099,6 +2100,34 @@ def test_draft_sample_method_gumbel_is_rejected():
             num_speculative_tokens=1,
             draft_sample_method="gumbel",
         )
+
+
+def test_gumbel_watermark_rejects_speculative_decoding():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    with pytest.raises(ValueError, match="does not support speculative decoding"):
+        VllmConfig(
+            watermark_config=WatermarkConfig(key=42),
+            speculative_config=speculative_config,
+        )
+
+
+@pytest.mark.parametrize(
+    ("prf", "key", "key_bits"),
+    [("philox", 2**64, 64), ("hmac_sha256", 2**256, 256)],
+)
+def test_watermark_key_range_is_prf_specific(prf, key, key_bits):
+    with pytest.raises(ValueError, match=rf"{key_bits} bits"):
+        WatermarkConfig(key=key, prf=prf)
+
+
+def test_watermarking_forces_model_runner_v2(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = SimpleNamespace(watermark_config=WatermarkConfig(key=42))
+
+    assert VllmConfig.use_v2_model_runner.fget(config)
 
 
 @patch("vllm.config.speculative.ModelConfig")

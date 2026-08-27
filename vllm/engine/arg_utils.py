@@ -105,6 +105,7 @@ from vllm.config.parallel import (
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
+from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -651,6 +652,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    watermark_config: dict[str, Any] | None = None
     diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
@@ -1651,6 +1653,8 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        vllm_kwargs["watermark_config"]["type"] = optional_type(json.loads)
+        vllm_group.add_argument("--watermark-config", **vllm_kwargs["watermark_config"])
         vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
             "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
@@ -1947,6 +1951,14 @@ class EngineArgs:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
+
+    def create_watermark_config(self) -> WatermarkConfig | None:
+        if self.watermark_config is None:
+            return None
+        cfg = self.watermark_config
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        return WatermarkConfig(**cfg)
 
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
@@ -2326,6 +2338,7 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
         diffusion_config = self.create_diffusion_config()
+        watermark_config = self.create_watermark_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
@@ -2546,6 +2559,7 @@ class EngineArgs:
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
+            watermark_config=watermark_config,
             diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,

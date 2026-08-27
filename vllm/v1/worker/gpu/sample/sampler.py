@@ -305,7 +305,29 @@ class Sampler:
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
 
-        # Sample the next token.
+        return self._sample_random(
+            processed_logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            pos,
+            top_k,
+            top_p,
+            use_flashinfer,
+            return_logprobs,
+        )
+
+    def _sample_random(
+        self,
+        processed_logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+        top_k: torch.Tensor | None,
+        top_p: torch.Tensor | None,
+        use_flashinfer: bool,
+        return_logprobs: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del return_logprobs
         if use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:
