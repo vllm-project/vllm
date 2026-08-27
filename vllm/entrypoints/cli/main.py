@@ -31,6 +31,16 @@ def _load_command(name: str):
     raise RuntimeError(f"CLI module {module_name} did not register {name}")
 
 
+def _vllm_version() -> str:
+    try:
+        return importlib.metadata.version("vllm")
+    except importlib.metadata.PackageNotFoundError:
+        # Source-tree runs have no installed distribution metadata.
+        from vllm.version import __version__
+
+        return __version__
+
+
 def _build_parser(selected_name: str | None):
     selected_command = None
     if selected_name in CLI_COMMANDS:
@@ -46,7 +56,7 @@ def _build_parser(selected_name: str | None):
         "-v",
         "--version",
         action="version",
-        version=importlib.metadata.version("vllm"),
+        version=_vllm_version(),
     )
     subparsers = parser.add_subparsers(required=False, dest="subparser")
 
