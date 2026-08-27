@@ -511,10 +511,7 @@ def get_and_maybe_dequant_weights(
     while hasattr(layer, "base_layer") and hasattr(layer.base_layer, "quant_method"):
         layer = layer.base_layer
 
-    if hasattr(layer, "_cpu_unpacked_weight"):
-        weight = layer._cpu_unpacked_weight
-    else:
-        weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
+    weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
     # Unquantized layer: just return base weights
     if layer.quant_method is None or isinstance(

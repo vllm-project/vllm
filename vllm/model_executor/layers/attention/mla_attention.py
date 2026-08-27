@@ -385,32 +385,6 @@ def _get_kv_b_proj_input_dtype(
     return weight_dtype
 
 
-def _gather_mla_context_cache_cpu(
-    *,
-    src_cache: torch.Tensor,
-    dst: torch.Tensor,
-    block_table: torch.Tensor,
-    starts: torch.Tensor,
-    cu_seq_lens: torch.Tensor,
-) -> None:
-    """Gather MLA context KV rows on CPU without custom cache ops."""
-    page_size = src_cache.shape[1]
-    flat_cache = src_cache.view(-1, src_cache.shape[-1])
-    seq_lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
-
-    out_start = 0
-    for req_idx, (start, seq_len) in enumerate(zip(starts.tolist(), seq_lens.tolist())):
-        if seq_len <= 0:
-            continue
-        positions = torch.arange(start, start + seq_len, device=block_table.device)
-        block_ids = block_table[req_idx, positions // page_size].to(torch.long)
-        offsets = positions % page_size
-        slots = block_ids * page_size + offsets
-        out_end = out_start + seq_len
-        dst[out_start:out_end].copy_(flat_cache[slots])
-        out_start = out_end
-
-
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -2724,7 +2698,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     "CPU MLA context gather fallback only supports "
                     f"non-quantized KV cache, got {self.kv_cache_dtype}"
                 )
-                _gather_mla_context_cache_cpu(
+                ops.gather_mla_context_cache_cpu(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
                     block_table=block_table,

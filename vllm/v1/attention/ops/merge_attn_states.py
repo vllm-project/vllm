@@ -156,8 +156,7 @@ def merge_attn_states(
             prefill_tokens_with_context,
             output_scale,
         )
-
-    if current_platform.is_cpu():
+    elif current_platform.is_cpu():
         return _merge_attn_states_torch(
             output,
             prefix_output,
@@ -168,18 +167,18 @@ def merge_attn_states(
             prefill_tokens_with_context,
             output_scale,
         )
+    else:
+        from vllm.v1.attention.ops.triton_merge_attn_states import (
+            merge_attn_states,
+        )
 
-    from vllm.v1.attention.ops.triton_merge_attn_states import (
-        merge_attn_states,
-    )
-
-    return merge_attn_states(
-        output,
-        prefix_output,
-        prefix_lse,
-        suffix_output,
-        suffix_lse,
-        output_lse,
-        prefill_tokens_with_context,
-        output_scale,
-    )
+        return merge_attn_states(
+            output,
+            prefix_output,
+            prefix_lse,
+            suffix_output,
+            suffix_lse,
+            output_lse,
+            prefill_tokens_with_context,
+            output_scale,
+        )
