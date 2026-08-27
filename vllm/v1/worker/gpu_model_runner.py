@@ -752,15 +752,16 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
-        logitsprocs = build_logitsprocs(
-            self.vllm_config,
-            self.device,
-            PIN_MEMORY,
-            self.is_pooling_model,
-            custom_logitsprocs,
-        )
-        # Capture warmup providers registered by the initial placeholder InputBatch
+        # Capture warmup providers registered by the initial placeholder
+        # InputBatch and by logits processor construction.
         with self.jit_warmup_registry.activate():
+            logitsprocs = build_logitsprocs(
+                self.vllm_config,
+                self.device,
+                PIN_MEMORY,
+                self.is_pooling_model,
+                custom_logitsprocs,
+            )
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 # We need to use the encoder length for encoder-decoder
