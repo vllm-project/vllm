@@ -29,8 +29,10 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.responses.streaming_events import StreamingParsedOutput
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
+    construct_builtin_and_mcp_tool_dicts,
     construct_tool_dicts,
     response_item_status,
 )
@@ -105,6 +107,57 @@ class TurnMetrics:
         )
 
 
+class TurnUsageTracker:
+    """Per-turn token accounting shared by contexts that drive multiple
+    generation rounds (e.g., builtin tool loops).
+
+    Semantics mirror ``HarmonyContext``: input and cached tokens are counted
+    once when a generation round starts; output tokens accumulate across
+    streaming deltas within the round; extra prompt tokens introduced after
+    the first round (typically tool outputs) are reported as
+    ``tool_output_tokens``.
+    """
+
+    def __init__(self) -> None:
+        self.all_turn_metrics: list[TurnMetrics] = []
+        self.current_turn_metrics = TurnMetrics()
+        self._last_finished_turn: TurnMetrics | None = None
+        self._turn_active = False
+
+    def start_turn(self, output: RequestOutput) -> bool:
+        """Begin accounting for a new generation round if none is active.
+
+        Returns True if a new round was started, False if a round is
+        already in progress.
+        """
+        if self._turn_active:
+            return False
+        self._turn_active = True
+        input_tokens = len(output.prompt_token_ids or [])
+        self.current_turn_metrics.input_tokens = input_tokens
+        last = self._last_finished_turn
+        if last is not None:
+            tool_tokens = max(
+                0,
+                input_tokens - last.input_tokens - last.output_tokens,
+            )
+            self.current_turn_metrics.tool_output_tokens = tool_tokens
+        self.current_turn_metrics.cached_input_tokens = output.num_cached_tokens or 0
+        return True
+
+    def add_output_tokens(self, num_tokens: int) -> None:
+        self.current_turn_metrics.output_tokens += num_tokens
+
+    def end_turn(self) -> None:
+        if not self._turn_active:
+            return
+        snapshot = self.current_turn_metrics.copy()
+        self.all_turn_metrics.append(snapshot)
+        self._last_finished_turn = snapshot
+        self.current_turn_metrics.reset()
+        self._turn_active = False
+
+
 class ConversationContext(ABC):
     response_parser: Parser | None = None
     request_metrics: "RequestStateStats | None" = None
@@ -112,6 +165,9 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+    # Set by the streaming layer when delta parsing accumulates results;
+    # currently only populated on the Simple (non-harmony) streaming path.
+    streaming_parsed_output: StreamingParsedOutput | None = None
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -203,31 +259,38 @@ class SimpleContext(ConversationContext):
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
-        # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
-        # not implemented yet for SimpleContext
-        self.all_turn_metrics: list[TurnMetrics] = []
+        self.turn_usage = TurnUsageTracker()
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.kv_transfer_params: dict[str, Any] | None = None
         self.ec_transfer_params: dict[str, Any] | None = None
 
+    @property
+    def all_turn_metrics(self) -> list[TurnMetrics]:
+        return self.turn_usage.all_turn_metrics
+
     def append_output(self, output) -> None:
         self.last_output = output
         if not isinstance(output, RequestOutput):
             raise ValueError("SimpleContext only supports RequestOutput.")
-        self.num_prompt_tokens = len(output.prompt_token_ids or [])
-        self.num_cached_tokens = output.num_cached_tokens or 0
+        delta_output = output.outputs[0]
+        if self.turn_usage.start_turn(output):
+            self.num_prompt_tokens += len(output.prompt_token_ids or [])
+            self.num_cached_tokens += output.num_cached_tokens or 0
         if output.num_cache_creation_tokens is not None:
             self.num_cache_creation_tokens = output.num_cache_creation_tokens
-        self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        num_output_tokens = len(delta_output.token_ids or [])
+        self.num_output_tokens += num_output_tokens
+        self.turn_usage.add_output_tokens(num_output_tokens)
+        if delta_output.finish_reason is not None:
+            self.turn_usage.end_turn()
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
         if output.ec_transfer_params is not None:
             self.ec_transfer_params = output.ec_transfer_params
 
         # Accumulate text, token_ids, and logprobs for streaming mode
-        delta_output = output.outputs[0]
         self._accumulated_text += delta_output.text
         self._accumulated_token_ids.extend(delta_output.token_ids)
         if delta_output.logprobs is not None:
@@ -312,14 +375,14 @@ class ParsableContext(ConversationContext):
         chat_template_content_format: ChatTemplateContentFormatOption,
         response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
+        tool_server: ToolServer | None = None,
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.num_reasoning_tokens = 0
-        # not implemented yet for ParsableContext
-        self.all_turn_metrics: list[TurnMetrics] = []
+        self.turn_usage = TurnUsageTracker()
 
         self.response_messages: list[ResponseInputOutputItem] = response_messages
         self.num_init_messages = len(response_messages)
@@ -336,7 +399,7 @@ class ParsableContext(ConversationContext):
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
-        self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        self.tool_dicts = self._build_prompt_tool_dicts(tool_server)
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
@@ -346,19 +409,39 @@ class ParsableContext(ConversationContext):
         self.kv_transfer_params: dict[str, Any] | None = None
         self.ec_transfer_params: dict[str, Any] | None = None
 
+    @property
+    def all_turn_metrics(self) -> list[TurnMetrics]:
+        return self.turn_usage.all_turn_metrics
+
+    def _build_prompt_tool_dicts(
+        self, tool_server: ToolServer | None
+    ) -> list[dict[str, Any]] | None:
+        """Function tools plus builtin/MCP tools rendered for prompting."""
+        tool_dicts = construct_tool_dicts(self.request.tools, self.request.tool_choice)
+        builtin_dicts = construct_builtin_and_mcp_tool_dicts(
+            self.request.tools, tool_server
+        )
+        if builtin_dicts:
+            tool_dicts = (tool_dicts or []) + builtin_dicts
+        return tool_dicts
+
     def append_output(self, output: RequestOutput) -> None:
-        self.num_prompt_tokens = len(output.prompt_token_ids or [])
-        self.num_cached_tokens = output.num_cached_tokens or 0
+        completion = output.outputs[0]
+        if self.turn_usage.start_turn(output):
+            self.num_prompt_tokens += len(output.prompt_token_ids or [])
+            self.num_cached_tokens += output.num_cached_tokens or 0
         self.num_cache_creation_tokens += output.num_cache_creation_tokens or 0
-        self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        num_output_tokens = len(completion.token_ids or [])
+        self.num_output_tokens += num_output_tokens
+        self.turn_usage.add_output_tokens(num_output_tokens)
+        if completion.finish_reason is not None:
+            self.turn_usage.end_turn()
+        self.finish_reason = completion.finish_reason
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
 
         if output.ec_transfer_params is not None:
             self.ec_transfer_params = output.ec_transfer_params
-
-        completion = output.outputs[0]
-        self.finish_reason = completion.finish_reason
 
         if self.response_parser is not None:
             reasoning, content, tool_calls = self.response_parser.parse(
