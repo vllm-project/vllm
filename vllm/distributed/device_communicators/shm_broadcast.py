@@ -247,7 +247,7 @@ def check_shm_free_space(
         if required_bytes > free_bytes:
             mib = 1 << 20
             raise RuntimeError(
-                f"Insufficient space in {shm_path}: "
+                f"Insufficient space in {shm_path} for {allocation_name}: "
                 f"{required_bytes / mib:.0f} MiB required, "
                 f"{free_bytes / mib:.0f} MiB free. Increase {shm_path} "
                 "(e.g. --shm-size or --ipc=host)."

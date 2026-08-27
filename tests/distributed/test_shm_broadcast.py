@@ -742,7 +742,10 @@ def test_check_cgroup_memory_available_raises(monkeypatch):
         lambda: (1 << 30, 512 << 20),
     )
 
-    with pytest.raises(RuntimeError, match="Insufficient cgroup memory for mmap"):
+    with pytest.raises(
+        RuntimeError,
+        match="512 MiB available.*512 MiB current usage",
+    ):
         check_cgroup_memory_available(600 << 20, "mmap")
 
 
@@ -751,6 +754,15 @@ def test_check_cgroup_memory_available_passes_without_limit(monkeypatch):
         cpu_resource_utils,
         "get_cgroup_memory_limit",
         lambda: (None, None),
+    )
+    check_cgroup_memory_available(1 << 60, "mmap")
+
+
+def test_check_cgroup_memory_available_skips_without_usage(monkeypatch):
+    monkeypatch.setattr(
+        cpu_resource_utils,
+        "get_cgroup_memory_limit",
+        lambda: (1 << 30, None),
     )
     check_cgroup_memory_available(1 << 60, "mmap")
 
