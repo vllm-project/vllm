@@ -14,7 +14,6 @@ from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import (
     MCPToolServer,
-    get_tool_input_schema,
     post_process_tools_description,
 )
 
@@ -102,10 +101,7 @@ class TestMCPToolServerUnit:
         # Empty list - returns None
         assert server.get_tool_description("test_server", allowed_tools=[]) is None
 
-    @pytest.mark.parametrize("schema_attribute", ["inputSchema", "input_schema"])
-    def test_post_process_tools_description_supports_mcp_sdk_schema_attributes(
-        self, schema_attribute: str
-    ):
+    def test_post_process_tools_description_uses_mcp_v2_input_schema(self):
         schema = {
             "type": "object",
             "title": "Arguments",
@@ -115,16 +111,43 @@ class TestMCPToolServerUnit:
             name="tool",
             description="test",
             annotations=None,
-            **{schema_attribute: schema},
+            input_schema=schema,
         )
         result = SimpleNamespace(tools=[tool])
 
         post_process_tools_description(result)
 
-        assert get_tool_input_schema(result.tools[0]) == {
+        assert result.tools[0].input_schema == {
             "type": "object",
             "properties": {"value": {"type": "string"}},
         }
+
+    @pytest.mark.asyncio
+    async def test_add_tool_server_uses_mcp_v2_fields(self, monkeypatch):
+        initialize_result = SimpleNamespace(
+            server_info=SimpleNamespace(name="browser"),
+            instructions="Mock tools",
+        )
+        tool = SimpleNamespace(
+            name="get_weather",
+            description="Return mock weather",
+            annotations=None,
+            input_schema={"type": "object", "properties": {}},
+        )
+
+        async def mock_list_server_and_tools(url):
+            return initialize_result, SimpleNamespace(tools=[tool])
+
+        monkeypatch.setattr(
+            "vllm.entrypoints.mcp.tool_server.list_server_and_tools",
+            mock_list_server_and_tools,
+        )
+        server = MCPToolServer()
+
+        await server.add_tool_server("127.0.0.1:8001")
+
+        assert server.has_tool("browser")
+        assert server.urls == {"browser": "http://127.0.0.1:8001/sse"}
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""

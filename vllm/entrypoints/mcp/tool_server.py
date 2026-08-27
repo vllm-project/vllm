@@ -53,18 +53,12 @@ def trim_schema(schema: dict) -> dict:
     return schema
 
 
-def get_tool_input_schema(tool: Any) -> dict:
-    if hasattr(tool, "input_schema"):
-        return tool.input_schema
-    return tool.inputSchema
-
-
 def post_process_tools_description(
     list_tools_result: "ListToolsResult",
 ) -> "ListToolsResult":
     # Adapt the MCP tool result for Harmony
     for tool in list_tools_result.tools:
-        trim_schema(get_tool_input_schema(tool))
+        trim_schema(tool.input_schema)
 
     # Some tools schema don't need to be part of the prompt (e.g. simple text
     # in text out for Python)
@@ -127,17 +121,18 @@ class MCPToolServer(ToolServer):
             list_tools_response = post_process_tools_description(list_tools_response)
 
             tool_from_mcp = ToolNamespaceConfig(
-                name=initialize_response.serverInfo.name,
+                name=initialize_response.server_info.name,
                 description=initialize_response.instructions,
                 tools=[
                     ToolDescription.new(
                         name=tool.name,
                         description=tool.description,
-                        parameters=get_tool_input_schema(tool),
+                        parameters=tool.input_schema,
                     )
                     for tool in list_tools_response.tools
                 ],
             )
+
             self.harmony_tool_descriptions[tool_from_mcp.name] = tool_from_mcp
             if tool_from_mcp.name not in self.urls:
                 self.urls[tool_from_mcp.name] = url

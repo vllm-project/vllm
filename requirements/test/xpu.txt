@@ -376,7 +376,9 @@ mbstrdecoder==1.1.5
     #   pytablewriter
     #   typepy
 mcp==2.0.0
-    # via -r requirements/test/../common.txt
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
 mcp-types==2.0.0
     # via mcp
 mdurl==0.1.2
