@@ -352,6 +352,29 @@ class Scheduler(SchedulerInterface):
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
+        # The mamba "align" state grid is the mamba group's own block size.
+        # `cache_config.block_size` is the minimum over all groups and can be
+        # finer than the state grid in heterogeneous layouts (page-size
+        # matching, a drafter or attention group with a smaller block, or an
+        # explicit --block-size; see also #53142 for the worker-side sibling
+        # of this invariant). The worker checkpoints a state only where a
+        # chunk ENDS exactly on `MambaSpec.block_size` (`postprocess_mamba`),
+        # so `_mamba_block_aligned_split` must stop on that grid: on a finer
+        # generic grid the stops never coincide with it below the scheduler
+        # LCM, no state materializes, and the mamba group publishes no (or a
+        # misaligned) prefix hash.
+        mamba_state_block_sizes = {
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        assert len(mamba_state_block_sizes) <= 1, (
+            "mamba align scheduling requires a single mamba state block size, "
+            f"got {sorted(mamba_state_block_sizes)}"
+        )
+        self.mamba_state_block_size = (
+            next(iter(mamba_state_block_sizes)) if mamba_state_block_sizes else None
+        )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -417,7 +440,14 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
+        # Chunk ends are what the worker checkpoints a mamba state at, so the
+        # stops follow the mamba group's own grid, not the generic group
+        # minimum (see `mamba_state_block_size` in `__init__`).
+        block_size = (
+            self.mamba_state_block_size
+            if self.mamba_state_block_size is not None
+            else self.cache_config.block_size
+        )
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
