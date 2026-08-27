@@ -2605,3 +2605,39 @@ class TestPostprocessMambaFusedKernel:
             atol=0,
             msg="DS num_accepted_tokens result is wrong",
         )
+
+
+def test_mamba1_state_dtype_validation():
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateDtypeCalculator,
+    )
+
+    # Valid combinations
+    assert MambaStateDtypeCalculator.mamba1_state_dtype(
+        "float16", "auto", "auto"
+    ) == (torch.float16, torch.float16)
+    assert MambaStateDtypeCalculator.mamba1_state_dtype(
+        "float16", "float16", "float32"
+    ) == (torch.float16, torch.float32)
+    assert MambaStateDtypeCalculator.mamba1_state_dtype(
+        "bfloat16", "bfloat16", "bfloat16"
+    ) == (torch.bfloat16, torch.bfloat16)
+    assert MambaStateDtypeCalculator.mamba1_state_dtype(
+        "bfloat16", "bfloat16", "float32"
+    ) == (torch.bfloat16, torch.float32)
+
+    # Incompatible combinations that would crash CUDA selective_scan_fwd
+    with pytest.raises(
+        ValueError, match="Mamba-1 selective_scan does not support ssm_state_dtype"
+    ):
+        MambaStateDtypeCalculator.mamba1_state_dtype(
+            "float16", "bfloat16", "bfloat16"
+        )
+
+    with pytest.raises(
+        ValueError, match="Mamba-1 selective_scan does not support ssm_state_dtype"
+    ):
+        MambaStateDtypeCalculator.mamba1_state_dtype(
+            "bfloat16", "float16", "float16"
+        )
+
