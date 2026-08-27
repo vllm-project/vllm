@@ -73,7 +73,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
@@ -133,6 +133,11 @@ class DeepseekV4MLP(nn.Module):
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
+            return
+        # aiter's gemm_a8w8_blockscale_bpreshuffle has no working gfx1250 path
+        # Leaving _gateup_scale as None -> "not preshuffled"
+        # forward() falls back to the standard gate_up_proj linear
+        if on_gfx1250():
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
