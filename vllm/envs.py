@@ -296,7 +296,6 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
-    VLLM_ACCEPTANCE_ESTIMATOR_NUM_WARMUP_REFITS: int = 3
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2036,13 +2035,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),
-    # Adaptive verification sits out this many refits (100 engine steps each)
-    # while the online acceptance estimator fits, so that the drafts it learns
-    # from are not censored by its own trimming. Lower it to start trimming
-    # sooner on short-lived deployments, at the cost of a less settled fit.
-    "VLLM_ACCEPTANCE_ESTIMATOR_NUM_WARMUP_REFITS": lambda: int(
-        os.getenv("VLLM_ACCEPTANCE_ESTIMATOR_NUM_WARMUP_REFITS", "3")
-    ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.
@@ -2272,9 +2264,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
-        # Gates when adaptive verification starts trimming; no effect on
-        # compiled artifacts.
-        "VLLM_ACCEPTANCE_ESTIMATOR_NUM_WARMUP_REFITS",
         # Location-only derived paths: where a cache/config directory lives
         # cannot affect compiled artifacts, and hashing them means relocating
         # HOME or the XDG roots silently invalidates every compile cache

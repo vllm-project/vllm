@@ -372,14 +372,6 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
-    @property
-    def skip_adaptive_verification(self) -> bool:
-        """True while the acceptance estimator is still fitting."""
-        return (
-            self.acceptance_estimator is not None
-            and self.acceptance_estimator.needs_full_verification
-        )
-
     def _greedy_sample(
         self,
         hidden_states: torch.Tensor,
