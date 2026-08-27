@@ -797,8 +797,8 @@ def _w8a8_triton_block_scaled_mm(
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         if FORCE_FP8_DOT_UPCAST:
-            a = a.to(tl.float32)
-            b = b.to(tl.float32)
+            a = a.to(tl.bfloat16)
+            b = b.to(tl.bfloat16)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
