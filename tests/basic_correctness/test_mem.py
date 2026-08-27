@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 
 import pytest
 import torch
@@ -409,3 +410,40 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_discard_poison_pages():
+    """Test that VLLM_POISON_DISCARDED_PAGES makes wake_up() fill the
+    remapped pages of discarded allocations with 0xFF, so stale reads of
+    discarded content are detectable (supports SW3 regression checks,
+    RFC #48310). Offloaded allocations with a CPU backup must be restored,
+    not poisoned."""
+    os.environ["VLLM_POISON_DISCARDED_PAGES"] = "1"
+    try:
+        allocator = get_mem_allocator_instance()
+
+        with allocator.use_memory_pool("weights"):
+            weights = torch.ones(1024, 1024, device=DEVICE_TYPE)
+
+        with allocator.use_memory_pool("kv_cache"):
+            kv = torch.empty(512, 512, dtype=torch.uint8, device=DEVICE_TYPE)
+
+        # Offload weights (CPU backup), discard kv_cache (no backup).
+        allocator.sleep(offload_tags="weights")
+        allocator.wake_up()
+
+        # weights content is restored from the CPU backup, not poisoned.
+        assert torch.allclose(weights, torch.ones_like(weights))
+        # kv_cache pages were discarded and remapped: must be poisoned.
+        assert bool((kv == 0xFF).all())
+
+        # Negative control: without the flag the allocator does not poison
+        # remapped pages (contents are platform-dependent, typically zeroed
+        # by the driver).
+        os.environ.pop("VLLM_POISON_DISCARDED_PAGES")
+        allocator.sleep(offload_tags="weights")
+        allocator.wake_up()
+        assert not bool((kv == 0xFF).all())
+    finally:
+        os.environ.pop("VLLM_POISON_DISCARDED_PAGES", None)
