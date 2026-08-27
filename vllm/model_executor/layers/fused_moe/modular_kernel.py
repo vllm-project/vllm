@@ -93,6 +93,8 @@ class FusedMoEActivationFormat(Enum):
     """
     BatchedExperts = ("batched_experts",)
 
+    PaddedStandard = ("Paddedstandard",)  # E-padded (indexed?)
+
 
 @dataclass
 class ExpertTokensMetadata:
@@ -492,7 +494,7 @@ class FusedMoEExperts(ABC):
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+        if self.activation_format() != FusedMoEActivationFormat.BatchedExperts and (
             max_num_tokens is not None or num_dispatchers is not None
         ):
             raise ValueError(

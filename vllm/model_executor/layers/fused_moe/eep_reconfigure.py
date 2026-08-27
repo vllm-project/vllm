@@ -68,9 +68,9 @@ def make_eep_staged_quant_method(
         return None
 
     old_batched_format = (
-        module.moe_config.moe_parallel_config.use_batched_activation_format
+        module.moe_config.use_batched_activation_format
     )
-    new_batched_format = moe_config.moe_parallel_config.use_batched_activation_format
+    new_batched_format = moe_config.use_batched_activation_format
     assert old_batched_format == new_batched_format
 
     moe_kernel = quant_method.moe_kernel

@@ -206,17 +206,13 @@ class Config:
             and self.quant_block_shape is not None
         )
 
-    def is_batched_prepare_finalize(self):
+    def prepare_finalize_format(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
+        return info.activation_format
 
-    def is_batched_fused_experts(self):
+    def fused_experts_format(self):
         info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
-
-    def is_standard_fused_experts(self):
-        info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.Standard == info.activation_format
+        return info.activation_format
 
     def fe_supported_types(self):
         info = expert_info(self.fused_experts_type)
@@ -263,12 +259,8 @@ class Config:
 
     def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
-        if self.is_batched_prepare_finalize():
-            if not self.is_batched_fused_experts():
-                return False, "Mismatched format."
-        else:
-            if not self.is_standard_fused_experts():
-                return False, "Mismatched format."
+        if self.prepare_finalize_format() != self.fused_experts_format():
+            return False, f"Mismatched format {self.prepare_finalize_format()} != {self.fused_experts_format()}."
 
         # Check quantization sanity
         if (

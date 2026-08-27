@@ -218,11 +218,7 @@ def select_wna16_moe_backend(
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
     """
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(backend: WNA16MoEBackend):
         return f"Using '{backend.value}' WNA16 MoE backend."

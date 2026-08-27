@@ -106,11 +106,7 @@ def select_int8_moe_backend(
 
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(backend: Int8MoeBackend) -> str:
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]

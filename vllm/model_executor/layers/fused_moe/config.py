@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -19,6 +19,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEActivationFormat
 
 logger = init_logger(__name__)
 
@@ -1088,10 +1091,6 @@ class FusedMoEParallelConfig:
         )
 
     @property
-    def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
-
-    @property
     def needs_round_robin_routing_tables(self):
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
@@ -1387,6 +1386,22 @@ class FusedMoEConfig:
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA, XPU and ROCm for now"
             )
+
+    @property
+    def use_batched_activation_format(self):
+        from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEActivationFormat
+        return self.activation_format == FusedMoEActivationFormat.BatchedExperts
+
+    @property
+    def activation_format(self) -> "FusedMoEActivationFormat":
+        from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEActivationFormat
+        conf = self.moe_parallel_config
+        if conf.use_deepep_ll_kernels or conf.use_nixl_ep_kernels or conf.moe_backend == "batched_triton":
+            return FusedMoEActivationFormat.BatchedExperts
+        elif conf.use_deepep_v2_kernels:
+            return FusedMoEActivationFormat.PaddedStandard
+        else:
+            return FusedMoEActivationFormat.Standard
 
     @property
     def is_act_and_mul(self) -> bool:
