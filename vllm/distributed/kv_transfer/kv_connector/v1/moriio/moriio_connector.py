@@ -2720,24 +2720,11 @@ class MoRIIOConnectorWorker:
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
                 layer_name
             )
-            # Route this layer to its KV cache group's block-id lists. Hybrid
-            # sliding-window models keep a separate (window-clipped) block table
-            # per group; non-hybrid models have a single group (index 0).
-            group_idx = self.layer_to_group.get(layer_name, 0)
-            # Empty lists are the no-op transfer (full prefix hit / abort). When
-            # non-empty, there is one sublist per KV cache group, so indexing by
-            # group is in range; a malformed short list fails loud rather than
-            # silently under-transferring.
-            layer_local_block_ids = (
-                local_block_ids[group_idx] if local_block_ids else []
-            )
-            layer_remote_block_ids = (
-                remote_block_ids[group_idx] if remote_block_ids else []
-            )
+            group_idx = self.layer_to_group[layer_name]
             offs = self._compute_block_transfer_offsets(
                 layer_name,
-                layer_local_block_ids,
-                layer_remote_block_ids,
+                local_block_ids[group_idx],
+                remote_block_ids[group_idx],
                 remote_moriio_meta,
                 remote_tp_size=remote_tp_size,
             )
