@@ -70,7 +70,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v4",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "kimi_k3"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "inkling", "kimi_k3"})
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -581,6 +581,102 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
         ),
         end=_K3_TOOLS_CLOSE,
     )
+
+
+# --- Inkling -------------------------------------------------------------------
+# Wire format (vllm/parser/inkling.py):
+#   tool call: <|message_model|><|content_invoke_tool_json|>
+#              {"name": "get_weather", "args": {"city": "SF"}}<|end_message|>
+#   text:      <|message_model|><|content_text|>...<|end_message|>
+#
+# Inkling wraps its tool JSON in content markers, which is exactly why a BARE
+# JSON-schema constraint is wrong for it -- Dynamo's prepost.py gates that
+# fallback off for this parser because forcing raw JSON conflicts with the wire
+# format and can crash EngineCore under speculative decoding. The structural tag
+# constrains markers AND payload together, which is the whole point.
+_INKLING_MESSAGE_MODEL = "<|message_model|>"
+_INKLING_CONTENT_TEXT = "<|content_text|>"
+_INKLING_TOOL_JSON = "<|content_invoke_tool_json|>"
+_INKLING_END_MESSAGE = "<|end_message|>"
+_INKLING_TOOL_OPEN = _INKLING_MESSAGE_MODEL + _INKLING_TOOL_JSON
+_INKLING_TEXT_OPEN = _INKLING_MESSAGE_MODEL + _INKLING_CONTENT_TEXT
+
+
+def _inkling_call_schema(tool: FunctionToolParam) -> dict[str, Any]:
+    """`{"name": "<this tool>", "args": {...}}` -- name pinned to ONE tool."""
+    parameters = get_function_parameters(tool.function)
+    args_schema: Any = (
+        parameters if isinstance(parameters, dict) else {"type": "object"}
+    )
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"const": tool.function.name},
+            "args": args_schema,
+        },
+        "required": ["name", "args"],
+        "additionalProperties": False,
+    }
+
+
+def _inkling_call_tag(tool: FunctionToolParam) -> TagFormat:
+    return TagFormat(
+        begin=_INKLING_TOOL_OPEN,
+        content=JSONSchemaFormat(json_schema=_inkling_call_schema(tool)),
+        end=_INKLING_END_MESSAGE,
+    )
+
+
+def _inkling_tool_calls(tools: list[FunctionToolParam]) -> Any:
+    """One or more tool-call blocks, in any order, at least one."""
+    return TagsWithSeparatorFormat(
+        tags=[_inkling_call_tag(tool) for tool in tools],
+        separator="",
+        at_least_one=True,
+    )
+
+
+def _inkling_text_block() -> TagFormat:
+    return TagFormat(
+        begin=_INKLING_TEXT_OPEN,
+        content=AnyTextFormat(excludes=[_INKLING_END_MESSAGE]),
+        end=_INKLING_END_MESSAGE,
+    )
+
+
+@register_vllm_structural_tag("inkling")
+def get_inkling_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+) -> StructuralTag:
+    # `reasoning` is deliberately unused: an Inkling thinking block is a separate
+    # <|content_thinking|> message that precedes this one, and constraining it here
+    # would forbid the model from thinking before it calls a tool.
+    del builtin_tools, reasoning
+
+    if not tools:
+        return StructuralTag(format=_inkling_text_block())
+
+    if tool_choice == "auto":
+        # The model may answer in text INSTEAD of calling a tool.
+        return StructuralTag(
+            format=OrFormat(
+                elements=[_inkling_tool_calls(tools), _inkling_text_block()]
+            )
+        )
+    if tool_choice == "forced":
+        # A named tool_choice. normalize_tool_choice() has ALREADY filtered
+        # `tools` to the named one, so tools[:1] IS that tool.
+        # Use the same CONTAINER format as the required branch, never a bare
+        # call tag: a bare TagFormat at the root is a TRIGGERED constraint
+        # (xgrammar only enforces after `begin` matches), so it never anchors
+        # and the model stays free to call a different tool. kimi_k3 wraps
+        # forced the same way, for the same reason.
+        return StructuralTag(format=_inkling_tool_calls(tools[:1]))
+    # required: at least one call from the offered set, no text alternative.
+    return StructuralTag(format=_inkling_tool_calls(tools))
 
 
 @register_vllm_structural_tag("kimi_k3")
