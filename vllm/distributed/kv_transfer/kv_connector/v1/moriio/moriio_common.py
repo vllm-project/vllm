@@ -556,13 +556,10 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             )
         )
 
-        # Per-group block ids (BlockIds); [] on the WRITE producer leg.
-        remote_block_ids = kv_transfer_params["remote_block_ids"] or []
-
         _req = ReqMeta(
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
-            remote_block_ids=remote_block_ids,
+            remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=remote_host,
             remote_port=int(remote_handshake_port),
