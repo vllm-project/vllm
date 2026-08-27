@@ -2358,6 +2358,22 @@ def test_hisparse_shared_sparse_builder_routes_multi_token_chunks_to_prefill():
     assert builder.reorder_batch_threshold == 1
 
 
+def test_hisparse_mixed_single_token_batch_is_not_decode_only():
+    impl = object.__new__(FlashMLASparseImpl)
+    impl.hisparse_cache = SimpleNamespace(decode_batch=False)
+    metadata = SimpleNamespace(
+        num_decode_tokens=1,
+        num_actual_tokens=2,
+        max_query_len=1,
+        num_reqs=2,
+        req_id_per_token=torch.arange(2),
+    )
+
+    impl.prepare_for_batch(metadata)
+
+    assert not impl.hisparse_cache.decode_batch
+
+
 def test_flashmla_cache_dtype_aliases_use_ds_layout():
     from vllm.model_executor.layers.attention.mla_attention import (
         _canonicalize_sparse_mla_kv_cache_dtype,
