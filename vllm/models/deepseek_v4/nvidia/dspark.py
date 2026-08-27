@@ -204,8 +204,7 @@ class DSparkDeepseekV4Model(nn.Module):
                 )
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
-        # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
-        hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        hidden_states = inputs_embeds
 
         residual = post_mix = res_mix = None
         for layer in self.layers:
@@ -230,6 +229,9 @@ class DSparkDeepseekV4Model(nn.Module):
             self.hc_eps,
         )
         return hidden_states
+
+    def finalize_mhc_broadcast_weights(self) -> None:
+        self.layers[0].finalize_mhc_broadcast_weight()
 
 
 def _insert_context_kv(
@@ -516,6 +518,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
+        self.model.finalize_mhc_broadcast_weights()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
