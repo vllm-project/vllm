@@ -481,7 +481,8 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
-    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
+    dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
+    dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -495,6 +496,9 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_batch_sharded_sampling: bool | None = (
+        ParallelConfig.enable_batch_sharded_sampling
+    )
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
@@ -655,6 +659,9 @@ class EngineArgs:
     otlp_traces_endpoint: str | None = ObservabilityConfig.otlp_traces_endpoint
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
+    )
+    per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = (
+        ObservabilityConfig.per_request_spec_decode_metrics
     )
     kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
     kv_cache_metrics_sample: float = get_field(
@@ -1068,6 +1075,10 @@ class EngineArgs:
             **parallel_kwargs["dcp_comm_backend"],
         )
         parallel_group.add_argument(
+            "--dcp-q-replicate",
+            **parallel_kwargs["dcp_q_replicate"],
+        )
+        parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
             **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
@@ -1147,6 +1158,10 @@ class EngineArgs:
             "--enable-expert-parallel",
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
+        )
+        parallel_group.add_argument(
+            "--enable-batch-sharded-sampling",
+            **parallel_kwargs["enable_batch_sharded_sampling"],
         )
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
@@ -1475,6 +1490,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
+        )
+        observability_group.add_argument(
+            "--per-request-spec-decode-metrics",
+            **observability_kwargs["per_request_spec_decode_metrics"],
         )
         observability_group.add_argument(
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
@@ -1934,6 +1953,7 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
@@ -2266,6 +2286,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
@@ -2287,6 +2308,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
+            dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
