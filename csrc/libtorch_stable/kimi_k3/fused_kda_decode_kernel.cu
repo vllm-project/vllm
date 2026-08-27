@@ -329,6 +329,24 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
   }
 
   constexpr int kLocalDim = kFixedHeads * kDimK;
+  // gdn_attn.py pads full CUDA-graph decode batches with NULL_BLOCK_ID (0).
+  // The unfused convolution and recurrent kernels skip those rows. Mirror that
+  // behavior here so padding neither races on slot 0 nor exposes stale output.
+  // `slot` is block-uniform, so returning before the synchronizations below is
+  // safe. Complete the programmatic-launch protocol before leaving the block.
+  if constexpr (kUseStaticDecodeLayout) {
+    if (slot <= 0) {
+      if (tid < kDimV) {
+        out[static_cast<int64_t>(i_n) * kLocalDim + i_hv * kDimV + tid] =
+            bf16_store(0.0f);
+      }
+      __syncthreads();
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+      cudaTriggerProgrammaticLaunchCompletion();
+#endif
+      return;
+    }
+  }
   constexpr int kPackedDim = 3 * kLocalDim;
   const int hk_off = i_h * kDimK;
   const int hv_off = i_hv * kDimV;
@@ -805,6 +823,9 @@ void launch_kda_decode_many_heads_selected(
     case 24:
       LAUNCH_KDA_DECODE(24);
       break;
+    case 32:
+      LAUNCH_KDA_DECODE(32);
+      break;
     case 48:
       LAUNCH_KDA_DECODE(48);
       break;
@@ -989,9 +1010,9 @@ void fused_kda_decode(
   STD_TORCH_CHECK(qkv_width % (3 * kHeadDim) == 0,
                   "x must have shape [B, 3 * H * 128]");
   int64_t const num_heads = qkv_width / (3 * kHeadDim);
-  STD_TORCH_CHECK(
-      num_heads == 12 || num_heads == 24 || num_heads == 48 || num_heads == 96,
-      "H must be 12, 24, 48, or 96, got ", num_heads);
+  STD_TORCH_CHECK(num_heads == 12 || num_heads == 24 || num_heads == 32 ||
+                      num_heads == 48 || num_heads == 96,
+                  "H must be 12, 24, 32, 48, or 96, got ", num_heads);
   STD_TORCH_CHECK(batch_size > 0,
                   "KDA decode fusion requires at least one row");
   int const dim = num_heads * kHeadDim;
