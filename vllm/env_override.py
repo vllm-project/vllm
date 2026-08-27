@@ -48,12 +48,15 @@ def _get_torch_version_attr(name: str) -> Any | None:
         return None
     try:
         for node in ast.parse(source).body:
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == name
-            ):
+            # torch/version.py mixes plain and annotated assignments, for
+            # example `cuda: Optional[str] = "13.0"`.
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                target = node.target
+            else:
+                continue
+            if isinstance(target, ast.Name) and target.id == name:
                 return ast.literal_eval(node.value)
     except (SyntaxError, ValueError):
         pass

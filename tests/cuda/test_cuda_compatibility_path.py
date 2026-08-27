@@ -191,6 +191,12 @@ class TestGetTorchCudaVersion:
         torch = pytest.importorskip("torch")
         assert _get_torch_cuda_version() == torch.version.cuda
 
+    def test_reads_annotated_assignment(self):
+        """torch/version.py declares cuda with an annotation."""
+        source = 'git_version = "abc"\ncuda: Optional[str] = "13.0"\n'
+        with patch("vllm.env_override._torch_version_source", return_value=source):
+            assert _get_torch_cuda_version() == "13.0"
+
     def test_returns_none_when_torch_missing(self):
         """Should return None when torch is not importable."""
         with patch(
