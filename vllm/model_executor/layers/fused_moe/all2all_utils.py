@@ -403,9 +403,9 @@ def maybe_make_prepare_finalize(
             num_global_experts=moe.num_experts,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
         )
-        fleet = all2all_manager.get_handle(all_to_all_args)
+        handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = FlashInferEPLLPrepareAndFinalize(
-            fleet,
+            handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
@@ -420,9 +420,9 @@ def maybe_make_prepare_finalize(
             num_global_experts=moe.num_experts,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
         )
-        fleet = all2all_manager.get_handle(all_to_all_args)
+        handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = FlashInferEPHTPrepareAndFinalize(
-            fleet,
+            handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_local_experts=moe.num_experts // all2all_manager.world_size,

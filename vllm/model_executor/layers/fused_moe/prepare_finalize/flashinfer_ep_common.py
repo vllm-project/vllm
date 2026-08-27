@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared plumbing for the FlashInfer `moe_ep` (NCCL-EP) prepare/finalize adapters.
+"""Shared plumbing for the FlashInfer `moe_ep` prepare/finalize adapters.
 
 Both the low-latency (BatchedExperts) and high-throughput (Standard) adapters drive
 the same `flashinfer.moe_ep` sequence per forward:
@@ -19,17 +19,25 @@ stashed per micro-batch id so dual-batch-overlap (DBO) works like the DeepEP ada
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+if TYPE_CHECKING:
+    from flashinfer.moe_ep import Fleet
+
 
 class FlashInferEPPrepareAndFinalizeBase(mk.FusedMoEPrepareAndFinalizeModular):
     """Common base for the FlashInfer moe_ep LL / HT prepare-finalize adapters."""
 
-    def __init__(self, fleet, num_dispatchers: int, num_local_experts: int):
+    def __init__(self, fleet: Fleet, num_dispatchers: int, num_local_experts: int):
         super().__init__()
+        # `fleet` is what the manager's get_handle() returned: FlashInfer's
+        # durable transport endpoint, distinct from the per-forward `Handle`
+        # created in prepare(). cf. `buffer: deep_ep.Buffer` in deepep_ht.py.
         self._fleet = fleet
         self._num_dispatchers = num_dispatchers
         self._num_local_experts = num_local_experts

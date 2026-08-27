@@ -14,6 +14,8 @@ Scope: bf16 activations (MVP). Quantized dispatch (fp8/nvfp4) is a follow-up.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -24,13 +26,16 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 
 from .flashinfer_ep_common import FlashInferEPPrepareAndFinalizeBase
 
+if TYPE_CHECKING:
+    from flashinfer.moe_ep import Fleet
+
 
 class FlashInferEPLLPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
     """Prepare/Finalize using FlashInfer moe_ep low-latency (EXPERT_MAJOR)."""
 
     def __init__(
         self,
-        fleet,
+        fleet: Fleet,
         max_tokens_per_rank: int,
         num_dispatchers: int,
         num_local_experts: int,

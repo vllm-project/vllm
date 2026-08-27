@@ -1096,7 +1096,15 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
 
 
 class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
-    """All2All based on FlashInfer's `moe_ep` API (NCCL-EP transport).
+    """All2All based on FlashInfer's `moe_ep` API.
+
+    A **Fleet** is FlashInfer's durable EP transport endpoint: the communicator
+    plus the registered RDMA/staging buffers. It is sized once per MoE config
+    and reused for the process lifetime. Each forward creates a short-lived
+    **Handle** from it, bound to that step's `topk_ids`, which carries
+    dispatch/combine/complete. Fleet : Handle is the same split as
+    `deep_ep.Buffer` : the handle returned by `Buffer.dispatch()`, and in vLLM
+    terms the Fleet *is* the "handle" that `get_handle()` returns.
 
     Unlike the raw `nccl.ep` integration, this drives NVIDIA's nccl4py EP kernels
     through the packaged, versioned `flashinfer.moe_ep` wrapper (create_fleet /
@@ -1143,7 +1151,9 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
             "(VLLM_FLASHINFER_EP_TRANSPORT).",
             self._transport,
         )
-        # Config-keyed Fleet cache (different layers may size differently).
+        # Config-keyed Fleet cache: one durable transport endpoint per MoE
+        # sizing (different layers may size differently). See the class
+        # docstring for what a Fleet is.
         self._fleets: dict[tuple, Any] = {}
         self._ft_last_mask: torch.Tensor | None = None
 
@@ -1226,6 +1236,10 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
 
     def get_handle(self, kwargs):
         """Return the (cached) FlashInfer `Fleet` for this MoE config.
+
+        This is vLLM's "handle" for the all2all: callers outside this module
+        treat it as the opaque object `get_handle()` contracts to return, the
+        way the DeepEP managers return a `deep_ep.Buffer`.
 
         `kwargs` is the `all_to_all_args` dict built in
         `maybe_make_prepare_finalize` (num_global_experts /
