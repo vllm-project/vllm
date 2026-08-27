@@ -57,7 +57,6 @@ from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
-PREFIX_CACHE_HIT_RATE_WARNING_THRESHOLD = 0.01
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -311,83 +310,6 @@ async def fetch_diffusion_metrics(
             )
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
-
-
-@dataclass
-class PrefixCacheCounters:
-    """Cumulative prefix-cache counters from the Prometheus endpoint."""
-
-    queries: int
-    hits: int
-
-
-def _parse_prefix_cache_counters(text: str) -> PrefixCacheCounters | None:
-    counters = {
-        "vllm:prefix_cache_queries_total": 0,
-        "vllm:prefix_cache_hits_total": 0,
-    }
-    found: set[str] = set()
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        metric_name = parts[0].split("{", 1)[0]
-        if metric_name not in counters:
-            continue
-        with contextlib.suppress(ValueError):
-            counters[metric_name] += int(float(parts[1]))
-            found.add(metric_name)
-
-    if found != set(counters):
-        return None
-    return PrefixCacheCounters(
-        queries=counters["vllm:prefix_cache_queries_total"],
-        hits=counters["vllm:prefix_cache_hits_total"],
-    )
-
-
-async def fetch_prefix_cache_counters(
-    base_url: str, session: aiohttp.ClientSession
-) -> PrefixCacheCounters | None:
-    metrics_url = f"{base_url}/metrics"
-    try:
-        async with session.get(metrics_url) as response:
-            if response.status != 200:
-                return None
-            return _parse_prefix_cache_counters(await response.text())
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        return None
-
-
-def _warn_if_prefix_cache_hits(
-    before: PrefixCacheCounters | None,
-    after: PrefixCacheCounters | None,
-) -> None:
-    if before is None or after is None:
-        return
-
-    queries = after.queries - before.queries
-    hits = after.hits - before.hits
-    if queries <= 0 or hits < 0 or hits > queries:
-        return
-
-    hit_rate = hits / queries
-    if hit_rate < PREFIX_CACHE_HIT_RATE_WARNING_THRESHOLD:
-        return
-
-    warnings.warn(
-        f"This benchmark run observed a {hit_rate:.1%} prefix cache hit rate. "
-        "Hits may come from shared prefixes within this run or cached prompts "
-        "from an earlier run; the latter can inflate throughput. If cache reuse "
-        "is not intended, reset the prefix cache, restart the server, or use "
-        "`vllm bench sweep serve` for parameter sweeps.",
-        stacklevel=2,
-    )
 
 
 class TaskType(Enum):
@@ -1041,7 +963,6 @@ async def benchmark(
 
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
     diffusion_metrics_before = await fetch_diffusion_metrics(base_url, session)
-    prefix_cache_counters_before = await fetch_prefix_cache_counters(base_url, session)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -1230,12 +1151,6 @@ async def benchmark(
                 "steps_per_canvas": denoising_steps / num_canvases,
                 "committed_per_step": delta_committed / denoising_steps,
             }
-
-    prefix_cache_counters_after = await fetch_prefix_cache_counters(base_url, session)
-    _warn_if_prefix_cache_hits(
-        prefix_cache_counters_before,
-        prefix_cache_counters_after,
-    )
 
     metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
     actual_output_lens: list[int] | int
