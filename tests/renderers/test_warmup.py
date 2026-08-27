@@ -6,11 +6,18 @@ These tests exercise:
   - Zero-limit modalities are filtered from mm_counts passed to
     get_dummy_processor_inputs (e.g. --limit-mm-per-prompt image=0 ...)
   - MM warmup is skipped entirely when mm_processor is None
+  - The multimodal warmup is launched as a task on the single-worker
+    ``_mm_executor`` to overlap engine-core init (future lifecycle, join by
+    warmup/reset/shutdown, no double-run). Routing it through the same
+    executor that serves ``_process_multimodal`` keeps the numba workqueue
+    parallel region single-threaded, avoiding the "Concurrent access has been
+    detected" fatal abort when a request arrives during warmup.
 
 No model weights are required: warmup() is called directly on a MagicMock
 that acts as the renderer instance.
 """
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 from vllm.renderers.base import BaseRenderer
@@ -39,6 +46,18 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
         renderer, BaseRenderer
     )
     renderer._clear_processor_cache = BaseRenderer._clear_processor_cache
+    renderer.warmup_mm = BaseRenderer.warmup_mm.__get__(renderer, BaseRenderer)
+    renderer.start_mm_warmup_in_background = (
+        BaseRenderer.start_mm_warmup_in_background.__get__(renderer, BaseRenderer)
+    )
+    renderer._join_mm_warmup = BaseRenderer._join_mm_warmup.__get__(
+        renderer, BaseRenderer
+    )
+    renderer.shutdown = BaseRenderer.shutdown.__get__(renderer, BaseRenderer)
+    # No background warmup launched by default; warmup() takes the inline path.
+    renderer._mm_warmup_future = None
+    # MM warmup has not run yet; warmup_mm must actually execute on the mock.
+    renderer._mm_warmup_done = False
     renderer.clear_mm_cache = MagicMock()
     renderer.model_config.max_model_len = 128
     renderer.model_config.get_multimodal_config.return_value.limit_per_prompt = {}
@@ -133,3 +152,179 @@ class TestReadonlyMmWarmup:
 
         readonly_mm_processor.apply.assert_called_once()
         readonly_mm_processor.cache.clear_cache.assert_called_once()
+
+
+class TestChatWarmupDispatched:
+    """The chat-template warmup task must always run."""
+
+    def test_render_chat_called_with_warmup_message(self):
+        renderer = _make_renderer_mock({"image": 1})
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            BaseRenderer.warmup(renderer, ChatParams())
+
+        renderer.render_chat.assert_called_once()
+
+
+class TestWarmupFaultIsolation:
+    """A failure during a multimodal processor warmup is caught so it does not
+    abort the remaining warmup steps; warmup itself must not raise."""
+
+    def test_chat_failure_does_not_abort_mm_warmup(self):
+        renderer = _make_renderer_mock({"image": 1})
+        renderer.render_chat.side_effect = RuntimeError("chat boom")
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            BaseRenderer.warmup(renderer, ChatParams())  # must not raise
+
+        renderer.mm_processor.apply.assert_called_once()
+
+    def test_mm_failure_does_not_abort_readonly_warmup(self):
+        renderer = _make_renderer_mock({"image": 1})
+        readonly_mm_processor = MagicMock()
+        readonly_mm_processor.info.allowed_mm_limits = {"image": 1}
+        renderer._readonly_mm_processor = readonly_mm_processor
+        # main processor warmup blows up before apply()
+        renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs.side_effect = (
+            RuntimeError("mm boom")
+        )
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            BaseRenderer.warmup(renderer, ChatParams())  # must not raise
+
+        readonly_mm_processor.apply.assert_called_once()
+        # cache is still cleared in the failed task's finally
+        renderer.clear_mm_cache.assert_called_once()
+
+
+class TestBackgroundMmWarmup:
+    """The multimodal warmup is launched as a task on the single-worker
+    ``_mm_executor`` so it overlaps engine-core init (fork) while staying
+    serialized with the serving path (``_process_multimodal`` runs on the same
+    executor). warmup()/reset_mm_cache/shutdown join it. This also fixes the
+    numba workqueue "Concurrent access has been detected" abort: warmup and a
+    concurrent serving request can no longer both enter the numba parallel
+    region at once."""
+
+    def _make_bg_renderer(self, mm_limits: dict[str, int]):
+        """A renderer mock with a real single-worker executor so submit()
+        returns a real Future and warmup_mm actually runs (in the worker)."""
+        renderer = _make_renderer_mock(mm_limits)
+        renderer._mm_executor = ThreadPoolExecutor(max_workers=1)
+        return renderer
+
+    def test_start_submits_future_to_mm_executor(self):
+        renderer = self._make_bg_renderer({"image": 1})
+        try:
+            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+                # Spy on the real executor's submit to confirm the warmup is
+                # dispatched through _mm_executor (not a separate Thread).
+                with patch.object(
+                    renderer._mm_executor, "submit", wraps=renderer._mm_executor.submit
+                ) as spy:
+                    renderer.start_mm_warmup_in_background()
+                    assert isinstance(renderer._mm_warmup_future, Future)
+                    assert spy.called
+                renderer._join_mm_warmup()
+            assert renderer._mm_warmup_future is None
+            renderer.mm_processor.apply.assert_called_once()
+        finally:
+            renderer._mm_executor.shutdown(wait=True)
+
+    def test_start_noop_for_text_only_model(self):
+        renderer = _make_renderer_mock({})
+        renderer.mm_processor = None
+        # _readonly_mm_processor is already None
+
+        renderer.start_mm_warmup_in_background()
+
+        assert renderer._mm_warmup_future is None
+
+    def test_start_is_run_at_most_once(self):
+        renderer = self._make_bg_renderer({"image": 1})
+        try:
+            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+                renderer.start_mm_warmup_in_background()
+                first = renderer._mm_warmup_future
+                renderer.start_mm_warmup_in_background()  # must not spawn a second
+                assert renderer._mm_warmup_future is first
+                renderer._join_mm_warmup()
+        finally:
+            renderer._mm_executor.shutdown(wait=True)
+
+    def test_warmup_joins_background_and_does_not_rerun_mm(self):
+        """When a background MM warmup is in flight, warmup() must join it and
+        run only the chat warmup — the MM warmup must not run twice."""
+        renderer = self._make_bg_renderer({"image": 1})
+        try:
+            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+                renderer.start_mm_warmup_in_background()
+                BaseRenderer.warmup(renderer, ChatParams())
+
+            # MM apply called exactly once (by the background warmup task).
+            renderer.mm_processor.apply.assert_called_once()
+            # Chat warmup ran exactly once.
+            renderer.render_chat.assert_called_once()
+            # Background task has been joined and cleared.
+            assert renderer._mm_warmup_future is None
+        finally:
+            renderer._mm_executor.shutdown(wait=True)
+
+    def test_warmup_does_not_rerun_mm_after_reset_joins_background(self):
+        """Regression: reset_mm_cache joins the background warmup before
+        warmup() runs (it clears _mm_warmup_future). warmup() must still not
+        re-run the MM warmup — the _mm_warmup_done flag survives the join."""
+        renderer = self._make_bg_renderer({"image": 1})
+        try:
+            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+                renderer.start_mm_warmup_in_background()
+                # Simulate reset_mm_cache joining the background warmup first
+                # (clears _mm_warmup_future, sets _mm_warmup_done via the join).
+                renderer._join_mm_warmup()
+                assert renderer._mm_warmup_future is None  # joined & cleared
+                BaseRenderer.warmup(renderer, ChatParams())
+
+            # MM apply called exactly once (by the background warmup task);
+            # warmup() did not re-run warmup_mm despite the future being cleared.
+            renderer.mm_processor.apply.assert_called_once()
+            renderer.render_chat.assert_called_once()
+        finally:
+            renderer._mm_executor.shutdown(wait=True)
+
+    def test_warmup_mm_runs_at_most_once(self):
+        """Direct repeated calls to warmup_mm run the MM warmup only once."""
+        renderer = _make_renderer_mock({"image": 1})
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            renderer.warmup_mm()
+            renderer.warmup_mm()  # second call must be a no-op
+
+        renderer.mm_processor.apply.assert_called_once()
+
+    def test_join_mm_warmup_blocks_until_apply_done(self):
+        renderer = self._make_bg_renderer({"image": 1})
+        try:
+            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+                renderer.start_mm_warmup_in_background()
+                renderer._join_mm_warmup()
+
+            assert renderer._mm_warmup_future is None
+            renderer.mm_processor.apply.assert_called_once()
+        finally:
+            renderer._mm_executor.shutdown(wait=True)
+
+    def test_shutdown_joins_background_warmup(self):
+        """shutdown() must join the background warmup before closing caches,
+        so the mm_processor_cache is never touched concurrently."""
+        renderer = self._make_bg_renderer({"image": 1})
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            renderer.start_mm_warmup_in_background()
+            future = renderer._mm_warmup_future
+            renderer.shutdown()
+
+        assert renderer._mm_warmup_future is None
+        # The background warmup was allowed to complete (apply ran) and the
+        # future is done after shutdown joined it.
+        assert future.done()
+        renderer.mm_processor.apply.assert_called_once()
