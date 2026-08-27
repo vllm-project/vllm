@@ -315,6 +315,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_FLASHINFER_EP_TRANSPORT: str = "nccl_ep"
     VLLM_FLASHINFER_EP_FAULT_TOLERANCE: bool = False
     VLLM_FLASHINFER_EP_TIMEOUT_MS: int = 0
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
@@ -2114,6 +2115,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # Transport backing the flashinfer.moe_ep all2all backends: "nccl_ep"
+    # (default) or "nixl_ep". This is a sub-configuration of
+    # --all2all-backend flashinfer_ep_low_latency, not a backend of its own:
+    # moe_ep presents one API over both. "nixl_ep" is low-latency only.
+    "VLLM_FLASHINFER_EP_TRANSPORT": lambda: os.getenv(
+        "VLLM_FLASHINFER_EP_TRANSPORT", "nccl_ep"
     ),
     # Enable FlashInfer EP rank masking, so a dead/slow EP peer is skipped
     # instead of tripping a GPU trap that kills the job. Low-latency

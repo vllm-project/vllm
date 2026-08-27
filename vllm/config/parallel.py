@@ -52,9 +52,8 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
-    "flashinfer_ep_low_latency",  # flashinfer.moe_ep (NCCL-EP) low-latency
-    "flashinfer_ep_high_throughput",  # flashinfer.moe_ep (NCCL-EP) high-throughput
-    "flashinfer_ep_nixl",  # flashinfer.moe_ep (NIXL-EP) low-latency
+    "flashinfer_ep_low_latency",  # flashinfer.moe_ep low-latency
+    "flashinfer_ep_high_throughput",  # flashinfer.moe_ep high-throughput
 ]
 
 
@@ -206,10 +205,13 @@ class ParallelConfig:
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_ep_low_latency": flashinfer.moe_ep low-latency (NCCL-EP)
+    - "flashinfer_ep_low_latency": flashinfer.moe_ep low-latency
     - "flashinfer_ep_high_throughput": flashinfer.moe_ep high-throughput
-      (NCCL-EP)
-    - "flashinfer_ep_nixl": flashinfer.moe_ep low-latency (NIXL-EP)"""
+
+    The flashinfer_ep_* backends run over either the NCCL-EP or the NIXL-EP
+    transport, selected with VLLM_FLASHINFER_EP_TRANSPORT (default "nccl_ep");
+    flashinfer.moe_ep presents the same API over both. "nixl_ep" is
+    low-latency only."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -746,7 +748,6 @@ class ParallelConfig:
                 "deepep_low_latency",
                 "nixl_ep",
                 "flashinfer_ep_low_latency",
-                "flashinfer_ep_nixl",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1

@@ -1089,12 +1089,12 @@ class FusedMoEParallelConfig:
 
     @property
     def use_flashinfer_ep_ll_kernels(self):
-        # Both names drive the same LL (EXPERT_MAJOR / BatchedExperts) adapter;
-        # they differ only in the flashinfer.moe_ep transport (NCCL-EP vs
-        # NIXL-EP), selected by the all2all manager.
-        return self.use_all2all_kernels and self.all2all_backend in (
-            "flashinfer_ep_low_latency",
-            "flashinfer_ep_nixl",
+        # The LL (EXPERT_MAJOR / BatchedExperts) adapter is transport-agnostic:
+        # NCCL-EP vs NIXL-EP is chosen by the all2all manager via
+        # VLLM_FLASHINFER_EP_TRANSPORT, not by a separate backend name.
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "flashinfer_ep_low_latency"
         )
 
     @property

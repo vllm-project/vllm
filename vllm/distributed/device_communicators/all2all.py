@@ -1104,13 +1104,17 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
     lazily-created, config-cached `Fleet` (durable transport sizing); the
     prepare/finalize objects create a fresh per-forward `Handle` from it.
 
-    Subclasses fix the EP algorithm (LL vs HT) and the transport
-    (`_transport`: "nccl_ep" or "nixl_ep").
+    Subclasses fix the EP algorithm (LL vs HT). The transport is NOT a
+    separate backend: `flashinfer.moe_ep` presents one API over both NCCL-EP
+    and NIXL-EP, so it is a sub-configuration selected with
+    VLLM_FLASHINFER_EP_TRANSPORT (default "nccl_ep").
     """
 
-    _transport = "nccl_ep"
+    # NIXL-EP has no high-throughput path, so only the LL subclass allows it.
+    _allows_nixl_transport = False
 
     def __init__(self, cpu_group, tcp_store_group=None):
+        self._transport = self._resolve_transport()
         assert has_flashinfer_moe_ep(self._transport), (
             f"flashinfer.moe_ep with a built {self._transport} backend is "
             "required for the flashinfer_ep_* all2all backends. Install "
@@ -1133,9 +1137,32 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
                 "without fault tolerance (a failed EP rank will abort).",
                 self._transport,
             )
+        # The manager class name no longer identifies the transport, so log it.
+        logger.info_once(
+            "FlashInfer-EP all2all using the %s transport "
+            "(VLLM_FLASHINFER_EP_TRANSPORT).",
+            self._transport,
+        )
         # Config-keyed Fleet cache (different layers may size differently).
         self._fleets: dict[tuple, Any] = {}
         self._ft_last_mask: torch.Tensor | None = None
+
+    @classmethod
+    def _resolve_transport(cls) -> str:
+        """Pick the moe_ep transport from VLLM_FLASHINFER_EP_TRANSPORT."""
+        transport = envs.VLLM_FLASHINFER_EP_TRANSPORT
+        if transport not in ("nccl_ep", "nixl_ep"):
+            raise ValueError(
+                f"VLLM_FLASHINFER_EP_TRANSPORT={transport!r} is not a known "
+                'flashinfer.moe_ep transport; expected "nccl_ep" or "nixl_ep".'
+            )
+        if transport == "nixl_ep" and not cls._allows_nixl_transport:
+            raise ValueError(
+                "VLLM_FLASHINFER_EP_TRANSPORT=nixl_ep is only supported with "
+                "--all2all-backend flashinfer_ep_low_latency: the NIXL-EP "
+                "transport has no high-throughput path."
+            )
+        return transport
 
     def _supports_fault_tolerance(self) -> bool:
         return has_flashinfer_moe_ep_fault_tolerance(self._transport)
@@ -1258,7 +1285,12 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
 
 
 class FlashInferEPLLAll2AllManager(FlashInferEPAll2AllManagerBase):
-    """FlashInfer moe_ep low-latency (EXPERT_MAJOR / BatchedExperts)."""
+    """FlashInfer moe_ep low-latency (EXPERT_MAJOR / BatchedExperts).
+
+    Runs over either transport; see VLLM_FLASHINFER_EP_TRANSPORT.
+    """
+
+    _allows_nixl_transport = True
 
     def _algorithm(self):
         from flashinfer.moe_ep import EpAlgorithm
@@ -1281,14 +1313,3 @@ class FlashInferEPHTAll2AllManager(FlashInferEPAll2AllManagerBase):
         from flashinfer.moe_ep import EpAlgorithm
 
         return EpAlgorithm.HIGH_THROUGHPUT
-
-
-class FlashInferEPNixlAll2AllManager(FlashInferEPLLAll2AllManager):
-    """FlashInfer moe_ep low-latency over the NIXL-EP (UCX/GDAKI) transport.
-
-    Same LL EXPERT_MAJOR / BatchedExperts contract as the NCCL-EP LL manager —
-    the prepare/finalize adapter is shared — only the `flashinfer.moe_ep`
-    transport differs. The fleet derives its rendezvous store from the EP
-    process group (no separate TCPStore needed)."""
-
-    _transport = "nixl_ep"
