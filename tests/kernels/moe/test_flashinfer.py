@@ -26,11 +26,11 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsModular,
     TrtLlmFp8ExpertsMonolithic,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.fused_moe.flashinfer import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -404,7 +404,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
     num_experts, intermediate, hidden
 ):
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.model_executor.layers.fused_moe.flashinfer import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
 
