@@ -49,6 +49,10 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+        # Directly-constructed embeddings are only safe to offload through
+        # UVA. The functional_call fallback does not support all embedding
+        # users (for example, tied input/output embeddings).
+        self.supports_direct_module_offload = self.uva_offloading
 
     def wrap_modules(
         self,

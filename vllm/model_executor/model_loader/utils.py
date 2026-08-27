@@ -58,6 +58,7 @@ def initialize_model(
         # new-style model class
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
+            maybe_offload_embeddings(model, prefix=prefix)
             record_metadata_for_reloading(model)
             return model
 
@@ -90,9 +91,35 @@ def initialize_model(
         kwargs["scheduler_config"] = vllm_config.scheduler_config
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
+        maybe_offload_embeddings(model, prefix=prefix)
         record_metadata_for_reloading(model)
 
     return model
+
+
+def maybe_offload_embeddings(model: nn.Module, prefix: str = "") -> None:
+    """Route directly-constructed embeddings through compatible offloaders.
+
+    ``make_layers`` is the normal offloader entry point, but embeddings are
+    commonly created directly by model constructors. Do this before checkpoint
+    loading so offloaded parameters never need a full device-resident copy.
+    """
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+    from vllm.model_executor.offloader import get_offloader
+
+    offloader = get_offloader()
+    if not offloader.supports_direct_module_offload:
+        return
+
+    for name, module in model.named_modules():
+        if isinstance(module, VocabParallelEmbedding):
+            module_prefix = f"{prefix}.{name}" if prefix and name else prefix or name
+            offloader.wrap_modules(
+                (direct_module for direct_module in [module]),
+                prefix=module_prefix,
+            )
 
 
 def process_weights_after_loading(

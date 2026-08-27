@@ -60,6 +60,14 @@ class BaseOffloader(ABC):
     circular layer stack) must keep this `False`.
     """
 
+    supports_direct_module_offload: bool = False
+    """Whether ``wrap_modules`` accepts non-layer modules.
+
+    Some model components, such as token embeddings, are constructed directly
+    instead of through ``make_layers``. Offloaders that depend on a sequential
+    decoder-layer layout must keep this ``False``.
+    """
+
     @abstractmethod
     def wrap_modules(
         self,
