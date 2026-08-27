@@ -257,7 +257,8 @@ def oai_triton_moe_impl(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Requires CUDA-alike platform."
+    not OAITritonExperts._supports_current_device(),
+    reason="OAI Triton MoE is not supported on this device.",
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("m,n,k", MNK)
@@ -319,7 +320,8 @@ def test_oai_triton_moe(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not UnfusedOAITritonExperts._supports_current_device(),
+    reason="Unfused OAI Triton MoE is not supported on this device.",
 )
 def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_init):
     """Exercise ``UnfusedOAITritonExperts.apply`` with explicit workspaces.
@@ -345,10 +347,11 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
-        _x_pad,
+        x_pad,
     ) = make_weights(dtype, k, n, num_experts)
 
     x = torch.randn((m, k), dtype=dtype, device="cuda")
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
     router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
@@ -367,10 +370,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
     )
     experts = UnfusedOAITritonExperts(moe_config, quant_config)
 
-    if not UnfusedOAITritonExperts._supports_current_device():
-        pytest.skip("UnfusedOAITritonExperts does not support this device")
-
-    _, _, N, K, top_k = experts.moe_problem_size(x, w1_tri, w2_tri, topk_ids)
+    _, _, N, K, top_k = experts.moe_problem_size(x_tri, w1_tri, w2_tri, topk_ids)
     assert top_k == topk
     ws13_shape, ws2_shape, out_shape = experts.workspace_shapes(
         m,
@@ -390,7 +390,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
         out_ref = torch_moe_impl(x, w1, w2, w1_bias, w2_bias, topk_weights, topk_ids)
         experts.apply(
             output=output,
-            hidden_states=x,
+            hidden_states=x_tri,
             w1=w1_tri,
             w2=w2_tri,
             topk_weights=topk_weights,
@@ -405,5 +405,6 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
         )
+        output = output[..., :k]
 
     assert_close(ref=out_ref, tri=output, maxtol=0.025, rmstol=0.005)

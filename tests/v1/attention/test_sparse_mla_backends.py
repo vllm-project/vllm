@@ -813,7 +813,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     assert attn_metadata.req_id_per_token.shape[0] == num_batch_tokens
 
     q = torch.zeros(num_mqa_tokens, 4, 576, dtype=torch.bfloat16, device=device)
-    kv_cache = torch.zeros(40 * block_size, 576, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(40, block_size, 576, dtype=torch.bfloat16, device=device)
     topk_indices = torch.randint(
         0,
         block_size * 10,
@@ -824,18 +824,20 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 
     captured = {}
 
-    def _stub_kernel(q, kv, indices, lengths):
+    def _stub_kernel(q, kv, indices, lengths, actual_num_heads):
         captured["indices"] = indices
+        captured["actual_num_heads"] = actual_num_heads
         return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
 
     stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
 
     out = FlashMLASparseImpl._forward_bf16_kv(
-        stub_impl, q, kv_cache, topk_indices, attn_metadata
+        stub_impl, q, kv_cache, topk_indices, attn_metadata, q.shape[1]
     )
 
     assert out.shape[0] == num_mqa_tokens
     assert captured["indices"].shape[0] == num_mqa_tokens
+    assert captured["actual_num_heads"] == q.shape[1]
     reference = _triton_convert_reference_impl(
         attn_metadata.req_id_per_token[:num_mqa_tokens],
         attn_metadata.block_table,
@@ -1157,7 +1159,8 @@ def test_sparse_backend_prefill_correctness(
             q=query_cat,
             kv_c_normed=kv_c_cat,
             k_pe=k_pe_cat,
-            kv_c_and_k_pe_cache=kv_cache,
+            # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
+            kv_c_and_k_pe_cache=kv_cache.squeeze(1),
             attn_metadata=metadata,
             k_scale=torch.tensor(1.0, device=device),
             output=out_buffer,
