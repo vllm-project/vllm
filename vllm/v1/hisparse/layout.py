@@ -9,7 +9,11 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
+from vllm.v1.hisparse.runtime import (
+    ResolvedHiSparseConfig,
+    get_hisparse_host_block_stride,
+    use_shared_hisparse_host_pool,
+)
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -36,6 +40,8 @@ class HiSparseLayout:
     source_group: KVCacheGroupSpec
     device_groups: list[KVCacheGroupSpec]
     host_num_blocks: int
+    host_block_stride: int
+    shared_host_pool: bool
 
 
 def get_hisparse_kv_cache_groups(
@@ -221,9 +227,12 @@ def create_hisparse_layout(
     regular_groups = groups[1:]
     gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]
 
-    host_num_blocks = host_budget // sum(
-        spec.page_size_bytes for spec in source_specs.values()
+    shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
+    host_block_stride = get_hisparse_host_block_stride(
+        sum(spec.page_size_bytes for spec in source_specs.values()),
+        use_shared_host_pool=shared_host_pool,
     )
+    host_num_blocks = host_budget // host_block_stride
     if host_num_blocks <= 0:
         raise ValueError("HiSparse has no allocatable host blocks.")
 
@@ -339,6 +348,8 @@ def get_hisparse_kv_cache_config(
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[*host_groups, *device_groups],
         hisparse_host_num_blocks=hisparse_layout.host_num_blocks,
+        hisparse_host_block_stride=hisparse_layout.host_block_stride,
+        hisparse_shared_host_pool=hisparse_layout.shared_host_pool,
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
