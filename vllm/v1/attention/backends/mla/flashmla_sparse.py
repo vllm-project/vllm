@@ -205,6 +205,9 @@ class FlashMLASparseMetadata(AttentionMetadata):
 
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
+    physical_topk_indices: torch.Tensor | None = None
+    physical_topk_valid_counts: torch.Tensor | None = None
+    physical_topk_is_valid: bool = False
 
 
 def get_prefill_workspace_size(max_model_len: int):
@@ -234,6 +237,14 @@ class FlashMLASparseMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
+
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.physical_topk_indices = torch.empty(
+            (max_num_tokens, self.topk_tokens), dtype=torch.int32, device=device
+        )
+        self.physical_topk_valid_counts = torch.empty(
+            max_num_tokens, dtype=torch.int32, device=device
+        )
 
         num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
         if current_platform.is_device_capability_family(100):
@@ -522,6 +533,8 @@ class FlashMLASparseMetadataBuilder(
         fast_build: bool = False,
     ) -> FlashMLASparseMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata.physical_topk_indices = self.physical_topk_indices
+        metadata.physical_topk_valid_counts = self.physical_topk_valid_counts
 
         metadata.fp8_use_mixed_batch = self.fp8_use_mixed_batch
         if self.use_fp8_kv_cache:
@@ -625,23 +638,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
+        topk_length: torch.Tensor,
+        block_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill). req_id_per_token covers the whole batch; slice it
-        # to the MQA tokens (q may exclude prefill tokens routed to dense MHA).
-        kv_rows, block_stride_rows = flat_kv_row_view(
-            kv_c_and_k_pe_cache, attn_metadata.block_size
-        )
-        topk_indices, topk_length = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            BLOCK_STRIDE_ROWS=block_stride_rows,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
-        )
+        kv_rows, _ = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
 
         return self._bf16_flash_mla_kernel(
             q,
@@ -655,6 +655,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
+        topk_length: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
     ) -> torch.Tensor:
         fp8_metadata = attn_metadata.fp8_extra_metadata
@@ -666,36 +667,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         assert num_prefill_tokens in (0, fp8_metadata.num_prefill_tokens), (
             "FP8 sparse MLA expects either the decode subset or the full batch"
         )
-
-        prefill_request_ids = None
-        prefill_workspace_starts = None
-        has_prefill_workspace = False
-        if num_prefill_tokens > 0:
-            assert fp8_metadata.prefill is not None
-            prefill_request_ids = fp8_metadata.prefill.request_ids
-            prefill_workspace_starts = fp8_metadata.prefill.workspace_starts
-            has_prefill_workspace = True
-
-        # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill).
-        # For FP8 cache: prefill uses workspace mapping (upconverted to BF16)
-        # For BF16 cache: always use global cache slots (no workspace)
-        # prefill_workspace_starts has been adjusted in-place per chunk so
-        # prefill indices automatically come out chunk-local
-        topk_indices, topk_length = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            HAS_PREFILL_WORKSPACE=has_prefill_workspace,
-            prefill_workspace_request_ids=prefill_request_ids,
-            prefill_workspace_starts=prefill_workspace_starts,
-            return_valid_counts=True,
-        )
-
-        fp8_metadata = attn_metadata.fp8_extra_metadata
-        assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
 
         def _fp8_decode(
             q: torch.Tensor,
@@ -793,17 +764,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 compact_valid_to_front=False,
             )
-        else:
-            # Convert per-request indices to global slots (decode) or workspace
-            # offsets (prefill).
-            topk_indices = triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[: topk_indices.shape[0]],
-                attn_metadata.block_table,
-                topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-            )
-
         assert attn_metadata.fp8_extra_metadata is not None
         assert isinstance(
             attn_metadata.fp8_extra_metadata, FlashMLASparseMetadata.FP8KernelMetadata
@@ -940,22 +900,86 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
+        fp8_use_mixed_batch = use_fp8_cache and attn_metadata.fp8_use_mixed_batch
+        refresh_physical_topk = getattr(
+            layer, "indexer", None
+        ) is not None and not getattr(layer, "skip_topk", False)
+
+        if self.dcp_world_size > 1:
+            topk_length = None
+        else:
+            assert attn_metadata.physical_topk_indices is not None
+            physical_indices = attn_metadata.physical_topk_indices[:num_actual_toks]
+            topk_length = None
+            if not fp8_use_mixed_batch:
+                assert attn_metadata.physical_topk_valid_counts is not None
+                topk_length = attn_metadata.physical_topk_valid_counts[:num_actual_toks]
+
+            if refresh_physical_topk or not attn_metadata.physical_topk_is_valid:
+                prefill_request_ids = None
+                prefill_workspace_starts = None
+                has_prefill_workspace = False
+                if use_fp8_cache and not fp8_use_mixed_batch:
+                    fp8_metadata = attn_metadata.fp8_extra_metadata
+                    assert isinstance(
+                        fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode
+                    )
+                    if num_actual_toks > fp8_metadata.num_decode_tokens:
+                        assert fp8_metadata.prefill is not None
+                        prefill_request_ids = fp8_metadata.prefill.request_ids
+                        prefill_workspace_starts = fp8_metadata.prefill.workspace_starts
+                        has_prefill_workspace = True
+
+                block_stride_rows = None
+                if not use_fp8_cache:
+                    _, block_stride_rows = flat_kv_row_view(
+                        kv_c_and_k_pe_cache, attn_metadata.block_size
+                    )
+                converted = triton_convert_req_index_to_global_index(
+                    attn_metadata.req_id_per_token[:num_actual_toks],
+                    attn_metadata.block_table,
+                    topk_indices,
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    BLOCK_STRIDE_ROWS=block_stride_rows,
+                    NUM_TOPK_TOKENS=topk_indices.shape[1],
+                    HAS_PREFILL_WORKSPACE=has_prefill_workspace,
+                    prefill_workspace_request_ids=prefill_request_ids,
+                    prefill_workspace_starts=prefill_workspace_starts,
+                    return_valid_counts=not fp8_use_mixed_batch,
+                    output=physical_indices,
+                    valid_counts_out=topk_length,
+                )
+                if fp8_use_mixed_batch:
+                    assert isinstance(converted, torch.Tensor)
+                    topk_indices = converted
+                else:
+                    assert isinstance(converted, tuple)
+                    topk_indices, topk_length = converted
+                attn_metadata.physical_topk_is_valid = True
+            else:
+                topk_indices = physical_indices
 
         lse: torch.Tensor | None = None
 
         if not use_fp8_cache:
+            assert topk_length is not None
             attn_out, bf16_lse = self._forward_bf16_kv(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                topk_length,
+                attn_metadata.block_size,
             )
             if self.need_to_return_lse_for_decode:
                 lse = bf16_lse
-        elif attn_metadata.fp8_use_mixed_batch:
+        elif fp8_use_mixed_batch:
             attn_out, lse = self._forward_fp8_kv_mixed_batch(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
         else:
+            assert topk_length is not None
             attn_out = self._forward_fp8_kv_separate_prefill_decode(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q, kv_c_and_k_pe_cache, topk_indices, topk_length, attn_metadata
             )
 
         return attn_out, lse
