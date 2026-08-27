@@ -247,6 +247,9 @@ class ModelConfig:
     """Whether to return routed experts."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
+    enable_word_timestamps: bool = False
+    """Whether to enable Whisper word-level timestamps (cross-attention DTW).
+    Adds a small per-request capture; off by default."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the

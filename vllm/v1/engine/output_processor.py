@@ -185,6 +185,8 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # Whisper word-timestamp per-token onset times (set once on finish).
+        self.word_align: list[float] | None = None
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -433,6 +435,7 @@ class RequestState:
             token_ids=token_ids,
             routed_experts=routed_experts,
             sampling_mask=sampling_mask,
+            word_align=self.word_align if finished else None,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
@@ -656,6 +659,8 @@ class OutputProcessor:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
                 )
+            if engine_core_output.word_align is not None:
+                req_state.word_align = engine_core_output.word_align
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:

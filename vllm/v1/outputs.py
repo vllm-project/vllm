@@ -376,6 +376,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # Whisper word timestamps: {req_id -> per-token onset times (s)} for requests
+    # finishing this step; ``None`` unless word timestamps are requested.
+    word_align: dict[str, list[float]] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
