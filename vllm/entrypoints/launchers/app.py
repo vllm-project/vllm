@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
+import logging
+
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.plugins.endpoint_plugins.interface import attach_endpoint_plugins
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, SupportedTask
@@ -52,5 +54,21 @@ def build_app(
 
     init_exception_handler(app)
     init_entrypoints_middleware(args, app, supported_tasks)
+    
+    # Save the original handlers on the vLLM logger so they can be restored.
+    # The SageMaker standards bootstrap function overwrites the root logger's
+    # handlers to ERROR level, which inadvertently silences the vLLM logger
+    # if it shares the same handlers (e.g. via VLLM_LOGGING_CONFIG_PATH).
+    vllm_logger = logging.getLogger("vllm")
+    original_handlers = [
+        (handler, handler.level) for handler in vllm_logger.handlers
+    ]
+    
     app = sagemaker_standards_bootstrap(app)
+    
+    # Restore the vllm logger handlers' levels if they were changed
+    for handler, original_level in original_handlers:
+        if handler.level != original_level:
+            handler.setLevel(original_level)
+            
     return app
