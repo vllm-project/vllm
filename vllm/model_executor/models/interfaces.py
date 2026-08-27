@@ -276,7 +276,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         # Fallback
         for mod in self_module.children():
             candidate = mod
-            if is_vllm_model(candidate):
+            if isinstance(candidate, VllmModel):
                 _language_model_by_module[self_module] = candidate
                 return candidate
 
