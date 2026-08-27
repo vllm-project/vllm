@@ -28,6 +28,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
@@ -836,13 +837,27 @@ async fn test_admin_app_with_engine_script<F>(script: F) -> (axum::Router, MockE
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    test_admin_app_with_ready_and_engine_script(ready, script).await
+}
+
+async fn test_admin_app_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
+        ready,
         move |dealer, push| script(dealer, push),
     ));
 

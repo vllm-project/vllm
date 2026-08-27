@@ -209,6 +209,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt; \
     fi \
+    && if [ "$(uname -m)" = "aarch64" ]; then \
+        # The manylinux 2_28 (glibc 2.28) aarch64 builder cannot use
+        # tilelang's manylinux_2_34 wheel, so tilelang builds from sdist.
+        # Cython 3.3 rejects tilelang's hardcoded Py_LIMITED_API=3.8.
+        printf 'cython<3.3\n' > /tmp/build-constraints.txt \
+        && export UV_BUILD_CONSTRAINT=/tmp/build-constraints.txt; \
+    fi \
     && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
@@ -246,7 +253,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # build stage doesn't need the rust toolchain or the rust source.
 # This stage reuses the Python environment from base and runs in parallel with
 # csrc-build/extensions-build.
-FROM base AS rust-build
+FROM base AS rust-build-cache
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 
@@ -276,26 +283,28 @@ ENV CARGO_BUILD_JOBS=4
 # separate local sccache daemon while sharing the same remote cache backend.
 ENV SCCACHE_SERVER_PORT=4227
 
-# Only Rust inputs are present, so suppress the artificial dirty state caused
-# by other tracked files being absent from this build stage.
-ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
-
-# Build the release artifacts. Cache cargo registry/git, but not target/,
-# because stale target metadata can outlive source updates across BuildKit
-# cache reuse.
+# Build with a stable version so this target snapshot is keyed only by Rust
+# inputs. The child stage below relinks the crates that embed the exact version.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
         export RUSTC_WRAPPER=sccache; \
         sccache --show-stats; \
     fi \
-    && bash build_rust.sh \
+    && SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh \
     && if [ "$USE_SCCACHE" = "1" ]; then \
         sccache --show-stats; \
     fi
+
+# Relink with the exact Git-derived package version.
+FROM rust-build-cache AS rust-build
+
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
