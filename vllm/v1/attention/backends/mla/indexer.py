@@ -192,6 +192,7 @@ _FP4_FUSED_MIN_SEQ_LEN = int(
 _FUSED_MAX_SEQ_LEN = 1 << 20
 _FUSED_QUERY_LEN = 8192
 _FUSED_TAIL_QUERY_LEN = 8128
+_TP8_FP4_SHARD_QUERY_LENS = (32768, 32704)
 
 
 def _configured_litetopk_fused_min_seq_len(use_fp4: bool = False) -> int:
@@ -213,14 +214,16 @@ def _should_plan_fused_indexer(
     total_seq_len: int,
     query_len: int,
     fused_min_seq_len: int,
+    *,
+    allow_tp8_fp4_query_shard: bool = False,
 ) -> bool:
     """Whether this whole chunk may skip dense-logits budget splitting."""
     if fused_min_seq_len <= 0 or num_reqs != 1:
         return False
     return (
         query_len in (_FUSED_QUERY_LEN, _FUSED_TAIL_QUERY_LEN)
-        and fused_min_seq_len <= total_seq_len <= _FUSED_MAX_SEQ_LEN
-    )
+        or (allow_tp8_fp4_query_shard and query_len in _TP8_FP4_SHARD_QUERY_LENS)
+    ) and fused_min_seq_len <= total_seq_len <= _FUSED_MAX_SEQ_LEN
 
 
 def split_indexer_prefill_chunks(
@@ -230,6 +233,7 @@ def split_indexer_prefill_chunks(
     max_logits_bytes: int,
     request_offset: int = 0,
     fused_min_seq_len: int = 0,
+    allow_tp8_fp4_query_shard: bool = False,
 ) -> list[tuple[slice, slice]]:
     """
     Split prefill requests into chunks for the sparse indexer, respecting:
@@ -248,7 +252,6 @@ def split_indexer_prefill_chunks(
 
     while end < n:
         start, chunk_m, chunk_n = end, 0, 0
-
         while end < n:
             q, s = query_lens_cpu[end].item(), seq_lens_cpu[end].item()
             new_m, new_n = chunk_m + q, chunk_n + s
@@ -270,6 +273,7 @@ def split_indexer_prefill_chunks(
             chunk_n,
             chunk_m,
             fused_min_seq_len,
+            allow_tp8_fp4_query_shard=allow_tp8_fp4_query_shard,
         ):
             # Fused indexer handles this context and materializes no logits.
             max_q = max(1, chunk_m)
@@ -379,6 +383,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     # coordinates: (raw_seq_len - total_query_len + qs_start + 1) // ratio.
     # Matches the metadata kernel's ke formula; 0 when not applicable.
     common_ke_min: int = 0
+    compress_ratio: int = 1
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -781,6 +786,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
+        self.tp_world_size = parallel_config.tensor_parallel_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # The DCP sparse-indexer code is parameterized by interleave size, but
         # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
@@ -1165,47 +1171,74 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # re-gathering the same KV). Shorter contexts still run the dense
             # path and must keep the budget, so the exemption is keyed on the
             # same threshold as the runtime gate.
+            indexer_layout = (
+                getattr(
+                    self.vllm_config.model_config.hf_config,
+                    "index_n_heads",
+                    None,
+                ),
+                getattr(
+                    self.vllm_config.model_config.hf_config,
+                    "index_head_dim",
+                    None,
+                ),
+                getattr(
+                    self.vllm_config.model_config.hf_config,
+                    "index_topk",
+                    None,
+                ),
+            )
+            tp_query_shard_planning = bool(
+                envs.VLLM_LITETOPK_TP_QUERY_SHARD
+                and self.dcp_world_size == 1
+                and (
+                    (
+                        self.use_fp4_indexer_cache
+                        and self.compress_ratio == 4
+                        and self.tp_world_size == 8
+                        and self.pcp_world_size == 1
+                        and indexer_layout == (64, 128, 512)
+                    )
+                    or (
+                        not self.use_fp4_indexer_cache
+                        and self.compress_ratio == 1
+                        and self.tp_world_size == 4
+                        and self.pcp_world_size == 2
+                        and indexer_layout == (32, 128, 2048)
+                    )
+                )
+            )
             fused_min_seq_len = (
                 _configured_litetopk_fused_min_seq_len(self.use_fp4_indexer_cache)
                 if (
                     envs.VLLM_LITETOPK
-                    and envs.VLLM_DSA_MODE in ("litetopk", "litedsa")
                     # A prefix-cache hit can make the first fused chunk start
                     # above the crossover without the dense boundary chunk
                     # that seeds its certified hot carry. Keep budgeted dense
                     # chunks until a checked cold-start bootstrap exists.
                     and not self.vllm_config.cache_config.enable_prefix_caching
-                    and (
-                        getattr(
-                            self.vllm_config.model_config.hf_config,
-                            "index_n_heads",
-                            None,
-                        ),
-                        getattr(
-                            self.vllm_config.model_config.hf_config,
-                            "index_head_dim",
-                            None,
-                        ),
-                        getattr(
-                            self.vllm_config.model_config.hf_config,
-                            "index_topk",
-                            None,
-                        ),
-                    )
-                    in ((32, 128, 2048), (64, 128, 512))
+                    and indexer_layout in ((32, 128, 2048), (64, 128, 512))
                     and self.dcp_world_size == 1
                     and not current_platform.is_xpu()
                     and current_platform.is_device_capability(100)
-                    # Preflight the real JIT/prebuilt extension before
-                    # exempting this request from the dense-logits budget. If
-                    # loading or ABI validation fails, keep stock chunking so
-                    # runtime fallback remains memory-safe.
-                    and _litetopk_extension_ready_for_planning(
-                        use_fp4=self.use_fp4_indexer_cache,
-                        topk=int(self.vllm_config.model_config.hf_config.index_topk),
+                    # In TP-shard mode the plan must be rank-uniform. Runtime
+                    # status agreement handles a peer-local extension failure.
+                    and (
+                        tp_query_shard_planning
+                        or _litetopk_extension_ready_for_planning(
+                            use_fp4=self.use_fp4_indexer_cache,
+                            topk=int(
+                                self.vllm_config.model_config.hf_config.index_topk
+                            ),
+                        )
                     )
                 )
                 else 0
+            )
+            allow_tp8_fp4_query_shard = bool(
+                fused_min_seq_len
+                and tp_query_shard_planning
+                and self.use_fp4_indexer_cache
             )
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
@@ -1218,6 +1251,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 max_logits_bytes,
                 request_offset=num_decodes,
                 fused_min_seq_len=fused_min_seq_len,
+                allow_tp8_fp4_query_shard=allow_tp8_fp4_query_shard,
             )
 
             chunks = []
@@ -1239,6 +1273,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                     fused_min_seq_len=fused_min_seq_len,
+                    allow_tp8_fp4_query_shard=allow_tp8_fp4_query_shard,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -1436,6 +1471,7 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     fused_min_seq_len: int = 0,
+    allow_tp8_fp4_query_shard: bool = False,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
@@ -1538,8 +1574,10 @@ def build_prefill_chunk_metadata(
             total_seq_lens,
             output_query_len,
             fused_min_seq_len,
+            allow_tp8_fp4_query_shard=allow_tp8_fp4_query_shard,
         ),
         common_ke_min=common_ke_min,
+        compress_ratio=compress_ratio,
     )
 
 

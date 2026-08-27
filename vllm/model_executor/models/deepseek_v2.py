@@ -736,8 +736,6 @@ class Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-            num_init_tokens=getattr(config, "index_init_tokens", 0),
-            num_local_tokens=getattr(config, "index_local_tokens", 0),
         )
 
         self.is_inplace_rope = is_inplace_rope
@@ -848,42 +846,32 @@ def _try_load_fp8_indexer_wk(
     name, tensor, buf, params_dict, loaded_params, pp_missing_layer_names
 ):
     """
-    We fuse the WK and weights_proj projections, but in some checkpoints one
-    or both are stored in FP8 with a separate weight_scale_inv while the fused
-    parameter is BF16. Upcasting to BF16 during loading enables the fusion.
-    This function buffers the FP8 weight and scale, and when both are
-    available, dequantizes to BF16 and stores into the corresponding shard of
-    the fused wk_weights_proj.weight.
+    We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
+    in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
+    Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
+    weights and scale, and when both are available, dequantizes to BF16 and stores into
+    the fused wk_weights_proj.weight parameter.
     """
-    if "wk_weights" in name:
-        return False  # Already-fused parameter name, ignore.
-    if "indexer.wk." in name:
-        sub_name, shard_id = ".wk.", 0
-    elif "indexer.weights_proj." in name:
-        sub_name, shard_id = ".weights_proj.", 1
-    else:
-        return False  # Not an isolated indexer projection weight, ignore.
+    if "indexer.wk." not in name or "wk_weights" in name:
+        return False  # Weight is not an isolated WK weight for the indexer, ignore.
     is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
     is_scale = "weight_scale" in name
     if not is_weight and not is_scale:
-        return False  # Projection is not in FP8 format, ignore.
+        return False  # WK is not in FP8 format, ignore.
     # Buffer this tensor (weight or scale) until both have arrived.
-    # layer_prefix is e.g. "model.layers.0.self_attn.indexer"
-    layer_prefix = name.rsplit(sub_name, 1)[0]
+    layer_prefix = name.rsplit(".wk.", 1)[0]  # e.g. "model.layers.0.self_attn.indexer"
     fused_name = f"{layer_prefix}.wk_weights_proj.weight"
     if any(
         name.startswith(missing_layer_name)
         for missing_layer_name in pp_missing_layer_names
     ):
         return True
-    entry = buf.setdefault((layer_prefix, shard_id), {})
+    entry = buf.setdefault(layer_prefix, {})
     entry["weight" if is_weight else "scale"] = tensor
     if "weight" not in entry or "scale" not in entry:
         return True  # still waiting for the other param
 
-    # We have both weight and scale: dequantize FP8 to BF16. Derive the block
-    # shape per axis: narrow projections (e.g. a 32-row weights_proj under
-    # 128x128 quantization) span a partial row block.
+    # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
     if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
@@ -907,9 +895,9 @@ def _try_load_fp8_indexer_wk(
         out_dtype=torch.bfloat16,
     )
 
-    # Load the dequantized weight into its shard of the fused buffer.
+    # Load the dequantized weight into shard 0 of the fused buffer.
     param = params_dict[fused_name]
-    param.weight_loader(param, weight_bf16, shard_id)
+    param.weight_loader(param, weight_bf16, 0)
     loaded_params.add(fused_name)
     return True
 
@@ -1027,7 +1015,6 @@ class DeepseekV2MLAAttention(nn.Module):
         input_size: int | None = None,
         reduce_results: bool = True,
         non_causal_multi_token_decode: bool = False,
-        skip_topk: bool | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1144,10 +1131,7 @@ class DeepseekV2MLAAttention(nn.Module):
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
         _skip_topk = False
         is_mtp_layer = False
-        if self.is_v32 and skip_topk is not None:
-            # The caller decides the skip schedule directly.
-            _skip_topk = skip_topk
-        elif self.is_v32:
+        if self.is_v32:
             _index_topk_freq = getattr(config, "index_topk_freq", 1)
             _index_topk_pattern = getattr(config, "index_topk_pattern", None)
             _index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)

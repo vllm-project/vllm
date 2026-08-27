@@ -131,6 +131,24 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
                 logits = fp8_fp4_mqa_logits(
                     (q_fp8, None), kv_fp8, weights, ks, ke, clean_logits=clean_logits
                 )
+                output_slab = torch.empty(
+                    (seq_len + 128) * (seq_len_kv + 512),
+                    dtype=torch.float32,
+                    device="cuda",
+                )
+                logits_out = fp8_fp4_mqa_logits(
+                    (q_fp8, None),
+                    kv_fp8,
+                    weights,
+                    ks,
+                    ke,
+                    clean_logits=clean_logits,
+                    out=output_slab,
+                )
+                assert logits_out.data_ptr() == output_slab.data_ptr()
+                positions = torch.arange(seq_len_kv, device="cuda")[None, :]
+                valid_mask = (positions >= ks[:, None]) & (positions < ke[:, None])
+                torch.testing.assert_close(logits_out[valid_mask], logits[valid_mask])
 
                 ref_logits = _ref_fp8_mqa_logits(
                     q=q,

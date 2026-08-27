@@ -18,27 +18,15 @@ Env knobs:
   VLLM_LITETOPK_SO            optional prebuilt extension whose basename and
                               module name match the current source digest
   VLLM_LITETOPK_SO_SHA256     required SHA256 when VLLM_LITETOPK_SO is set
-  VLLM_LITETOPK_DENSE_SELECT
-                              replace vLLM's dense prefill top-k after the
-                              logits GEMM with one exact histogram+select
-                              kernel (default 1; set 0 to roll back)
-  VLLM_LITETOPK_DENSE_SELECT_MIN_S
-                              first dense length to replace (default 40960)
-  VLLM_LITETOPK_DENSE_SELECT_MAX_S
-                              last dense length to replace (default 262144)
-  VLLM_LITETOPK_DENSE_SELECT_BINS
-                              exact coarse histogram bins (fixed at 4096)
-  VLLM_LITETOPK_DENSE_SELECT_MIN_LOGITS_MB
-                              minimum dense slice size (default 0 MiB)
   VLLM_LITETOPK_PRODUCTION_MIN_S
                               FP8 fused-path crossover (default 196608); an
                               explicit value also overrides the FP4 default
   VLLM_LITETOPK_FP4_PRODUCTION_MIN_S
                               FP4 fused-path crossover (default 65536)
-  VLLM_LITETOPK_CHECK=1      also run the official path and log top-k recall
-  VLLM_LITETOPK_DEDUP_CARRY_WAIT
-                              elide an already-satisfied carry event wait (default 1)
-  VLLM_LITETOPK_MERGE_CAP    per-row candidate capacity (default 196608)
+  VLLM_LITETOPK_PCP_FRONTIER_CARRY
+                              opt in to broadcasting the global DualChunkSwap
+                              frontier carry after each of its two fused phases
+  VLLM_LITETOPK_MERGE_CAP    per-row candidate capacity (default 49152)
   VLLM_LITETOPK_HEADROOM     bucket-scale headroom (default 0)
   VLLM_LITETOPK_OVF_LOG=1    log new candidate-count maxima
   VLLM_LITETOPK_PROBE_EVERY  overflow telemetry cadence (default 8); probed
@@ -46,7 +34,7 @@ Env knobs:
                               every chunk device-traps before winner mapping
   VLLM_LITETOPK_OVF_WATERMARK
                               count row-chunks whose candidate count exceeds
-                              this (default 65536); accumulated on device
+                              this (default 40960); accumulated on device
                               every call, so the reported running max is
                               complete even though readback is sampled
 """
@@ -97,35 +85,46 @@ def production_min_s(use_fp4: bool) -> int:
 
 FUSED_QUERY_LEN = 8192
 FUSED_TAIL_QUERY_LEN = 8128
-HOT_PREFIX = 12288
-DENSE_SELECT = os.environ.get("VLLM_LITETOPK_DENSE_SELECT", "1") == "1"
-DENSE_SELECT_MIN_S = int(os.environ.get("VLLM_LITETOPK_DENSE_SELECT_MIN_S", "40960"))
-DENSE_SELECT_MAX_S = int(os.environ.get("VLLM_LITETOPK_DENSE_SELECT_MAX_S", "262144"))
-DENSE_SELECT_BINS = int(os.environ.get("VLLM_LITETOPK_DENSE_SELECT_BINS", "4096"))
-DENSE_SELECT_MIN_LOGITS_MB = int(
-    os.environ.get("VLLM_LITETOPK_DENSE_SELECT_MIN_LOGITS_MB", "0")
+TP_QUERY_SHARD_ENABLED = os.environ.get("VLLM_LITETOPK_TP_QUERY_SHARD", "0") == "1"
+TP8_FP4_SHARD_FULL_QUERY_LENS = (
+    FUSED_QUERY_LEN,
+    FUSED_TAIL_QUERY_LEN,
+    32768,
+    32704,
 )
-if DENSE_SELECT_BINS != 4096:
-    raise ValueError("VLLM_LITETOPK_DENSE_SELECT_BINS must be 4096")
-if DENSE_SELECT_MIN_S < 0 or DENSE_SELECT_MAX_S < DENSE_SELECT_MIN_S:
-    raise ValueError("invalid LiteTopK dense-select length interval")
-if DENSE_SELECT_MIN_LOGITS_MB < 0:
-    raise ValueError("VLLM_LITETOPK_DENSE_SELECT_MIN_LOGITS_MB must be >= 0")
+TP8_FP4_SHARD_QUERY_LENS = tuple(q // 8 for q in TP8_FP4_SHARD_FULL_QUERY_LENS)
+TP4_FP8_SHARD_QUERY_LENS = (FUSED_QUERY_LEN // 4, FUSED_TAIL_QUERY_LEN // 4)
+TP_SHARD_QUERY_LENS = TP8_FP4_SHARD_QUERY_LENS + TP4_FP8_SHARD_QUERY_LENS
+
+
+def _supported_fused_query_len(q: int) -> bool:
+    return q in (FUSED_QUERY_LEN, FUSED_TAIL_QUERY_LEN) or (
+        TP_QUERY_SHARD_ENABLED and q in TP_SHARD_QUERY_LENS
+    )
+
+
+HOT_PREFIX = 12288
 NB = int(os.environ.get("VLLM_LITETOPK_NB", "256"))
-CHECK = os.environ.get("VLLM_LITETOPK_CHECK", "0") == "1"
 _TELEMETRY = {"calls": 0, "candidate_max": 0}
 # Absolute forward headroom on the bucket scale (fraction of the sample span
 # prepended ABOVE the sample max). Pair with a proportionally larger NB to
 # keep bucket width unchanged (e.g. HEADROOM=1.0 + NB=512 == today's width).
 HEADROOM = float(os.environ.get("VLLM_LITETOPK_HEADROOM", "0.0"))
-# recent-1536 HOT reduced the real adjacent-chunk maximum to 32,864 records.
-# Use the smallest supported power-of-two slab by default; overflow telemetry
-# remains enabled in production qualification runs so longer-tail layers fail
-# closed instead of silently truncating candidates.
-MERGE_CAP = int(os.environ.get("VLLM_LITETOPK_MERGE_CAP", "196608"))
-# The K-relative floor (cap >= 32*topk, e.g. 16384 at K=512) is enforced at
-# the call sites where topk is known; this import-time check only rejects
-# configurations no supported K could satisfy.
+# Target the aligned 24*K slab for GLM K=2048. It leaves 30% headroom over the
+# 37,752-record maximum observed in the prior GLM-5.2 1M run; the reduced shape
+# is separately qualified below, and overflow remains fail-closed.
+MERGE_CAP = int(os.environ.get("VLLM_LITETOPK_MERGE_CAP", "49152"))
+
+
+# GLM-5.2 K=2048 targets 24*K. Keep the historical 32*K floor for every other
+# selection width rather than widening their support as an accidental side
+# effect of the GLM memory reduction.
+def minimum_merge_cap(topk: int) -> int:
+    return 49152 if topk == 2048 else max(16384, 32 * topk)
+
+
+# The K-relative floor is enforced at the call sites where topk is known; this
+# import-time check only rejects configurations no supported K could satisfy.
 if MERGE_CAP < 16384:
     raise ValueError(
         "VLLM_LITETOPK_MERGE_CAP must be at least 16384 for the "
@@ -138,16 +137,9 @@ _HOT_STREAM: dict = {}
 PROBE_EVERY = int(os.environ.get("VLLM_LITETOPK_PROBE_EVERY", "8"))
 if PROBE_EVERY < 1:
     raise ValueError("VLLM_LITETOPK_PROBE_EVERY must be >= 1")
-OVF_WATERMARK = int(os.environ.get("VLLM_LITETOPK_OVF_WATERMARK", "65536"))
-# Enriched sampling uses positions from the previous part's top-k indices.
-# Any selected position set still gives a valid exact-subset bound. Zero
-# disables it; a positive value is the hot-column budget.
-HOTSAMPLE = HOT_PREFIX
-# HOTONLY: the hot columns ARE the whole sample (no uniform probe). The
-# subset bound stays provable for any chosen sample; drift discovery is
-# carried by the scan->select->carry loop itself. Probe survives only as
-# the cold-start fallback (hot_prev is None).
-HOTONLY = True
+# Warn one full 8192-record chunk before the hard cap. This is telemetry only;
+# candidate_count > MERGE_CAP still fails closed in the selector/map path.
+OVF_WATERMARK = int(os.environ.get("VLLM_LITETOPK_OVF_WATERMARK", "40960"))
 # Real adjacent-chunk capture selected this window: all K winners from the last
 # 1536 query rows predict the next chunk substantially better than the old
 # rotating 1/8 sample over all rows, while adding only atomics to the mandatory
@@ -155,10 +147,6 @@ HOTONLY = True
 CARRY_RECENT_ROWS = 1536
 # The production selector parallelizes each 256-bin radix prefix search in
 # warp 0 and selects the remaining 16 score bits in two passes.
-# The carry-ready event also guards reuse of its vote slab. The main stream
-# consumes both in one exact-once call, so the second wait can be elided when
-# it is provably the exact same Event object.
-DEDUP_CARRY_WAIT = os.environ.get("VLLM_LITETOPK_DEDUP_CARRY_WAIT", "1") == "1"
 _HOT_CARRY: dict = {}
 # GATE4 writes BUCKET-SPACE high24 candidates (affine order-preserving).
 # Both seed-prefix emission and the suffix producer use the same packed score
@@ -167,33 +155,6 @@ _HOT_CARRY: dict = {}
 _EXT = None
 _FAILED = False
 _AUX_CACHE: dict = {}  # (device, head) -> (zeros[Qmax], full_head[Qmax]) int32
-_DENSE_SELECT_LOGGED = False
-_DENSE_DECLINE_LOGGED = False
-
-
-def _dense_decline_note(stage, seq_len_hint, logits, out_indices, topk):
-    """One-shot diagnostic: dense-select declined while S was in-window."""
-    global _DENSE_DECLINE_LOGGED
-    if (
-        _DENSE_DECLINE_LOGGED
-        or not ENABLED
-        or not DENSE_SELECT
-        or not DENSE_SELECT_MIN_S <= seq_len_hint <= DENSE_SELECT_MAX_S
-    ):
-        return
-    _DENSE_DECLINE_LOGGED = True
-    print(
-        f"[litetopk] dense-select declined in-window at {stage}: "
-        f"S={seq_len_hint} topk={topk} "
-        f"logits={tuple(logits.shape)}/{logits.dtype}/"
-        f"strides=({logits.stride(0)},{logits.stride(1)}) "
-        f"bytes={logits.numel() * logits.element_size()} "
-        f"out={tuple(out_indices.shape)}/{out_indices.dtype}/"
-        f"contig={out_indices.is_contiguous()}",
-        flush=True,
-    )
-
-
 _SINGLE_SCAN_LOGGED = False
 
 
@@ -202,7 +163,6 @@ def _dsa_source_id():
     for filename in (
         "dsa_litetopk.cu",
         "sm100_dsa_litetopk.cuh",
-        "dense_topk_litetopk.cuh",
     ):
         path = os.path.join(_DSA_DIR, filename)
         digest.update(filename.encode())
@@ -352,7 +312,6 @@ def _ext():
             for required_op in (
                 "plan_and_permuted_paged_gather_out",
                 "h2048_safe_topk_out_litetopk_",
-                "dense_topk_litetopk_",
             ):
                 if not hasattr(_EXT, required_op):
                     raise RuntimeError(
@@ -388,7 +347,7 @@ def production_extension_available(*, use_fp4: bool, topk: int) -> bool:
         or torch.cuda.get_device_capability() != (10, 0)
         or topk <= 0
         or topk > 2048
-        or max(16384, 32 * topk) > MERGE_CAP
+        or minimum_merge_cap(topk) > MERGE_CAP
     ):
         return False
 
@@ -396,16 +355,15 @@ def production_extension_available(*, use_fp4: bool, topk: int) -> bool:
     if ext is None:
         return False
 
-    from vllm.utils.deep_gemm import _import_deep_gemm
+    from vllm.utils.deep_gemm import is_fp8_fp4_mqa_logits_out_supported
 
-    deep_gemm = _import_deep_gemm()
-    if deep_gemm is None or not hasattr(deep_gemm, "fp8_fp4_mqa_logits"):
+    if not is_fp8_fp4_mqa_logits_out_supported():
         return False
 
     common_ops = (
         "plan_and_permuted_paged_gather_out",
         "seed_prep_litetopk_",
-        "map_topk_indices_and_accumulate_votes_litetopk_",
+        "map_topk_vote_stats_litetopk_",
         "cand_count_stats_litetopk_",
     )
     scan_op = (
@@ -415,7 +373,7 @@ def production_extension_available(*, use_fp4: bool, topk: int) -> bool:
     )
     use_h2048_safe = (
         topk == 2048
-        and max(16384, 32 * topk) <= MERGE_CAP <= PRODUCTION_MAX_S
+        and minimum_merge_cap(topk) <= MERGE_CAP <= PRODUCTION_MAX_S
         and NB == 256
     )
     selector_ops = (
@@ -429,126 +387,9 @@ def production_extension_available(*, use_fp4: bool, topk: int) -> bool:
     return all(hasattr(ext, op) for op in (*common_ops, scan_op, *selector_ops))
 
 
-def try_dense_topk(
-    logits,
-    cu_seqlen_ks,
-    cu_seqlen_ke,
-    out_indices,
-    topk,
-    *,
-    seq_len_hint,
-    num_init_tokens=0,
-    num_local_tokens=0,
-):
-    """Exact replacement for vLLM's dense prefill top-k on measured lengths.
-
-    One CTA per row builds an FP16-coarse histogram in shared memory, then
-    reuses the same allocation to select the exact FP32 winners. Oversized or
-    tied cutoff buckets refine through a device-only exact radix fallback; no
-    global metadata, host synchronization, or ``-1`` fallback is used.
-    """
-    global _DENSE_SELECT_LOGGED
-    if (
-        not ENABLED
-        or not DENSE_SELECT
-        or seq_len_hint < DENSE_SELECT_MIN_S
-        or seq_len_hint > DENSE_SELECT_MAX_S
-        or logits.numel() * logits.element_size()
-        < DENSE_SELECT_MIN_LOGITS_MB * (1 << 20)
-        or logits.device.type != "cuda"
-        or torch.cuda.get_device_capability(logits.device) != (10, 0)
-        or logits.dtype != torch.float32
-        or logits.dim() != 2
-        or logits.stride(0) <= 0
-        or logits.stride(1) <= 0
-        or out_indices.dtype != torch.int32
-        or out_indices.dim() != 2
-        or not out_indices.is_contiguous()
-        or out_indices.device != logits.device
-        or cu_seqlen_ks.device != logits.device
-        or cu_seqlen_ke.device != logits.device
-        or topk <= 0
-        or topk > 2048
-        or num_init_tokens < 0
-        or num_local_tokens < 0
-        or num_init_tokens + num_local_tokens >= topk
-    ):
-        _dense_decline_note("gates", seq_len_hint, logits, out_indices, topk)
-        return False
-    rows = logits.shape[0]
-    if (
-        rows <= 0
-        or out_indices.shape != (rows, topk)
-        or cu_seqlen_ks.dtype != torch.int32
-        or cu_seqlen_ke.dtype != torch.int32
-        or not cu_seqlen_ks.is_contiguous()
-        or not cu_seqlen_ke.is_contiguous()
-        or cu_seqlen_ks.numel() < rows
-        or cu_seqlen_ke.numel() < rows
-    ):
-        _dense_decline_note("shapes", seq_len_hint, logits, out_indices, topk)
-        return False
-    ext = _ext()
-    if ext is None or not hasattr(ext, "dense_topk_litetopk_"):
-        _dense_decline_note("ext", seq_len_hint, logits, out_indices, topk)
-        return False
-    ext.dense_topk_litetopk_(
-        logits,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        out_indices,
-        rows,
-        logits.stride(0),
-        logits.stride(1),
-        topk,
-        num_init_tokens,
-        num_local_tokens,
-    )
-    if not _DENSE_SELECT_LOGGED:
-        print(
-            "[litetopk] exact fused dense histogram+selector active "
-            f"(S={seq_len_hint}, rows={rows}, bins={DENSE_SELECT_BINS})",
-            flush=True,
-        )
-        _DENSE_SELECT_LOGGED = True
-    return True
-
-
 _HINTS_VALIDATED = False
 # (cuda event, pinned int32 tensor, cap, K, watermark)
 _PENDING_TELEMETRY = None
-# VLLM_LITETOPK_PATH_TIMING=1: CUDA-event sub-segment timing of the fused
-# exact-once chain (seed | scan | select | map+vote+probe), keyed by 64K band
-# of S. Lazy readback of completed pairs only — sync-free.
-_SEG_ON = os.environ.get("VLLM_LITETOPK_PATH_TIMING", "0") == "1"
-_SEG_STATS: dict = {}
-
-
-def _seg_mark():
-    if not _SEG_ON:
-        return None
-    ev = torch.cuda.Event(enable_timing=True)
-    ev.record()
-    return ev
-
-
-def _seg_commit(seq_len, evs):
-    if not _SEG_ON or not evs or evs[0] is None:
-        return
-    key = f"fxseg_s{(seq_len + 65535) // 65536}"
-    rec = _SEG_STATS.setdefault(key, {"pend": [], "tot": [0.0] * 8, "n": 0})
-    rec["pend"].append(evs)
-    while rec["pend"] and rec["pend"][0][-1].query():
-        seq = rec["pend"].pop(0)
-        for i in range(len(seq) - 1):
-            rec["tot"][i] += seq[i].elapsed_time(seq[i + 1])
-        rec["n"] += 1
-        if rec["n"] % 128 == 0:
-            segs = " ".join(f"{t / rec['n']:.3f}" for t in rec["tot"][: len(seq) - 1])
-            print(
-                f"[litetopk] {key}: n={rec['n']} seed|scan|select|map_ms=[{segs}]",
-                flush=True,
-            )
 
 
 _CAND_ACC = None  # (device running max[1], device over-watermark count[1]):
@@ -559,43 +400,6 @@ _PROBE_RES = None
 # these per arm blocked the CPU ~17ms inside
 # cudaHostAlloc-class calls (nsys), starving the GPU
 # stream for ~3.4ms/call at 256K/Q=512 when throttled
-
-
-def _check_selector_status(
-    status,
-    candidate_count,
-    *,
-    stage,
-    sequence_length,
-    common_end,
-    cap,
-    layer,
-):
-    # Synchronous per-stage diagnostics are intentionally restricted to
-    # CUDA_LAUNCH_BLOCKING=1. Production probes use the deferred event+pinned
-    # readback below, while the map kernel checks every row device-side.
-    selector_status = int(status.amax().item())
-    if selector_status == 0:
-        return
-    candidate_max = int(candidate_count.amax().item())
-    if stage == "h2048-safe-select":
-        status_help = (
-            "1=bad count, 2=nonfinite score, "
-            "4=invalid physical ID, 16=invalid certificate, "
-            "32=unrecovered overflow, 64=fallback compact failure"
-        )
-    else:
-        status_help = (
-            "1=bad count, 2=underfill, 4=invalid threshold, "
-            "8=invalid boundary, 16=invalid index map"
-        )
-    raise RuntimeError(
-        "large exact-once stage="
-        f"{stage} status={selector_status} "
-        f"({status_help}); "
-        f"S={sequence_length}, common_end={common_end}, cap={cap}, "
-        f"candidate_max={candidate_max}, layer={layer}"
-    )
 
 
 def _poll_candidate_telemetry():
@@ -778,7 +582,7 @@ def _carry_vote_hist(nv, dev, hot_key, waited_event=None):
     entry = _CARRY_VOTE_BUFS.get(key)
     if entry is not None and entry["free_event"] is not None:
         free_event = entry["free_event"]
-        if not (DEDUP_CARRY_WAIT and free_event is waited_event):
+        if free_event is not waited_event:
             torch.cuda.current_stream(dev).wait_event(free_event)
     if entry is None or entry["buf"].numel() < nv:
         cap = max(1024, 1 << (nv - 1).bit_length())
@@ -793,11 +597,9 @@ def _carry_vote_hist(nv, dev, hot_key, waited_event=None):
             "buf": torch.zeros(cap, dtype=torch.int32, device=dev),
             "free_event": None,
             "ready_event": ready_event,
-            "hot": (
-                hot
-                if hot is not None
-                else torch.empty(max(HOTSAMPLE, 1), dtype=torch.int64, device=dev)
-            ),
+            "hot": hot
+            if hot is not None
+            else torch.empty(HOT_PREFIX, dtype=torch.int64, device=dev),
             "needs_reset": False,
             "dirty_extent": 0,
         }
@@ -838,37 +640,53 @@ def _carry_topk_workspace(max_vote, dev):
     return entry
 
 
-_CARRY_TIMING = os.environ.get("VLLM_LITETOPK_CARRY_TIMING", "0") == "1"
-# Publish the voted-hot carry every Nth fused chunk. The skip decision runs
-# BEFORE the vote-hist acquire and the map-kernel accumulation, so skipped
-# chunks pay neither the acquire zeroing, the vote atomics, nor the publish
-# select (0.35 ms/call side-stream). The published hot set is voted from the
-# publish chunk's recent rows only -- the same information the every-chunk
-# scheme retains, since an unpublished accumulate was discarded by the
-# needs_reset safety net anyway. (An earlier hang attributed to stride > 1
-# was misattributed; the lifecycle audit found no hang or corruption path.)
-_CARRY_EVERY = max(1, int(os.environ.get("VLLM_LITETOPK_CARRY_EVERY", "1")))
-_CARRY_SKIP_COUNTS: dict = {}
-_CARRY_IO_ENV = os.environ.get("VLLM_LITETOPK_CARRY_IO", "1") == "1"
-_CARRY_TIME_STATS: dict = {"pend": [], "tot": 0.0, "n": 0}
+def _pcp_frontier_broadcast_carry(
+    hot,
+    local_extent,
+    side,
+    *,
+    broadcast_src=None,
+    broadcast_extent=None,
+):
+    """Broadcast one PCP frontier carry on its producing side stream."""
+    if broadcast_src is None:
+        if broadcast_extent is not None:
+            raise ValueError("PCP frontier carry extent requires a source rank")
+        return local_extent
+    from vllm.distributed import get_pcp_group
+
+    pcp_group = get_pcp_group()
+    if (
+        pcp_group.world_size <= 1
+        or not 0 <= int(broadcast_src) < pcp_group.world_size
+        or broadcast_extent is None
+    ):
+        raise ValueError("invalid PCP frontier carry broadcast plan")
+    publish_extent = int(broadcast_extent)
+    if pcp_group.rank_in_group == int(broadcast_src) and publish_extent != local_extent:
+        raise ValueError("PCP frontier source extent does not match its local carry")
+    communicator = pcp_group.device_communicator
+    pynccl_comm = (
+        None if communicator is None else getattr(communicator, "pynccl_comm", None)
+    )
+    if pynccl_comm is None or pynccl_comm.disabled:
+        raise ValueError("PCP frontier carry requires the device PyNccl communicator")
+    # Enqueue directly on the carry stream so its ready event covers the
+    # selection and the communication.
+    pynccl_comm.broadcast(hot, src=int(broadcast_src), stream=side)
+    return publish_extent
 
 
-def _carry_time_commit(ev0, ev1):
-    st = _CARRY_TIME_STATS
-    st["pend"].append((ev0, ev1))
-    while st["pend"] and st["pend"][0][1].query():
-        a, b = st["pend"].pop(0)
-        st["tot"] += a.elapsed_time(b)
-        st["n"] += 1
-        if st["n"] % 256 == 0:
-            print(
-                f"[litetopk] carry-timing: n={st['n']} "
-                f"side_ms={st['tot'] / st['n']:.3f}",
-                flush=True,
-            )
-
-
-def _publish_carry(hot_key, votes, nv, min_index, max_vote):
+def _publish_carry(
+    hot_key,
+    votes,
+    nv,
+    min_index,
+    max_vote,
+    *,
+    broadcast_src=None,
+    broadcast_extent=None,
+):
     """Publish HOT12288 on the per-device side stream."""
     if nv - min_index < HOT_PREFIX:
         return
@@ -882,15 +700,11 @@ def _publish_carry(hot_key, votes, nv, min_index, max_vote):
     carry_ext = _ext()
     side.wait_stream(torch.cuda.current_stream(dev))
     with torch.cuda.stream(side):
-        if _CARRY_TIMING:
-            _ct0 = torch.cuda.Event(enable_timing=True)
-            _ct0.record(side)
         votes.record_stream(side)
         hot_n = HOT_PREFIX
         use_custom = (
             carry_ext is not None
             and hasattr(carry_ext, "carry_votes_topk_reset_")
-            and 0 < HOTSAMPLE <= HOT_PREFIX
             and nv <= 1_048_576
             and 0 < max_vote <= 8192
         )
@@ -912,14 +726,17 @@ def _publish_carry(hot_key, votes, nv, min_index, max_vote):
             if min_index > 0:
                 votes[:min_index].fill_(torch.iinfo(torch.int32).min)
             hot = votes.topk(hot_n).indices
+        publish_extent = _pcp_frontier_broadcast_carry(
+            hot,
+            nv,
+            side,
+            broadcast_src=broadcast_src,
+            broadcast_extent=broadcast_extent,
+        )
         ready = entry["ready_event"]
         ready.record(side)
-        if _CARRY_TIMING:
-            _ct1 = torch.cuda.Event(enable_timing=True)
-            _ct1.record(side)
-            _carry_time_commit(_ct0, _ct1)
     entry["free_event"] = ready
-    _HOT_CARRY[key] = (hot, nv, ready, min_index)
+    _HOT_CARRY[key] = (hot, publish_extent, ready, min_index)
 
 
 def _prep_bufs(Q, nb, cap, dev):
@@ -964,12 +781,10 @@ def prepare_permuted_gather(
         common_end = int(common_end)
         if (
             not ENABLED
-            or not HOTONLY
-            or HOTSAMPLE != HOT_PREFIX
             or not (
                 production_min_s(dst_k.dtype == torch.uint8) <= S <= PRODUCTION_MAX_S
             )
-            or Q not in (FUSED_QUERY_LEN, FUSED_TAIL_QUERY_LEN)
+            or not _supported_fused_query_len(Q)
             or num_reqs != 1
             or hot_key is None
             or ks < 0
@@ -998,41 +813,14 @@ def prepare_permuted_gather(
             or carry[0].dim() != 1
             or carry[0].numel() < HOT_PREFIX
         )
-        if (
-            not carry_valid
-            and os.environ.get("VLLM_LITETOPK_COLDSTART_IDENTITY", "0") != "1"
-        ):
-            if os.environ.get("VLLM_LITETOPK_CARRY_DEBUG", "0") == "1":
-                if carry is None:
-                    why = "missing"
-                else:
-                    carry_ext = int(carry[1]) if len(carry) > 1 else -1
-                    carry_min = int(carry[3]) if len(carry) > 3 else -1
-                    why = (
-                        f"len={len(carry)} ext={carry_ext} "
-                        f"vs common_end={common_end}, min={carry_min} "
-                        f"vs ks={ks}"
-                    )
-                print(
-                    f"[litetopk] carry invalid ({why}) S={S} Q={Q}",
-                    flush=True,
-                )
+        if not carry_valid:
             return None
         ext = _ext()
         if ext is None or not hasattr(ext, "plan_and_permuted_paged_gather_out"):
             return None
-        if carry_valid:
-            assert carry is not None
-            hot = carry[0][:HOT_PREFIX]
-            carry_event = carry[2]
-        else:
-            # Identity cold start: HOT = the physical window prefix. The seed
-            # gate starts looser than a voted-hot carry, and the ring daemon
-            # tightens it during the scan; recall is machinery-guaranteed.
-            hot = torch.arange(
-                ks, ks + HOT_PREFIX, dtype=torch.int32, device=dst_k.device
-            )
-            carry_event = None
+        assert carry is not None
+        hot = carry[0][:HOT_PREFIX]
+        carry_event = carry[2]
         if carry_event is not None:
             carry_event.wait()
         hot.record_stream(torch.cuda.current_stream(dst_k.device))
@@ -1064,32 +852,22 @@ def prepare_permuted_gather(
             "planner_state": state,
         }
     except Exception as e:  # noqa: BLE001
-        detail = ""
-        if os.environ.get("VLLM_LITETOPK_CARRY_DEBUG", "0") == "1":
-            try:
-                parts = []
-                for name, t in (
-                    ("kv_cache", kv_cache),
-                    ("dst_k", dst_k),
-                    ("dst_scale", dst_scale),
-                    ("block_table", block_table),
-                ):
-                    parts.append(
-                        f"{name}: shape={tuple(t.shape)} "
-                        f"stride={tuple(t.stride())} "
-                        f"contig={t.is_contiguous()} dtype={t.dtype}"
-                    )
-                detail = " | " + "; ".join(parts)
-            except Exception:
-                pass
         print(
-            f"[litetopk] exact-once permuted gather declined: {e}{detail}",
+            f"[litetopk] exact-once permuted gather declined: {e}",
             flush=True,
         )
         return None
 
 
-def stash_carry(hot_key, idx, S, min_index=0, *, next_sequence_length=None):
+def stash_carry(
+    hot_key,
+    idx,
+    S,
+    min_index=0,
+    *,
+    broadcast_src=None,
+    broadcast_extent=None,
+):
     """Seed a layer's hot carry from the OFFICIAL path's topk output, called
     by the container on the LAST official chunk before MIN_S. The
     official->ours boundary is deterministic, so this one seed is all the
@@ -1100,10 +878,11 @@ def stash_carry(hot_key, idx, S, min_index=0, *, next_sequence_length=None):
     (async): seeding overlaps the model forward instead of stalling the
     official path. The exact-once gather consumer waits on the stored event
     before touching the carry."""
-    if hot_key is None or not (HOTONLY and HOTSAMPLE > 0):
+    if hot_key is None:
         return
     dev = idx.device
     nv = int(S)
+    lifecycle_extent = int(broadcast_extent) if broadcast_src is not None else nv
     if nv - min_index < HOT_PREFIX:
         return
     # max_tokens=1 can finish directly from the final prefill logits, without
@@ -1116,7 +895,11 @@ def stash_carry(hot_key, idx, S, min_index=0, *, next_sequence_length=None):
     # clears every old per-device planner/carry, and the remaining layers build
     # fresh state.
     previous = _HOT_CARRY.get((str(dev), hot_key))
-    if previous is not None and len(previous) >= 2 and int(previous[1]) > nv:
+    if (
+        previous is not None
+        and len(previous) >= 2
+        and int(previous[1]) > lifecycle_extent
+    ):
         _retire_request_state(dev)
     # The caller reuses one persistent output tensor across layers.  The next
     # chunk is best predicted by every winner from the most recent query
@@ -1129,9 +912,6 @@ def stash_carry(hot_key, idx, S, min_index=0, *, next_sequence_length=None):
     if ss is None:
         ss = torch.cuda.Stream(device=dev)
         _HOT_STREAM[str(dev)] = ss
-    # Kept in the public signature while older wrappers still pass the hint;
-    # planning now happens only on the consuming main stream.
-    _ = next_sequence_length
     carry_ext = _ext()
     ss.wait_stream(torch.cuda.current_stream())  # see the just-written topk
     idx_snapshot.record_stream(ss)  # keep it alive for the read
@@ -1165,9 +945,16 @@ def stash_carry(hot_key, idx, S, min_index=0, *, next_sequence_length=None):
             if min_index > 0:
                 votes[:min_index].fill_(torch.iinfo(torch.int32).min)
             hot = votes.topk(hot_n).indices
+        publish_extent = _pcp_frontier_broadcast_carry(
+            hot,
+            nv,
+            ss,
+            broadcast_src=broadcast_src,
+            broadcast_extent=broadcast_extent,
+        )
         ev = torch.cuda.Event()
         ev.record()
-    _HOT_CARRY[(str(dev), hot_key)] = (hot, nv, ev, min_index)
+    _HOT_CARRY[(str(dev), hot_key)] = (hot, publish_extent, ev, min_index)
 
 
 def try_large_exact_once_chunk(
@@ -1189,6 +976,8 @@ def try_large_exact_once_chunk(
     carry_extent_hint=None,
     headroom=None,
     q_sf=None,
+    carry_broadcast_src=None,
+    carry_broadcast_extent=None,
     _carry_io=True,
 ):
     """Run the fixed-HOT producer without rescanning HOT12288.
@@ -1218,7 +1007,7 @@ def try_large_exact_once_chunk(
         if (
             not isinstance(permuted_plan, dict)
             or num_reqs != 1
-            or Q not in (FUSED_QUERY_LEN, FUSED_TAIL_QUERY_LEN)
+            or not _supported_fused_query_len(Q)
             or min_s > S
             or S > PRODUCTION_MAX_S
             or q.dim() != 3
@@ -1237,13 +1026,17 @@ def try_large_exact_once_chunk(
             or out_idx.dtype != torch.int32
             or topk <= 0
             or topk > 2048
-            or cap_eff < max(16384, 32 * topk)
+            or cap_eff < minimum_merge_cap(topk)
             or prefix_base < 0
             or prefix_base % 4 != 0
             or prefix_base + HOT_PREFIX > common_end
             or common_end > S
             or int(permuted_plan.get("sequence_length", -1)) != S
             or int(permuted_plan.get("query_length", -1)) != Q
+            or (
+                Q in TP_SHARD_QUERY_LENS
+                and permuted_plan.get("tp_query_shard") is not True
+            )
             or int(permuted_plan.get("window_start", -1)) != prefix_base
             or int(permuted_plan.get("common_end", -1)) != common_end
         ):
@@ -1305,7 +1098,9 @@ def try_large_exact_once_chunk(
         _poll_candidate_telemetry()
         ext = _ext()
         use_h2048_safe = (
-            topk == 2048 and max(16384, 32 * topk) <= cap_eff <= (1 << 20) and NB == 256
+            topk == 2048
+            and minimum_merge_cap(topk) <= cap_eff <= (1 << 20)
+            and NB == 256
         )
         scan_op = (
             "mqa_logits_dsa_static_hot_nohist_fp4graft_litetopk_"
@@ -1315,7 +1110,7 @@ def try_large_exact_once_chunk(
         required_ops: tuple[str, ...] = (
             "seed_prep_litetopk_",
             scan_op,
-            "map_topk_indices_and_accumulate_votes_litetopk_",
+            "map_topk_vote_stats_litetopk_",
         )
         required_ops += (
             ("h2048_safe_topk_out_litetopk_",)
@@ -1335,24 +1130,25 @@ def try_large_exact_once_chunk(
             _OPS_VERIFIED[ops_key] = all(hasattr(ext, name) for name in required_ops)
         if not _OPS_VERIFIED[ops_key]:
             return False
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.utils.deep_gemm import (
+            fp8_fp4_mqa_logits,
+            is_fp8_fp4_mqa_logits_out_supported,
+        )
 
-        deep_gemm = _import_deep_gemm()
-        if deep_gemm is None or not hasattr(deep_gemm, "fp8_fp4_mqa_logits"):
+        if not is_fp8_fp4_mqa_logits_out_supported():
             return False
 
         prefix_end = prefix_base + HOT_PREFIX
         prefix_k = k[prefix_base:prefix_end]
         prefix_scale = k_scale[prefix_base:prefix_end]
         sample_start, sample_end = _ks0_keh(Q, HOT_PREFIX, q.device)
-        _seg0 = _seg_mark()
         if use_fp4:
             seed_q = (q.view(torch.int8), q_sf)
             seed_k = (prefix_k.view(torch.int8), prefix_scale)
         else:
             seed_q = (q, None)
             seed_k = (prefix_k, prefix_scale)
-        sample_logits = deep_gemm.fp8_fp4_mqa_logits(
+        sample_logits = fp8_fp4_mqa_logits(
             seed_q,
             seed_k,
             weights,
@@ -1371,22 +1167,8 @@ def try_large_exact_once_chunk(
         status = b["status"][:Q]
         candidate_value = cb["cv"][:Q]
         candidate_index = cb["ci"][:Q]
-        diagnostic_stages = os.environ.get("CUDA_LAUNCH_BLOCKING") == "1"
         call_number = _TELEMETRY["calls"] + 1
         probe_due = call_number == 1 or call_number % PROBE_EVERY == 0
-
-        def _check_static_stage(stage):
-            if not diagnostic_stages:
-                return
-            _check_selector_status(
-                status,
-                candidate_count,
-                stage=stage,
-                sequence_length=S,
-                common_end=common_end,
-                cap=cap_eff,
-                layer=hot_key,
-            )
 
         headroom_eff = HEADROOM if headroom is None else float(headroom)
         if headroom_eff < 0.0:
@@ -1411,16 +1193,7 @@ def try_large_exact_once_chunk(
             candidate_index,
             candidate_count,
         )
-        if diagnostic_stages:
-            seed_min = int(candidate_count.min().item())
-            if seed_min < topk:
-                raise RuntimeError(
-                    "large exact-once stage=seed-emission underfill; "
-                    f"S={S}, common_end={common_end}, min={seed_min}, "
-                    f"topk={topk}, layer={hot_key}"
-                )
         del sample_logits
-        _seg1 = _seg_mark()
 
         # All rows share the physical prefix.  Reuse the immutable cached
         # filled tensor instead of launching an add kernel in every layer.
@@ -1462,7 +1235,6 @@ def try_large_exact_once_chunk(
                 NB,
                 topk,
             )
-        _seg2 = _seg_mark()
         if not use_h2048_safe:
             # Compatibility path for LongCat's K=1008, DSV4's K=512, and
             # non-default CAP/NB. It retains the existing certificate and
@@ -1478,7 +1250,6 @@ def try_large_exact_once_chunk(
                 topk,
                 S,
             )
-            _check_static_stage("physical-finalize")
 
         _TELEMETRY["calls"] = call_number
 
@@ -1486,20 +1257,7 @@ def try_large_exact_once_chunk(
         carry_nv = 0
         carry_recent_rows = min(Q, CARRY_RECENT_ROWS)
         carry_event = permuted_plan.get("carry_event")
-        carry_due = True
-        if _CARRY_EVERY > 1 and hot_key is not None:
-            _ck = (str(q.device), hot_key)
-            _cn = _CARRY_SKIP_COUNTS.get(_ck, 0) + 1
-            _CARRY_SKIP_COUNTS[_ck] = _cn
-            carry_due = _cn % _CARRY_EVERY == 0
-        if (
-            _carry_io
-            and _CARRY_IO_ENV
-            and carry_due
-            and hot_key is not None
-            and HOTONLY
-            and HOTSAMPLE == HOT_PREFIX
-        ):
+        if _carry_io and hot_key is not None:
             carry_nv = int(carry_extent_hint if carry_extent_hint is not None else S)
             carry_votes = _carry_vote_hist(carry_nv, q.device, hot_key, carry_event)
         if carry_votes is None:
@@ -1518,8 +1276,6 @@ def try_large_exact_once_chunk(
                 boundary_meta,
                 S,
             )
-            _check_static_stage("h2048-safe-select")
-            _seg3 = _seg_mark()
         else:
             ext.compact_topk_min_thr_inplace_idx_out_litetopk(
                 candidate_value,
@@ -1540,29 +1296,17 @@ def try_large_exact_once_chunk(
             )
         run_max, over_events = _CAND_ACC
         # The CUDA map kernel checks every status row before mapping a winner.
-        # This preserves fail-closed ordering between synchronous probes.
-        if hasattr(ext, "map_topk_vote_stats_litetopk_"):
-            ext.map_topk_vote_stats_litetopk_(
-                out_idx,
-                permutation,
-                status,
-                carry_votes,
-                carry_recent_rows,
-                candidate_count,
-                run_max,
-                over_events,
-                OVF_WATERMARK,
-            )
-        else:
-            ext.map_topk_indices_and_accumulate_votes_litetopk_(
-                out_idx,
-                permutation,
-                status,
-                carry_votes,
-                carry_recent_rows,
-            )
-            torch.maximum(run_max, candidate_count.amax(0, keepdim=True), out=run_max)
-            over_events.add_((candidate_count > OVF_WATERMARK).sum(dtype=torch.int32))
+        ext.map_topk_vote_stats_litetopk_(
+            out_idx,
+            permutation,
+            status,
+            carry_votes,
+            carry_recent_rows,
+            candidate_count,
+            run_max,
+            over_events,
+            OVF_WATERMARK,
+        )
         if _PENDING_TELEMETRY is None and probe_due:
             # Arm one deferred event+pinned probe after the selector. The map
             # kernel checks every status row device-side, so bad output cannot
@@ -1590,29 +1334,6 @@ def try_large_exact_once_chunk(
                 topk,
                 OVF_WATERMARK,
             )
-        if _SEG_ON and use_h2048_safe:
-            _seg_commit(S, [_seg0, _seg1, _seg2, _seg3, _seg_mark()])
-        if CHECK:
-            logits = deep_gemm.fp8_fp4_mqa_logits(
-                (q.view(torch.int8), q_sf) if use_fp4 else (q, None),
-                (k.view(torch.int8), k_scale) if use_fp4 else (k, k_scale),
-                weights,
-                ks,
-                ke,
-                clean_logits=True,
-            )
-            ref_physical = logits.topk(topk, dim=1).indices
-            ref = permutation[ref_physical]
-            refs = ref.sort(dim=1).values
-            got = out_idx.long().sort(dim=1).values
-            pos = torch.searchsorted(refs, got).clamp(max=topk - 1)
-            recall = (torch.gather(refs, 1, pos) == got).float().mean()
-            print(
-                f"[litetopk] large exact-once Q={Q} S={S} "
-                f"recall={100 * recall.item():.3f}%",
-                flush=True,
-            )
-
         if carry_votes.numel() > 0:
             _publish_carry(
                 hot_key,
@@ -1620,6 +1341,8 @@ def try_large_exact_once_chunk(
                 carry_nv,
                 prefix_base,
                 carry_recent_rows,
+                broadcast_src=carry_broadcast_src,
+                broadcast_extent=carry_broadcast_extent,
             )
         if not _SINGLE_SCAN_LOGGED:
             print(
@@ -1631,10 +1354,6 @@ def try_large_exact_once_chunk(
             _SINGLE_SCAN_LOGGED = True
         return True
     except Exception as e:  # noqa: BLE001
-        if os.environ.get("VLLM_LITETOPK_CARRY_DEBUG", "0") == "1":
-            import traceback
-
-            traceback.print_exc()
         print(
             f"[litetopk] large exact-once declined: {e}",
             flush=True,

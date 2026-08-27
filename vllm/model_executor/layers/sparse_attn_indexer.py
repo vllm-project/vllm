@@ -4,7 +4,6 @@
 
 import functools
 import os
-import time
 
 import torch
 
@@ -13,15 +12,15 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.dsa_litetopk import (
     dsa_litetopk_latest_available,
-    dsa_litetopk_latest_dense_topk,
     dsa_litetopk_latest_prepare_permuted_gather,
     dsa_litetopk_latest_release_pair_swap_workspace,
+    dsa_litetopk_latest_stash_carry,
     dsa_litetopk_latest_stash_dense,
     dsa_litetopk_latest_streaming_indexer,
 )
@@ -57,62 +56,106 @@ _LITETOPK_FP4_FUSED_MIN_SEQ_LEN = int(
         _LITETOPK_MIN_S_OVERRIDE or "65536",
     )
 )
+_LITETOPK_TP8_FP4_FULL_QUERY_LENS = (8192, 8128, 32768, 32704)
+_LITETOPK_TP4_FP8_FULL_QUERY_LENS = (8192, 8128)
 
 
 def _litetopk_fused_min_seq_len(use_fp4: bool) -> int:
     return _LITETOPK_FP4_FUSED_MIN_SEQ_LEN if use_fp4 else _LITETOPK_FUSED_MIN_SEQ_LEN
 
 
-# VLLM_LITETOPK_PATH_TIMING=1: per-call CUDA-event timing of the prefill
-# indexer, split by (path, 64K band of S) and (gather, topk) segments.
-# Events are read back lazily (only pairs whose end already completed), so
-# the instrumented run stays sync-free.
-_LITETOPK_PATH_TIMING = os.environ.get("VLLM_LITETOPK_PATH_TIMING", "0") == "1"
-_LITETOPK_PT_STATS: dict = {}
-_LITETOPK_HOST_TIMING = os.environ.get("VLLM_LITETOPK_HOST_TIMING", "0") == "1"
-_LITETOPK_HOST_STATS: dict = {}
+def _litetopk_pcp_frontier_local_extents(
+    metadata: DeepseekV32IndexerMetadata,
+) -> tuple[int, int] | None:
+    """Return this rank's canonical DualChunkSwap A/B carry extents.
+
+    The strict shape check is deliberately host-only.  It excludes dense/fused
+    crossover steps, mixed batches, sub-chunked logits, and uneven tails before
+    any frontier collective is scheduled.
+    """
+    prefill = metadata.prefill
+    if metadata.num_decodes != 0 or metadata.num_prefills != 2 or prefill is None:
+        return None
+    chunks = prefill.chunks
+    if len(chunks) != 2:
+        return None
+    a, b = chunks
+    query_lengths = tuple(c.token_end - c.token_start for c in chunks)
+    if query_lengths[0] != query_lengths[1] or query_lengths[0] not in (8192, 8128):
+        return None
+    for chunk in chunks:
+        if (
+            chunk.num_reqs != 1
+            or not chunk.fused_indexer_planned
+            or chunk.skip_kv_gather
+            or chunk.local_total_seq_lens <= 0
+            or chunk.local_total_seq_lens != chunk.max_local_total_seq_lens
+            or chunk.total_seq_lens != chunk.max_local_total_seq_lens
+            or chunk.common_ke_min <= 0
+        ):
+            return None
+    # Stable DualChunkSwap order is A then B.  The source carry must be wholly
+    # causal for B's first row; this also rejects rank-0's fresh-prefill reorder.
+    if a.max_local_total_seq_lens > b.common_ke_min:
+        return None
+    return a.max_local_total_seq_lens, b.max_local_total_seq_lens
 
 
-def _litetopk_host_commit(kind, dt):
-    rec = _LITETOPK_HOST_STATS.setdefault(kind, [0.0, 0])
-    rec[0] += dt
-    rec[1] += 1
-    if rec[1] % 256 == 0:
+def _litetopk_pcp_frontier_sources(
+    descriptors: list[tuple[int, int, int]],
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Map all-rank ``(eligible, A extent, B extent)`` to phase plans."""
+    world_size = len(descriptors)
+    if world_size <= 1 or any(flag != 1 for flag, _, _ in descriptors):
+        return None
+    if any(a <= 0 or b < a for _, a, b in descriptors):
+        return None
+    # A segments form the first global half, whose frontier is rank P-1.
+    # B segments form the mirrored second half, whose frontier is rank 0.
+    return (
+        (world_size - 1, descriptors[world_size - 1][1]),
+        (0, descriptors[0][2]),
+    )
+
+
+def _litetopk_pcp_frontier_plan(
+    metadata: DeepseekV32IndexerMetadata,
+    device: torch.device,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Agree on one frontier plan once per metadata build, then cache it."""
+    global _LITETOPK_PCP_FRONTIER_LOGGED
+    cache_name = "_litetopk_pcp_frontier_plan"
+    # Attention metadata is built once per scheduler step and shared by every
+    # indexer layer.  Caching on that object avoids a GPU->CPU descriptor sync
+    # per layer while keeping the lifetime exactly one model forward.
+    cache_owner = metadata.prefill if metadata.prefill is not None else metadata
+    if hasattr(cache_owner, cache_name):
+        return getattr(cache_owner, cache_name)
+
+    group = get_pcp_group()
+    local = _litetopk_pcp_frontier_local_extents(metadata)
+    descriptor = torch.tensor(
+        (1, local[0], local[1]) if local is not None else (0, 0, 0),
+        dtype=torch.int64,
+        device=device,
+    )
+    gathered = group.all_gather(descriptor, dim=0).view(group.world_size, 3)
+    descriptors = [
+        (int(valid), int(start), int(end)) for valid, start, end in gathered.tolist()
+    ]
+    plan = _litetopk_pcp_frontier_sources(descriptors)
+    setattr(cache_owner, cache_name, plan)
+    if plan is not None and not _LITETOPK_PCP_FRONTIER_LOGGED:
         print(
-            f"[litetopk] host-timing {kind}: n={rec[1]} "
-            f"host_ms={rec[0] / rec[1] * 1e3:.3f}",
+            "[litetopk] PCP global-frontier carry active: "
+            f"A src={plan[0][0]}, B src={plan[1][0]}",
             flush=True,
         )
+        _LITETOPK_PCP_FRONTIER_LOGGED = True
+    return plan
 
 
-def _litetopk_pt_mark():
-    if not _LITETOPK_PATH_TIMING:
-        return None
-    import torch as _torch
-
-    ev = _torch.cuda.Event(enable_timing=True)
-    ev.record()
-    return ev
-
-
-def _litetopk_pt_commit(kind, seq_len, ev_seq):
-    if not _LITETOPK_PATH_TIMING or not ev_seq or ev_seq[0] is None:
-        return
-    key = f"{kind}_s{(seq_len + 65535) // 65536}"
-    rec = _LITETOPK_PT_STATS.setdefault(key, {"pend": [], "tot": [0.0, 0.0], "n": 0})
-    rec["pend"].append(ev_seq)
-    while rec["pend"] and rec["pend"][0][-1].query():
-        seq = rec["pend"].pop(0)
-        for i in range(len(seq) - 1):
-            rec["tot"][i] += seq[i].elapsed_time(seq[i + 1])
-        rec["n"] += 1
-        if rec["n"] % 256 == 0:
-            print(
-                f"[litetopk] path-timing {key}: n={rec['n']} "
-                f"gather_ms={rec['tot'][0] / rec['n']:.3f} "
-                f"topk_ms={rec['tot'][1] / rec['n']:.3f}",
-                flush=True,
-            )
+_LITETOPK_PCP_FRONTIER_LOGGED = False
 
 
 logger = init_logger(__name__)
@@ -329,40 +372,6 @@ def fused_indexer_q_rope_quant(
     return q_fp8, weights_out
 
 
-def _mask_init_and_local_tokens(
-    logits: torch.Tensor,
-    row_starts: torch.Tensor | None,
-    row_ends: torch.Tensor,
-    num_init_tokens: int,
-    num_local_tokens: int,
-) -> None:
-    """Force streaming tokens into the top-k set (streaming-aware indexing):
-    scatter +inf into the first ``num_init_tokens`` and last
-    ``num_local_tokens`` columns of each row's valid range
-    ``[row_starts, row_ends)``. Out-of-range writes are clamped into
-    ``[row_starts, row_ends)`` so they never leak into other rows' ranges.
-    """
-    device = logits.device
-    ends = row_ends.to(device=device, dtype=torch.int64).reshape(-1)
-    if row_starts is None:
-        starts = torch.zeros_like(ends)
-    else:
-        starts = row_starts.to(device=device, dtype=torch.int64).reshape(-1)
-    last = (ends - 1).clamp_max_(logits.shape[1] - 1).clamp_min_(starts)
-    if num_init_tokens > 0:
-        init_idx = starts[:, None] + torch.arange(
-            num_init_tokens, dtype=torch.int64, device=device
-        )
-        init_idx = torch.minimum(init_idx, last[:, None])
-        logits.scatter_(1, init_idx, float("inf"))
-    if num_local_tokens > 0:
-        local_idx = last[:, None] - torch.arange(
-            num_local_tokens, dtype=torch.int64, device=device
-        )
-        local_idx = torch.maximum(local_idx, starts[:, None])
-        logits.scatter_(1, local_idx, float("inf"))
-
-
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
@@ -404,9 +413,103 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-# Bumped whenever topk_indices_buffer is (re)written (see the note at the
-# bump site inside sparse_attn_indexer).
-_SPARSE_IDX_VERSION = [0]
+_LITETOPK_TP_SHARD_BUFS: dict[tuple[str, int, int], torch.Tensor] = {}
+_LITETOPK_TP_SHARD_STATUS: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+_LITETOPK_TP_SHARD_LOGGED = False
+
+
+def _litetopk_tp_guarded_call(tp_query_shard, stage, func, *args, **kwargs):
+    """Turn shard-local setup errors into a peer-visible decline."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as error:
+        if tp_query_shard is None:
+            raise
+        logger.error("LiteTopK TP query shard %s failed locally: %s", stage, error)
+        return None
+
+
+def _litetopk_tp_compressed_row_offset(shard_lo: int, compress_ratio: int) -> int:
+    if compress_ratio <= 0 or shard_lo % compress_ratio != 0:
+        raise ValueError("TP query shard must start on a compressed-token boundary")
+    return shard_lo // compress_ratio
+
+
+def _litetopk_tp_query_shard(
+    full_q: int,
+    topk: int,
+    device: torch.device,
+    *,
+    use_fp4_cache: bool,
+    use_pcp: bool,
+    pcp_world_size: int,
+    compress_ratio: int,
+    num_heads: int,
+    num_reqs: int,
+    dcp_world_size: int,
+) -> tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Return this rank's qualified TP row interval and persistent buffers."""
+    global _LITETOPK_TP_SHARD_LOGGED
+    if (
+        not envs.VLLM_LITETOPK_TP_QUERY_SHARD
+        or num_reqs != 1
+        or dcp_world_size != 1
+        or (device.type == "cuda" and torch.cuda.is_current_stream_capturing())
+    ):
+        return None
+    dsv4_profile = (
+        use_fp4_cache
+        and not use_pcp
+        and pcp_world_size == 1
+        and compress_ratio == 4
+        and num_heads == 64
+        and topk == 512
+        and full_q in _LITETOPK_TP8_FP4_FULL_QUERY_LENS
+    )
+    glm_profile = (
+        not use_fp4_cache
+        and use_pcp
+        and pcp_world_size == 2
+        and compress_ratio == 1
+        and num_heads == 32
+        and topk == 2048
+        and full_q in _LITETOPK_TP4_FP8_FULL_QUERY_LENS
+    )
+    if not (dsv4_profile or glm_profile):
+        return None
+    expected_tp_world_size = 8 if dsv4_profile else 4
+    tp_group = get_tp_group()
+    if (
+        tp_group.world_size != expected_tp_world_size
+        or full_q % tp_group.world_size != 0
+    ):
+        return None
+    local_q = full_q // tp_group.world_size
+    lo = tp_group.rank_in_group * local_q
+    _litetopk_tp_compressed_row_offset(lo, compress_ratio)
+    key = (str(device), local_q, topk)
+    local_out = _LITETOPK_TP_SHARD_BUFS.get(key)
+    if local_out is None:
+        local_out = torch.empty((local_q, topk), dtype=torch.int32, device=device)
+        _LITETOPK_TP_SHARD_BUFS[key] = local_out
+    status_key = (str(device), tp_group.world_size)
+    status_bufs = _LITETOPK_TP_SHARD_STATUS.get(status_key)
+    if status_bufs is None:
+        status_bufs = (
+            torch.empty(1, dtype=torch.int32, device=device),
+            torch.empty(tp_group.world_size, dtype=torch.int32, device=device),
+        )
+        _LITETOPK_TP_SHARD_STATUS[status_key] = status_bufs
+    if not _LITETOPK_TP_SHARD_LOGGED:
+        print(
+            f"[litetopk] {'DSV4 TP8' if dsv4_profile else 'GLM TP4'} "
+            "query-row shard active: "
+            f"rank={tp_group.rank_in_group} full_q={full_q} "
+            f"rows=[{lo},{lo + local_q})",
+            flush=True,
+        )
+        _LITETOPK_TP_SHARD_LOGGED = True
+    return lo, lo + local_q, local_out, status_bufs[0], status_bufs[1]
 
 
 @functools.cache
@@ -414,67 +517,6 @@ def _cooperative_topk_available() -> bool:
     """The cooperative_topk op is only compiled on CUDA 12.9+ (its cuda::ptx
     sem_relaxed TMA path); fall back to persistent_topk when it is absent."""
     return hasattr(torch.ops._C, "cooperative_topk")
-
-
-_DSA_DUMP_STATE = {"seen": set(), "count": 0}
-
-
-def _maybe_dsa_dump(use_fp4, layer_key, q, q_sf, kv, kv_sf, w, ks, ke, topk, total_s):
-    """Env-gated real-cache dump on the official dense fp4 path.
-
-    VLLM_DSA_DUMP_DIR=<dir> enables; dumps the first call at each new
-    total_seq_lens >= VLLM_DSA_DUMP_MIN_S (default 245760), up to
-    VLLM_DSA_DUMP_MAX (default 2) events, rank 0 only. The first call
-    per forward is the first DSA layer, so consecutive dumps are the
-    same layer's consecutive chunks.
-    """
-    d = os.environ.get("VLLM_DSA_DUMP_DIR")
-    if d and os.environ.get("VLLM_DSA_DUMP_DEBUG") == "1":
-        st0 = _DSA_DUMP_STATE
-        st0["dbg"] = st0.get("dbg", 0) + 1
-        if st0["dbg"] <= 40:
-            print(
-                f"[dsa-dump-dbg] call#{st0['dbg']} fp4={use_fp4} "
-                f"S={total_s} q={tuple(q.shape)} layer={layer_key}",
-                flush=True,
-            )
-    if not d or not use_fp4:
-        return
-    st = _DSA_DUMP_STATE
-    thresh = int(os.environ.get("VLLM_DSA_DUMP_MIN_S", "245760"))
-    maxn = int(os.environ.get("VLLM_DSA_DUMP_MAX", "2"))
-    if total_s < thresh or total_s in st["seen"] or st["count"] >= maxn:
-        return
-    try:
-        import torch.distributed as dist
-
-        if dist.is_initialized() and dist.get_rank() != 0:
-            return
-    except Exception:
-        pass
-    st["seen"].add(total_s)
-    st["count"] += 1
-    from safetensors.torch import save_file
-
-    tag = str(layer_key).replace("/", "_").replace(".", "_")
-    save_file(
-        {
-            "q": q.view(torch.uint8).contiguous().cpu(),
-            "q_sf": q_sf.contiguous().cpu(),
-            "kv": kv.view(torch.uint8).contiguous().cpu(),
-            "kv_sf": kv_sf.contiguous().cpu(),
-            "weights": w.float().contiguous().cpu(),
-            "ks": ks.int().cpu(),
-            "ke": ke.int().cpu(),
-            "topk": topk.int().cpu(),
-        },
-        os.path.join(d, f"dsv4_dump_S{total_s}_{tag}.safetensors"),
-    )
-    print(
-        f"[dsa-dump] wrote S={total_s} layer={tag} "
-        f"q={tuple(q.shape)} kv={tuple(kv.shape)}",
-        flush=True,
-    )
 
 
 @eager_break_during_capture
@@ -501,8 +543,6 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
-    num_init_tokens: int = 0,
-    num_local_tokens: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -555,6 +595,18 @@ def sparse_attn_indexer(
     has_decode = attn_metadata_narrowed.num_decodes > 0
     has_prefill = attn_metadata_narrowed.num_prefills > 0
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
+    pcp_world_size = get_pcp_group().world_size if use_pcp else 1
+    pcp_frontier_plan = None
+    if (
+        use_pcp
+        and envs.VLLM_LITETOPK
+        and envs.VLLM_LITETOPK_PCP_FRONTIER_CARRY
+        and pcp_world_size > 1
+    ):
+        pcp_frontier_plan = _litetopk_pcp_frontier_plan(
+            attn_metadata_narrowed,
+            hidden_states.device,
+        )
     if not has_prefill:
         dsa_litetopk_latest_release_pair_swap_workspace(hidden_states.device)
 
@@ -571,7 +623,7 @@ def sparse_attn_indexer(
     # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
     if use_pcp:
-        num_tokens //= get_pcp_group().world_size
+        num_tokens //= pcp_world_size
     if k is not None:
         k = k[:num_tokens]
 
@@ -612,11 +664,6 @@ def sparse_attn_indexer(
                 # unnecessary work.
                 return topk_indices_buffer
 
-    # Monotonic version of topk_indices_buffer contents: 'shared'-indexer
-    # layers (e.g. GLM indexer_types) reuse the previous full layer's indices
-    # without re-entering this function, so downstream consumers (the grouped
-    # sparse attention in litedsa.py) can cache per-version work.
-    _SPARSE_IDX_VERSION[0] += 1
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
     # nvidia path, _fused_norm_rope_kernel already cleared the same
@@ -640,49 +687,56 @@ def sparse_attn_indexer(
             values_spec,
             scales_spec,
         )
-        for chunk in prefill_metadata.chunks:
+        for chunk_index, chunk in enumerate(prefill_metadata.chunks):
+            carry_broadcast = (
+                pcp_frontier_plan[chunk_index]
+                if pcp_frontier_plan is not None
+                else None
+            )
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
             assert chunk.local_cu_seq_lens is not None
             k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
-            _pt0 = _litetopk_pt_mark()
-            _host_t0 = time.perf_counter() if _LITETOPK_HOST_TIMING else 0.0
             permuted_plan = None
-            if (
-                chunk.fused_indexer_planned
-                and os.environ.get("VLLM_LITETOPK_CARRY_DEBUG") == "1"
-            ):
-                print(
-                    f"[litetopk] chunk dbg skip_gather={chunk.skip_kv_gather} "
-                    f"lts={chunk.local_total_seq_lens} "
-                    f"mlts={chunk.max_local_total_seq_lens} "
-                    f"tts={chunk.total_seq_lens} "
-                    f"q={chunk.token_end - chunk.token_start} "
-                    f"nreq={chunk.num_reqs}",
-                    flush=True,
+            query_length = chunk.token_end - chunk.token_start
+            tp_query_shard = (
+                _litetopk_tp_query_shard(
+                    query_length,
+                    topk_tokens,
+                    k_quant.device,
+                    use_fp4_cache=use_fp4_cache,
+                    use_pcp=use_pcp,
+                    pcp_world_size=pcp_world_size,
+                    compress_ratio=chunk.compress_ratio,
+                    num_heads=int(q_quant.shape[1]),
+                    num_reqs=chunk.num_reqs,
+                    dcp_world_size=dcp_world_size,
                 )
-            noop_fused = (
-                chunk.fused_indexer_planned
-                and os.environ.get("VLLM_LITETOPK_NOOP_INDEXER", "0") == "1"
+                if chunk.fused_indexer_planned
+                else None
             )
-            if (
-                not chunk.skip_kv_gather
-                and chunk.local_total_seq_lens > 0
-                and not noop_fused
-            ):
-                query_length = chunk.token_end - chunk.token_start
+            shard_row_offset = (
+                0
+                if tp_query_shard is None
+                else _litetopk_tp_compressed_row_offset(
+                    tp_query_shard[0], chunk.compress_ratio
+                )
+            )
+            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                 if (
                     chunk.fused_indexer_planned
                     and envs.VLLM_LITETOPK
-                    and envs.VLLM_DSA_MODE in ("litetopk", "litedsa")
                     and dcp_world_size == 1
                     and not current_platform.is_xpu()
                     # The pair-swap plan is a cooperative launch, which CUDA
                     # graph capture cannot record; capture warmups take the
                     # ordinary gather + materialized path below.
                     and not torch.cuda.is_current_stream_capturing()
-                    and dsa_litetopk_latest_available(
+                    and _litetopk_tp_guarded_call(
+                        tp_query_shard,
+                        "availability preflight",
+                        dsa_litetopk_latest_available,
                         use_fp4=use_fp4_cache,
                         topk=topk_tokens,
                     )
@@ -691,13 +745,20 @@ def sparse_attn_indexer(
                     # planner pair-swaps HOT12288 into the physical prefix and
                     # its gather writes the same shared workspace, so there is
                     # no later index_select or second cache read.
-                    permuted_plan = dsa_litetopk_latest_prepare_permuted_gather(
+                    permuted_plan = _litetopk_tp_guarded_call(
+                        tp_query_shard,
+                        "permuted-gather preparation",
+                        dsa_litetopk_latest_prepare_permuted_gather,
                         kv_cache,
                         k_quant,
                         k_scale,
                         chunk.block_table,
                         sequence_length=chunk.max_local_total_seq_lens,
-                        query_length=query_length,
+                        query_length=(
+                            query_length
+                            if tp_query_shard is None
+                            else tp_query_shard[1] - tp_query_shard[0]
+                        ),
                         num_reqs=chunk.num_reqs,
                         common_end=(
                             (
@@ -705,12 +766,14 @@ def sparse_attn_indexer(
                                 if chunk.common_ke_min > 0
                                 else chunk.total_seq_lens - query_length + 1
                             )
-                            - num_local_tokens
+                            + shard_row_offset
                         ),
-                        window_start=num_init_tokens,
+                        window_start=0,
                         topk=topk_tokens,
                         hot_key=k_cache_prefix,
                     )
+                    if permuted_plan is not None and tp_query_shard is not None:
+                        permuted_plan["tp_query_shard"] = True
                 if permuted_plan is None:
                     ops.cp_gather_indexer_k_quant_cache(
                         kv_cache,
@@ -719,8 +782,6 @@ def sparse_attn_indexer(
                         chunk.block_table,
                         chunk.local_cu_seq_lens,
                     )
-            _pt1 = _litetopk_pt_mark()
-
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
                 q_scale[chunk.token_start : chunk.token_end]
@@ -751,50 +812,21 @@ def sparse_attn_indexer(
                 # logits. Runtime requirements are checked separately so a
                 # planner/runtime mismatch fails clearly instead of trying an
                 # unsafe multi-GiB dense fallback.
-                if noop_fused:
-                    # Ceiling probe: charge the fused chunks zero indexer
-                    # cost. Output indices are valid positions but wrong,
-                    # so tokens are meaningless -- timing only. Modes bracket
-                    # the downstream sparse-attention cost: arange (one hot
-                    # L2-resident block, optimistic), window (per-row local
-                    # tail), random (uniform scatter, pessimistic).
-                    mode = os.environ.get("VLLM_LITETOPK_NOOP_MODE", "arange")
-                    rows = topk_indices.shape[0]
-                    dev = topk_indices.device
-                    if mode == "random":
-                        hi = max(1, chunk.common_ke_min)
-                        topk_indices[:] = torch.randint(
-                            0, hi, (rows, topk_tokens), dtype=torch.int32, device=dev
-                        )
-                    elif mode == "window":
-                        base = cu_seqlen_ke[:rows].to(torch.int32)
-                        offs = torch.arange(topk_tokens, dtype=torch.int32, device=dev)
-                        topk_indices[:] = (
-                            base.unsqueeze(1) - topk_tokens + offs.unsqueeze(0)
-                        ).clamp_(min=0)
-                    else:
-                        topk_indices[:] = torch.arange(
-                            topk_tokens, dtype=torch.int32, device=dev
-                        ).unsqueeze(0)
-                    logits = None
-                    _pt1b = _litetopk_pt_mark()
-                    _litetopk_pt_commit(
-                        "fused", chunk.max_local_total_seq_lens, (_pt0, _pt1, _pt1b)
-                    )
-                    continue
                 fused_indexer_planned = chunk.fused_indexer_planned
                 fused_indexer_runtime_eligible = (
                     fused_indexer_planned
                     and not torch.cuda.is_current_stream_capturing()
                     and envs.VLLM_LITETOPK
-                    and envs.VLLM_DSA_MODE in ("litetopk", "litedsa")
                     and dcp_world_size == 1
                     and not current_platform.is_xpu()
                     and q_slice_cast.dim() == 3
                     and q_slice_cast.shape[1] in (32, 64)
                     and q_slice_cast.shape[2] == (64 if use_fp4_cache else 128)
                     and (not use_fp4_cache or q_scale_slice is not None)
-                    and dsa_litetopk_latest_available(
+                    and _litetopk_tp_guarded_call(
+                        tp_query_shard,
+                        "runtime availability",
+                        dsa_litetopk_latest_available,
                         use_fp4=use_fp4_cache,
                         topk=topk_tokens,
                     )
@@ -805,7 +837,7 @@ def sparse_attn_indexer(
                         # materialized path even though the planner left the
                         # chunk unsplit.
                         fused_indexer_planned = False
-                    else:
+                    elif tp_query_shard is None:
                         raise RuntimeError(
                             "LiteTopK was planned for an unsplit prefill "
                             "chunk, but its runtime requirements are not "
@@ -821,37 +853,97 @@ def sparse_attn_indexer(
                     fused_indexer_runtime_eligible
                     and permuted_prefix_expected
                     and permuted_plan is None
+                    and tp_query_shard is None
                 ):
                     raise RuntimeError(
                         "an exact-once HOT-prefix path was planned for an "
                         "unsplit prefill chunk, but no valid HOT12288 carry "
                         "was available before the paged-cache gather"
                     )
-                if fused_indexer_runtime_eligible and (
-                    dsa_litetopk_latest_streaming_indexer(
-                        q_slice_cast,
-                        k_quant_cast,
-                        k_scale_cast,
-                        weights[chunk.token_start : chunk.token_end],
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                        topk_tokens,
+                fused_ok = False
+                shard_lo = 0
+                shard_hi = query_length
+                fused_topk_indices = topk_indices
+                if tp_query_shard is not None:
+                    shard_lo, shard_hi, fused_topk_indices = tp_query_shard[:3]
+                if fused_indexer_runtime_eligible:
+                    try:
+                        fused_ok = dsa_litetopk_latest_streaming_indexer(
+                            q_slice_cast[shard_lo:shard_hi],
+                            k_quant_cast,
+                            k_scale_cast,
+                            weights[
+                                chunk.token_start + shard_lo : chunk.token_start
+                                + shard_hi
+                            ],
+                            cu_seqlen_ks[shard_lo:shard_hi],
+                            cu_seqlen_ke[shard_lo:shard_hi],
+                            topk_tokens,
+                            fused_topk_indices,
+                            num_reqs=chunk.num_reqs,
+                            ke_min_hint=(
+                                chunk.common_ke_min
+                                if chunk.common_ke_min > 0
+                                else chunk.total_seq_lens - query_length + 1
+                            )
+                            + shard_row_offset,
+                            hot_key=k_cache_prefix,
+                            permuted_plan=permuted_plan,
+                            q_sf=(
+                                q_scale_slice[shard_lo:shard_hi]
+                                if q_scale_slice is not None
+                                else None
+                            ),
+                            carry_broadcast_src=(
+                                carry_broadcast[0]
+                                if carry_broadcast is not None
+                                else None
+                            ),
+                            carry_broadcast_extent=(
+                                carry_broadcast[1]
+                                if carry_broadcast is not None
+                                else None
+                            ),
+                            publish_carry=tp_query_shard is None,
+                        )
+                    except Exception:
+                        if tp_query_shard is None:
+                            raise
+                        fused_ok = False
+                if tp_query_shard is not None:
+                    local_status = tp_query_shard[3]
+                    all_status = tp_query_shard[4]
+                    if not fused_ok:
+                        fused_topk_indices.fill_(-1)
+                    tp_group = get_tp_group()
+                    torch.distributed.all_gather_into_tensor(
                         topk_indices,
-                        num_init_tokens,
-                        num_local_tokens,
-                        num_reqs=chunk.num_reqs,
-                        ke_min_hint=(
-                            chunk.common_ke_min
-                            if chunk.common_ke_min > 0
-                            else chunk.total_seq_lens
-                            - (chunk.token_end - chunk.token_start)
-                            + 1
-                        ),
-                        hot_key=k_cache_prefix,
-                        permuted_plan=permuted_plan,
-                        q_sf=q_scale_slice if use_fp4_cache else None,
+                        fused_topk_indices,
+                        group=tp_group.device_group,
                     )
-                ):
+                    local_status.fill_(int(fused_ok))
+                    torch.distributed.all_gather_into_tensor(
+                        all_status,
+                        local_status,
+                        group=tp_group.device_group,
+                    )
+                    torch._assert_async(
+                        torch.all(all_status == 1),
+                        "LiteTopK TP query shard declined on a peer rank",
+                    )
+                    dsa_litetopk_latest_stash_carry(
+                        topk_indices,
+                        seq_len=chunk.max_local_total_seq_lens,
+                        hot_key=k_cache_prefix,
+                        carry_broadcast_src=(
+                            carry_broadcast[0] if carry_broadcast is not None else None
+                        ),
+                        carry_broadcast_extent=(
+                            carry_broadcast[1] if carry_broadcast is not None else None
+                        ),
+                    )
+                    fused_ok = True
+                if fused_ok:
                     logits = None
                 elif fused_indexer_runtime_eligible:
                     # The metadata builder deliberately skipped dense-logits
@@ -886,65 +978,25 @@ def sparse_attn_indexer(
                     )
                 # The fused indexer already wrote topk_indices and set
                 # logits=None; only the dense paths need the top-k selection.
-                _pt_kind = "fused" if logits is None else "dense"
                 if logits is not None:
                     num_rows = logits.shape[0]
-                    if not dsa_litetopk_latest_dense_topk(
+                    ops.top_k_per_row_prefill(
                         logits,
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                         topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
                         topk_tokens,
-                        seq_len_hint=chunk.max_local_total_seq_lens,
-                        num_init_tokens=num_init_tokens,
-                        num_local_tokens=num_local_tokens,
-                    ):
-                        _pt_kind = "official"
-                        # Streaming-aware indexing (LongCat): the LiteTopK
-                        # selector appends sink/local indices itself. Native
-                        # top-k still receives the historical +inf mask.
-                        if num_init_tokens > 0 or num_local_tokens > 0:
-                            _mask_init_and_local_tokens(
-                                logits,
-                                cu_seqlen_ks,
-                                cu_seqlen_ke,
-                                num_init_tokens,
-                                num_local_tokens,
-                            )
-                        ops.top_k_per_row_prefill(
-                            logits,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
-                            topk_indices,
-                            num_rows,
-                            logits.stride(0),
-                            logits.stride(1),
-                            topk_tokens,
-                        )
+                    )
                     dsa_litetopk_latest_stash_dense(
                         topk_indices,
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
                         seq_len=chunk.total_seq_lens,
-                        num_init_tokens=num_init_tokens,
-                        num_local_tokens=num_local_tokens,
                         hot_key=k_cache_prefix,
                         use_fp4=use_fp4_cache,
+                        pcp_world_size=(get_pcp_group().world_size if use_pcp else 1),
                     )
-                    _maybe_dsa_dump(
-                        use_fp4_cache,
-                        k_cache_prefix,
-                        q_slice_cast,
-                        q_scale_slice,
-                        k_quant_cast,
-                        k_scale_cast,
-                        weights[chunk.token_start : chunk.token_end],
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                        topk_indices,
-                        chunk.total_seq_lens,
-                    )
-
             # The fused indexer path writes topk_indices directly and produces no
             # logits tensor; it is gated to dcp_world_size == 1, so the DCP merge
             # (a no-op without context parallelism) is skipped.
@@ -957,15 +1009,6 @@ def sparse_attn_indexer(
                     dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=chunk.cu_seqlen_ks,
-                )
-            if _LITETOPK_HOST_TIMING:
-                _litetopk_host_commit(_pt_kind, time.perf_counter() - _host_t0)
-            if _pt0 is not None and chunk.local_total_seq_lens > 0:
-                _pt2 = _litetopk_pt_mark()
-                _litetopk_pt_commit(
-                    _pt_kind,
-                    chunk.max_local_total_seq_lens,
-                    [_pt0, _pt1, _pt2],
                 )
 
     if has_decode:
@@ -1054,17 +1097,6 @@ def sparse_attn_indexer(
             )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-
-        if num_init_tokens > 0 or num_local_tokens > 0:
-            # seq_lens is (B, next_n) whenever next_n > 1, so flattening
-            # yields the per-row context length.
-            _mask_init_and_local_tokens(
-                logits,
-                None,
-                seq_lens.reshape(-1)[:num_rows],
-                num_init_tokens,
-                num_local_tokens,
-            )
 
         use_cooperative_topk = (
             current_platform.is_cuda()
@@ -1165,8 +1197,6 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
-    num_init_tokens: int = 0,
-    num_local_tokens: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1206,8 +1236,6 @@ class SparseAttnIndexer(CustomOp):
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
         compress_ratio: int = 1,
-        num_init_tokens: int = 0,
-        num_local_tokens: int = 0,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -1222,8 +1250,6 @@ class SparseAttnIndexer(CustomOp):
         self.use_fp4_cache = use_fp4_cache
         self.compress_ratio = compress_ratio
         self.dense_mha_metadata_layer_name = ""
-        self.num_init_tokens = num_init_tokens
-        self.num_local_tokens = num_local_tokens
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -1305,8 +1331,6 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
-            num_init_tokens=self.num_init_tokens,
-            num_local_tokens=self.num_local_tokens,
         )
 
     def forward_xpu(
@@ -1328,10 +1352,6 @@ class SparseAttnIndexer(CustomOp):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
-        )
-        assert self.num_init_tokens == 0 and self.num_local_tokens == 0, (
-            "Streaming-aware indexing (index_init_tokens/index_local_tokens) is "
-            "not supported on the ROCm sparse_attn_indexer path yet"
         )
         from vllm.platforms.rocm import on_gfx11
 
