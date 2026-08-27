@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import errno
+import fcntl
+import glob
 import mmap
 import os
 import time
@@ -63,6 +65,62 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
+_MMAP_GLOB = "/dev/shm/vllm_offload_*.mmap"
+
+
+def _hold_shared_lock(fd: int, path: str) -> None:
+    """Mark this region as in use for as long as the process lives.
+
+    The lock is advisory and shared, so every worker of the same engine can
+    hold it at once; the kernel releases it when the process exits, however
+    it exits. ``_reclaim_orphaned_regions`` reads it to tell a live region
+    from an orphan. A filesystem that does not support ``flock`` only costs
+    us that signal, so failure here is logged and ignored.
+    """
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        logger.debug("Could not flock %s; orphan reclaim disabled for it", path)
+
+
+def _reclaim_orphaned_regions(own_path: str) -> None:
+    """Remove offload regions left behind by an engine that died hard.
+
+    ``cleanup()`` unlinks the region on a graceful shutdown, but a SIGKILL,
+    an OOM kill or a segfault skips it. Where ``/dev/shm`` outlives the
+    process -- a container restart with a tmpfs-backed ``/dev/shm``, for
+    instance -- the orphan keeps consuming the tmpfs budget, and the next
+    start fails to allocate its own region.
+
+    Every participant holds a shared ``flock`` on its region for as long as
+    it lives, and the kernel drops that lock when the process dies. So an
+    orphan is exactly a region no one can be holding: if this process can
+    take the exclusive lock, nothing else is using the file and it is safe
+    to unlink. That keeps a second engine sharing this host's ``/dev/shm``
+    untouched, which unconditional name-based deletion would not.
+
+    Zero-length files are skipped: a region is empty only between its
+    creator's ``O_EXCL`` create and the ``ftruncate`` that sizes it, so
+    skipping them avoids racing a starting engine.
+    """
+    for path in glob.glob(_MMAP_GLOB):
+        if path == own_path:
+            continue
+        try:
+            if os.path.getsize(path) == 0:
+                continue
+            with open(path, "r+b") as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue  # still held: a live engine owns this region
+                os.unlink(path)
+        except OSError:
+            logger.debug("Skipped reclaiming %s", path, exc_info=True)
+        else:
+            logger.info("Reclaimed orphaned mmap file %s", path)
+
+
 class SharedOffloadRegion:
     """
     Single mmap-backed memory region shared across all workers for a
@@ -99,6 +157,8 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        _reclaim_orphaned_regions(self.mmap_path)
+
         try:
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
@@ -107,6 +167,7 @@ class SharedOffloadRegion:
             # Joiner path — another worker won O_EXCL. Reopen and wait
             # for the file to reach expected size.
             self.fd = os.open(self.mmap_path, os.O_RDWR)
+            _hold_shared_lock(self.fd, self.mmap_path)
             try:
                 _wait_for_file_size(self.fd, self.total_size_bytes)
             except (TimeoutError, OSError):
@@ -119,6 +180,7 @@ class SharedOffloadRegion:
             # land on a 0-byte stub and spin in _wait_for_file_size
             # for the full 30 s timeout.
             try:
+                _hold_shared_lock(self.fd, self.mmap_path)
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
             except (RuntimeError, OSError):

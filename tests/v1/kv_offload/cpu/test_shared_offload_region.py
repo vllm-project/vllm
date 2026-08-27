@@ -840,3 +840,75 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+
+
+# ---------------------------------------------------------------------------
+# Orphan reclamation (gh-53987 / gh-54002)
+# ---------------------------------------------------------------------------
+
+
+def _write_orphan(engine_id: str, size: int = PAGE_SIZE) -> str:
+    """Leave behind a region file the way a hard-killed engine would."""
+    path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.ftruncate(fd, size)
+    finally:
+        os.close(fd)
+    return path
+
+
+def test_orphaned_region_is_reclaimed(iid):
+    """A region left by a crashed engine is removed when the next one starts.
+
+    cleanup() unlinks the file on a graceful shutdown, but a SIGKILL or an OOM
+    kill skips it. Where /dev/shm outlives the process the orphan keeps
+    consuming the tmpfs budget, so the next start must reclaim it.
+    """
+    orphan = _write_orphan(f"{iid}-orphan")
+    assert os.path.exists(orphan)
+
+    region = _make_region(iid)
+    try:
+        assert not os.path.exists(orphan)
+    finally:
+        region.cleanup()
+        _cleanup_file(orphan)
+
+
+def test_live_region_is_not_reclaimed(iid):
+    """A region another live engine is using must survive a new engine's start.
+
+    Reclaiming by filename alone would delete it, breaking a second vLLM
+    instance that shares this host's /dev/shm.
+    """
+    live = _make_region(f"{iid}-live")
+    live_path = live.mmap_path
+    try:
+        other = _make_region(f"{iid}-other")
+        try:
+            assert os.path.exists(live_path)
+        finally:
+            other.cleanup()
+    finally:
+        live.cleanup()
+        _cleanup_file(live_path)
+
+
+def test_empty_region_file_is_not_reclaimed(iid):
+    """A zero-length file is a region mid-creation, not an orphan.
+
+    The creator holds O_EXCL before it sizes the file, so an empty file may
+    belong to an engine that is starting right now.
+    """
+    path = f"/dev/shm/vllm_offload_{iid}-starting.mmap"
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.close(fd)
+    try:
+        region = _make_region(iid)
+        try:
+            assert os.path.exists(path)
+        finally:
+            region.cleanup()
+    finally:
+        _cleanup_file(path)
