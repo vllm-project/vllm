@@ -787,6 +787,7 @@ class TestECMooncakeSchedulerMetadata:
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         request = mock_request_with_3_mm
+        request.mm_features = request.mm_features[:1]
         request.ec_transfer_params = {
             "consumer_zmq": "tcp://decode:19019",
             "ec_items": [{"mm_hash": "img_hash_1", "transfer_id": "transfer-1"}],
@@ -804,6 +805,15 @@ class TestECMooncakeSchedulerMetadata:
                 Mock(spec=SchedulerOutput, free_encoder_mm_hashes=[])
             )
 
+            # The same request remains visible on a later scheduler step, but
+            # its worker push metadata must not be emitted a second time.
+            assert scheduler.ensure_cache_available(request, 0)
+            next_meta = scheduler.build_connector_meta(
+                Mock(spec=SchedulerOutput, free_encoder_mm_hashes=[])
+            )
+
+            scheduler.request_finished(request)
+
         assert meta.loads == []
         assert meta.pushes == [
             ECMooncakePushSpec(
@@ -816,6 +826,8 @@ class TestECMooncakeSchedulerMetadata:
                 request_id="test_req_123",
             )
         ]
+        assert next_meta.pushes == []
+        assert "transfer-1" not in scheduler._prepared_push_transfer_ids
 
     def test_producer_uses_deepstack_encoder_cache_width(
         self, mock_vllm_config_producer, mock_request_with_3_mm

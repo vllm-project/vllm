@@ -788,6 +788,10 @@ class ECMooncakeConnector(ECConnectorBase):
         self._resident_bytes = 0
         self._scheduler_pending_work = False
         self._pushes_to_prepare: dict[str, ECMooncakePushSpec] = {}
+        # A producer request may be revisited across scheduler steps. Queue its
+        # initial push metadata once; the worker owns reservation refreshes
+        # after the scheduler emits it.
+        self._prepared_push_transfer_ids: set[str] = set()
 
         # Worker producer
         self._engine: TransferEngine | None = None
@@ -2560,7 +2564,7 @@ class ECMooncakeConnector(ECConnectorBase):
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
             transfer_id = f"{request.request_id}:{index}"
-        if not consumer_zmq or transfer_id in self._pushes_to_prepare:
+        if not consumer_zmq or transfer_id in self._prepared_push_transfer_ids:
             return
         num_tokens = request.get_num_encoder_embeds(index)
         dtype = self._model_config.dtype
@@ -2577,6 +2581,7 @@ class ECMooncakeConnector(ECConnectorBase):
             transfer_id=transfer_id,
             request_id=request.request_id,
         )
+        self._prepared_push_transfer_ids.add(transfer_id)
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:
         mm_hash = request.mm_features[index].identifier
@@ -2740,6 +2745,16 @@ class ECMooncakeConnector(ECConnectorBase):
                     continue
                 self._pop_pending_spec(transfer_id)
                 self._queue_cancel(transfer_id)
+        if (
+            self.is_producer
+            and self._role == ECConnectorRole.SCHEDULER
+            and self._prepared_push_transfer_ids
+        ):
+            for index in range(len(request.mm_features)):
+                transfer_id = self._request_transfer_id(request, index)
+                if transfer_id is None:
+                    transfer_id = f"{request.request_id}:{index}"
+                self._prepared_push_transfer_ids.discard(transfer_id)
         if not self.is_producer:
             return False, None
 
