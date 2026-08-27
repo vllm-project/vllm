@@ -414,7 +414,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float? clamp_limit=None, "
       "Tensor? expert_ids=None, "
       "Tensor? expert_map=None, "
-      "int expert_step=1) -> ()");
+      "int expert_step=1, "
+      "bool use_ue8m0=False) -> ()");
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.

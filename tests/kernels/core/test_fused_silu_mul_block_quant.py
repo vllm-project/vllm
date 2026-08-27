@@ -128,20 +128,23 @@ def test_silu_and_mul_per_block_quant(
     )
 
 
-@pytest.mark.parametrize("num_tokens", [6, 128, 1024])
-@pytest.mark.parametrize("use_expert_map", [False, True])
+@pytest.mark.parametrize("num_tokens", [8, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [512, 2048])
+@pytest.mark.parametrize("filter_mode", ["none", "ids", "map"])
+@pytest.mark.parametrize("use_ue8m0", [False, True])
 @torch.inference_mode()
 def test_dsv4_clamp_and_expert_filter(
     default_vllm_config,
     num_tokens: int,
-    use_expert_map: bool,
+    hidden_size: int,
+    filter_mode: str,
+    use_ue8m0: bool,
 ) -> None:
-    """Guard clamped BF16 math and skipping invalid or non-local rows."""
+    """Guard clamped BF16 math and optional expert filtering."""
     if not current_platform.is_cuda():
-        pytest.skip("The persistent expert-filtering kernel is CUDA-only")
+        pytest.skip("The fused clamped activation path is CUDA-only")
 
     device = "cuda"
-    hidden_size = 2048
     group_size = 128
     clamp_limit = 10.0
     torch.manual_seed(0)
@@ -150,14 +153,16 @@ def test_dsv4_clamp_and_expert_filter(
         torch.randn(num_tokens, hidden_size * 2, dtype=torch.bfloat16, device=device)
         * 8
     )
-    expert_ids = torch.arange(num_tokens, dtype=torch.int32, device=device) % 4
-    expert_ids[::11] = -1
+    expert_ids = None
     expert_map = None
-    if use_expert_map:
+    valid = torch.ones(num_tokens, dtype=torch.bool, device=device)
+    if filter_mode != "none":
+        expert_ids = torch.arange(num_tokens, dtype=torch.int32, device=device) % 4
+        expert_ids[::11] = -1
+        valid &= expert_ids >= 0
+    if filter_mode == "map":
+        assert expert_ids is not None
         expert_map = torch.tensor([0, -1, 1, -1], dtype=torch.int32, device=device)
-
-    valid = expert_ids >= 0
-    if expert_map is not None:
         valid &= expert_map[expert_ids.clamp(min=0)] >= 0
 
     gate, up = x.float().chunk(2, dim=-1)
@@ -166,7 +171,7 @@ def test_dsv4_clamp_and_expert_filter(
     # The unfused MoE activation computes SiLU and multiplication in BF16.
     activated = F.silu(gate.to(torch.bfloat16)) * up.to(torch.bfloat16)
     ref_out, ref_scales = per_token_group_quant_fp8(
-        activated, group_size=group_size, use_ue8m0=False
+        activated, group_size=group_size, use_ue8m0=use_ue8m0
     )
 
     output = torch.full(
@@ -192,9 +197,22 @@ def test_dsv4_clamp_and_expert_filter(
         expert_ids,
         expert_map,
         1,
+        use_ue8m0,
     )
 
-    torch.testing.assert_close(scales[valid], ref_scales[valid], rtol=2e-3, atol=1e-5)
+    if use_ue8m0:
+        # MTP acceptance is sensitive to target/draft numerical drift. The
+        # clamped path preserves the BF16 materialization point and must match
+        # the original two-kernel path bit for bit.
+        assert torch.equal(scales[valid], ref_scales[valid])
+        assert torch.equal(
+            output[valid].contiguous().view(torch.uint8),
+            ref_out[valid].contiguous().view(torch.uint8),
+        )
+    else:
+        torch.testing.assert_close(
+            scales[valid], ref_scales[valid], rtol=2e-3, atol=1e-5
+        )
     ref_dequant = ref_out[valid].float() * ref_scales[valid].repeat_interleave(
         group_size, dim=1
     )

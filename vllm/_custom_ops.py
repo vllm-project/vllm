@@ -447,6 +447,7 @@ def silu_and_mul_per_block_quant(
     expert_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
     expert_step: int = 1,
+    use_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
@@ -489,6 +490,7 @@ def silu_and_mul_per_block_quant(
         expert_ids,
         expert_map,
         expert_step,
+        use_ue8m0,
     )
 
     return output, scales

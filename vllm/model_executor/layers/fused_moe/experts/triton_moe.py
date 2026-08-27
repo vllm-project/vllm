@@ -457,10 +457,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         use_dsv4_fused_act_quant = (
             envs.VLLM_USE_DSV4_FUSED_ACT_QUANT
             and self.activation_config.clamp_limit is not None
-            and expert_map is not None
-            and expert_map.dtype == torch.int32
+            and (expert_map is None or expert_map.dtype == torch.int32)
             and topk_ids.dtype == torch.int32
             and current_platform.is_cuda()
+            # The unfiltered H=512 path wins through 1M output elements; at
+            # larger prefills the existing 16-thread quantizer has more
+            # parallelism. Expert-filtered EP still uses the persistent kernel
+            # because skipping non-local rows dominates that crossover.
+            and (expert_map is not None or intermediate_cache1.numel() // 2 <= 1 << 20)
         )
 
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
@@ -473,7 +477,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
-            and not is_deep_gemm_e8m0_used()
+            # The existing unclamped fusion does not materialize the BF16
+            # activation and is therefore not bit-exact with the UE8M0 path.
+            # Keep its original exclusion; the clamped DSV4 path below
+            # explicitly preserves the low-precision activation semantics.
+            and (not is_deep_gemm_e8m0_used() or use_dsv4_fused_act_quant)
             and (self.activation_config.clamp_limit is None or use_dsv4_fused_act_quant)
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
@@ -485,8 +493,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     if use_dsv4_fused_act_quant
                     else None
                 ),
-                expert_ids=(topk_ids.view(-1) if use_dsv4_fused_act_quant else None),
+                expert_ids=(
+                    topk_ids.view(-1)
+                    if use_dsv4_fused_act_quant and expert_map is not None
+                    else None
+                ),
                 expert_map=expert_map if use_dsv4_fused_act_quant else None,
+                use_ue8m0=is_deep_gemm_e8m0_used(),
             )
         else:
             self.activation(

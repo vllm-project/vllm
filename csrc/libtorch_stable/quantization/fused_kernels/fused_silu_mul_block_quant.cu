@@ -16,7 +16,7 @@ namespace vllm {
 // Logic: one thread block per (token, group) pair
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
-          int32_t group_size>
+          bool use_ue8m0, int32_t group_size>
 __global__ void silu_and_mul_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // Output: [num_tokens, hidden_size] in
                                      // FP8/INT8
@@ -101,8 +101,14 @@ __global__ void silu_and_mul_per_block_quant_kernel(
       group_scale = fminf(group_scale, *scale_ub);
     }
 
-    // Use minimum safe scaling factor
-    group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+    if constexpr (use_ue8m0) {
+      // Match per_token_group_quant_8bit_kernel: DeepGEMM consumes FP32
+      // scales rounded up to an exact power of two on Hopper.
+      group_scale = exp2f(ceilf(log2f(fmaxf(fabsf(group_scale), 1e-10f))));
+    } else {
+      // Use minimum safe scaling factor
+      group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+    }
 
     // Store scale to global memory
     *group_scale_ptr = group_scale;
@@ -123,6 +129,10 @@ __global__ void silu_and_mul_per_block_quant_kernel(
 constexpr int32_t kDsv4GroupSize = 128;
 constexpr int32_t kDsv4ElementsPerThread = 8;
 constexpr float kDsv4QuantEps = 1e-10f;
+// Below this size, one block per quantization group has lower launch cost than
+// filling the GPU with persistent blocks. The crossover is stable when scaled
+// by the number of output elements across the 512 and 2048 hidden-size paths.
+constexpr int64_t kDsv4PersistentMinElements = 1 << 20;
 
 __device__ __forceinline__ float dsv4_half_warp_reduce_max(float value) {
   unsigned const mask = threadIdx.x % 32 >= 16 ? 0xffff0000u : 0x0000ffffu;
@@ -160,7 +170,8 @@ __device__ __forceinline__ void store_fp8x8(
 // Persistent DeepSeek-V4 specialization adapted from SGLang PR #32058.
 // It fuses clamp, SiLU, gated multiplication, and FP8 group quantization,
 // while skipping token assignments routed to non-local experts.
-template <bool has_clamp, bool has_expert_ids, bool has_expert_map>
+template <bool has_clamp, bool has_expert_ids, bool has_expert_map,
+          bool use_ue8m0>
 __global__ void dsv4_silu_and_mul_per_block_quant_kernel(
     __nv_fp8_e4m3* __restrict__ output, float* __restrict__ output_scale,
     __nv_bfloat16 const* __restrict__ input,
@@ -233,7 +244,10 @@ __global__ void dsv4_silu_and_mul_per_block_quant_kernel(
       }
 
       float const group_max = dsv4_half_warp_reduce_max(thread_max);
-      float const scale = group_max / 448.0f;
+      float scale = group_max / 448.0f;
+      if constexpr (use_ue8m0) {
+        scale = exp2f(ceilf(log2f(fmaxf(fabsf(scale), 1e-10f))));
+      }
       float const inverted_scale = 1.0f / scale;
   #pragma unroll
       for (int32_t i = 0; i < kDsv4ElementsPerThread; ++i) {
@@ -257,7 +271,8 @@ void silu_and_mul_per_block_quant(
     std::optional<torch::stable::Tensor> scale_ub, bool is_scale_transposed,
     std::optional<double> clamp_limit,
     std::optional<torch::stable::Tensor> expert_ids,
-    std::optional<torch::stable::Tensor> expert_map, int64_t expert_step) {
+    std::optional<torch::stable::Tensor> expert_map, int64_t expert_step,
+    bool use_ue8m0) {
   static torch::headeronly::ScalarType kFp8Type =
       is_fp8_ocp() ? torch::headeronly::ScalarType::Float8_e4m3fn
                    : torch::headeronly::ScalarType::Float8_e4m3fnuz;
@@ -317,7 +332,10 @@ void silu_and_mul_per_block_quant(
       out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn &&
       group_size == vllm::kDsv4GroupSize && !is_scale_transposed &&
       !scale_ub.has_value() &&
-      (clamp_limit.has_value() || expert_ids.has_value());
+      (clamp_limit.has_value() || expert_ids.has_value()) &&
+      (expert_ids.has_value() ||
+       static_cast<int64_t>(num_tokens) * hidden_size >=
+           vllm::kDsv4PersistentMinElements);
   if (use_dsv4_kernel) {
     if (num_tokens == 0) {
       return;
@@ -341,9 +359,9 @@ void silu_and_mul_per_block_quant(
                           ? expert_map->const_data_ptr<int32_t>()
                           : nullptr;
 
-  #define LAUNCH_DSV4(HAS_CLAMP, HAS_IDS, HAS_MAP)                          \
+  #define LAUNCH_DSV4(HAS_CLAMP, HAS_IDS, HAS_MAP, USE_UE8M0)               \
     vllm::dsv4_silu_and_mul_per_block_quant_kernel<HAS_CLAMP, HAS_IDS,      \
-                                                   HAS_MAP>                 \
+                                                   HAS_MAP, USE_UE8M0>      \
         <<<grid, block, 0, stream>>>(                                       \
             reinterpret_cast<__nv_fp8_e4m3*>(out.mutable_data_ptr()),       \
             scales.mutable_data_ptr<float>(),                               \
@@ -354,21 +372,45 @@ void silu_and_mul_per_block_quant(
     if (clamp > 0.0f) {
       if (ids != nullptr) {
         if (map != nullptr) {
-          LAUNCH_DSV4(true, true, true);
+          if (use_ue8m0) {
+            LAUNCH_DSV4(true, true, true, true);
+          } else {
+            LAUNCH_DSV4(true, true, true, false);
+          }
         } else {
-          LAUNCH_DSV4(true, true, false);
+          if (use_ue8m0) {
+            LAUNCH_DSV4(true, true, false, true);
+          } else {
+            LAUNCH_DSV4(true, true, false, false);
+          }
         }
       } else {
-        LAUNCH_DSV4(true, false, false);
+        if (use_ue8m0) {
+          LAUNCH_DSV4(true, false, false, true);
+        } else {
+          LAUNCH_DSV4(true, false, false, false);
+        }
       }
     } else if (ids != nullptr) {
       if (map != nullptr) {
-        LAUNCH_DSV4(false, true, true);
+        if (use_ue8m0) {
+          LAUNCH_DSV4(false, true, true, true);
+        } else {
+          LAUNCH_DSV4(false, true, true, false);
+        }
       } else {
-        LAUNCH_DSV4(false, true, false);
+        if (use_ue8m0) {
+          LAUNCH_DSV4(false, true, false, true);
+        } else {
+          LAUNCH_DSV4(false, true, false, false);
+        }
       }
     } else {
-      LAUNCH_DSV4(false, false, false);
+      if (use_ue8m0) {
+        LAUNCH_DSV4(false, false, false, true);
+      } else {
+        LAUNCH_DSV4(false, false, false, false);
+      }
     }
   #undef LAUNCH_DSV4
     return;
@@ -389,17 +431,19 @@ void silu_and_mul_per_block_quant(
               VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
                 VLLM_STABLE_DISPATCH_BOOL(
                     is_scale_transposed, transpose_scale, [&] {
-                      vllm::silu_and_mul_per_block_quant_kernel<
-                          scalar_in_t, scalar_out_t, transpose_scale, gs>
-                          <<<grid, block, 0, stream>>>(
-                              out.mutable_data_ptr<scalar_out_t>(),
-                              scales.mutable_data_ptr<float>(),
-                              input.const_data_ptr<scalar_in_t>(),
-                              scale_ub.has_value()
-                                  ? scale_ub->const_data_ptr<float>()
-                                  : nullptr,
-                              static_cast<float>(clamp_limit.value_or(0.0)),
-                              hidden_size);
+                      VLLM_STABLE_DISPATCH_BOOL(use_ue8m0, use_ue8m0_, [&] {
+                        vllm::silu_and_mul_per_block_quant_kernel<
+                            scalar_in_t, scalar_out_t, transpose_scale,
+                            use_ue8m0_, gs><<<grid, block, 0, stream>>>(
+                            out.mutable_data_ptr<scalar_out_t>(),
+                            scales.mutable_data_ptr<float>(),
+                            input.const_data_ptr<scalar_in_t>(),
+                            scale_ub.has_value()
+                                ? scale_ub->const_data_ptr<float>()
+                                : nullptr,
+                            static_cast<float>(clamp_limit.value_or(0.0)),
+                            hidden_size);
+                      });
                     });
               });
             });
