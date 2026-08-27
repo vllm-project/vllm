@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-import yaml
 import torch
+import yaml
 from huggingface_hub import constants
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -837,7 +837,7 @@ def get_config(
     if quantization_config is None and file_or_path_exists(
         model, "recipe.yaml", revision
     ):
-        recipe = _get_hf_yaml_file_to_dict("recipe.yaml", model, revision)
+        recipe = _get_hf_yaml_file_to_dict("recipe.yaml", str(model), revision)
         quantization_config = _recipe_to_quantization_config(recipe)
 
     if quantization_config is not None:

@@ -102,8 +102,6 @@ def test_safetensors_metadata_of_repo_without_safetensors():
     get_safetensors_metadata.assert_called_once()
 
 
-
-
 def _write_granite_config(tmp_path, quantization_config=None):
     payload = {
         "architectures": ["GraniteForCausalLM"],
@@ -119,6 +117,7 @@ def _write_granite_config(tmp_path, quantization_config=None):
     if quantization_config is not None:
         payload["quantization_config"] = quantization_config
     (tmp_path / "config.json").write_text(json.dumps(payload))
+
 
 def test_recipe_yaml_fp8_dynamic_maps_to_compressed_tensors():
     recipe = {
