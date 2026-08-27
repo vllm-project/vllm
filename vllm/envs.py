@@ -298,6 +298,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_PLE_CPU_OFFLOAD: bool = False
     VLLM_PLE_OFFLOAD_READY_TIMEOUT: float = 600.0
+    VLLM_PLE_DISK_OFFLOAD_DIR: str = ""
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2045,6 +2046,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout for PLE weight loading and TP worker registration.
     "VLLM_PLE_OFFLOAD_READY_TIMEOUT": lambda: float(
         os.getenv("VLLM_PLE_OFFLOAD_READY_TIMEOUT", "600")
+    ),
+    # Directory for file-backed PLE n-gram tables. When set together with
+    # VLLM_PLE_CPU_OFFLOAD, the offload worker memory-maps each table from
+    # <dir>/<layer>.<param>.bin instead of holding it in anonymous host RAM:
+    # the first boot streams checkpoint shards through the mapping (page cache
+    # absorbs the writes, so hosts with less RAM than the table can load it),
+    # and later boots map the finished file instantly, skipping the checkpoint
+    # read. Residency is then governed by page-cache pressure, not table size.
+    "VLLM_PLE_DISK_OFFLOAD_DIR": lambda: os.getenv(
+        "VLLM_PLE_DISK_OFFLOAD_DIR", ""
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
