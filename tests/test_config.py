@@ -177,7 +177,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     default_v2_model_runner_architectures.cache_clear()
     default_breakable_cudagraph_architectures.cache_clear()
