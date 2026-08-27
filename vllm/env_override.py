@@ -37,10 +37,6 @@ def _get_torch_cuda_version() -> str | None:
     return cast(str | None, _get_torch_version_attr("cuda"))
 
 
-def get_torch_xpu_version() -> str | None:
-    return cast(str | None, _get_torch_version_attr("xpu"))
-
-
 def _maybe_set_cuda_compatibility_path(
     get_torch_cuda_version: Callable[[], str | None] | None = None,
 ) -> None:
