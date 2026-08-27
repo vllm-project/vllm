@@ -916,6 +916,7 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         )
 
     @staticmethod
@@ -965,6 +966,7 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         ]
 
     @staticmethod
@@ -996,11 +998,15 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         assert self.moe_config.intermediate_size_per_partition_unpadded is not None
         assert self.moe_config.hidden_dim_unpadded is not None
-        score_mode = (
-            "sqrtsoftplus"
-            if self.moe_config.routing_method == RoutingMethodType.DeepseekV4
-            else None
-        )
+        routing_method = self.moe_config.routing_method
+        if routing_method == RoutingMethodType.DeepseekV4:
+            score_mode = "sqrtsoftplus"
+        elif routing_method == RoutingMethodType.DeepSeekV3:
+            # DeepSeek-R1/V3: sigmoid scores + noaux_tc routing bias, grouped
+            # top-k and routed_scaling_factor
+            score_mode = "sigmoid"
+        else:
+            score_mode = None
         return aiter_triton_kernel_w4a4_moe_forward(
             hidden_states=hidden_states,
             w1=w1,
