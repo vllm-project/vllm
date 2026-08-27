@@ -245,7 +245,6 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -309,16 +308,6 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
-
-
-def _is_mla_bmm_requantization_allowed(kv_b_proj: torch.nn.Module) -> bool:
-    """Whether online BMM weight quantization preserves checkpoint precision."""
-    return not (
-        getattr(kv_b_proj, "quant_config", None) is not None
-        and isinstance(
-            getattr(kv_b_proj, "quant_method", None), UnquantizedLinearMethod
-        )
-    )
 
 
 def _detect_output_quant_key(
@@ -628,23 +617,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_pcp=self.use_pcp,
             )
 
-        allow_bmm_requantization = _is_mla_bmm_requantization_allowed(self.kv_b_proj)
-        if not allow_bmm_requantization and (
-            rocm_aiter_ops.is_fp8bmm_enabled() or rocm_aiter_ops.is_fp4bmm_enabled()
-        ):
-            logger.info_once(
-                "Skipping AITER FP8/FP4 BMM online re-quantization for MLA "
-                "kv_b_proj: the checkpoint's quantization config explicitly "
-                "leaves this projection unquantized."
-            )
-        self.is_aiter_triton_fp8_bmm_enabled = (
-            rocm_aiter_ops.is_fp8bmm_enabled() and allow_bmm_requantization
-        )
+        # TODO(ROCm): both BMM kernels re-quantize kv_b_proj online, ignoring
+        # the precision the checkpoint asked for, so they now default to off.
+        # Turning them back on needs long-context accuracy validation, and the
+        # per-layer decision belongs in --quantization-config.targets rather
+        # than in this layer.
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
-            and allow_bmm_requantization
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
@@ -3063,10 +3045,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
-        self.is_aiter_triton_fp8_bmm_enabled = (
-            rocm_aiter_ops.is_fp8bmm_enabled()
-            and _is_mla_bmm_requantization_allowed(kv_b_proj)
-        )
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
