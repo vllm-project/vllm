@@ -399,10 +399,6 @@ class MoRIIOConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.mode = get_moriio_mode(self.kv_transfer_config)
 
-        # Hybrid Memory Allocator (HMA): with per-group block tables the
-        # scheduler hands us one block-id list per KV cache group. HMA is only
-        # engaged when the manager is enabled AND the model actually has a
-        # non-full-attention group (e.g. hybrid sliding-window attention).
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
@@ -410,11 +406,8 @@ class MoRIIOConnectorScheduler:
                 for g in kv_cache_config.kv_cache_groups
             )
         )
-        # Only sliding-window hybrids (e.g. Gemma) are supported: those are the
-        # groups get_exchange_clipped_blocks knows how to transfer. Any other
-        # non-full-attention group (Mamba/SSM, chunked-local attention, ...)
-        # would be silently mistransferred, so fail closed instead.
         if self._is_hma_required:
+            # TODO(simondanielsson): support non-sliding window hybrids
             unsupported = [
                 type(g.kv_cache_spec).__name__
                 for g in kv_cache_config.kv_cache_groups
@@ -429,43 +422,42 @@ class MoRIIOConnectorScheduler:
                     f"cache group spec(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-        # READ mode is the only HMA-correct transfer path today; hybrid WRITE
-        # would need per-group notify/write routing that is out of scope.
         if self._is_hma_required and self.mode == MoRIIOMode.WRITE:
+            # TODO(simondanielsson): support HMA in WRITE mode
             raise NotImplementedError(
                 "MoRIIO WRITE mode does not support hybrid KV cache groups "
                 "(sliding-window attention). Use READ mode, or pass "
                 "--disable-hybrid-kv-cache-manager."
             )
-        # Gather Sliding Window sizes for each kv cache group (if any) in number of
-        # blocks per KV cache group. This is used to clip the local attention window.
+
         sw_sizes_tokens: list[tuple[int, int]] = [
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
             for g in kv_cache_config.kv_cache_groups
         ]
-        # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
-        # account for boundary overlap eg window isn't fully aligned with blocks.
+        # add 1 to conservatively account for boundary overlap eg window isn't fully
+        # aligned with blocks.
         self.blocks_per_sw = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
-        # Chunked-prefill last-chunk detection counts tokens as
-        # len(block_ids[g]) * block_size. Use an unclipped full-attention group
-        # (blocks_per_sw == 0) and its own block size: sliding-window groups are
-        # clipped and may be rescaled by the page-size unifier, so their block
-        # counts do not reflect the full sequence length. Falls back to group 0
-        # for a non-hybrid single-group model (unchanged behaviour).
-        self._token_count_group_idx = 0
-        self._token_count_block_size = self.block_size
+        # In WRITE mode and chunked prefill, we perform the write after the last chunk.
+        # Hence we need to track once we are in the last chunk. We do this by computing
+        # len(block_ids[g]) * block_size[g] for a full attn group g, as hybrid groups
+        # may be clipped and hence not reflect the full sequence length. Here we store
+        # g and block_size[g] for later.
+        self._full_attn_group_idx = 0
+        self._full_attn_block_size = self.block_size
         for gi, group in enumerate(kv_cache_config.kv_cache_groups):
-            if self.blocks_per_sw[gi] == 0:
-                self._token_count_group_idx = gi
-                self._token_count_block_size = getattr(
+            is_full_attn = self.blocks_per_sw[gi] == 0
+            if is_full_attn:
+                self._full_attn_group_idx = gi
+                self._full_attn_block_size = getattr(
                     group.kv_cache_spec, "block_size", self.block_size
                 )
                 break
+
         self.host_ip = resolve_host_ip(
             self.kv_transfer_config.kv_connector_extra_config
         )
@@ -969,8 +961,8 @@ class MoRIIOConnectorScheduler:
                     ]
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
                     saved_tokens = (
-                        len(updated_blocks[self._token_count_group_idx])
-                        * self._token_count_block_size
+                        len(updated_blocks[self._full_attn_group_idx])
+                        * self._full_attn_block_size
                     )
                     if saved_tokens >= req.num_prompt_tokens:
                         # Final chunk: live kv_transfer_params may be cleared,
@@ -998,8 +990,7 @@ class MoRIIOConnectorScheduler:
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
             tokens_covered = (
-                len(block_ids[self._token_count_group_idx])
-                * self._token_count_block_size
+                len(block_ids[self._full_attn_group_idx]) * self._full_attn_block_size
             )
             if req.num_prompt_tokens > tokens_covered:
                 # not last chunk prefill

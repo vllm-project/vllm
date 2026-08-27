@@ -817,8 +817,8 @@ def test_token_count_basis_uses_full_attention_group():
     group (blocks_per_sw == 0), not a clipped sliding-window group."""
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     # Group 0 is the full-attention group; group 1 is sliding-window (clipped).
-    assert scheduler._token_count_group_idx == 0
-    assert scheduler._token_count_block_size == 16
+    assert scheduler._full_attn_group_idx == 0
+    assert scheduler._full_attn_block_size == 16
 
 
 def test_get_exchange_clipped_blocks_clips_only_sw_group():
