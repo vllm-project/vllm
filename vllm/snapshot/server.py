@@ -176,7 +176,7 @@ async def wait_for_release_marker(
 
 
 def parse_vllm_args(argv: list[str]) -> Any:
-    from vllm.entrypoints.openai.cli_args import (
+    from vllm.entrypoints.launchers.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )

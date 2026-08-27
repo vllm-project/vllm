@@ -111,7 +111,7 @@ class SnapshotSubcommand(CLISubcommand):
             "create", help="Create a snapshot from an initialized TP1 engine."
         )
         if self.create_requested:
-            from vllm.entrypoints.openai.cli_args import make_arg_parser
+            from vllm.entrypoints.launchers.cli_args import make_arg_parser
 
             create_parser = make_arg_parser(create_parser)
         else:
