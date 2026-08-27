@@ -25,10 +25,14 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   - tests/test_env_override_lifecycle.py
+  - tests/entrypoints/launchers/test_cli_imports.py
   - tests/jit_monitor/test_hooks.py
   - tests/jit_monitor/test_hooks_gpu.py
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_env_override_lifecycle.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  # entrypoints/launchers/test_cli_imports.py guards the no-torch help
+  # contract, whose breaking changes come from the config/engine/platform
+  # sources this job already depends on.
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_env_override_lifecycle.py entrypoints/launchers/test_cli_imports.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
   mirror:
     amd:
       label: ":amd: (MI300) Engine Core"

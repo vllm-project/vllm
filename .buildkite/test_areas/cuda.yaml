@@ -7,6 +7,7 @@ steps:
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
+  - vllm/env_override.py
   - vllm/envs.py
   - vllm/logger.py
   - vllm/platforms/
