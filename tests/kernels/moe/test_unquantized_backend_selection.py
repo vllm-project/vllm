@@ -60,7 +60,7 @@ def test_x86_cpu_unquantized_kernel_selection(
                 moe_config,
                 None,
                 None,
-                CPUUnquantizedExperts.activation_format(),
+                CPUUnquantizedExperts.activation_formats()[0],  # TODO: fixme,
             )[0]
         )
 
@@ -113,7 +113,7 @@ def test_arm_cpu_unquantized_kernel_selection(
                 moe_config,
                 None,
                 None,
-                CPUUnquantizedExperts.activation_format(),
+                CPUUnquantizedExperts.activation_formats()[0],  # TODO: fixme
             )[0]
         )
 
