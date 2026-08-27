@@ -1620,12 +1620,6 @@ class rocm_aiter_ops:
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
-        from vllm.config import get_current_vllm_config_or_none
-        cfg = get_current_vllm_config_or_none()
-        if cfg is not None and getattr(cfg, 'speculative_config', None) is not None:
-            cls._SHUFFLE_KV_CACHE_ENABLED = False
-            import os
-            os.environ['VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT'] = '0'
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
@@ -1789,10 +1783,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
-        from vllm.config import get_current_vllm_config_or_none
-        cfg = get_current_vllm_config_or_none()
-        if cfg is not None and getattr(cfg, 'speculative_config', None) is not None:
-            return False
         return cls._SHUFFLE_KV_CACHE_ENABLED
 
     @classmethod

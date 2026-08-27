@@ -866,6 +866,14 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+        if (vllm_config.speculative_config is not None
+                and os.environ.get("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
+                                   "").lower() in ("true", "1")):
+            logger.warning(
+                "Shuffle KV cache layout is incompatible with speculative "
+                "decoding. Disabling VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT.")
+            os.environ["VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT"] = "0"
+
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
