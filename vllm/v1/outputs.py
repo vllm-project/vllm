@@ -435,6 +435,12 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+    # True when the drafter was skipped for this step (e.g. the input no longer
+    # fits in the drafter) and ``draft_token_ids`` is therefore zero padding
+    # rather than real proposals. The padding is kept for compatibility, so the
+    # scheduler needs this flag to tell it apart from a genuine draft: zero is
+    # also a valid token id.
+    drafting_skipped: bool = False
 
 
 def make_empty_encoder_model_runner_output(

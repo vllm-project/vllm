@@ -2289,8 +2289,11 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
-            if request.is_prefill_chunk:
-                # Ignore draft tokens for prefill chunks.
+            if request.is_prefill_chunk or draft_token_ids.drafting_skipped:
+                # Ignore draft tokens for prefill chunks, and the zero padding
+                # produced when the drafter was skipped: scheduling it would
+                # only spend verification on tokens that must be rejected, and
+                # would report them as drafted tokens (issue #34734).
                 if request.spec_token_ids:
                     request.spec_token_ids = []
                 continue
@@ -2324,8 +2327,13 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
+            if draft_token_ids.drafting_skipped:
+                # Zero padding, not a real draft. The tokens are already part of
+                # this step's batch, so drop them into the invalid path below to
+                # keep them out of the drafted-token stats (issue #34734).
+                spec_token_ids.clear()
             # Filter out spec tokens which do not adhere to the grammar.
-            if self.structured_output_manager.should_advance(request):
+            elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             # Pad to original number of spec tokens.

@@ -931,6 +931,10 @@ class GPUModelRunner(
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self._draft_probs: torch.Tensor | None = None
         self._draft_prob_req_ids: list[str] | None = None
+        # Set when the drafter was skipped and `_draft_token_ids` holds zero
+        # padding instead of real proposals, so the scheduler can avoid counting
+        # the padding as drafted tokens.
+        self._drafting_skipped: bool = False
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
@@ -4714,6 +4718,7 @@ class GPUModelRunner(
         self._draft_probs = None
         self._draft_prob_req_ids = None
         self._draft_token_req_ids = None
+        self._drafting_skipped = False
         self.valid_sampled_token_count_gpu = None
         self.input_batch.prev_sampled_token_ids = None
 
@@ -4820,6 +4825,10 @@ class GPUModelRunner(
                 ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
                 self._draft_probs = None
                 self._draft_prob_req_ids = None
+                # The padding above is indistinguishable from a real draft (zero
+                # is a valid token id), so record that drafting was skipped and
+                # let the scheduler decide what to do with it.
+                self._drafting_skipped = True
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
@@ -4995,7 +5004,9 @@ class GPUModelRunner(
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
-        return DraftTokenIds(req_ids, draft_token_ids)
+        return DraftTokenIds(
+            req_ids, draft_token_ids, drafting_skipped=self._drafting_skipped
+        )
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False

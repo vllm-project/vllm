@@ -1519,6 +1519,134 @@ def test_per_request_spec_decode_acceptance_disabled_by_default():
     assert scheduler.requests[req.request_id].spec_decode_metrics is None
 
 
+def _prefill_one_request(scheduler):
+    """Add one request and run its prefill step. Returns (request, req_id)."""
+    [req] = create_requests(num_requests=1, num_tokens=1)
+    scheduler.add_request(req)
+    rid = req.request_id
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[rid],
+            req_id_to_index={rid: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return req, rid
+
+
+def test_skipped_drafting_is_not_scheduled_as_spec_tokens():
+    """Padding from a skipped drafter must not be scheduled for verification.
+
+    When the input no longer fits in the drafter, the model runner keeps zero
+    padding in place of real proposals (needed for Mamba-based targets). Zero is
+    a valid token id, so the scheduler relies on ``drafting_skipped`` to tell the
+    padding apart from a genuine draft. Regression test for issue #34734.
+    """
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    req, rid = _prefill_one_request(scheduler)
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([rid], [[0, 0, 0]], drafting_skipped=True)
+    )
+
+    assert scheduler.requests[rid].spec_token_ids == []
+    output = scheduler.schedule()
+    assert rid not in output.scheduled_spec_decode_tokens
+    # Only the previously sampled token is scheduled, no speculative tokens.
+    assert output.num_scheduled_tokens[rid] == 1
+
+
+def test_skipped_drafting_reports_no_spec_decode_stats():
+    """A skipped drafter must not be reported as a draft with 0% acceptance."""
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    req, rid = _prefill_one_request(scheduler)
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([rid], [[0, 0, 0]], drafting_skipped=True)
+    )
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[rid],
+            req_id_to_index={rid: 0},
+            sampled_token_ids=[[42]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    outputs = engine_core_outputs.get(0) if engine_core_outputs else None
+    assert (
+        outputs is None
+        or outputs.scheduler_stats is None
+        or outputs.scheduler_stats.spec_decoding_stats is None
+    ), "skipped drafting must not report drafted tokens (issue #34734)"
+
+
+def test_real_drafts_are_still_scheduled_and_counted():
+    """Guard against over-correcting: a genuine draft is unaffected."""
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    req, rid = _prefill_one_request(scheduler)
+
+    # Same token values as the padding case, but not flagged as skipped.
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [[0, 0, 0]]))
+
+    assert scheduler.requests[rid].spec_token_ids == [0, 0, 0]
+    output = scheduler.schedule()
+    assert output.scheduled_spec_decode_tokens[rid] == [0, 0, 0]
+    assert output.num_scheduled_tokens[rid] == 4  # 1 sampled + 3 spec
+
+    engine_core_outputs = scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[rid],
+            req_id_to_index={rid: 0},
+            sampled_token_ids=[[0, 0, 7]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    stats = engine_core_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats is not None
+    assert stats.num_drafts == 1
+    assert stats.num_draft_tokens == 3
+    assert stats.num_accepted_tokens == 2
+
+
+def test_skipped_drafting_in_output_marks_tokens_invalid():
+    """Async path: tokens already scheduled this step go down the invalid path.
+
+    Under async scheduling the speculative tokens are part of the in-flight
+    batch, so they cannot be un-scheduled. They are instead padded with -1 and
+    recorded in ``num_invalid_spec_tokens``, the existing channel for drafts
+    that must not count, which keeps them out of the drafted-token total.
+    """
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    req, rid = _prefill_one_request(scheduler)
+
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [[1, 2, 3]]))
+    output = scheduler.schedule()
+    assert output.scheduled_spec_decode_tokens[rid] == [1, 2, 3]
+
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([rid], [[0, 0, 0]], drafting_skipped=True), output
+    )
+
+    assert output.scheduled_spec_decode_tokens[rid] == [-1, -1, -1]
+    assert output.num_invalid_spec_tokens == {rid: 3}
+
+
+def test_drafting_skipped_defaults_to_false():
+    """Existing callers keep their behavior without passing the new flag."""
+    assert DraftTokenIds(["r0"], [[1, 2, 3]]).drafting_skipped is False
+
+
 def test_spec_decoding_stats_empty_output():
     """Test that spec decoding stats handle empty output tokens gracefully.
 
