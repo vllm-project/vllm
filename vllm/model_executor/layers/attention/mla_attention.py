@@ -524,6 +524,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # explicitly so backbone "skip" layers (indexer=None) still find it.
         if use_sparse:
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
+        if self.attn_backend.get_name() == "FLASHMLA_SPARSE":
+            extra_impl_args["dcp_q_replicate"] = dcp_q_replicate
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
