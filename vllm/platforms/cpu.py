@@ -497,26 +497,30 @@ class CpuPlatform(Platform):
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
-                        logger.warning_once("Failed to import from vllm._C: %r", e)
+                        logger.warning_once(
+                            "Failed to import from vllm._C: %s", repr(e)
+                        )
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
                     except ImportError as e:
                         if ignored_msg not in e.msg:
                             logger.warning_once(
-                                "Failed to import from vllm._C_AVX512: %r", e
+                                "Failed to import from vllm._C_AVX512: %s", repr(e)
                             )
             else:
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
-                        logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
+                        logger.warning_once(
+                            "Failed to import from vllm._C_AVX2: %s", repr(e)
+                        )
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
-                logger.warning_once("Failed to import from vllm._C: %r", e)
+                logger.warning_once("Failed to import from vllm._C: %s", repr(e))
 
     @classmethod
     def pack_kv_cache(

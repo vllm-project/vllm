@@ -365,7 +365,10 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C: %r", e)
+            # Format eagerly: warning_once caches its arguments forever, and a
+            # live exception would pin its traceback (and every local on the
+            # raising path, including the LLM under construction).
+            logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
 
