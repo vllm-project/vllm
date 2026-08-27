@@ -1292,6 +1292,25 @@ class SpecDecodeBaseProposer:
         spec_cfg = self.speculative_config
         base = self.vllm_config
 
+        if self.method == "mtp":
+            # The engine config belongs to the target and therefore carries
+            # the target quantization object. MTP modules must be constructed
+            # with the external draft checkpoint's model and quantization
+            # metadata instead.
+            draft_load_config = spec_cfg.draft_load_config or base.load_config
+            draft_quant_config = VllmConfig._get_quantization_config(
+                spec_cfg.draft_model_config, draft_load_config
+            )
+            base = replace(
+                base,
+                model_config=spec_cfg.draft_model_config,
+                quant_config=draft_quant_config,
+            )
+            logger.info(
+                "Using the draft checkpoint quantization config for MTP modules; "
+                "target quantization is not inherited."
+            )
+
         if spec_cfg.moe_backend is not None:
             base = replace(
                 base,
@@ -1534,6 +1553,48 @@ class SpecDecodeBaseProposer:
         duplicate copy of the target model's LM head. In these cases, we share
         the target model's LM head with the draft model to save memory.
         """
+        if self.method == "mtp" and not self.speculative_config.mtp_share_lm_head:
+            draft_lm_head = getattr(self.model, "lm_head", None)
+            if draft_lm_head is None:
+                raise ValueError(
+                    "mtp_share_lm_head=False requires the MTP model to own an lm_head."
+                )
+            target_lm_head = getattr(target_language_model, "lm_head", None)
+            if draft_lm_head is target_lm_head:
+                raise RuntimeError(
+                    "Private MTP lm_head unexpectedly aliases the target lm_head."
+                )
+            draft_weight = getattr(draft_lm_head, "weight", None)
+            target_weight = getattr(target_lm_head, "weight", None)
+            if isinstance(draft_weight, torch.Tensor) and isinstance(
+                target_weight, torch.Tensor
+            ):
+                same_storage = (
+                    draft_weight.untyped_storage().data_ptr()
+                    == target_weight.untyped_storage().data_ptr()
+                )
+                if same_storage:
+                    raise RuntimeError(
+                        "Private MTP lm_head unexpectedly shares target weight storage."
+                    )
+            quant_method = getattr(draft_lm_head, "quant_method", None)
+            target_quant_method = getattr(target_lm_head, "quant_method", None)
+            target_quant_name = (
+                type(target_quant_method).__name__
+                if target_quant_method is not None
+                else "unquantized"
+            )
+            logger.info(
+                "Detected MTP model with mtp_share_lm_head=False. Keeping the "
+                "independently loaded draft-owned lm_head from %s "
+                "(quantization implementation: %s; no target alias). Target "
+                "lm_head quantization implementation: %s.",
+                self.speculative_config.draft_model_config.model,
+                type(quant_method).__name__ if quant_method is not None else "none",
+                target_quant_name,
+            )
+            return
+
         share_lm_head = False
         if hasattr(self.model, "has_own_lm_head"):
             # EAGLE model
