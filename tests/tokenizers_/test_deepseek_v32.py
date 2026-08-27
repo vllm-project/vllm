@@ -53,3 +53,36 @@ def test_unaffected_conversations_are_unchanged(messages):
 
     assert prompt.startswith("<｜begin▁of▁sentence｜>")
     assert prompt.endswith("<think>")
+
+
+def test_system_turn_after_a_context_boundary_is_kept():
+    context = [SYSTEM, USER]
+
+    prompt = encode_messages(
+        [{"role": "system", "content": "Later instruction."}],
+        thinking_mode="thinking",
+        context=context,
+    )
+
+    assert "Later instruction." in prompt
+
+
+def test_folded_system_turn_keeps_its_tools():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    prompt = encode_messages(
+        [USER, {"role": "system", "content": "Be brief.", "tools": tools}],
+        thinking_mode="thinking",
+    )
+
+    assert "get_weather" in prompt
+    assert prompt.index("Be brief.") < prompt.index("<｜Assistant｜>")
