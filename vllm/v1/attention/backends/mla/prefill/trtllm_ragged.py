@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.mla.prefill.base import (
     MLADimensions,
     MLAPrefillBackend,
 )
+from vllm.v1.attention.backends.utils import log2_lse_to_ln
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -138,7 +139,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
-            return ret[0], ret[1].transpose(0, 1)
+            return ret[0], log2_lse_to_ln(ret[1].transpose(0, 1))
         return ret
 
     def run_prefill_context_chunk(
@@ -147,16 +148,18 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        out = torch.empty(
-            q.shape[0],
-            q.shape[1],
-            v.shape[2],
-            device=q.device,
-            dtype=self._prefill_metadata.output_dtype,
-        )
+        if out is None:
+            out = torch.empty(
+                q.shape[0],
+                q.shape[1],
+                v.shape[2],
+                device=q.device,
+                dtype=self._prefill_metadata.output_dtype,
+            )
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
@@ -180,4 +183,4 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
-        return attn_out, lse.transpose(0, 1)
+        return attn_out, log2_lse_to_ln(lse.transpose(0, 1))

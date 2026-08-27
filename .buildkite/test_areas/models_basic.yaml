@@ -2,7 +2,7 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
-- label: Basic Models Tests (Initialization)
+- label: ":nvidia: (H200) Basic Models (Initialization)"
   key: basic-models-tests-initialization
   timeout_in_minutes: 25
   device: h200_18gb
@@ -15,7 +15,7 @@ steps:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
-- label: Basic Models Tests (Extra Initialization) %N
+- label: ":nvidia: (H200) Basic Models (Extra Initialization) Shard %N"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
   timeout_in_minutes: 100
@@ -30,7 +30,7 @@ steps:
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: Basic Models Tests (Other)
+- label: ":nvidia: (H200) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
   timeout_in_minutes: 35
@@ -44,13 +44,14 @@ steps:
     - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
   mirror:
     amd:
+      label: ":amd: (MI300) Basic Models (Other)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
-- label: Inkling Unit Tests (B200)
+- label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
   timeout_in_minutes: 40
   device: b200-k8s
@@ -63,7 +64,7 @@ steps:
     # FA4 kernel tests require SM100; the suite skips them elsewhere.
     - pytest -v -s models/inkling
 
-- label: Kimi K3 Unit Tests (B200)
+- label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
   timeout_in_minutes: 40
   device: b200-k8s
@@ -77,7 +78,7 @@ steps:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
     - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
 
-- label: Basic Models Test (Other CPU) # 5min
+- label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
   depends_on:
   - image-build-cpu

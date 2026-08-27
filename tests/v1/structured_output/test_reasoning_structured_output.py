@@ -84,17 +84,62 @@ class TestReasoningStructuredOutput:
         return manager
 
     def test_should_fill_bitmask_with_enable_in_reasoning(
-        self, mock_vllm_config, mock_request_with_structured_output
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_fill_bitmask when enable_in_reasoning is True."""
-        # Enable enable_in_reasoning
-        mock_vllm_config.structured_outputs_config.enable_in_reasoning = True
-
-        manager = StructuredOutputManager(mock_vllm_config)
+        manager_with_reasoner.enable_in_reasoning = True
 
         # Should always return True when enable_in_reasoning is enabled
-        result = manager.should_fill_bitmask(mock_request_with_structured_output)
+        result = manager_with_reasoner.should_fill_bitmask(
+            mock_request_with_structured_output
+        )
         assert result is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoner
+            is None
+        )
+
+    def test_should_fill_bitmask_reasoning_already_ended(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """An active grammar does not need a request-local reasoner."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = True
+
+        result = manager_with_reasoner.should_fill_bitmask(
+            mock_request_with_structured_output
+        )
+
+        assert result is True
+        assert structured_req.reasoner is None
+
+    def test_grammar_bitmask_skips_reasoner_when_already_active(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Bitmask generation skips reasoning-boundary detection."""
+        manager_with_reasoner.vllm_config.num_speculative_tokens = 1
+        manager_with_reasoner._grammar_bitmask = Mock()
+        manager_with_reasoner._grammar_bitmask.shape = (1, 1)
+        expected_bitmask = Mock()
+        manager_with_reasoner._grammar_bitmask.numpy.return_value = expected_bitmask
+        manager_with_reasoner._fill_bitmasks = Mock()
+
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = True
+        request_id = mock_request_with_structured_output.request_id
+
+        bitmask = manager_with_reasoner.grammar_bitmask(
+            requests={request_id: mock_request_with_structured_output},
+            structured_output_request_ids=[request_id],
+            scheduled_spec_decode_tokens={},
+        )
+
+        assert bitmask is expected_bitmask
+        assert structured_req.reasoner is None
 
     def test_should_fill_bitmask_without_enable_in_reasoning(
         self,
@@ -171,6 +216,10 @@ class TestReasoningStructuredOutput:
             mock_request_with_structured_output
         )
         assert result is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoner
+            is None
+        )
 
     def test_should_advance_reasoning_not_ended(
         self,
@@ -233,6 +282,10 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoner
+            is None
+        )
 
     def test_should_advance_uses_new_token_ids_when_provided(
         self,

@@ -2,15 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
 from tests.utils import single_gpu_only
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
-from ..utils import evaluate_llm_for_gsm8k, get_test_prompts
+from ..utils import (
+    evaluate_llm_for_gsm8k,
+    get_spec_decode_metric_value,
+    get_test_prompts,
+)
 
 
 @pytest.fixture
@@ -43,6 +45,7 @@ def test_ngram_and_suffix_correctness(
 ):
     with vllm_runner(
         model_name,
+        block_size=None,
         # Keep LLM defaults; VllmRunner only provides lifecycle cleanup here.
         trust_remote_code=False,
         enable_chunked_prefill=None,
@@ -59,6 +62,7 @@ def test_ngram_and_suffix_correctness(
 @single_gpu_only
 def test_ngram_gpu_default_with_async_scheduling(
     async_scheduling: bool,
+    vllm_runner,
 ):
     """
     Test ngram_gpu speculative decoding (k=3) correctness with and without
@@ -66,8 +70,10 @@ def test_ngram_gpu_default_with_async_scheduling(
     Uses Qwen/Qwen3-8B (ref GSM8K accuracy: 87%-92%).
     """
     qwen3_model = "Qwen/Qwen3-8B"
-    spec_llm = LLM(
-        model=qwen3_model,
+    with vllm_runner(
+        qwen3_model,
+        block_size=None,
+        trust_remote_code=False,
         speculative_config={
             "method": "ngram_gpu",
             "prompt_lookup_max": 3,
@@ -76,22 +82,22 @@ def test_ngram_gpu_default_with_async_scheduling(
         },
         max_model_len=4096,
         async_scheduling=async_scheduling,
-    )
-    # Assert the resolved async_scheduling config matches what was requested.
-    assert (
-        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-        == async_scheduling
-    )
-    evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
-    del spec_llm
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        # Assert the resolved async_scheduling config matches what was requested.
+        assert (
+            spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+            == async_scheduling
+        )
+        evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
 
 
 @single_gpu_only
 def test_suffix_decoding_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
+    vllm_runner,
 ):
     """
     Check that suffix decoding caching takes effect and improves acceptance
@@ -99,8 +105,10 @@ def test_suffix_decoding_acceptance(
     """
     test_prompts = get_test_prompts(mm_enabled=False)
 
-    spec_llm = LLM(
-        model=model_name,
+    with vllm_runner(
+        model_name,
+        block_size=None,
+        trust_remote_code=False,
         speculative_config={
             "method": "suffix",
             "suffix_decoding_max_spec_factor": 2.0,
@@ -108,40 +116,60 @@ def test_suffix_decoding_acceptance(
         },
         max_model_len=1024,
         disable_log_stats=False,
-    )
-
-    # Run several times and check that the accepted tokens increase.
-    num_draft = []
-    num_accept = []
-    for i in range(10):  # Run multiple times to warm up the cache.
-        spec_llm.chat(test_prompts, sampling_config)
-        # Collect draft and acceptance stats.
-        metrics = spec_llm.get_metrics()
-        for metric in metrics:
-            if metric.name == "vllm:spec_decode_num_draft_tokens":
-                num_draft.append(metric.value)
-            if metric.name == "vllm:spec_decode_num_accepted_tokens":
-                num_accept.append(metric.value)
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        # Run several times and check that the accepted tokens increase.
+        num_draft = []
+        num_accept = []
+        for _ in range(10):  # Run multiple times to warm up the cache.
+            spec_runner.llm.chat(test_prompts, sampling_config)
+            # Collect draft and acceptance stats.
+            metrics = spec_runner.llm.get_metrics()
+            num_draft.append(
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_draft_tokens"
+                )
+            )
+            num_accept.append(
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_accepted_tokens"
+                )
+            )
 
     # Calculate the acceptance rates for the first and last runs.
     first_accept_tokens = num_accept[0]
     first_draft_tokens = num_draft[0]
+    assert first_draft_tokens > 0, (
+        "Suffix decoder produced no draft tokens on the first run: "
+        f"accepted={first_accept_tokens}, drafted={first_draft_tokens}"
+    )
     first_accept_rate = first_accept_tokens / first_draft_tokens
 
     # Take the diff since the stats are cumulative.
     last_accept_tokens = num_accept[-1] - num_accept[-2]
     last_draft_tokens = num_draft[-1] - num_draft[-2]
+    assert last_draft_tokens > 0, (
+        "Suffix decoder produced no draft tokens on the last run: "
+        f"accepted_delta={last_accept_tokens}, drafted_delta={last_draft_tokens}; "
+        f"cumulative_drafted={num_draft[-2:]}"
+    )
     last_accept_rate = last_accept_tokens / last_draft_tokens
+    summary = (
+        f"first accepted/drafted={first_accept_tokens}/{first_draft_tokens} "
+        f"(rate={first_accept_rate:.3f}); last delta accepted/drafted="
+        f"{last_accept_tokens}/{last_draft_tokens} (rate={last_accept_rate:.3f})"
+    )
 
     # Expect the acceptance length to improve.
-    assert first_accept_tokens < last_accept_tokens
+    assert first_accept_tokens < last_accept_tokens, (
+        f"Expected accepted tokens to increase after cache warmup; {summary}"
+    )
 
     # Expect the acceptance rate to improve.
-    assert first_accept_rate < last_accept_rate
+    assert first_accept_rate < last_accept_rate, (
+        f"Expected acceptance rate to increase after cache warmup; {summary}"
+    )
 
     # Heuristic: expect at least 80.0% acceptance rate at the end.
-    assert last_accept_rate > 0.80
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+    assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"

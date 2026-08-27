@@ -151,7 +151,7 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
             f"transformers>={required}, but got {installed}"
         )
 
-    model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
+    model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
@@ -263,7 +263,16 @@ def test_embed_loading(vllm_runner, model):
 @pytest.mark.parametrize(
     "arch", ["TransformersEmbeddingModel", "TransformersForSequenceClassification"]
 )
-def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_pooling(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    arch,
+    monkeypatch,
+    use_v2_model_runner,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     model = get_model(arch)
 
     vllm_kwargs = dict(max_model_len=None, model_impl="transformers")

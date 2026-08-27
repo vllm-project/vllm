@@ -38,7 +38,7 @@ def test_registry_imports(model_arch):
         check_version_reason="vllm",
     )
 
-    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+    if model_arch == "Terratorch":
         import importlib.util
 
         if importlib.util.find_spec("terratorch") is None:
@@ -53,6 +53,11 @@ def test_registry_imports(model_arch):
         current_platform.is_cuda() or current_platform.is_rocm()
     ):
         pytest.skip("DSparkDraftModel is only supported on CUDA and ROCm")
+
+    if model_arch in ("Dots3NoteForCausalLM", "Dots3NoteMTPModel") and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Dots3 NOTE is only supported on CUDA")
 
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
@@ -138,8 +143,10 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        # ReplaySSM is opt-in per model; only Nemotron-H sets the flag today.
+        # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
+        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],
@@ -164,6 +171,36 @@ def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
     second_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
 
     assert first_hash != second_hash
+
+
+def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
+    cached_model_info = object()
+    loaded_hashes = []
+
+    def fake_load_cache(self, module_hash):
+        loaded_hashes.append(module_hash)
+        return cached_model_info
+
+    monkeypatch.setattr(
+        _LazyRegisteredModel,
+        "_load_modelinfo_from_cache",
+        fake_load_cache,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        lambda _: pytest.fail("Package-backed model should use the cache path"),
+    )
+
+    registered_model = _LazyRegisteredModel(
+        module_name="vllm.model_executor.models.transformers",
+        class_name="TransformersForCausalLM",
+    )
+
+    result = registered_model.inspect_model_cls()
+
+    assert result is cached_model_info
+    assert len(loaded_hashes) == 1
+    assert loaded_hashes[0]
 
 
 def test_hf_registry_coverage():
