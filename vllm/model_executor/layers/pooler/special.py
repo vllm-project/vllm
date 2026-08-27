@@ -75,6 +75,15 @@ class DispatchPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.poolers_by_task[task].get_pooling_updates(task)
 
+    def replace_classifier(
+        self,
+        new_classifier: ClassifierFn,
+    ) -> None:
+        for pooler in self.poolers_by_task.values():
+            head = getattr(pooler, "head", None)
+            if head is not None and hasattr(head, "classifier"):
+                head.classifier = new_classifier
+
     def forward(
         self,
         hidden_states: torch.Tensor,

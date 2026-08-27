@@ -561,6 +561,7 @@ class LoRAModelManager:
                         self.model.config,
                     ),
                 )
+                self.model.pooler.replace_classifier(new_module)
 
             # Some matched modules can be unsupported by LoRA wrappers
             # (e.g. subclasses with specialized forward behavior).
