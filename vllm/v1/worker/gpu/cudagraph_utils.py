@@ -640,7 +640,7 @@ def prepare_inputs_to_capture(
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
-    if full_cudagraph and pcp_manager is not None:
+    if pcp_manager is not None:
         input_batch, input_block_tables, slot_mappings = (
             pcp_manager.prepare_inputs_to_capture(
                 num_reqs,

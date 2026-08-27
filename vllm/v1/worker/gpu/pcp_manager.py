@@ -361,14 +361,20 @@ class PCPManager:
         )
 
     @staticmethod
-    def _get_full_padded_num_reqs(
+    def _resolve_num_reqs_after_padding(
         input_batch: InputBatch,
         padded_num_reqs: int | None,
-    ) -> int | None:
+        num_local_reqs: int,
+    ) -> int:
         if padded_num_reqs is None:
-            return None
+            return num_local_reqs
         if input_batch.has_prefill:
             raise RuntimeError("PCP FULL graphs require a decode-only batch.")
+        if padded_num_reqs < num_local_reqs:
+            raise RuntimeError(
+                "PCP graph request capacity is smaller than the rank-local batch: "
+                f"{padded_num_reqs} < {num_local_reqs}."
+            )
         return padded_num_reqs
 
     @property
@@ -392,10 +398,6 @@ class PCPManager:
         global_batch = input_batch
         self._global_batch = global_batch
 
-        num_reqs_after_padding = self._get_full_padded_num_reqs(
-            global_batch,
-            padded_num_reqs,
-        )
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
@@ -419,17 +421,15 @@ class PCPManager:
             ]
 
         num_local_reqs = len(local_segments)
-        if num_reqs_after_padding is None:
-            num_reqs_after_padding = num_local_reqs
-        elif num_reqs_after_padding < num_local_reqs:
+        num_reqs_after_padding = self._resolve_num_reqs_after_padding(
+            global_batch,
+            padded_num_reqs,
+            num_local_reqs,
+        )
+        if num_reqs_after_padding > input_buffers.max_num_reqs:
             raise RuntimeError(
-                "PCP graph request capacity is smaller than the rank-local batch: "
-                f"{num_reqs_after_padding} < {num_local_reqs}."
-            )
-        if num_local_reqs > input_buffers.max_num_reqs:
-            raise RuntimeError(
-                "PCP local request count exceeds the MRV2 input buffer size: "
-                f"{num_local_reqs} > {input_buffers.max_num_reqs}."
+                "PCP padded local request count exceeds the MRV2 input buffer size: "
+                f"{num_reqs_after_padding} > {input_buffers.max_num_reqs}."
             )
 
         local_to_global_batch_req_idx_np = np.fromiter(
@@ -635,7 +635,7 @@ class PCPManager:
         num_tokens: int,
         max_query_len: int | None = None,
     ) -> tuple[InputBatch, tuple[torch.Tensor, ...], torch.Tensor]:
-        """Prepare persistent PCP buffers for FULL decode graph capture."""
+        """Prepare persistent PCP buffers for CUDA graph capture."""
         assert self._input_buffers is not None
         assert self._local_block_tables is not None
         input_batch = InputBatch.make_dummy(

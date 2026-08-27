@@ -54,8 +54,8 @@ def test_full_graph_preserves_request_padding():
         has_prefill=False,
     )
 
-    assert PCPManager._get_full_padded_num_reqs(input_batch, 4) == 4
-    assert PCPManager._get_full_padded_num_reqs(input_batch, None) is None
+    assert PCPManager._resolve_num_reqs_after_padding(input_batch, 4, 2) == 4
+    assert PCPManager._resolve_num_reqs_after_padding(input_batch, None, 2) == 2
 
 
 def test_full_graph_rejects_prefill_batch():
@@ -64,7 +64,16 @@ def test_full_graph_rejects_prefill_batch():
     )
 
     with pytest.raises(RuntimeError, match="decode-only"):
-        PCPManager._get_full_padded_num_reqs(input_batch, 4)
+        PCPManager._resolve_num_reqs_after_padding(input_batch, 4, 2)
+
+
+def test_full_graph_rejects_insufficient_request_capacity():
+    input_batch = SimpleNamespace(
+        has_prefill=False,
+    )
+
+    with pytest.raises(RuntimeError, match="request capacity"):
+        PCPManager._resolve_num_reqs_after_padding(input_batch, 1, 2)
 
 
 def test_full_capture_uses_pcp_persistent_buffers(monkeypatch):
