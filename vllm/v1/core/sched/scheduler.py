@@ -975,7 +975,6 @@ class Scheduler(SchedulerInterface):
                             if padded_num_tokens > request_token_budget:
                                 # Prefer to not schedule than schedule un-padded.
                                 break
-                            num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
@@ -1030,6 +1029,10 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                    if pad_spec_decode:
+                        assert num_new_tokens == 1
+                        num_new_tokens += self.num_spec_tokens
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid

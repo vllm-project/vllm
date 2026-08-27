@@ -1726,6 +1726,38 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+def test_spec_decode_padding_follows_mamba_alignment():
+    """Mamba alignment must not clip reject-only verifier padding."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    running, prompt_tail = create_requests(num_requests=2, num_tokens=14)
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        side_effect=lambda request, _: (
+            (13, False) if request is prompt_tail else (0, False)
+        )
+    )
+
+    scheduler.add_request(running)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([running.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(prompt_tail)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens == {
+        running.request_id: 1 + num_spec,
+        prompt_tail.request_id: 1 + num_spec,
+    }
+    assert out.scheduled_spec_decode_tokens[prompt_tail.request_id] == [-1] * num_spec
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span
