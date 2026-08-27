@@ -10,7 +10,7 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -166,6 +166,13 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    def __init__(self) -> None:
+        config = get_current_vllm_config_or_none()
+        linear_backend = (
+            config.kernel_config.linear_backend if config is not None else "auto"
+        )
+        self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -215,7 +222,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_impl(layer, x, layer.weight, bias)
 
 
 class LinearBase(PluggableLayer):
