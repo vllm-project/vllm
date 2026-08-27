@@ -53,11 +53,18 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def test_batch_invariant_spec_decode_rejects_unsupported_config(monkeypatch):
+def test_batch_invariant_spec_decode_warns_for_unvalidated_config(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    warning_once = Mock()
+    monkeypatch.setattr("vllm.config.vllm.logger.warning_once", warning_once)
 
-    with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT only supports"):
-        create_scheduler(num_speculative_tokens=2)
+    create_scheduler(num_speculative_tokens=2)
+
+    warning_once.assert_any_call(
+        "VLLM_BATCH_INVARIANT with speculative decoding is supported for Model "
+        "Runner V2 with probabilistic drafting, standard rejection sampling, "
+        "fixed speculative lengths, and adaptive verification disabled."
+    )
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():

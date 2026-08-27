@@ -841,16 +841,15 @@ class Scheduler(SchedulerInterface):
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
+                num_running = len(self.running) + self.num_waiting_for_streaming_input
+                if num_running >= self.max_num_running_reqs:
+                    break
+
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-                num_occupied_slots = (
-                    len(self.running) + self.num_waiting_for_streaming_input
-                )
-                if num_occupied_slots >= self.max_num_running_reqs:
-                    break
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(

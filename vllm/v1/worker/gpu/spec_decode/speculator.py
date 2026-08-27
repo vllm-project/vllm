@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -25,10 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.gumbel import (
-    RNG_DOMAIN_DRAFT_PROPOSAL,
-    gumbel_sample,
-)
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
@@ -82,10 +78,6 @@ class DraftModelSpeculator(BaseSpeculator):
         assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
         self.method = self.speculative_config.method
-        self.use_batch_invariant_rng = (
-            envs.VLLM_BATCH_INVARIANT
-            and self.speculative_config.supports_batch_invariance()
-        )
         self.num_speculative_steps = self.speculative_config.num_speculative_tokens
         self.draft_model_config = self.speculative_config.draft_model_config
 
@@ -350,6 +342,8 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
+            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+            # used for draft and target sampling.
             return gumbel_sample(
                 logits,
                 idx_mapping,
@@ -360,9 +354,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
-                rng_domain=(
-                    RNG_DOMAIN_DRAFT_PROPOSAL if self.use_batch_invariant_rng else 0
-                ),
             )
         return self._greedy_sample_draft(hidden_states)
 

@@ -1131,16 +1131,16 @@ class VllmConfig:
         if (
             envs.VLLM_BATCH_INVARIANT
             and speculative_config is not None
-            and (
-                not self.use_v2_model_runner
-                or not speculative_config.supports_batch_invariance()
+            and not (
+                self.use_v2_model_runner
+                and speculative_config.supports_batch_invariance()
             )
         ):
-            raise ValueError(
-                "VLLM_BATCH_INVARIANT only supports speculative decoding with "
-                "Model Runner V2, EAGLE3/DFlash/DSpark, probabilistic drafting, "
-                "standard rejection sampling, fixed speculative lengths, and "
-                "adaptive verification disabled."
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT with speculative decoding is supported for "
+                "Model Runner V2 with probabilistic drafting, standard rejection "
+                "sampling, fixed speculative lengths, and adaptive verification "
+                "disabled."
             )
 
         if self.model_config is not None:
