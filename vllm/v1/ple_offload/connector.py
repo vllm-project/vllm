@@ -148,7 +148,7 @@ class PleOffloadConnector:
             # placeholder waits on the paired cross-process semaphore.
             output_buffer = torch.empty(
                 max_num_tokens,
-                int(config.ple_embed_dim),
+                layer.get_offload_output_dim(int(config.ple_embed_dim)),
                 dtype=layer.get_offload_output_dtype(vllm_config.model_config.dtype),
                 device=self.device,
             )

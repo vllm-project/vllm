@@ -555,7 +555,6 @@ class PleOffloadRunner:
 
         config = self.vllm_config.model_config.hf_text_config
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
-        embedding_dim = int(config.ple_embed_dim)
         for dp_rank, layer_targets in self._worker_targets.items():
             self._pinned_bufs[dp_rank] = {}
             for layer_name, targets in layer_targets.items():
@@ -567,7 +566,9 @@ class PleOffloadRunner:
                 targets.sort(key=lambda target: target.tp_rank)
                 self._pinned_bufs[dp_rank][layer_name] = torch.empty(
                     max_tokens,
-                    embedding_dim,
+                    self._layers[layer_name].get_offload_output_dim(
+                        int(config.ple_embed_dim)
+                    ),
                     dtype=self._layers[layer_name].get_offload_output_dtype(
                         self.vllm_config.model_config.dtype
                     ),

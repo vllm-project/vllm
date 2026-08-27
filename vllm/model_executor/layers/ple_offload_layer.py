@@ -227,6 +227,10 @@ class PleOffloadLayer(nn.Module, ABC):
         """Return the dtype used by cross-process output buffers."""
         return default_dtype
 
+    def get_offload_output_dim(self, default_dim: int) -> int:
+        """Return the last dimension used by cross-process output buffers."""
+        return default_dim
+
     def setup_cross_process_offload(
         self,
         gpu_output_buffer: torch.Tensor,

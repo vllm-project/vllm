@@ -463,7 +463,10 @@ def test_ple_offload_runner_groups_registrations_by_dp_rank(
         ),
     )
     runner._layers = {
-        "ple": SimpleNamespace(get_offload_output_dtype=lambda default: default)
+        "ple": SimpleNamespace(
+            get_offload_output_dtype=lambda default: default,
+            get_offload_output_dim=lambda default: default + 1,
+        )
     }
     runner._worker_targets = {}
     runner._pinned_bufs = {}
@@ -513,6 +516,8 @@ def test_ple_offload_runner_groups_registrations_by_dp_rank(
     assert runner._input_bufs[0].input_ids_buf[0].item() == 0
     assert runner._input_bufs[1].input_ids_buf[0].item() == 1
     assert set(runner._pinned_bufs) == {0, 1}
+    assert runner._pinned_bufs[0]["ple"].shape == (8, 3)
+    assert runner._pinned_bufs[1]["ple"].shape == (8, 3)
 
 
 def test_ple_offload_runner_routes_requests_layer_first(
