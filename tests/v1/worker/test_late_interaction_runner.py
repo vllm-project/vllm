@@ -11,7 +11,7 @@ from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
 )
-from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
+from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 
 
 def _make_pooling_params(

@@ -26,9 +26,59 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mx
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_quark
 
 logger = init_logger(__name__)
+
+
+def activation_quant_dtype(
+    ocp_mx_scheme: OCP_MX_Scheme | str,
+) -> torch.dtype | str | None:
+    """Activation dtype `moe_kernel_quantize_input` should fake-quantize to.
+
+    Args:
+        ocp_mx_scheme: The OCP MX scheme the emulated experts run. Accepts the
+            enum member or its string value.
+
+    Returns:
+        A `quant_dtype` `moe_kernel_quantize_input` dispatches on, or None for
+        weight-only schemes, which leave activations untouched.
+
+    Raises:
+        NotImplementedError: If the scheme has no emulated activation dtype.
+    """
+    if ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4,
+        OCP_MX_Scheme.w_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e2m3,
+    }:
+        return None
+    elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp4:
+        return "mxfp4"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+    }:
+        return "mxfp6_e3m2"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+    }:
+        return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_fp8,
+    }:
+        return current_platform.fp8_dtype()
+    raise NotImplementedError(
+        f"No emulated activation dtype for OCP MX scheme {ocp_mx_scheme}."
+        " Please open an issue."
+    )
 
 
 class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
@@ -68,23 +118,26 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
-        if self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-        }:
-            # Weight has to be dequantized for mxfp4 emulation.
-            self._quant_dtype = "mxfp4"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
-        ]:
-            self._quant_dtype = "mxfp6"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_fp8,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
-        ]:
-            self._quant_dtype = current_platform.fp8_dtype()
+        self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
+
+    @staticmethod
+    def is_supported_config(
+        cls: type["mk.FusedMoEExperts"],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if not has_quark():
+            return False, "kernel requires amd-quark package"
+
+        return TritonExperts.is_supported_config(
+            cls=cls,
+            moe_config=moe_config,
+            weight_key=weight_key,
+            activation_key=activation_key,
+            activation_format=activation_format,
+        )
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:

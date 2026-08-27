@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -8,6 +10,7 @@ use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningPar
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::error::{Error, Result};
+use crate::request_metrics::current_unix_timestamp_secs;
 
 /// Tokenized decoder-only generate request accepted by [`crate::Llm`].
 ///
@@ -30,8 +33,9 @@ pub struct GenerateRequest {
     pub mm_features: Option<MmFeatures>,
     /// Unix timestamp, in seconds, when this request arrived at the frontend.
     ///
-    /// When omitted, the Rust frontend fills it immediately before sending the
-    /// request to engine-core, matching Python's default arrival-time behavior.
+    /// Stamped at the frontend entry, before render and tokenization, to match
+    /// Python's renderer-entry arrival_time. When omitted, it is filled as a
+    /// fallback before the request is sent to engine-core.
     pub arrival_time: Option<f64>,
     /// Optional salt used to partition prefix-cache entries for this request.
     pub cache_salt: Option<String>,
@@ -42,6 +46,8 @@ pub struct GenerateRequest {
     pub priority: i32,
     /// Optional data-parallel rank override for routing this request.
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
@@ -72,6 +78,7 @@ impl GenerateRequest {
             trace_headers,
             priority,
             data_parallel_rank,
+            session_id,
             reasoning_parser_kwargs,
             lora_request,
         } = self;
@@ -101,6 +108,7 @@ impl GenerateRequest {
                 priority,
                 trace_headers,
                 resumable: false,
+                session_id,
                 external_req_id: Some(external_request_id),
                 // Rust parser doesn't expose this information, leave it unset and let the
                 // reasoning logic in engine-sided structured output manager handle it.
@@ -120,13 +128,6 @@ impl PreparedGenerateRequest {
             .as_ref()
             .expect("prepared request must have prompt token ids")
     }
-}
-
-fn current_unix_timestamp_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs_f64()
 }
 
 #[cfg(test)]
@@ -153,6 +154,7 @@ mod tests {
             )])),
             priority: 3,
             data_parallel_rank: Some(2),
+            session_id: Some("session-1".to_string()),
             reasoning_parser_kwargs: Some(ReasoningParserKwargs {
                 chat_template_kwargs: [(
                     "chat_template_kwargs".to_string(),
@@ -180,6 +182,7 @@ mod tests {
         assert_eq!(request.arrival_time, 42.5);
         assert_eq!(request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(request.data_parallel_rank, Some(2));
+        assert_eq!(request.session_id.as_deref(), Some("session-1"));
         assert_eq!(
             request.trace_headers,
             Some(BTreeMap::from([(

@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponseTextConfig,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import StructuredOutputsParams
 
 
@@ -83,19 +84,6 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.stop == []  # Empty list
         assert sampling_params.extra_args == {}  # Empty dict
 
-    def test_logprobs_with_null_top_logprobs(self):
-        request = ResponsesRequest(
-            model="test-model",
-            input="test input",
-            include=["message.output_text.logprobs"],
-            top_logprobs=None,
-        )
-
-        sampling_params = request.to_sampling_params(default_max_tokens=1000)
-
-        assert request.top_logprobs == 0
-        assert sampling_params.logprobs == 0
-
     def test_seed_bounds_validation(self):
         """Test that seed values outside torch.long bounds are rejected."""
         # Test seed below minimum
@@ -145,6 +133,21 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.structured_outputs is not None
         assert sampling_params.structured_outputs.grammar == "root ::= 'hello'"
 
+    def test_text_format_json_object_enables_structured_outputs(self):
+        """text.format json_object enables structured outputs for sampling."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            text=ResponseTextConfig.model_validate({"format": {"type": "json_object"}}),
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.structured_outputs is not None
+        assert sampling_params.structured_outputs.json_object is True
+        assert sampling_params.structured_outputs.json is None
+        assert request.structured_outputs is None
+
     def test_structured_outputs_and_json_schema_conflict(self):
         """Test that specifying both structured_outputs and json_schema raises."""
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
@@ -161,7 +164,7 @@ class TestResponsesRequestSamplingParams:
             text=text_config,
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(VLLMValidationError) as exc_info:
             request.to_sampling_params(default_max_tokens=1000)
 
         assert "Cannot specify both structured_outputs and text.format" in str(

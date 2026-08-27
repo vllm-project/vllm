@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Python-compatible validation for logprobs sampling params.
 //!
 //! `-1` is expanded only for bounds checks. The original request values are

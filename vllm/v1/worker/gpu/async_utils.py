@@ -1,12 +1,115 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
-from vllm.v1.outputs import AsyncModelRunnerOutput, LogprobsTensors, ModelRunnerOutput
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
+import vllm.envs as envs
+from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
+    LogprobsTensors,
+    ModelRunnerOutput,
+    PoolerOutput,
+    RoutedExpertsTensors,
+)
+from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.utils import raise_if_nan_logits
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass(frozen=True)
+class StepTimingSample:
+    forward_ms: float
+    drafter_ms: float
+    num_target_tokens: int
+    num_reqs: int
+    full_cudagraph: bool
+
+
+def _timing_event() -> torch.cuda.Event:
+    return torch.cuda.Event(enable_timing=True)
+
+
+@dataclass
+class StepTimingEvents:
+    forward_start: torch.cuda.Event = field(default_factory=_timing_event)
+    forward_end: torch.cuda.Event = field(default_factory=_timing_event)
+    drafter_start: torch.cuda.Event = field(default_factory=_timing_event)
+    drafter_end: torch.cuda.Event = field(default_factory=_timing_event)
+
+
+class StepTimingCollector:
+    """Times the steps run inside ``collect``; record calls no-op outside it.
+
+    Every step gets its own events, so the steps queue back-to-back and the
+    block resolves them all behind one sync on the way out.
+    """
+
+    def __init__(self):
+        self._collecting = False
+        self._step: StepTimingEvents | None = None
+        self._batch = (False, 0, 0)
+        self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
+
+    @contextlib.contextmanager
+    def collect(self) -> Iterator[list[StepTimingSample]]:
+        """Time every step run in this block.
+
+        The yielded list holds one sample per timed step once the block exits;
+        it stays empty inside the block, where the timings are still on device.
+        """
+        samples: list[StepTimingSample] = []
+        self._collecting = True
+        try:
+            yield samples
+        finally:
+            self._collecting = False
+            timed, self._timed, self._step = self._timed, [], None
+        if not timed:
+            return
+        # Same stream, issue order: once the last step is done, so are the rest.
+        timed[-1][0].drafter_end.synchronize()
+        samples.extend(
+            StepTimingSample(
+                events.forward_start.elapsed_time(events.forward_end),
+                events.drafter_start.elapsed_time(events.drafter_end),
+                num_target_tokens,
+                num_reqs,
+                full_cudagraph,
+            )
+            for events, (full_cudagraph, num_target_tokens, num_reqs) in timed
+        )
+
+    def record_batch(self, input_batch: "InputBatch", full_cudagraph: bool) -> None:
+        """Costs from different execution modes must not share a cost curve."""
+        self._batch = (full_cudagraph, input_batch.num_tokens, input_batch.num_reqs)
+
+    def forward_start(self) -> None:
+        if self._collecting:
+            self._step = StepTimingEvents()
+            self._step.forward_start.record()
+
+    def forward_end(self) -> None:
+        if self._step is not None:
+            self._step.forward_end.record()
+
+    def drafter_start(self) -> None:
+        if self._step is not None:
+            self._step.drafter_start.record()
+
+    def drafter_end(self) -> None:
+        """Ends the step: only steps that reach here have a draft cost."""
+        if self._step is not None:
+            self._step.drafter_end.record()
+            self._timed.append((self._step, self._batch))
+            self._step = None
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -17,6 +120,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
+        check_ep_fault: bool = False,
+        routed_experts: RoutedExpertsTensors | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -24,7 +129,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_event = torch.cuda.Event()
+        self.routed_experts = routed_experts
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
+        self._has_fault: torch.Tensor | None = None
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -39,10 +147,21 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
+            self.sampling_mask_tensors: SamplingMaskTensors | None = None
+            if sampler_output.sampling_mask_tensors is not None:
+                self.sampling_mask_tensors = (
+                    sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
+                )
+            self.routed_experts_cpu: RoutedExpertsTensors | None = None
+            if routed_experts is not None:
+                self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
+            if check_ep_fault:
+                has_fault = get_ep_all2all_manager().query_fault()
+                self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
@@ -58,14 +177,32 @@ class AsyncOutput(AsyncModelRunnerOutput):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
+        if self.sampling_mask_tensors is not None:
+            self.model_runner_output.sampling_masks = (
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
+            )
+
         if self.num_nans is not None:
             self.model_runner_output.num_nans_in_logits = dict(
                 zip(self.model_runner_output.req_ids, self.num_nans.tolist())
             )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(self.model_runner_output.num_nans_in_logits)
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        if self.routed_experts_cpu is not None:
+            self.model_runner_output.routed_experts = self.routed_experts_cpu.tolists()
+
+        if self._has_fault is not None and self._has_fault.item():
+            mask = get_ep_all2all_manager().query_active_mask()
+            raise RuntimeError(
+                "Fault detected in EP all2all communication: "
+                "one or more ranks timed out during dispatch/combine. "
+                f"Mask: {mask.cpu().tolist()}"
+            )
+
         return self.model_runner_output
 
 
@@ -73,33 +210,42 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
-        pooler_output: torch.Tensor,
-        is_valid: torch.Tensor | None,
+        pooler_output: PoolerOutput,
+        finished_mask: list[bool],
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
-        self.is_valid = is_valid
-        self.copy_event = torch.cuda.Event()
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
-            self.pooler_output_cpu = self.pooler_output.to("cpu", non_blocking=True)
-            if self.is_valid is not None:
-                self.is_valid_cpu = self.is_valid.to("cpu", non_blocking=True)
+            if isinstance(self.pooler_output, torch.Tensor) and all(finished_mask):
+                self.pooler_output_cpu: PoolerOutput = self.pooler_output.to(
+                    "cpu", non_blocking=True
+                )
             else:
-                self.is_valid_cpu = None
+                outputs = (
+                    self.pooler_output.unbind()
+                    if isinstance(self.pooler_output, torch.Tensor)
+                    else self.pooler_output
+                )
+                self.pooler_output_cpu = [
+                    None
+                    if output is None or not is_finished
+                    else output.to("cpu", non_blocking=True)
+                    for output, is_finished in zip(outputs, finished_mask, strict=True)
+                ]
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        if isinstance(self.pooler_output_cpu, torch.Tensor):
+            pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        else:
+            pooler_output = self.pooler_output_cpu
         self.copy_event.synchronize()
-        if self.is_valid_cpu is not None:
-            is_valid_cpu = self.is_valid_cpu.tolist()
-            for i, is_valid in enumerate(is_valid_cpu):
-                if not is_valid:
-                    pooler_output[i] = None
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
