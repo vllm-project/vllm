@@ -1975,6 +1975,47 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     return initial_ecos
 
 
+@pytest.mark.parametrize(
+    ("load_modes", "expected_has_sync_loads"),
+    [
+        ((True,), False),
+        ((False,), True),
+        ((True, False), True),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_has_sync_kv_loads(
+    load_modes: tuple[bool, ...],
+    expected_has_sync_loads: bool,
+    tmp_path,
+):
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    block_size = 16
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        use_kv_connector=mock_kv(matched_tokens=block_size, is_async=False),
+        block_size=block_size,
+    )
+    requests = create_requests(
+        num_requests=len(load_modes),
+        num_tokens=block_size * 2,
+        block_size=block_size,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        side_effect=[(block_size, is_async) for is_async in load_modes]
+    )
+
+    output = scheduler.schedule()
+
+    assert output.has_sync_kv_loads is expected_has_sync_loads
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """
