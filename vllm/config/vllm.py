@@ -1607,6 +1607,7 @@ class VllmConfig:
             self._validate_v1_model_runner()
 
         self._validate_batch_sharded_sampling()
+        self._validate_adaptive_verification()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -2444,34 +2445,6 @@ class VllmConfig:
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
-            if (
-                speculative_config.enable_adaptive_verification
-                and self.lora_config is not None
-            ):
-                # The per-token LoRA mapping is built from CPU placeholder boundaries,
-                # while the trimmed batch's true boundaries are decided on the GPU.
-                unsupported.append("adaptive verification with LoRA")
-
-            if (
-                speculative_config.enable_adaptive_verification
-                and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            ):
-                # The draft budget divides by step costs profiled from captured
-                # cudagraphs; eager execution captures none.
-                unsupported.append(
-                    "adaptive verification with enforce_eager/cudagraph_mode=none"
-                )
-
-            if (
-                speculative_config.enable_adaptive_verification
-                and self.parallel_config.pipeline_parallel_size > 1
-            ):
-                # Cost curves and confidences currently only exist on the last PP rank;
-                # earlier ranks would diverge on the trimmed batch shape.
-                # TODO: we should be able to support adaptive verification with PP by
-                # broadcasting the cost curves and confidences to all ranks.
-                unsupported.append("adaptive verification with pipeline parallelism")
-
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
@@ -2503,8 +2476,11 @@ class VllmConfig:
             unsupported.append("prefill context parallel")
 
         # DSpark is implemented only by the V2 GPU model runner.
-        if self.speculative_config and self.speculative_config.method == "dspark":
-            unsupported.append("dspark speculative decoding")
+        if self.speculative_config:
+            if self.speculative_config.method == "dspark":
+                unsupported.append("dspark speculative decoding")
+            if self.speculative_config.enable_adaptive_verification:
+                unsupported.append("adaptive draft verification")
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():
@@ -2523,6 +2499,36 @@ class VllmConfig:
             unsupported.append("batch-sharded sampling")
 
         return unsupported
+
+    def _validate_adaptive_verification(self) -> None:
+        spec_config = self.speculative_config
+        if not spec_config or not spec_config.enable_adaptive_verification:
+            return
+
+        if self.lora_config is not None:
+            # The per-token LoRA mapping is built from CPU placeholder boundaries,
+            # while the trimmed batch's true boundaries are decided on the GPU.
+            raise ValueError(
+                "Adaptive verification is not currently compatible with LoRA"
+            )
+
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            # The draft budget divides by step costs profiled from captured
+            # cudagraphs; eager execution captures none.
+            raise ValueError(
+                "Adaptive verification is not currently compatible with "
+                "enforce_eager/cudagraph_mode=none"
+            )
+
+        if self.parallel_config.pipeline_parallel_size > 1:
+            # Cost curves and confidences currently only exist on the last PP rank;
+            # earlier ranks would diverge on the trimmed batch shape.
+            # TODO: we should be able to support adaptive verification with PP by
+            # broadcasting the cost curves and confidences to all ranks.
+            raise ValueError(
+                "Adaptive verification is not currently compatible "
+                "with pipeline parallelism"
+            )
 
     def _validate_batch_sharded_sampling(self) -> None:
         """Validate `enable_batch_sharded_sampling` against the rest of the config."""
