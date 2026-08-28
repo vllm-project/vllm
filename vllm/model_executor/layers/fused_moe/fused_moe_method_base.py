@@ -46,6 +46,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
 
+    @property
+    def output_is_reduced(self) -> bool:
+        return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
+
     @abstractmethod
     def create_weights(
         self,

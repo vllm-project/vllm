@@ -701,10 +701,29 @@ class RoutedExperts(PluggableLayer):
                 )
             return True if return_success else None
 
-        # Case input scale: input_scale loading is only supported for fp8
-        if "input_scale" in weight_name:
+        # Case input scale: input_scale loading is only supported for fp8.
+        # The MegaMoE CT checkpoint uses the explicit input_global_scale name;
+        # keep that additional match scoped to its shard-aware loader.
+        load_input_scales_by_shard = getattr(
+            self.quant_method,
+            "load_input_scales_by_shard",
+            False,
+        )
+        if "input_scale" in weight_name or (
+            load_input_scales_by_shard and "input_global_scale" in weight_name
+        ):
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
+
+            if load_input_scales_by_shard:
+                scale_expert_id = global_expert_id if use_global_sf else expert_id
+                self._load_per_tensor_weight_scale(
+                    shard_id=shard_id,
+                    param=param,
+                    loaded_weight=loaded_weight,
+                    expert_id=scale_expert_id,
+                )
+                return True if return_success else None
 
             # ModelOpt NVFP4 stores w13 input scales as two logical shards.
             # The generic assignment below would broadcast w1/w3 into the
