@@ -21,6 +21,9 @@ class ProcessorInputs:
     mm_data_items: MultiModalDataItems
     mm_uuid_items: MultiModalUUIDItems | None = None
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
+    media_io_kwargs: Mapping[str, Mapping[str, object]] = field(
+        default_factory=dict
+    )
 
     def get_mm_hashes(
         self,
@@ -30,6 +33,11 @@ class ProcessorInputs:
         mm_data_items = self.mm_data_items
         mm_uuid_items = self.mm_uuid_items or {}
         hf_processor_mm_kwargs = self.hf_processor_mm_kwargs
+        hash_factors = {
+            "media_io_kwargs": dict(self.media_io_kwargs),
+            "mm_processor_kwargs": dict(hf_processor_mm_kwargs),
+        }
+        has_hash_factors = any(hash_factors.values())
 
         mm_hashes = dict[str, list[str]]()
         hasher = MultiModalHasher
@@ -44,10 +52,10 @@ class ProcessorInputs:
                     uuid_item = uuid_items[i]
 
                     # NOTE: Even if a uuid_item is provided, we still compute a hash
-                    # if `hf_processor_mm_kwargs` is provided.
+                    # if processing configuration is provided.
                     # This is because the processed multimodal inputs can be different
-                    # depending on the processor kwargs.
-                    if uuid_item is None or hf_processor_mm_kwargs:
+                    # depending on this configuration.
+                    if uuid_item is None or has_hash_factors:
                         # NOTE: use provided hash string to hash with kwargs
                         # if available for better performance.
                         item = uuid_item if uuid_item is not None else item
@@ -56,7 +64,7 @@ class ProcessorInputs:
                                 hash_algorithm,
                                 model_id=model_id,
                                 **{modality: item},
-                                **hf_processor_mm_kwargs,
+                                **(hash_factors if has_hash_factors else {}),
                             )
                         )
                     else:
@@ -69,7 +77,7 @@ class ProcessorInputs:
                         hash_algorithm,
                         model_id=model_id,
                         **{modality: item},
-                        **hf_processor_mm_kwargs,
+                        **hash_factor_kwargs,
                     )
                     for item in data_items.get_all_items_for_hash()
                 ]
