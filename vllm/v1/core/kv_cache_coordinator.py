@@ -766,6 +766,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     curr_hit_length = min(
                         curr_hit_length, hit_length_by_group[first_group_id]
                     )
+                    if _DBG_PREFIX_CACHE:
+                        logger.info(
+                            "[dbg-pc] loop: pass_cand=%d idx=%d spec=%s gids=%s "
+                            "FULL-ATTN-TRIM -> %d",
+                            hit_length,
+                            idx,
+                            type(spec).__name__,
+                            list(group_ids),
+                            curr_hit_length,
+                        )
                     continue
 
                 drop_eagle_block = use_eagle and idx not in eagle_verified
@@ -812,6 +822,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     hit_length_by_group[group_id] = _new_hit_length
 
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
+
+                if _DBG_PREFIX_CACHE:
+                    logger.info(
+                        "[dbg-pc] loop: pass_cand=%d idx=%d spec=%s gids=%s "
+                        "max_in=%d hit_out=%d drop_eagle=%s",
+                        hit_length,
+                        idx,
+                        type(spec).__name__,
+                        list(group_ids),
+                        _max_length,
+                        _new_hit_length,
+                        drop_eagle_block,
+                    )
 
             if curr_hit_length >= hit_length:
                 break
