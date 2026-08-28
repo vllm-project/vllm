@@ -1578,9 +1578,19 @@ class VllmConfig:
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-            # disable cudagraph when enforce eager execution
-            if self.model_config is not None and self.model_config.enforce_eager:
-                logger.info_once("Cudagraph is disabled under eager mode")
+            # disable cudagraph when enforce eager execution or when using
+            # host/CPU distributed backends without custom allreduce
+            from vllm.platforms import current_platform
+
+            if (self.model_config is not None and self.model_config.enforce_eager) or (
+                self.parallel_config.world_size > 1
+                and current_platform.dist_backend == "gloo"
+                and not current_platform.use_custom_allreduce()
+            ):
+                logger.info_once(
+                    "Cudagraph is disabled under eager mode or when "
+                    "distributed backend is Gloo without custom allreduce"
+                )
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0

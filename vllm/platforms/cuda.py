@@ -211,7 +211,13 @@ class CudaPlatformBase(Platform):
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
-    dist_backend: str = "nccl"
+
+    @property
+    def dist_backend(self) -> str:
+        if envs.VLLM_DISABLE_PYNCCL:
+            return "gloo"
+        return "nccl"
+
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
@@ -592,6 +598,15 @@ class CudaPlatformBase(Platform):
         group_size: int,
         timeout: timedelta,
     ) -> ProcessGroup:
+        if backend == "gloo":
+            from vllm.distributed.utils import init_gloo_process_group
+
+            return init_gloo_process_group(
+                prefix_store=prefix_store,
+                group_rank=group_rank,
+                group_size=group_size,
+                timeout=timeout,
+            )
         assert is_nccl_available()
         pg: ProcessGroup = ProcessGroup(
             prefix_store,

@@ -1588,9 +1588,14 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str | None = None,
     timeout: timedelta | None = None,
 ):
+    from vllm.platforms import current_platform
+
+    if backend is None:
+        backend = current_platform.dist_backend or "nccl"
+
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
         world_size,
@@ -1647,9 +1652,13 @@ def init_distributed_environment(
             "distributed_init_method must be provided when initializing "
             "distributed environment"
         )
-        if not torch.distributed.is_backend_available(backend):
-            logger.warning(
-                "Distributed backend %s is not available; falling back to gloo.",
+        if (
+            backend == "nccl"
+            and (envs.VLLM_DISABLE_PYNCCL or current_platform.dist_backend == "gloo")
+        ) or not torch.distributed.is_backend_available(backend):
+            logger.info(
+                "Distributed backend %s is disabled or unavailable; "
+                "falling back to gloo.",
                 backend,
             )
             assert torch.distributed.is_gloo_available(), (

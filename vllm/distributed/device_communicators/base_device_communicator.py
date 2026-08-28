@@ -216,7 +216,24 @@ class DeviceCommunicatorBase:
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
+    # NOTE(fallback-collectives): Gloo is a CPU-only distributed backend.
+    # The fallback collective methods below (all_reduce, all_gather, etc.)
+    # stage tensors through host memory (.cpu() / .copy_()). For simplicity
+    # and minimal memory footprint in this fallback path, standard pageable
+    # host memory is used. A future optimization can introduce a pinned memory
+    # staging buffer pool for asynchronous D2H/H2D transfers to improve throughput.
+    def _is_gloo(self) -> bool:
+        return (
+            self.device_group is not None
+            and dist.get_backend(self.device_group) == dist.Backend.GLOO
+        )
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if self._is_gloo():
+            cpu_input = input_.cpu()
+            dist.all_reduce(cpu_input, group=self.device_group)
+            input_.copy_(cpu_input)
+            return input_
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
@@ -239,17 +256,22 @@ class DeviceCommunicatorBase:
         output_tensor = torch.empty(
             output_size, dtype=input_.dtype, device=input_.device
         )
-        # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        if self._is_gloo():
+            cpu_input = input_.contiguous().cpu()
+            cpu_output = torch.empty(output_size, dtype=input_.dtype, device="cpu")
+            dist.all_gather_into_tensor(cpu_output, cpu_input, group=self.device_group)
+            output_tensor.copy_(cpu_output)
+        else:
+            # All-gather.
+            dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
-        output_tensor = output_tensor.reshape(
+        return output_tensor.reshape(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]
         )
-        return output_tensor
 
     def all_gatherv(
         self,
@@ -257,7 +279,88 @@ class DeviceCommunicatorBase:
         dim: int = 0,
         sizes: list[int] | None = None,
     ) -> torch.Tensor | list[torch.Tensor]:
-        raise NotImplementedError
+        if dim != 0:
+            raise NotImplementedError("only dim 0 all-gatherv is supported")
+        world_size = self.world_size
+        if world_size == 1:
+            if isinstance(input_, torch.Tensor):
+                return input_
+            return list(input_)
+
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
+        def _all_gather_single(
+            inp: torch.Tensor, sizes: list[int] | None = None
+        ) -> torch.Tensor:
+            input_size = inp.size()
+            if sizes is not None:
+                assert len(sizes) == world_size
+                assert inp.shape[dim] == sizes[self.rank_in_group], (
+                    f"{inp.shape[dim]} != {sizes[self.rank_in_group]}"
+                )
+                output_size = (sum(sizes),) + input_size[1:]
+            else:
+                output_size = (input_size[0] * world_size,) + input_size[1:]
+
+            output_tensor = torch.empty(output_size, dtype=inp.dtype, device=inp.device)
+            if self._is_gloo():
+                cpu_input = inp.contiguous().cpu()
+                if sizes is not None:
+                    max_s = max(sizes)
+                    padded_input = torch.zeros(
+                        (max_s,) + input_size[1:],
+                        dtype=inp.dtype,
+                        device="cpu",
+                    )
+                    padded_input[: inp.shape[0]].copy_(cpu_input)
+                    padded_gather_list = [
+                        torch.empty(
+                            (max_s,) + input_size[1:],
+                            dtype=inp.dtype,
+                            device="cpu",
+                        )
+                        for _ in range(world_size)
+                    ]
+                    dist.all_gather(
+                        padded_gather_list, padded_input, group=self.device_group
+                    )
+                    cpu_gather_list = [
+                        padded_gather_list[i][: sizes[i]] for i in range(world_size)
+                    ]
+                    cpu_output = torch.cat(cpu_gather_list, dim=0)
+                else:
+                    cpu_output = torch.empty(output_size, dtype=inp.dtype, device="cpu")
+                    dist.all_gather_into_tensor(
+                        cpu_output, cpu_input, group=self.device_group
+                    )
+                output_tensor.copy_(cpu_output)
+            else:
+                # Native collective fallback for non-CUDA, non-GLOO platforms.
+                if sizes is not None:
+                    gather_list = [
+                        torch.empty(
+                            (s,) + input_size[1:],
+                            dtype=inp.dtype,
+                            device=inp.device,
+                        )
+                        for s in sizes
+                    ]
+                    dist.all_gather(
+                        gather_list, inp.contiguous(), group=self.device_group
+                    )
+                    torch.cat(gather_list, dim=0, out=output_tensor)
+                else:
+                    dist.all_gather_into_tensor(
+                        output_tensor,
+                        inp.contiguous(),
+                        group=self.device_group,
+                    )
+            return output_tensor
+
+        if isinstance(input_, torch.Tensor):
+            return _all_gather_single(input_, sizes)
+        return [_all_gather_single(inp, sizes) for inp in input_]
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
@@ -284,10 +387,18 @@ class DeviceCommunicatorBase:
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        # Perform reduce-scatter operation
-        torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_tensor, group=self.device_group
-        )
+        if self._is_gloo():
+            cpu_input = input_tensor.cpu()
+            cpu_output = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device="cpu"
+            )
+            dist.reduce_scatter_tensor(cpu_output, cpu_input, group=self.device_group)
+            output_tensor.copy_(cpu_output)
+        else:
+            # Perform reduce-scatter operation
+            torch.distributed.reduce_scatter_tensor(
+                output_tensor, input_tensor, group=self.device_group
+            )
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
@@ -295,7 +406,57 @@ class DeviceCommunicatorBase:
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ) -> torch.Tensor:
-        raise NotImplementedError
+        world_size = self.world_size
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        )
+        if dim < 0:
+            dim += input_.dim()
+
+        input_tensor = input_.movedim(0, dim).contiguous()
+
+        if sizes is not None:
+            assert len(sizes) == world_size, f"{len(sizes)} == {world_size}"
+            assert input_tensor.shape[0] == sum(sizes)
+            chunk_size = sizes[self.rank_in_group]
+        else:
+            assert input_tensor.shape[0] % world_size == 0
+            chunk_size = input_tensor.shape[0] // world_size
+
+        output_shape = (chunk_size,) + input_tensor.shape[1:]
+        output = torch.empty(
+            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+        )
+
+        if self._is_gloo():
+            cpu_input = input_tensor.cpu()
+            cpu_output = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device="cpu"
+            )
+            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+                # PyTorch Gloo does not support uneven list-of-splits in
+                # reduce_scatter, so perform all_reduce then slice locally.
+                dist.all_reduce(cpu_input, group=self.device_group)
+                offset = sum(sizes[: self.rank_in_group])
+                cpu_output = cpu_input[offset : offset + chunk_size]
+            else:
+                dist.reduce_scatter_tensor(
+                    cpu_output, cpu_input, group=self.device_group
+                )
+            output.copy_(cpu_output)
+        else:
+            # Native collective fallback for non-CUDA, non-GLOO platforms.
+            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+                input_splits = list(input_tensor.split(sizes, dim=0))
+                dist.reduce_scatter(output, input_splits, group=self.device_group)
+            else:
+                dist.reduce_scatter_tensor(
+                    output, input_tensor, group=self.device_group
+                )
+
+        return output.movedim(0, dim).contiguous()
 
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
@@ -313,27 +474,52 @@ class DeviceCommunicatorBase:
             # Convert negative dim to positive.
             dim += input_.dim()
 
-        # Allocate output tensor.
-        if self.rank_in_group == dst:
-            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+        if self._is_gloo():
+            cpu_input = input_.cpu()
+            if self.rank_in_group == dst:
+                cpu_gather_list = [
+                    torch.empty_like(cpu_input) for _ in range(world_size)
+                ]
+            else:
+                cpu_gather_list = None
+            torch.distributed.gather(
+                cpu_input,
+                cpu_gather_list,
+                dst=self.ranks[dst],
+                group=self.device_group,
+            )
+            if self.rank_in_group == dst:
+                assert cpu_gather_list is not None
+                cpu_output = torch.cat(cpu_gather_list, dim=dim)
+                return cpu_output.to(input_.device)
+            return None
         else:
-            gather_list = None
-        # Gather.
-        torch.distributed.gather(
-            input_, gather_list, dst=self.ranks[dst], group=self.device_group
-        )
-        if self.rank_in_group == dst:
-            output_tensor = torch.cat(gather_list, dim=dim)
-        else:
-            output_tensor = None
-        return output_tensor
+            # Allocate output tensor.
+            if self.rank_in_group == dst:
+                gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+            else:
+                gather_list = None
+            # Gather.
+            torch.distributed.gather(
+                input_, gather_list, dst=self.ranks[dst], group=self.device_group
+            )
+            if self.rank_in_group == dst:
+                assert gather_list is not None
+                output_tensor = torch.cat(gather_list, dim=dim)
+            else:
+                output_tensor = None
+            return output_tensor
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
-        torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+        if self._is_gloo():
+            cpu_tensor = tensor.cpu()
+            torch.distributed.send(cpu_tensor, self.ranks[dst], self.device_group)
+        else:
+            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
     def recv(
         self, size: torch.Size, dtype: torch.dtype, src: int | None = None
@@ -343,15 +529,25 @@ class DeviceCommunicatorBase:
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
-        torch.distributed.recv(tensor, self.ranks[src], self.device_group)
-        return tensor
+        if self._is_gloo():
+            cpu_tensor = torch.empty(size, dtype=dtype, device="cpu")
+            torch.distributed.recv(cpu_tensor, self.ranks[src], self.device_group)
+            return cpu_tensor.to(self.device)
+        else:
+            tensor = torch.empty(size, dtype=dtype, device=self.device)
+            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
+            return tensor
 
     def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
         """Broadcast a tensor from source rank to all ranks."""
         if self.world_size == 1:
             return tensor
-        torch.distributed.broadcast(tensor, self.ranks[src], self.device_group)
+        if self._is_gloo():
+            cpu_tensor = tensor.cpu()
+            torch.distributed.broadcast(cpu_tensor, self.ranks[src], self.device_group)
+            tensor.copy_(cpu_tensor)
+        else:
+            torch.distributed.broadcast(tensor, self.ranks[src], self.device_group)
         return tensor
 
     def destroy(self):

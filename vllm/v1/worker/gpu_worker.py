@@ -1465,9 +1465,13 @@ def init_worker_distributed_environment(
     rank: int,
     distributed_init_method: str | None = None,
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str | None = None,
 ) -> None:
     """Initialize the distributed environment."""
+    from vllm.platforms import current_platform
+
+    if backend is None:
+        backend = current_platform.dist_backend or "nccl"
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
 

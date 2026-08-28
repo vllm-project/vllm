@@ -165,7 +165,9 @@ class Platform:
     simple_compile_backend: str = "inductor"
 
     # The backend used for distributed communication.
-    dist_backend: str = ""
+    @property
+    def dist_backend(self) -> str:
+        return ""
 
     supported_quantization: list[str] = []
 

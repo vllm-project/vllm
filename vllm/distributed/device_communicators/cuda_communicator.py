@@ -56,7 +56,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
-            use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+            use_custom_allreduce = (
+                _ENABLE_CUSTOM_ALL_REDUCE and current_platform.use_custom_allreduce()
+            )
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             # FlashInfer all-reduce does not provide a fixed reduction order.
             use_flashinfer_allreduce = (
@@ -85,7 +87,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
-        if self.world_size > 1:
+        disable_pynccl = (
+            envs.VLLM_DISABLE_PYNCCL or current_platform.dist_backend == "gloo"
+        )
+        if self.world_size > 1 and not disable_pynccl:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
@@ -227,6 +232,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
+            "TORCH_DISTRIBUTED",
         ]
         enabled_ar_backends: list[str] = []
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
@@ -265,6 +271,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("SYMM_MEM")
         if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
             enabled_ar_backends.append("PYNCCL")
+        if not enabled_ar_backends:
+            enabled_ar_backends.append(
+                "GLOO" if self._is_gloo() else "TORCH_DISTRIBUTED"
+            )
 
         logger.info_once(
             "Using %s all-reduce backends (in dispatch order) for group "
@@ -332,9 +342,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return out
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is None or pynccl_comm.disabled:
-            out = input_.clone()
-            torch.distributed.all_reduce(out, group=self.device_group)
-            return out
+            return super().all_reduce(input_.clone())
         assert pynccl_comm is not None
         out = pynccl_comm.all_reduce(input_)
         if out is None:
@@ -342,8 +350,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # this usually happens during testing.
             # when we run the model, allreduce only happens for the TP
             # group, where we always have either custom allreduce or pynccl.
-            out = input_.clone()
-            torch.distributed.all_reduce(out, group=self.device_group)
+            out = super().all_reduce(input_.clone())
         return out
 
     def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
@@ -397,6 +404,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().reduce_scatter(input_, dim)
         assert pynccl_comm is not None
         if dim < 0:
             # Convert negative dim to positive.
@@ -426,6 +435,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
     ):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().reduce_scatterv(input_, dim, sizes)
         assert pynccl_comm is not None
         if dim < 0:
             # Convert negative dim to positive.
@@ -552,7 +563,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if pynccl_comm is not None and not pynccl_comm.disabled:
             pynccl_comm.send(tensor, dst)
         else:
-            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+            super().send(tensor, dst)
 
     def recv(
         self, size: torch.Size, dtype: torch.dtype, src: int | None = None
@@ -562,13 +573,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
+            tensor = torch.empty(size, dtype=dtype, device=self.device)
             pynccl_comm.recv(tensor, src)
+            return tensor
         else:
-            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
-        return tensor
+            return super().recv(size, dtype, src)
 
     def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
         """Broadcast a tensor from source rank to all ranks."""
@@ -580,7 +591,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             pynccl_comm.broadcast(tensor, src)
             return tensor
         else:
-            raise ValueError("No PyNCCL communicator found")
+            return super().broadcast(tensor, src)
 
     def destroy(self):
         if self.pynccl_comm is not None:
@@ -624,6 +635,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise NotImplementedError("only dim 0 all-gatherv is supported")
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_gatherv(input_, dim, sizes)
         assert pynccl_comm is not None and not pynccl_comm.disabled
 
         # 'sizes' is not needed if all inputs in the same group have the same
