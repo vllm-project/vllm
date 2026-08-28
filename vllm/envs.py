@@ -322,6 +322,10 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_PLE_MMAP: bool = False
+    VLLM_PLE_MMAP_WORKERS: int = 32
+    VLLM_PLE_MMAP_CHUNK: int = 2048
+    VLLM_PLE_MMAP_PREWARM: bool = False
 
 
 def get_default_cache_root():
@@ -2161,6 +2165,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
     # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
     "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
+    # Serve the Qwen4Exp PLE n-gram table from NVMe via mmap instead of
+    # keeping it GPU/host-resident. See vllm/models/qwen4_exp/nvidia/ple_mmap.py.
+    "VLLM_PLE_MMAP": lambda: bool(int(os.getenv("VLLM_PLE_MMAP", "0"))),
+    # Gather thread-pool size for the PLE mmap path.
+    "VLLM_PLE_MMAP_WORKERS": lambda: int(os.getenv("VLLM_PLE_MMAP_WORKERS", "32")),
+    # Rows per PLE mmap gather task.
+    "VLLM_PLE_MMAP_CHUNK": lambda: int(os.getenv("VLLM_PLE_MMAP_CHUNK", "2048")),
+    # If set, stream the PLE table once at load to warm the page cache
+    # (bounded by available memory).
+    "VLLM_PLE_MMAP_PREWARM": lambda: bool(int(os.getenv("VLLM_PLE_MMAP_PREWARM", "0"))),
 }
 
 
@@ -2328,6 +2342,12 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
+        # PLE mmap gather-pool tuning: affects only the CPU body of a
+        # split-out op, never the compiled graph. VLLM_PLE_MMAP itself stays
+        # a factor since it changes which op the graph splits around.
+        "VLLM_PLE_MMAP_WORKERS",
+        "VLLM_PLE_MMAP_CHUNK",
+        "VLLM_PLE_MMAP_PREWARM",
     }
 
     from vllm.config.utils import normalize_value
