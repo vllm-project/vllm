@@ -2016,9 +2016,18 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
+    def needs_eagle_block_drop(self) -> bool:
+        """Whether draft KV at a position depends on the next token.
+
+        EAGLE-style drafters build a position's draft KV from its hidden state
+        and the next token. DFlash/DSpark build it from the target hidden state
+        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        """
+        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
+
     def use_eagle_block_drop(self) -> bool:
-        """Whether volatile trailing cache blocks should be discarded."""
-        return self.use_eagle() and not self.disable_eagle_block_drop
+        """Whether the volatile trailing prefix-cache block should be dropped."""
+        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
