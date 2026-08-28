@@ -202,6 +202,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
 
+        # Inputs are staged into reused pinned CPU buffers with non_blocking
+        # H2D copies, so a step must not overwrite them until the previous
+        # step's DMA has landed. Blocking (sleep) event rather than a spin, to
+        # avoid holding the CUDA driver lock under contention. GPUModelRunner
+        # (V1) has this protocol as synchronize_input_prep(); V2 did not.
+        self.prepare_inputs_event: torch.cuda.Event | None = None
+        if self.scheduler_config.async_scheduling:
+            self.prepare_inputs_event = torch.cuda.Event(blocking=True)
+
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.is_first_pp_rank = get_pp_group().is_first_rank
@@ -1566,6 +1575,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
+        # Wait for the previous step's input DMAs before restaging the shared
+        # buffers. Real and dummy batches both reach this point, which is what
+        # makes it necessary under data parallelism: an idle rank's dummy batch
+        # stages its inputs through these same buffers.
+        if self.prepare_inputs_event is not None:
+            self.prepare_inputs_event.synchronize()
+
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
@@ -1648,6 +1664,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # indices from the previous real batch.
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
+
+        # Input staging for this step is enqueued; make the next step wait on
+        # it rather than race it.
+        if self.prepare_inputs_event is not None:
+            self.prepare_inputs_event.record()
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
