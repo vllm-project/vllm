@@ -24,7 +24,13 @@ from vllm.snapshot.types import Oracle, oracles_match
 def _child_engine_argv(
     args: argparse.Namespace, engine_argv: tuple[str, ...] | None
 ) -> tuple[str, ...]:
-    """Build the child argv: no snapshot options, sleep mode always enabled."""
+    """Build the child argv from the first argv source that is present.
+
+    In order: an explicit ``engine_argv`` from the caller, the process argv
+    tail when invoked as ``vllm snapshot create ...``, then the bare model from
+    the parsed args. Whichever source wins, snapshot options are stripped and
+    sleep mode is appended.
+    """
     if not engine_argv:
         process_argv = tuple(sys.argv[1:])
         if process_argv[:2] == ("snapshot", "create"):

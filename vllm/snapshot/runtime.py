@@ -706,6 +706,8 @@ class LocalSnapshotTools:
         if not locations:
             raise RuntimeError("installed torch package could not be located")
         version_path = Path(next(iter(locations))) / "version.py"
+        # Parse the version file rather than importing torch: snapshot create's
+        # CLI path stays import-light (vllm/entrypoints/cli/snapshot.py).
         syntax = ast.parse(version_path.read_text(), filename=str(version_path))
         cuda_runtime = ""
         for statement in syntax.body:
