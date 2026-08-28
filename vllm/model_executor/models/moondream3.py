@@ -517,7 +517,6 @@ class Moondream3TextMoE(nn.Module):
                     quant_config=biased_moe_quant_config(self._fused_w1_bias, None),
                 )
             except (NotImplementedError, RuntimeError) as exc:
-                out = None
                 self._use_fused_moe = False
                 logger.warning_once(
                     "Disabling fused Moondream3 MoE path and falling back to "
