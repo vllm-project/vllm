@@ -35,6 +35,7 @@ from vllm.parser.deepseek_v4 import (
     _unwrap_wrapper_args,
     deepseek_v4_config,
 )
+from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
@@ -267,37 +268,12 @@ class TestThinkingModeConfig:
         )
         assert parser.parser_engine_config.initial_state.name == expected_state
 
-    def test_keep_thinking_tags_preserves_special_tokens(self):
-        cfg = deepseek_v4_config(keep_thinking_tags=True)
+    def test_tool_config_preserves_reasoning_tags(self):
+        cfg = deepseek_v4_config(thinking=True, parse_reasoning=False)
         assert cfg.preserve_tokens == {DSML_THINK_START, DSML_THINK_END}
-
-    def test_reasoning_adapter_ignores_keep_thinking_tags(self, mock_tokenizer):
-        parser = DeepSeekV4ParserReasoningAdapter(
-            mock_tokenizer,
-            chat_template_kwargs={"thinking": True, "keep_thinking_tags": True},
-        )
-
-        reasoning, content = parser.extract_reasoning(
-            "<think>Let me check.</think>Here is the answer.", None
-        )
-
-        assert reasoning == "Let me check."
-        assert content == "Here is the answer."
-        assert parser._parser_engine.reasoning_ended
-
-    def test_combined_parser_ignores_keep_thinking_tags(self, mock_tokenizer):
-        parser = DeepSeekV4Parser(
-            mock_tokenizer,
-            chat_template_kwargs={"thinking": True, "keep_thinking_tags": True},
-        )
-
-        reasoning, content = parser.extract_reasoning(
-            "<think>Let me check.</think>Here is the answer.", None
-        )
-
-        assert reasoning == "Let me check."
-        assert content == "Here is the answer."
-        assert parser.reasoning_ended
+        assert "THINK_START" not in cfg.terminals
+        assert "THINK_END" not in cfg.terminals
+        assert cfg.initial_state == ParserState.CONTENT
 
     def test_thinking_mode_reasoning_without_tags(self, mock_tokenizer):
         parser = DeepSeekV4Parser(

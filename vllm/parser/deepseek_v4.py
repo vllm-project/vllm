@@ -124,7 +124,7 @@ def _unwrap_wrapper_args(
 @functools.cache
 def deepseek_v4_config(
     thinking: bool = False,
-    keep_thinking_tags: bool = False,
+    parse_reasoning: bool = True,
 ) -> ParserEngineConfig:
     terminals = {
         "THINK_START": DSML_THINK_START,
@@ -142,19 +142,23 @@ def deepseek_v4_config(
         "TOOL_START": DSML_TOOL_START,
         "TOOL_END": DSML_TOOL_END,
     }
-    if keep_thinking_tags:
+    if not parse_reasoning:
         terminals.pop("THINK_START")
         terminals.pop("THINK_END")
         token_id_terminals.pop("THINK_START")
         token_id_terminals.pop("THINK_END")
     return ParserEngineConfig(
         name="deepseek_v4",
-        initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        initial_state=(
+            ParserState.REASONING
+            if thinking and parse_reasoning
+            else ParserState.CONTENT
+        ),
         terminals=terminals,
         token_id_terminals=token_id_terminals,
         preserve_tokens=(
             frozenset({DSML_THINK_START, DSML_THINK_END})
-            if keep_thinking_tags
+            if not parse_reasoning
             else frozenset()
         ),
         transitions={
@@ -232,22 +236,19 @@ class DeepSeekV4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.pop("chat_template_kwargs", None) or {}
-        adapter_role = kwargs.pop("_parser_engine_adapter_role", None)
+        parse_reasoning = kwargs.pop("parse_reasoning", True)
         thinking = bool(
             chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking")
         )
         if "thinking" not in chat_kwargs and "enable_thinking" not in chat_kwargs:
             thinking = True
         thinking = thinking and chat_kwargs.get("reasoning_effort") != "none"
-        keep_thinking_tags = adapter_role == "tool" and bool(
-            chat_kwargs.get("keep_thinking_tags")
-        )
         super().__init__(
             tokenizer,
             tools,
             parser_engine_config=deepseek_v4_config(
                 thinking=thinking,
-                keep_thinking_tags=keep_thinking_tags,
+                parse_reasoning=parse_reasoning,
             ),
             **kwargs,
         )
