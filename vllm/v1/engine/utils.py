@@ -259,27 +259,53 @@ class CoreEngineProcManager:
 
         sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
         sentinels = set(sentinel_to_proc.keys())
+        # A sentinel this loop gave up waiting on directly, because it kept
+        # reporting ready without an exit code to show for it. Checked by
+        # polling its exitcode instead, on the cadence below, rather than
+        # left in `sentinels` where it would do the same thing again.
+        polled: list[BaseProcess] = []
 
-        while sentinels and not self.manager_stopped.is_set():
-            ready_sentinels = connection.wait(sentinels, timeout=1)
+        while (sentinels or polled) and not self.manager_stopped.is_set():
+            if sentinels:
+                # Once something needs polling, wake up often enough to
+                # poll it promptly; a healthy sentinel still wakes this
+                # up immediately on its own.
+                ready_sentinels = connection.wait(
+                    sentinels, timeout=0.1 if polled else 1
+                )
+            else:
+                time.sleep(0.1)
+                ready_sentinels = []
 
             died = False
             for sentinel in ready_sentinels:
-                proc = sentinel_to_proc[cast(int, sentinel)]
-                exitcode = proc.exitcode
-                if exitcode is None:
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
+                sentinels.discard(sentinel)
+                if proc.exitcode is None:
                     # Sentinel readiness alone is not proof of death: on
                     # Linux, PollSelector maps POLLNVAL/POLLERR/POLLHUP to
                     # read readiness, so a stale or invalid descriptor can
                     # report "ready" while its process is still alive with
-                    # no exitcode populated. Keep watching it -- a real
-                    # future exit is still caught below -- and back off
-                    # briefly so a persistently-invalid descriptor cannot
-                    # spin this loop at full speed.
-                    time.sleep(0.1)
+                    # no exitcode populated -- and it stays ready this way
+                    # indefinitely, so re-selecting on it would spin this
+                    # loop at full speed instead of blocking. Move it to
+                    # bounded polling instead, the same way
+                    # MultiprocExecutor.start_worker_monitor does for the
+                    # same failure mode.
+                    polled.append(proc)
                     continue
                 died = True
-                if exitcode != 0 and not self.manager_stopped.is_set():
+                if proc.exitcode != 0 and not self.manager_stopped.is_set():
+                    self.failed_proc_name = proc.name
+            if died:
+                break
+
+            for proc in list(polled):
+                if proc.exitcode is None:
+                    continue
+                polled.remove(proc)
+                died = True
+                if proc.exitcode != 0 and not self.manager_stopped.is_set():
                     self.failed_proc_name = proc.name
             if died:
                 break

@@ -251,6 +251,53 @@ def test_monitor_engine_liveness_ignores_spurious_sentinel_readiness(
     assert shutdown_calls == [1]
 
 
+def test_monitor_engine_liveness_polls_a_persistently_invalid_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A sentinel that never resolves to a real exit code -- a persistently
+    stale or invalid descriptor rather than a briefly spurious one -- must
+    stop being handed to connection.wait once recognized. Left in the wait
+    set, it would report ready on every single call and spin this loop at
+    full speed instead of blocking. A second, healthy process's real exit
+    must still be caught promptly while the first sits in fallback
+    polling."""
+    stuck = SimpleNamespace(sentinel=1, exitcode=None, name="stuck")
+    healthy = SimpleNamespace(sentinel=2, exitcode=None, name="healthy")
+
+    manager = object.__new__(CoreEngineProcManager)
+    manager.processes = [stuck, healthy]
+    manager.manager_stopped = Event()
+    manager.failed_proc_name = None
+
+    shutdown_calls = []
+    monkeypatch.setattr(manager, "shutdown", lambda: shutdown_calls.append(1))
+
+    wait_calls = []
+
+    def fake_wait(object_list, timeout=None):
+        wait_calls.append((set(object_list), timeout))
+        if len(wait_calls) == 1:
+            return [1]  # only the stuck sentinel is ready at first
+        healthy.exitcode = 1  # the healthy process actually exits now
+        return [2]
+
+    monkeypatch.setattr(engine_utils.connection, "wait", fake_wait)
+    monkeypatch.setattr(engine_utils.time, "sleep", lambda _: None)
+
+    manager.monitor_engine_liveness()
+
+    # The stuck sentinel was handed to connection.wait exactly once, then
+    # never again -- moved to bounded polling instead of staying in the
+    # wait set and reporting ready every call.
+    assert wait_calls[0] == ({1, 2}, 1)
+    assert all(1 not in sentinels for sentinels, _ in wait_calls[1:])
+    # Once something needed polling, the remaining wait used the shorter
+    # cadence instead of blocking for a full second.
+    assert all(timeout == 0.1 for _, timeout in wait_calls[1:])
+    assert manager.failed_proc_name == "healthy"
+    assert shutdown_calls == [1]
+
+
 def test_wait_for_engine_startup_reports_watched_process_exit():
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
