@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -204,6 +205,9 @@ pub struct TextRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Optional orchestrator-originated KV hints.
+    #[serde(default)]
+    pub kv_hints: Option<KvHintsEnvelope>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     #[serde(default)]
@@ -234,6 +238,7 @@ impl TextRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
+            kv_hints: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
             arrival_time: None,
