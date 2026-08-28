@@ -4,6 +4,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -527,6 +528,7 @@ def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
     return weight_loader
 
 
+@eager_break_during_capture
 def olmo_hybrid_gdn_full_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
