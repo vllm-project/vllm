@@ -465,7 +465,9 @@ class Attention(nn.Module, AttentionLayerBase):
             and not self.kv_cache_dtype.endswith("per_token_head")
         ):
             is_per_head = (
-                hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
+                use_per_head_quant_scales
+                and hasattr(self, "q_scale")
+                and self.q_scale.numel() == self.num_kv_heads
             )
             block_size = self.head_size * self.num_heads // self.num_kv_heads
             self.query_quant = QuantFP8(

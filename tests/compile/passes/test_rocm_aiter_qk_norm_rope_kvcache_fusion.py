@@ -44,10 +44,12 @@ from vllm.config import (
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _encode_layer_name
+from vllm.utils.torch_utils import _USE_LAYERNAME, _encode_layer_name
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -103,6 +105,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         device: torch.device,
         rotary_dim: int | None = None,
         prefix: str = "model.layers.0.self_attn.attn",
+        expect_per_tensor_query_quant: bool = False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -142,6 +145,9 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             attn_backend=attn_backend.get_class(),
         )
         self.attn_backend: type[AttentionBackend] = self.attn.get_attn_backend()
+        if expect_per_tensor_query_quant:
+            assert self.attn.query_quant is not None
+            assert self.attn.query_quant.group_shape == GroupShape.PER_TENSOR
         assert not self.attn_backend.forward_includes_kv_cache_update, (
             f"Attention backend {self.attn_backend} does not support "
             "fuse_qk_norm_rope_kvcache."
@@ -236,11 +242,8 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             self.kv_cache_dtype != self.dtype
             and self.attn.impl.supports_quant_query_input
         ):
-            q_fp8 = torch.empty_like(q, dtype=FP8_DTYPE)
-            torch.ops.vllm.rocm_aiter_per_tensor_quant(
-                q_fp8, q, self.attn._q_scale, False
-            )
-            q = q_fp8
+            assert self.attn.query_quant is not None
+            q, _ = self.attn.query_quant(q, self.attn._q_scale)
 
         # Final views + KV cache update
         q = q.view(-1, self.num_heads, self.head_size)
@@ -350,17 +353,28 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     observe_mrope_k: bool = False,
     expect_fusion: bool = True,
     force_mrope_support: bool = False,
+    use_quark_scalar_query_scale: bool = False,
 ) -> None:
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 
+    # Set AITER toggles before VllmConfig initialization enables env caching.
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         cache_config=CacheConfig(
             block_size=block_size,
             cache_dtype=kv_cache_dtype,
+        ),
+        quant_config=(
+            QuarkConfig(quant_config={"exclude": []})
+            if use_quark_scalar_query_scale
+            else None
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -374,6 +388,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
         m.setenv(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE",
             "1" if enable_aiter_triton_rope else "0",
@@ -398,6 +413,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             "rms_norm_eps": rms_norm_eps,
             "dtype": dtype,
             "device": torch.get_default_device(),
+            "expect_per_tensor_query_quant": use_quark_scalar_query_scale,
         }
         if mrope_section is None:
             model = QKNormRoPEKVCacheTestModel(**model_kwargs)
@@ -663,6 +679,39 @@ def test_qk_norm_mrope_kvcache_fusion(
     )
 
 
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads"),
+    [(32, 2), (16, 1), (8, 1)],
+    ids=["tp2", "tp4", "tp8"],
+)
+def test_qk_norm_mrope_kvcache_fusion_quark_scalar_query_scale(
+    num_heads: int,
+    num_kv_heads: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        enable_aiter_triton_rope=False,
+        num_tokens=5,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=128,
+        rotary_dim=128,
+        block_size=16,
+        is_neox=True,
+        use_shuffle_kv_layout="0",
+        kv_layout=KVCacheLayout.LBHNC,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8",
+        rms_norm_eps=1e-6,
+        custom_op="+rotary_embedding",
+        monkeypatch=monkeypatch,
+        mrope_section=(24, 20, 20),
+        mrope_interleaved=True,
+        use_quark_scalar_query_scale=True,
+    )
+
+
 def test_mrope_fusion_rejects_observable_k(monkeypatch: pytest.MonkeyPatch):
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
@@ -712,6 +761,49 @@ def test_mrope_fusion_rejects_unaligned_rotary_dim(
         expect_fusion=False,
         force_mrope_support=True,
     )
+
+
+@pytest.mark.skipif(not _USE_LAYERNAME, reason="requires opaque LayerName")
+def test_opaque_layer_name_patterns_register_once(monkeypatch: pytest.MonkeyPatch):
+    device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        cache_config=CacheConfig(block_size=16, cache_dtype="fp8_e4m3"),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            pass_config=PassConfig(fuse_qk_norm_rope_kvcache=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        model_kwargs = {
+            "vllm_config": vllm_config,
+            "attn_backend": AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            "num_heads": 8,
+            "num_kv_heads": 2,
+            "head_size": 128,
+            "is_neox": True,
+            "rms_norm_eps": 1e-6,
+            "dtype": torch.bfloat16,
+            "device": torch.device(device),
+        }
+        models = [
+            QKNormRoPEKVCacheTestModel(
+                **model_kwargs,
+                prefix=f"model.layers.{index}.self_attn.attn",
+            )
+            for index in range(2)
+        ]
+
+        # Opaque layer names are wildcards in the pattern graph. Registering
+        # once per physical layer raises "Duplicate pattern" on torch >= 2.11.
+        fusion_pass = QkNormRopeKvCacheFusionPass(vllm_config)
+
+    assert models
+    assert fusion_pass.patterns
 
 
 @pytest.mark.parametrize(
