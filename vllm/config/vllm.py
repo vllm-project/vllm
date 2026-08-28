@@ -2617,7 +2617,8 @@ class VllmConfig:
         unsupported = self._get_v1_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
-                f"Model Runner V1 does not support: {', '.join(unsupported)}")
+                f"Model Runner V1 does not support: {', '.join(unsupported)}"
+            )
 
     def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_config: "KVCacheConfig"
