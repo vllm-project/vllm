@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
@@ -611,6 +611,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
+        cache_salt = cast(str | None, engine_input.get("cache_salt"))
 
         orig_priority = priority
         sub_request = 0
@@ -657,7 +658,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             if isinstance(context, HarmonyContext):
                 engine_input = self.online_renderer.render_responses_harmony_messages(
                     context.messages,
-                    cache_salt=None,
+                    cache_salt=cache_salt,
                 )
 
                 sampling_params.max_tokens = max_model_len - self._extract_prompt_len(

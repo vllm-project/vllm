@@ -654,7 +654,7 @@ class TestInitializeToolSessions:
         assert render_request.cache_salt == "request-salt"
 
     @pytest.mark.asyncio
-    async def test_harmony_tool_followup_does_not_reuse_cache_salt(
+    async def test_harmony_tool_followup_preserves_cache_salt(
         self, serving_responses_instance
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
@@ -683,24 +683,27 @@ class TestInitializeToolSessions:
             lambda *args, **kwargs: generate_output()
         )
         serving_responses_instance.online_renderer.render_responses_harmony_messages = (
-            MagicMock(return_value=tokens_input([8, 9]))
+            MagicMock(
+                side_effect=lambda messages, *, cache_salt: tokens_input(
+                    [8, 9], cache_salt=cache_salt
+                )
+            )
         )
         serving_responses_instance._extract_prompt_len = MagicMock(return_value=2)
 
         async for _ in serving_responses_instance._generate_with_builtin_tools(
             request_id="req",
-            engine_input=tokens_input([1]),
+            engine_input=tokens_input([1], cache_salt="request-salt"),
             sampling_params=MagicMock(),
             context=context,
         ):
             pass
 
-        (
-            serving_responses_instance.online_renderer.render_responses_harmony_messages.assert_called_once_with(
-                context.messages,
-                cache_salt=None,
-            )
+        assert serving_responses_instance.engine_client.generate.call_count == 2
+        followup_engine_input = (
+            serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
         )
+        assert followup_engine_input.get("cache_salt") == "request-salt"
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
