@@ -135,21 +135,10 @@ class LoRAModel:
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and PIN_MEMORY
 
+        modules_to_save_names = peft_helper.modules_to_save or []
         full_parameters: dict[str, dict[str, torch.Tensor]] = {}
-        # split the full-parameters weights from the LoRA weights.
-        lora_tensors = tensors.copy()
-        for tensor_name, tensor in tensors.items():
-            if is_base_embedding_weights(tensor_name):
-                continue
-            module_name, _ = parse_fine_tuned_lora_name(tensor_name, weights_mapper)
-            if module_name in (peft_helper.modules_to_save or ()):
-                full_parameters.setdefault(module_name, {})[
-                    tensor_name.split(".")[-1]
-                ] = tensor.to(device=device)
-                lora_tensors.pop(tensor_name)
-
         loras: dict[str, LoRALayerWeights] = {}
-        for tensor_name, tensor in lora_tensors.items():
+        for tensor_name, tensor in tensors.items():
             if is_base_embedding_weights(tensor_name):
                 continue
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
@@ -158,6 +147,12 @@ class LoRAModel:
             module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
+            if module_name in modules_to_save_names:
+                full_parameters.setdefault(module_name, {})[
+                    tensor_name.split(".")[-1]
+                ] = tensor.to(device=device)
+                continue
+
             if module_name not in loras:
                 loras[module_name] = LoRALayerWeights.from_config(
                     module_name, peft_helper
