@@ -20,15 +20,27 @@ def dense_mask_mod(
     batch_idx = utils.ssa_to_scalar(batch)
     q_idx = utils.ssa_to_scalar(q_idx)
     kv_idx = utils.ssa_to_scalar(kv_idx)
-    word_idx = kv_idx >> 5
-    bit_idx = cutlass.Uint32(kv_idx & 31)
-    word = dense_mask[batch_idx, q_idx, word_idx]
-    result = cute.make_rmem_tensor(1, dtype=cutlass.Uint32)
-    result[0] = utils.shr_u32(cutlass.Uint32(word), bit_idx)
-    return result.load()
+    batch_stride, query_stride, _ = dense_mask.stride
+    aligned_mask = cute.make_tensor(
+        dense_mask.iterator,
+        cute.make_layout(
+            dense_mask.shape,
+            stride=(
+                cute.assume(batch_stride, divby=4),
+                cute.assume(query_stride, divby=4),
+                1,
+            ),
+        ),
+    )
+    mask_row = aligned_mask[batch_idx, q_idx, None]
+    mask_chunks = cute.flat_divide(mask_row, (4,))
+    mask_chunk = mask_chunks[None, (kv_idx >> 5) >> 2]
+    loaded = cute.make_rmem_tensor_like(mask_chunk)
+    cute.autovec_copy(mask_chunk, loaded)
+    return cute.recast_tensor(loaded, cutlass.Uint32).load()
 
 
-dense_mask_mod.__vec_size__ = 32
+dense_mask_mod.__vec_size__ = 128
 
 
 @cute.jit

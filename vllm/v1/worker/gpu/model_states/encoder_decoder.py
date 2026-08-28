@@ -43,7 +43,7 @@ class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
 
 class EncoderDecoderModelState(ModelState):
     """ModelState for cross-attention encoder-decoder models
-    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    (Whisper, CohereASR, NemotronParse, ...)
     """
 
     def __init__(
@@ -54,6 +54,10 @@ class EncoderDecoderModelState(ModelState):
         device: torch.device,
     ) -> None:
         assert encoder_cache is not None
+        if vllm_config.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
         super().__init__(vllm_config, model, encoder_cache, device)
 
         self.max_encoder_len = getattr(
@@ -67,7 +71,7 @@ class EncoderDecoderModelState(ModelState):
 
         self.encoder_outputs: list[torch.Tensor] = []
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
@@ -86,7 +90,8 @@ class EncoderDecoderModelState(ModelState):
             # so execute_mm_encoder preserves request order; use its return value
             # directly. No need to store in encoder_cache: cross-attention K/V are
             # written to the KV cache on the first step; decode steps use the cache.
-            self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            with self.encoder_runner.timed_encoder_operation(encoder_inputs.keys()):
+                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []
