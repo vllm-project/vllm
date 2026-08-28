@@ -157,6 +157,100 @@ class _FinishedProcess:
         return 1
 
 
+class _SpuriousThenDeadProcess:
+    """A process whose sentinel is already poll-ready (its pipe's write end
+    is closed), but whose exitcode only becomes real after `spurious_reads`
+    readiness events -- simulating a stale/invalid descriptor that reports
+    readiness before the process has actually exited."""
+
+    name = "RustFrontend"
+
+    def __init__(self, sentinel, spurious_reads: int):
+        self.sentinel = sentinel
+        self.remaining_spurious = spurious_reads
+
+    @property
+    def exitcode(self):
+        if self.remaining_spurious > 0:
+            self.remaining_spurious -= 1
+            return None
+        return 1
+
+
+def test_wait_for_engine_startup_ignores_spurious_sentinel_readiness():
+    ctx = zmq.Context()
+    handshake_socket = ctx.socket(zmq.ROUTER)
+    recv, send = connection.Pipe(duplex=False)
+    send.close()
+
+    parallel_config = SimpleNamespace(
+        data_parallel_size_local=1,
+        data_parallel_hybrid_lb=False,
+        data_parallel_external_lb=False,
+    )
+
+    proc = _SpuriousThenDeadProcess(recv, spurious_reads=2)
+
+    try:
+        launch = CoreEngineLaunch(
+            engine_manager=None,
+            coordinator=None,
+            addresses=EngineZmqAddresses(inputs=[], outputs=[]),
+            tensor_queue=None,
+        )
+        launch.watched_frontend_processes = [proc]
+        with pytest.raises(RuntimeError) as exc_info:
+            wait_for_engine_startup(
+                handshake_socket,
+                [CoreEngine()],
+                parallel_config,  # type: ignore[arg-type]
+                coordinated_dp=False,
+                cache_config=None,  # type: ignore[arg-type]
+                launch=launch,
+            )
+    finally:
+        recv.close()
+        handshake_socket.close(linger=0)
+        ctx.term()
+
+    # The first two readiness events were spurious (exitcode still None)
+    # and must not raise; only the third, real exit is reported.
+    assert proc.remaining_spurious == 0
+    assert "Frontend process failed during engine core initialization" in str(
+        exc_info.value
+    )
+    assert "Failed frontend proc(s): {'RustFrontend': 1}" in str(exc_info.value)
+
+
+def test_monitor_engine_liveness_ignores_spurious_sentinel_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recv, send = connection.Pipe(duplex=False)
+    send.close()
+    proc = _SpuriousThenDeadProcess(recv, spurious_reads=2)
+    proc.name = "EngineCore"
+
+    manager = object.__new__(CoreEngineProcManager)
+    manager.processes = [proc]
+    manager.manager_stopped = Event()
+    manager.failed_proc_name = None
+
+    shutdown_calls = []
+    monkeypatch.setattr(manager, "shutdown", lambda: shutdown_calls.append(1))
+
+    try:
+        manager.monitor_engine_liveness()
+    finally:
+        recv.close()
+
+    # A sentinel that reports readiness twice with exitcode still None must
+    # not be mistaken for a dead process; only the real, non-zero exit on
+    # the third readiness event should be recorded and trigger shutdown.
+    assert proc.remaining_spurious == 0
+    assert manager.failed_proc_name == "EngineCore"
+    assert shutdown_calls == [1]
+
+
 def test_wait_for_engine_startup_reports_watched_process_exit():
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
