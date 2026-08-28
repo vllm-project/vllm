@@ -214,10 +214,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         max_total_tokens: int,
         max_num_reqs: int,
         prefix: str,
+        layer_name: str,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        self.layer_name = layer_name
         self.embedding_dim = embedding_dim
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
@@ -334,12 +336,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
         return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
-    def forward(
+    def compute_ngram_ids(
         self,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
+        """Compute n-gram embedding indices for the current request layout."""
         input_ids = input_ids.reshape(-1).long()
         query_start_loc = query_start_loc.long()
         num_reqs = query_start_loc.numel() - 1
@@ -397,7 +400,27 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             offsets = self.ngram_heads_offsets[start:end]
             ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
             id_blocks.append(ids[request_indices, adjusted_columns])
-        ngram_ids = torch.cat(id_blocks, dim=-1)
+        return torch.cat(id_blocks, dim=-1)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+    ) -> torch.Tensor:
+        ngram_ids = input_ids.new_empty(
+            (input_ids.shape[0], self.ngram_heads),
+            dtype=torch.long,
+        )
+        # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
+        # which dispatch only on the padded token count.
+        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            ngram_ids,
+            self.layer_name,
+        )
         return self.ngram_embedding(ngram_ids).flatten(-2)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -499,13 +522,14 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
-        self.ple_embedding: nn.Module = Qwen4ExpNGramEmbedding(
+        self.ple_embedding = Qwen4ExpNGramEmbedding(
             config,
             int(config.ple_embed_dim),
             self.ple_dense_layer_id,
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.scheduler_config.max_num_seqs,
-            f"{prefix}.ple_embedding",
+            prefix=f"{prefix}.ple_embedding",
+            layer_name=prefix,
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
@@ -1134,6 +1158,33 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         return gated_value.flatten(-2) + conv_output
 
 
+def qwen4_exp_compute_ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
+    layer = get_forward_context().no_compile_layers[layer_name]
+    ngram_ids = layer.ple_embedding.compute_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+    )
+    output.copy_(ngram_ids)
+
+
+def qwen4_exp_compute_ple_ngram_ids_fake(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     output: torch.Tensor,
@@ -1150,6 +1201,14 @@ def qwen4_exp_ple_short_conv_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_compute_ple_ngram_ids",
+    op_func=qwen4_exp_compute_ple_ngram_ids,
+    mutates_args=["output"],
+    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
+)
 
 
 direct_register_custom_op(
