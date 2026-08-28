@@ -85,6 +85,7 @@ class InstanceRegistry:
         # forces -- restarts every fan-out at the first instance and hot-spots
         # it after each registration.
         self._cursors: dict[InstanceRole, int] = {role: 0 for role in InstanceRole}
+        self._replica_cursors: dict[str, int] = {}
         self._probe_task: asyncio.Task | None = None
 
     def register(self, record: InstanceRecord) -> bool:
@@ -138,6 +139,19 @@ class InstanceRegistry:
         start = self._cursors[role]
         self._cursors[role] = start + count
         return [alive[(start + offset) % len(alive)] for offset in range(count)]
+
+    def next_replica(self, record: InstanceRecord) -> int:
+        """Take the next data-parallel replica of `record`, round-robin.
+
+        The encoder pushes to one replica's receive channel, so the request
+        has to run on that same replica; the caller names the rank to both
+        halves.
+        """
+        if record.dp_size <= 1:
+            return 0
+        cursor = self._replica_cursors.get(record.url, 0)
+        self._replica_cursors[record.url] = cursor + 1
+        return cursor % record.dp_size
 
     def status(self) -> dict[str, Any]:
         return {
@@ -205,7 +219,11 @@ class InstanceRegistry:
             )
 
     def _on_probe_failure(self, record: InstanceRecord, now: float) -> None:
-        if record.url in self._evicted:
+        if record.url not in self._live:
+            # Either already evicted, or unregistered while this probe was in
+            # flight. A round snapshots its targets and then awaits, so a
+            # removal inside that window would otherwise be undone by a result
+            # describing a registry that no longer exists.
             return
         failures = self._fail_counts.get(record.url, 0) + 1
         self._fail_counts[record.url] = failures

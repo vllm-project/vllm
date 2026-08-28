@@ -127,12 +127,21 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
 
 @dataclass
 class _Route:
-    """The instances one request was assigned to."""
+    """The instances one request was assigned to.
+
+    Attributes:
+        consumer: The stage that receives the embedding, if any stage does.
+        consumer_zmq: The receive address named to the encoders.
+        dp_rank: Which replica of `consumer` was named, so the request can be
+            pinned to it.
+    """
 
     encoders: list[InstanceRecord]
     prefill: InstanceRecord | None
     decode: InstanceRecord
-    consumer_zmq: str | None
+    consumer: InstanceRecord | None = None
+    consumer_zmq: str | None = None
+    dp_rank: int | None = None
 
 
 class EPDProxy:
@@ -162,30 +171,30 @@ class EPDProxy:
             raise HTTPException(
                 status_code=503, detail="No encode instance is registered"
             )
-        return _Route(
-            encoders=encoders,
-            prefill=prefill,
-            decode=decode,
-            consumer_zmq=self._consumer_zmq(prefill, decode),
-        )
+        route = _Route(encoders=encoders, prefill=prefill, decode=decode)
+        self._name_consumer(route)
+        return route
 
-    @staticmethod
-    def _consumer_zmq(
-        prefill: InstanceRecord | None, decode: InstanceRecord
-    ) -> str | None:
-        """Address the encoder should push this request's embedding to.
+    def _name_consumer(self, route: _Route) -> None:
+        """Choose where the encoders push, and which replica runs the request.
 
         Which stage consumes the embedding depends on the topology -- the
         prefill instance when prefill is split out, the decode instance
         otherwise -- so the consumer is whichever one registered a receive
         address rather than whichever list it came from. Connectors that
-        publish to shared storage register none, and the encoder is then
+        publish to shared storage register none, and the encoders are then
         told nothing.
         """
-        for candidate in (prefill, decode):
-            if candidate is not None and candidate.ec_zmq_addrs:
-                return candidate.ec_zmq_addrs[0]
-        return None
+        for candidate in (route.prefill, route.decode):
+            if candidate is None or not candidate.ec_zmq_addrs:
+                continue
+            rank = self.registry.next_replica(candidate)
+            route.consumer = candidate
+            route.consumer_zmq = candidate.ec_zmq_addrs[
+                rank % len(candidate.ec_zmq_addrs)
+            ]
+            route.dp_rank = rank if candidate.dp_size > 1 else None
+            return
 
     # ---------------------------------------------------------------- #
     # Stages                                                           #
@@ -281,6 +290,16 @@ class EPDProxy:
             status_code=resp.status, detail=f"{stage} request failed: {detail}"
         )
 
+    @staticmethod
+    def _headers(route: _Route, req_id: str, target: InstanceRecord) -> dict[str, str]:
+        headers = {"x-request-id": req_id}
+        if route.dp_rank is not None and target is route.consumer:
+            # The push landed on one replica's receive channel, so the request
+            # has to run there rather than wherever the instance's own
+            # balancer would have put it.
+            headers["X-data-parallel-rank"] = str(route.dp_rank)
+        return headers
+
     async def prefill(self, req_data: dict, route: _Route, req_id: str) -> dict:
         """Run the prefill stage and carry its transfer params to the decoder."""
         if route.prefill is None:
@@ -305,7 +324,7 @@ class EPDProxy:
         async with self.http.post(
             f"{route.prefill.url}/v1/chat/completions",
             json=prefill_request,
-            headers={"x-request-id": req_id},
+            headers=self._headers(route, req_id, route.prefill),
         ) as resp:
             await self._raise_for_upstream(resp, "Prefill")
             body = await resp.json()
@@ -331,7 +350,7 @@ class EPDProxy:
         async with self.http.post(
             f"{route.decode.url}/v1/chat/completions",
             json=req_data,
-            headers={"x-request-id": req_id},
+            headers=self._headers(route, req_id, route.decode),
         ) as resp:
             await self._raise_for_upstream(resp, "Decode")
             return await resp.json()
@@ -344,7 +363,7 @@ class EPDProxy:
         async with self.http.post(
             f"{route.decode.url}/v1/chat/completions",
             json=req_data,
-            headers={"x-request-id": req_id},
+            headers=self._headers(route, req_id, route.decode),
         ) as resp:
             await self._raise_for_upstream(resp, "Decode")
             async for chunk in resp.content.iter_chunked(1024):
