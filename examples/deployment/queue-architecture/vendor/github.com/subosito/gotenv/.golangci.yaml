@@ -1,0 +1,7 @@
+# Options for analysis running.
+run:
+  timeout: 1m
+
+linters-settings:
+  gofmt:
+    simplify: true

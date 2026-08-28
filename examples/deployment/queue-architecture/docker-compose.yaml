@@ -1,13 +1,16 @@
-version: '3.8'
-
 services:
-  valkey:
-    image: valkey/valkey:9.1.1-alpine3.24
-    container_name: valkey
+  nats:
+    image: nats:2-alpine
+    container_name: nats
     ports:
-      - "16379:6379"
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-data:/data
+    command: ["-js", "-c", "/etc/nats/nats-server.conf"]
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -19,8 +22,6 @@ services:
     container_name: mockvllm
     ports:
       - "18000:8000"
-    depends_on:
-      - valkey
     healthcheck:
       test: ["CMD", "/app/mockvllm", "--healthcheck"]
       interval: 5s
@@ -32,15 +33,14 @@ services:
       context: .
       dockerfile: Dockerfile.sidecar
     environment:
-      REDIS_ADDR: "valkey:6379"
-      STREAM_NAME: "vllm_requests"
-      CONSUMER_GROUP: "sidecar_group"
-      CONSUMER_NAME: "sidecar_consumer"
-      VLLM_TARGET: "http://mockvllm:8000"
-      IDLE_THRESHOLD: "15s"
-      RECLAIM_INTERVAL: "5s"
+      RTR_NATS_URL: "nats://nats:4222"
+      RTR_STREAM_NAME: "vllm_requests"
+      RTR_STREAM_SUBJECT: "vllm.requests"
+      RTR_CONSUMER_NAME: "vllm-sidecars"
+      RTR_VLLM_TARGET: "http://mockvllm:8000"
+      RTR_MAX_CONCURRENCY: "0"
     depends_on:
-      valkey:
+      nats:
         condition: service_healthy
       mockvllm:
         condition: service_healthy
@@ -51,13 +51,16 @@ services:
       dockerfile: Dockerfile.proxy
     container_name: proxy
     environment:
-      REDIS_ADDR: "valkey:6379"
-      STREAM_NAME: "vllm_requests"
-      LISTEN_PORT: "8001"
+      RTR_NATS_URL: "nats://nats:4222"
+      RTR_STREAM_NAME: "vllm_requests"
+      RTR_PORT: "8001"
     ports:
       - "18001:8001"
     depends_on:
-      valkey:
+      nats:
         condition: service_healthy
-      mockvllm:
-        condition: service_healthy
+      sidecar:
+        condition: service_started
+
+volumes:
+  nats-data:

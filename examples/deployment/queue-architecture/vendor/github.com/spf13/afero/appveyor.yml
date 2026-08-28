@@ -1,0 +1,10 @@
+# This currently does nothing. We have moved to GitHub action, but this is kept
+# until spf13 has disabled this project in AppVeyor.
+version: '{build}'
+clone_folder: C:\gopath\src\github.com\spf13\afero
+environment:
+  GOPATH: C:\gopath
+build_script:
+- cmd: >-
+    go version
+

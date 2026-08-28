@@ -1,29 +1,109 @@
-# github.com/cespare/xxhash/v2 v2.3.0
-## explicit; go 1.11
-github.com/cespare/xxhash/v2
+# github.com/fsnotify/fsnotify v1.9.0
+## explicit; go 1.17
+github.com/fsnotify/fsnotify
+github.com/fsnotify/fsnotify/internal
+# github.com/go-viper/mapstructure/v2 v2.5.0
+## explicit; go 1.18
+github.com/go-viper/mapstructure/v2
+github.com/go-viper/mapstructure/v2/internal/errors
+# github.com/google/go-cmp v0.7.0
+## explicit; go 1.21
+# github.com/inconshreveable/mousetrap v1.1.0
+## explicit; go 1.18
+github.com/inconshreveable/mousetrap
+# github.com/klauspost/compress v1.18.5
+## explicit; go 1.24
+github.com/klauspost/compress/flate
+github.com/klauspost/compress/internal/le
+# github.com/nats-io/nats.go v1.53.1
+## explicit; go 1.25.0
+github.com/nats-io/nats.go
+github.com/nats-io/nats.go/encoders/builtin
+github.com/nats-io/nats.go/internal/parser
+github.com/nats-io/nats.go/internal/syncx
+github.com/nats-io/nats.go/jetstream
+github.com/nats-io/nats.go/util
+# github.com/nats-io/nkeys v0.4.15
+## explicit; go 1.24.0
+github.com/nats-io/nkeys
+# github.com/nats-io/nuid v1.0.1
+## explicit
+github.com/nats-io/nuid
 # github.com/oklog/ulid/v2 v2.1.2
 ## explicit; go 1.15
 github.com/oklog/ulid/v2
-# github.com/redis/go-redis/v9 v9.22.0
-## explicit; go 1.24
-github.com/redis/go-redis/v9
-github.com/redis/go-redis/v9/auth
-github.com/redis/go-redis/v9/internal
-github.com/redis/go-redis/v9/internal/auth/streaming
-github.com/redis/go-redis/v9/internal/hashtag
-github.com/redis/go-redis/v9/internal/hscan
-github.com/redis/go-redis/v9/internal/interfaces
-github.com/redis/go-redis/v9/internal/maintnotifications/logs
-github.com/redis/go-redis/v9/internal/otel
-github.com/redis/go-redis/v9/internal/pool
-github.com/redis/go-redis/v9/internal/proto
-github.com/redis/go-redis/v9/internal/routing
-github.com/redis/go-redis/v9/internal/util
-github.com/redis/go-redis/v9/maintnotifications
-github.com/redis/go-redis/v9/push
-# go.uber.org/atomic v1.11.0
+# github.com/pelletier/go-toml/v2 v2.2.4
+## explicit; go 1.21.0
+github.com/pelletier/go-toml/v2
+github.com/pelletier/go-toml/v2/internal/characters
+github.com/pelletier/go-toml/v2/internal/danger
+github.com/pelletier/go-toml/v2/internal/tracker
+github.com/pelletier/go-toml/v2/unstable
+# github.com/rogpeppe/go-internal v1.14.1
+## explicit; go 1.23
+# github.com/sagikazarmark/locafero v0.11.0
+## explicit; go 1.23.0
+github.com/sagikazarmark/locafero
+# github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8
+## explicit; go 1.20
+github.com/sourcegraph/conc
+github.com/sourcegraph/conc/panics
+github.com/sourcegraph/conc/pool
+# github.com/spf13/afero v1.15.0
+## explicit; go 1.23.0
+github.com/spf13/afero
+github.com/spf13/afero/internal/common
+github.com/spf13/afero/mem
+# github.com/spf13/cast v1.10.0
+## explicit; go 1.21.0
+github.com/spf13/cast
+github.com/spf13/cast/internal
+# github.com/spf13/cobra v1.10.2
+## explicit; go 1.15
+github.com/spf13/cobra
+# github.com/spf13/pflag v1.0.10
+## explicit; go 1.12
+github.com/spf13/pflag
+# github.com/spf13/viper v1.21.0
+## explicit; go 1.23.0
+github.com/spf13/viper
+github.com/spf13/viper/internal/encoding/dotenv
+github.com/spf13/viper/internal/encoding/json
+github.com/spf13/viper/internal/encoding/toml
+github.com/spf13/viper/internal/encoding/yaml
+github.com/spf13/viper/internal/features
+# github.com/stretchr/testify v1.12.1
+## explicit; go 1.17
+# github.com/subosito/gotenv v1.6.0
 ## explicit; go 1.18
-go.uber.org/atomic
-# golang.org/x/sys v0.30.0
-## explicit; go 1.18
+github.com/subosito/gotenv
+# go.yaml.in/yaml/v3 v3.0.5
+## explicit; go 1.16
+go.yaml.in/yaml/v3
+# golang.org/x/crypto v0.55.0
+## explicit; go 1.25.0
+golang.org/x/crypto/blake2b
+golang.org/x/crypto/curve25519
+golang.org/x/crypto/internal/alias
+golang.org/x/crypto/internal/poly1305
+golang.org/x/crypto/nacl/box
+golang.org/x/crypto/nacl/secretbox
+golang.org/x/crypto/salsa20/salsa
+# golang.org/x/sync v0.22.0
+## explicit; go 1.25.0
+golang.org/x/sync/errgroup
+# golang.org/x/sys v0.47.0
+## explicit; go 1.25.0
 golang.org/x/sys/cpu
+golang.org/x/sys/unix
+golang.org/x/sys/windows
+# golang.org/x/text v0.41.0
+## explicit; go 1.25.0
+golang.org/x/text/encoding
+golang.org/x/text/encoding/internal
+golang.org/x/text/encoding/internal/identifier
+golang.org/x/text/encoding/unicode
+golang.org/x/text/internal/utf8internal
+golang.org/x/text/runes
+golang.org/x/text/transform
+golang.org/x/text/unicode/norm

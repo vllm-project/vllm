@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,12 +47,23 @@ func WaitForHealthy(ctx context.Context, client *http.Client, target string, pol
 			if doErr == nil {
 				resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
-					log.Printf("vLLM target %s is healthy (attempt %d)", target, attempt)
+					slog.InfoContext(ctx, "vLLM target is health",
+						"target", target,
+						"attempt", attempt,
+					)
 					return nil
 				}
-				log.Printf("Waiting for vLLM target %s to become healthy: got status %d (attempt %d)", target, resp.StatusCode, attempt)
+				slog.InfoContext(ctx, "waiting for vLLM target to become healthy",
+					"target", target,
+					"status", resp.StatusCode,
+					"attempt", attempt,
+				)
 			} else {
-				log.Printf("Waiting for vLLM target %s to become healthy: %v (attempt %d)", target, doErr, attempt)
+				slog.ErrorContext(ctx, "error waiting on vLLM target",
+					"target", target,
+					"attempt", attempt,
+					"err", doErr,
+				)
 			}
 		}
 
@@ -159,7 +170,9 @@ func waitForCapacity(ctx context.Context, client *http.Client, target string, ma
 		if err != nil {
 			consecutiveFailures++
 			if consecutiveFailures < maxConsecutiveFailures {
-				log.Printf("WARNING: failed to check vLLM capacity (%d/%d consecutive failures), retrying shortly: %v", consecutiveFailures, maxConsecutiveFailures, err)
+				slog.WarnContext(ctx, fmt.Sprintf("failed to check vLLM capacity (%d/%d consecutive failures)", consecutiveFailures, maxConsecutiveFailures),
+					"err", err,
+				)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -167,8 +180,9 @@ func waitForCapacity(ctx context.Context, client *http.Client, target string, ma
 				}
 				continue
 			}
-
-			log.Printf("vLLM capacity check failed %d times in a row (%v) -- treating vLLM as unhealthy, waiting for it to recover before claiming more work", consecutiveFailures, err)
+			slog.ErrorContext(ctx, fmt.Sprintf("vLLM capacity check failed %d times in a row -- treating vLLM as unhealthy, waiting for it to recover before claiming more work", consecutiveFailures),
+				"err", err,
+			)
 			if err := WaitForHealthy(ctx, client, target, pollInterval); err != nil {
 				return err
 			}
@@ -181,7 +195,7 @@ func waitForCapacity(ctx context.Context, client *http.Client, target string, ma
 			return nil
 		}
 
-		log.Printf("vLLM at capacity (running+waiting=%.0f >= max=%d), holding off on claiming next message", load, maxConcurrent)
+		slog.InfoContext(ctx, fmt.Sprintf("vLLM at capacity (running+waiting=%.0f >= max=%d), holding off on claiming next message", load, maxConcurrent))
 
 		select {
 		case <-ctx.Done():

@@ -1,0 +1,4 @@
+*.test
+*.out
+annotate.json
+profile.cov

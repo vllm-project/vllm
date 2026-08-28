@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/model"
 )
 
 // ForwardNonStreaming forwards a non-streaming job to the local vLLM instance
@@ -23,7 +23,7 @@ import (
 //   - headers: response headers as a map
 //   - body: raw response body as bytes
 //   - err: error if the request failed
-func ForwardNonStreaming(ctx context.Context, job queue.Job, target string) (status int, headers map[string]string, body []byte, err error) {
+func ForwardNonStreaming(ctx context.Context, job model.Job, target string) (status int, headers map[string]string, body []byte, err error) {
 	// Construct the full URL
 	url := target + job.Path
 

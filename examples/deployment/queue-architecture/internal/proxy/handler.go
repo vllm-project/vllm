@@ -1,19 +1,21 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/oklog/ulid/v2"
-	"github.com/redis/go-redis/v9"
-
-	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/model"
 )
 
-// Result represents the stored result of a processed job.
+// Result represents the inbox reply for a processed non-streaming job.
 type Result struct {
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers"`
@@ -21,13 +23,12 @@ type Result struct {
 }
 
 // HandleNonStreaming returns an HTTP handler that processes non-streaming requests.
-// It reads the request into a Job, enqueues it, waits for the result via BLPop,
-// and writes the response back to the client.
-func HandleNonStreaming(rdb *redis.Client, streamName string, timeout time.Duration) http.HandlerFunc {
+// It reads the request into a Job, subscribes on a NATS inbox, enqueues the job,
+// waits for one inbox reply, and writes the response back to the client.
+func HandleNonStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		// Read request body
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
@@ -35,40 +36,37 @@ func HandleNonStreaming(rdb *redis.Client, streamName string, timeout time.Durat
 		}
 		defer r.Body.Close()
 
-		// Convert headers to map[string]string
-		headers := make(map[string]string)
-		for key, values := range r.Header {
-			if len(values) > 0 {
-				headers[key] = values[0]
-			}
-		}
-
-		// Create Job with new ULID
-		jobID := ulid.Make().String()
-		job := queue.Job{
-			JobID:   jobID,
+		job := model.Job{
+			JobID:   ulid.Make().String(),
 			Method:  r.Method,
 			Path:    r.RequestURI,
-			Headers: headers,
+			Headers: headerMapFromRequest(r),
 			Body:    body,
 			Stream:  false,
 		}
 
-		// Enqueue the job
-		_, err = queue.Enqueue(ctx, rdb, streamName, job)
+		inbox := nats.NewInbox()
+		inbox, sub, err := prod.SubscribeSync()
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to enqueue job: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("failed to subscribe inbox: %v", err), http.StatusInternalServerError)
+			return
+		}
+		defer sub.Unsubscribe()
+
+		job.ReplyTo = inbox
+
+		if err := prod.Enqueue(ctx, job); err != nil {
+			status, msg := enqueueHTTPStatus(err)
+			http.Error(w, msg, status)
 			return
 		}
 
-		// Wait for result with configured timeout
-		resultKey := fmt.Sprintf("result:%s", jobID)
+		timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
 
-		// Use BLPop to block and wait for the result
-		results, err := rdb.BLPop(ctx, timeout, resultKey).Result()
+		msg, err := sub.NextMsgWithContext(timeoutCtx)
 		if err != nil {
-			if err == redis.Nil {
-				// Timeout occurred
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 				http.Error(w, "request timeout", http.StatusGatewayTimeout)
 				return
 			}
@@ -76,33 +74,28 @@ func HandleNonStreaming(rdb *redis.Client, streamName string, timeout time.Durat
 			return
 		}
 
-		// BLPop returns [key, value], we want the value (results[1])
-		if len(results) < 2 {
-			http.Error(w, "invalid result format", http.StatusInternalServerError)
-			return
-		}
-
-		// Unmarshal the result
 		var result Result
-		err = json.Unmarshal([]byte(results[1]), &result)
-		if err != nil {
+		if err := json.Unmarshal(msg.Data, &result); err != nil {
 			http.Error(w, fmt.Sprintf("failed to unmarshal result: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		// Write response headers
 		for key, value := range result.Headers {
 			w.Header().Set(key, value)
 		}
 
-		// Write status code
 		w.WriteHeader(result.Status)
 
-		// Write response body
-		_, err = w.Write([]byte(result.Body))
-		if err != nil {
-			// Log error but don't write to response (already started)
+		if _, err := w.Write([]byte(result.Body)); err != nil {
 			fmt.Printf("failed to write response body: %v\n", err)
 		}
 	}
+}
+
+func enqueueHTTPStatus(err error) (int, string) {
+	msg := fmt.Sprintf("failed to enqueue job: %v", err)
+	if errors.Is(err, nats.ErrMaxPayload) || errors.Is(err, jetstream.ErrMaxBytesExceeded) {
+		return http.StatusRequestEntityTooLarge, msg
+	}
+	return http.StatusServiceUnavailable, msg
 }

@@ -1,0 +1,16 @@
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - linters:
+      - errcheck
+      text: "Unsubscribe"
+    - linters:
+      - errcheck
+      text: "Drain"
+    - linters:
+      - errcheck
+      text: "msg.Ack"
+    - linters:
+      - errcheck
+      text: "watcher.Stop"

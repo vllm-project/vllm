@@ -1,0 +1,25 @@
+The .words file is used by gospel (v1.2+), which wraps the Hunspell libraries
+but populates the dictionary with identifiers from the Go source.
+
+<https://github.com/kortschak/gospel>
+
+Alas, no comments are allowed in the .words file and newer versions of gospel
+error out on seeing them.  This is really a hunspell restriction.
+
+We assume en_US hunspell dictionaries are installed and used.
+The /AFFIXRULES are defined in en_US.aff (eg: /usr/share/hunspell/en_US.aff)
+Invoke `hunspell -D` to see the actual locations.
+
+Words which are in the base dictionary can't have extra affix rules added to
+them, so we have to start with the affixed variant we want to add.
+Thus `creds` rather than `cred/S` and so on.
+
+So we can't use receive/DRSZGBU, adding 'U', to allow unreceive and variants,
+we have to use unreceive as the stem.
+
+We can't define our own affix or compound rules,
+to capture rfc\d{3,} or 0x[0-9A-Fa-f]{2}
+
+The spelling tokenizer doesn't take "permessage-deflate" as allowing for ...
+"permessage-deflate", which is an RFC7692 registered extension for websockets.
+We have to explicitly list "permessage".

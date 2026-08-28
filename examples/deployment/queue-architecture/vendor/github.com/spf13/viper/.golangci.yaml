@@ -1,0 +1,118 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - bodyclose
+    - dogsled
+    - dupl
+    - durationcheck
+    - exhaustive
+    - gocritic
+    - godot
+    - gomoddirectives
+    - goprintffuncname
+    - govet
+    - importas
+    - ineffassign
+    - makezero
+    - misspell
+    - nakedret
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - predeclared
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+    - whitespace
+
+    # fixme
+    # - cyclop
+    # - errcheck
+    # - errorlint
+    # - exhaustivestruct
+    # - forbidigo
+    # - forcetypeassert
+    # - gochecknoglobals
+    # - gochecknoinits
+    # - gocognit
+    # - goconst
+    # - gocyclo
+    # - gosec
+    # - gosimple
+    # - ifshort
+    # - lll
+    # - nlreturn
+    # - paralleltest
+    # - scopelint
+    # - thelper
+    # - wrapcheck
+
+    # unused
+    # - depguard
+    # - goheader
+    # - gomodguard
+
+    # don't enable:
+    # - asciicheck
+    # - funlen
+    # - godox
+    # - goerr113
+    # - gomnd
+    # - interfacer
+    # - maligned
+    # - nestif
+    # - testpackage
+    # - wsl
+
+  exclusions:
+    rules:
+      - linters:
+        - errcheck
+        - noctx
+        path: _test.go
+    presets:
+      - comments
+      - std-error-handling
+
+  settings:
+    misspell:
+      locale: US
+    nolintlint:
+      allow-unused: false # report any unused nolint directives
+      require-specific: false # don't require nolint directives to be specific about which linter is being skipped
+    gocritic:
+      # Enable multiple checks by tags. See "Tags" section in https://github.com/go-critic/go-critic#usage.
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - style
+      disabled-checks:
+        - importShadow
+        - unnamedResult
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    # - golines
+
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule

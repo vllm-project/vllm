@@ -1,0 +1,8 @@
+/.devenv/
+/.direnv/
+/.task/
+/bin/
+/build/
+/tmp/
+/var/
+/vendor/

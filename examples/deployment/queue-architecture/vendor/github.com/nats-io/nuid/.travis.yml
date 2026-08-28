@@ -1,0 +1,17 @@
+language: go
+sudo: false
+go:
+- 1.9.x
+- 1.10.x
+
+install:
+- go get -t ./...
+- go get github.com/mattn/goveralls
+
+script:
+- go fmt ./...
+- go vet ./...
+- go test -v
+- go test -v --race
+- go test -v -covermode=count -coverprofile=coverage.out
+- $HOME/gopath/bin/goveralls -coverprofile coverage.out -service travis-ci

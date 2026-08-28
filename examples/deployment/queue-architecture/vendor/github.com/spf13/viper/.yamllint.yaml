@@ -1,0 +1,6 @@
+ignore-from-file: [.gitignore, .yamlignore]
+
+extends: default
+
+rules:
+  line-length: disable

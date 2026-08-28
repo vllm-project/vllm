@@ -1,0 +1,127 @@
+version: 2
+before:
+  hooks:
+    - go mod tidy
+    - go fmt ./...
+    - go test ./...
+builds:
+  - id: tomll
+    main: ./cmd/tomll
+    binary: tomll
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_arm
+      - linux_riscv64
+      - windows_amd64
+      - windows_arm64
+      - windows_arm
+      - darwin_amd64
+      - darwin_arm64
+  - id: tomljson
+    main: ./cmd/tomljson
+    binary: tomljson
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_arm
+      - linux_riscv64
+      - windows_amd64
+      - windows_arm64
+      - windows_arm
+      - darwin_amd64
+      - darwin_arm64
+  - id: jsontoml
+    main: ./cmd/jsontoml
+    binary: jsontoml
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_riscv64
+      - linux_arm
+      - windows_amd64
+      - windows_arm64
+      - windows_arm
+      - darwin_amd64
+      - darwin_arm64
+universal_binaries:
+  - id: tomll
+    replace: true
+    name_template: tomll
+  - id: tomljson
+    replace: true
+    name_template: tomljson
+  - id: jsontoml
+    replace: true
+    name_template: jsontoml
+archives:
+- id: jsontoml
+  format: tar.xz
+  builds:
+    - jsontoml
+  files:
+  - none*
+  name_template: "{{ .Binary }}_{{.Version}}_{{ .Os }}_{{ .Arch }}"
+- id: tomljson
+  format: tar.xz
+  builds:
+    - tomljson
+  files:
+  - none*
+  name_template: "{{ .Binary }}_{{.Version}}_{{ .Os }}_{{ .Arch }}"
+- id: tomll
+  format: tar.xz
+  builds:
+    - tomll
+  files:
+  - none*
+  name_template: "{{ .Binary }}_{{.Version}}_{{ .Os }}_{{ .Arch }}"
+dockers:
+  - id: tools
+    goos: linux
+    goarch: amd64
+    ids:
+      - jsontoml
+      - tomljson
+      - tomll
+    image_templates:
+      - "ghcr.io/pelletier/go-toml:latest"
+      - "ghcr.io/pelletier/go-toml:{{ .Tag }}"
+      - "ghcr.io/pelletier/go-toml:v{{ .Major }}"
+    skip_push: false
+checksum:
+  name_template: 'sha256sums.txt'
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+release:
+  github:
+    owner: pelletier
+    name: go-toml
+  draft: true
+  prerelease: auto
+  mode: replace
+changelog:
+  use: github-native
+announce:
+  skip: true

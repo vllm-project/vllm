@@ -1,0 +1,48 @@
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  enable:
+    - govet
+    - ineffassign
+    # - misspell
+    - nolintlint
+    # - revive
+
+  disable:
+    - errcheck
+    - staticcheck
+    - unused
+
+  settings:
+    misspell:
+      locale: US
+    nolintlint:
+      allow-unused: false # report any unused nolint directives
+      require-specific: false # don't require nolint directives to be specific about which linter is being skipped
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    # - golines
+
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    gofmt:
+      simplify: true
+      rewrite-rules:
+        - pattern: interface{}
+          replacement: any
+
+  exclusions:
+    paths:
+      - internal/

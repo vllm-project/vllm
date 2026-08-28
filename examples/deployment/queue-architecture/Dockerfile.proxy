@@ -1,6 +1,6 @@
 # Multi-stage build for proxy binary
 # Stage 1: Builder
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY . .
 
 # Build the proxy binary with CGO disabled for portability
 # Use -mod=vendor to build from vendored dependencies (no network access needed)
-RUN CGO_ENABLED=0 go build -mod=vendor -o /app/proxy ./cmd/proxy
+RUN CGO_ENABLED=0 go build -mod=vendor -o /app/proxy ./cmd/cli
 
 # Stage 2: Runtime
 FROM gcr.io/distroless/base-debian12:nonroot
@@ -22,4 +22,4 @@ FROM gcr.io/distroless/base-debian12:nonroot
 COPY --from=builder /app/proxy /app/proxy
 
 # Set the entrypoint
-ENTRYPOINT ["/app/proxy"]
+ENTRYPOINT ["/app/proxy", "proxy"]
