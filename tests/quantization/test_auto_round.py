@@ -212,7 +212,6 @@ def make_block_fp8_raw_config(**overrides) -> dict[str, object]:
         "act_dynamic": True,
         "activation_scheme": "dynamic",
         "fmt": "e4m3",
-        "enable_quanted_input": False,
         "weight_block_size": [128, 128],
     }
     kwargs.update(overrides)

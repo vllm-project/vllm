@@ -235,7 +235,6 @@ class INCConfig(QuantizationConfig):
                 "act_dynamic": True,
                 "activation_scheme": self.FP8_BLOCK_ACTIVATION_SCHEME,
                 "fmt": self.FP8_BLOCK_FMT,
-                "enable_quanted_input": False,
             }
             self._check_expected(
                 config,
@@ -249,7 +248,6 @@ class INCConfig(QuantizationConfig):
                 "act_group_size": self.MXFP8_GROUP_SIZE,
                 "act_sym": True,
                 "act_dynamic": True,
-                "enable_quanted_input": False,
             }
             self._check_expected(
                 config,
