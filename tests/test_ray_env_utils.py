@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from vllm.v1.executor.ray_env_utils import (
     get_driver_env_vars,
-    update_runtime_env_for_breakable_cudagraph,
+    update_runtime_env_for_worker_import,
 )
 
 WORKER_VARS: set[str] = {
@@ -59,7 +59,7 @@ class TestImportTimePropagation:
     def test_breakable_cudagraph_is_available_during_actor_import(self):
         runtime_env = {"env_vars": {"EXISTING": "value"}}
 
-        result = update_runtime_env_for_breakable_cudagraph(runtime_env)
+        result = update_runtime_env_for_worker_import(runtime_env)
 
         assert result is runtime_env
         assert result["env_vars"] == {
@@ -71,7 +71,7 @@ class TestImportTimePropagation:
     def test_other_env_vars_are_unchanged(self):
         runtime_env = {"env_vars": {"EXISTING": "value"}}
 
-        result = update_runtime_env_for_breakable_cudagraph(runtime_env)
+        result = update_runtime_env_for_worker_import(runtime_env)
 
         assert result is runtime_env
         assert result["env_vars"] == {"EXISTING": "value"}

@@ -23,7 +23,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_env_utils import (
-    update_runtime_env_for_breakable_cudagraph,
+    update_runtime_env_for_worker_import,
 )
 from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
@@ -150,7 +150,7 @@ class RayDistributedExecutor(Executor):
         env_vars.update(
             {env_var: "1" for env_var in current_platform.ray_noset_device_env_vars}
         )
-        update_runtime_env_for_breakable_cudagraph(runtime_env)
+        update_runtime_env_for_worker_import(runtime_env)
         return ray_remote_kwargs
 
     # child class could overwrite this to return actual env vars.

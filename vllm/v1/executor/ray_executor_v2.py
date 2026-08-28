@@ -28,7 +28,7 @@ from vllm.v1.executor.multiproc_executor import (
 )
 from vllm.v1.executor.ray_env_utils import (
     get_driver_env_vars,
-    update_runtime_env_for_breakable_cudagraph,
+    update_runtime_env_for_worker_import,
 )
 from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
@@ -246,7 +246,7 @@ class RayExecutorV2(MultiprocExecutor):
 
         env_vars = runtime_env.setdefault("env_vars", {})
         env_vars.update({v: "1" for v in current_platform.ray_noset_device_env_vars})
-        update_runtime_env_for_breakable_cudagraph(runtime_env)
+        update_runtime_env_for_worker_import(runtime_env)
         if self.parallel_config.ray_workers_use_nsight:
             runtime_env["nsight"] = {
                 "t": "cuda,cudnn,cublas",
