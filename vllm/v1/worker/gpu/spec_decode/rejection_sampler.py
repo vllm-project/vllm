@@ -267,7 +267,11 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        # Read from draft_sampled_raw (which preserves -1 scheduler placeholders)
+        # instead of input_ids (which are clamped to >=0 before embedding
+        # lookup). The rejection sampler's is_valid_draft check rejects -1 so
+        # placeholder drafts never get accepted.
+        draft_sampled = input_batch.draft_sampled_raw[input_batch.logits_indices]
         pos = input_batch.positions[input_batch.logits_indices]
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
