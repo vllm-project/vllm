@@ -612,6 +612,27 @@ def bind_kv_cache(
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
 
+def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
+    """Detach the KV/state cache tensors installed by bind_kv_cache().
+
+    The model object can outlive the runner (e.g. LLMEngine's finalizer keeps
+    it reachable until engine deletion), so dropping the runner's references
+    alone does not release the KV cache memory on teardown paths.
+    """
+    for layer in layers:
+        if not hasattr(layer, "kv_cache"):
+            continue
+        kv_cache = layer.kv_cache
+        layer.kv_cache = torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+        # Clean up quantized KV cache scale views
+        # (int8_per_token_head, fp8_per_token_head)
+        if hasattr(layer, "impl"):
+            if hasattr(layer.impl, "_k_scale_cache"):
+                layer.impl._k_scale_cache = None
+            if hasattr(layer.impl, "_v_scale_cache"):
+                layer.impl._v_scale_cache = None
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
