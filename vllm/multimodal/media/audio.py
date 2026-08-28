@@ -309,9 +309,10 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                 parameter="audio_filesize_mb",
                 value=(len(data) * 3 / 4) / MiB_bytes,
             )
-        return self.load_bytes(pybase64.b64decode(data))
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
+        self._validate_encoded_size(filepath.stat().st_size)
         return load_audio(
             filepath,
             sr=None,

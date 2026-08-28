@@ -10,6 +10,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -93,7 +94,12 @@ def create_scheduler(
         dtype="float16",
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
+        # The scheduler reads model_config.max_model_len, not the
+        # SchedulerConfig one, so both must agree.
+        max_model_len=max_model_len,
     )
+    if use_ec_connector and ec_role == "ec_producer":
+        model_config.multimodal_config = MultiModalConfig()
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
