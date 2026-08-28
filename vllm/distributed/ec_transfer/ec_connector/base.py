@@ -309,6 +309,22 @@ class ECConnectorBase(ABC):
         """
         return False, None
 
+    @classmethod
+    def receive_addresses(cls, vllm_config: "VllmConfig") -> list[str]:
+        """Where an encoder should push this instance's embeddings, per rank.
+
+        Only a consumer over a point-to-point transport has these, and only
+        this process can derive them: they follow from its own connector
+        config and rank layout. Reporting them when the instance registers
+        is what lets a proxy name a push target without an operator
+        hand-aligning a list of addresses against a list of instance URLs.
+
+        Connectors that publish to shared storage return nothing, and the
+        encoder finds the embedding by cache key instead of being told
+        where to put it.
+        """
+        return []
+
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires
         the engine main loop to keep stepping (e.g. for EPD,
