@@ -2419,6 +2419,22 @@ def topk_softmax(
     )
 
 
+def topk_softmax_a100(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    is_padding: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_softmax_a100(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        is_padding,
+    )
+
+
 def topk_sigmoid(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,

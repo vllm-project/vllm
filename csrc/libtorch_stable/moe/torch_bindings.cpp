@@ -10,6 +10,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias, Tensor? is_padding) -> ()");
 
+#ifndef USE_ROCM
+  m.def(
+      "topk_softmax_a100(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
+      "token_expert_indices, Tensor gating_output, Tensor? is_padding) -> ()");
+#endif
+
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
@@ -135,6 +141,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
 
 STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("topk_softmax", TORCH_BOX(&topk_softmax));
+#ifndef USE_ROCM
+  m.impl("topk_softmax_a100", TORCH_BOX(&topk_softmax_a100));
+#endif
   m.impl("topk_sigmoid", TORCH_BOX(&topk_sigmoid));
   m.impl("topk_softplus_sqrt", TORCH_BOX(&topk_softplus_sqrt));
   m.impl("moe_sum", TORCH_BOX(&moe_sum));
