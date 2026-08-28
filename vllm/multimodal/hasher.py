@@ -18,6 +18,28 @@ from .media import MediaWithBytes
 
 logger = init_logger(__name__)
 
+# Framing for the digest input. The hash is built by feeding a stream of byte
+# chunks to `hasher.update`, so the stream must be uniquely decodable: without
+# an explicit length in front of every chunk and a tag in front of every
+# container, distinct inputs serialize to identical bytes and share a cache
+# entry. See `test_hash_collision_*` in tests/multimodal/test_hasher.py.
+_LENGTH_BYTES = 8
+_TAG_NONE = b"\x00"
+_TAG_SEQUENCE = b"\x01"
+_TAG_MAPPING = b"\x02"
+_TAG_LEAF = b"\x03"
+
+
+def _encode_length(value: int) -> bytes:
+    return value.to_bytes(_LENGTH_BYTES, "little")
+
+
+def _framed(chunk: bytes | memoryview) -> Iterable[bytes | memoryview]:
+    """Yield *chunk* preceded by its size in bytes."""
+    size = chunk.nbytes if isinstance(chunk, memoryview) else len(chunk)
+    yield _encode_length(size)
+    yield chunk
+
 
 @functools.lru_cache(maxsize=3)
 def _get_hasher_factory(
@@ -49,22 +71,29 @@ def _get_hasher_factory(
 
 
 class MultiModalHasher:
+    """Derives multi-modal cache keys.
+
+    Every method here yields *framed* chunks: each chunk is preceded by its
+    length and each container by its kind, so that the concatenation fed to the
+    digest is uniquely decodable and distinct inputs cannot share a key.
+    """
+
     @classmethod
     def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
         # Simple cases
         if isinstance(obj, (bytes, memoryview)):
-            return (obj,)
+            return _framed(obj)
         if isinstance(obj, str):
-            return (obj.encode("utf-8"),)
+            return _framed(obj.encode("utf-8"))
         if isinstance(obj, (int, float)):
-            return (np.array(obj).tobytes(),)
+            return _framed(np.array(obj).tobytes())
 
         if isinstance(obj, Image.Image):
             exif = obj.getexif()
             if Image.ExifTags.Base.ImageID in exif and isinstance(
                 exif[Image.ExifTags.Base.ImageID], uuid.UUID
             ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+                return _framed(exif[Image.ExifTags.Base.ImageID].bytes)
 
             data = {"mode": obj.mode, "data": np.asarray(obj)}
             palette = obj.palette
@@ -80,7 +109,7 @@ class MultiModalHasher:
             if Image.ExifTags.Base.ImageID in exif and isinstance(
                 exif[Image.ExifTags.Base.ImageID], uuid.UUID
             ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+                return _framed(exif[Image.ExifTags.Base.ImageID].bytes)
 
             if obj.io_config:
                 return cls.iter_item_to_bytes(
@@ -140,7 +169,7 @@ class MultiModalHasher:
             "No serialization method found for %s. Falling back to pickle.", type(obj)
         )
 
-        return (pickle.dumps(obj),)
+        return _framed(pickle.dumps(obj))
 
     @classmethod
     def iter_item_to_bytes(
@@ -148,18 +177,36 @@ class MultiModalHasher:
         key: str,
         obj: object,
     ) -> Iterable[bytes | memoryview]:
+        """Yield the digest input for a single ``key``/``obj`` pair."""
+        yield from _framed(key.encode("utf-8"))
+        yield from cls.iter_value_to_bytes(obj)
+
+    @classmethod
+    def iter_value_to_bytes(
+        cls,
+        obj: object,
+    ) -> Iterable[bytes | memoryview]:
+        """Yield the digest input for a value, tagged by its container kind.
+
+        Containers carry their kind and length so that a nested structure can
+        never serialize to the same bytes as a differently shaped one (a list
+        and a mapping keyed by stringified indices, for example).
+        """
         if obj is None:
-            yield key.encode("utf-8")
-            return
-        # Recursive cases
-        if isinstance(obj, (list, tuple)):
-            for i, elem in enumerate(obj):
-                yield from cls.iter_item_to_bytes(f"{key}.{i}", elem)
+            yield _TAG_NONE
+        elif isinstance(obj, (list, tuple)):
+            yield _TAG_SEQUENCE
+            yield _encode_length(len(obj))
+            for elem in obj:
+                yield from cls.iter_value_to_bytes(elem)
         elif isinstance(obj, dict):
+            yield _TAG_MAPPING
+            yield _encode_length(len(obj))
             for k, v in obj.items():
-                yield from cls.iter_item_to_bytes(f"{key}.{k}", v)
+                yield from _framed(str(k).encode("utf-8"))
+                yield from cls.iter_value_to_bytes(v)
         else:
-            yield key.encode("utf-8")
+            yield _TAG_LEAF
             yield from cls.serialize_item(obj)
 
     @classmethod
