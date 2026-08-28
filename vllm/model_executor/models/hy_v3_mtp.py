@@ -51,8 +51,12 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from .hy_v3 import HYV3DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .hy_v3 import HYV3DecoderLayer
+from .utils import (
+    get_spec_layer_idx_from_weight_name,
+    is_pp_missing_parameter,
+    maybe_prefix,
+)
 
 
 def _is_moe(config: PretrainedConfig) -> bool:

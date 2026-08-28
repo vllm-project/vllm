@@ -11,8 +11,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_layers_from_vllm_config,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -25,12 +30,13 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
+    get_num_attention_heads_from_layers,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    KVCacheLayout,
 )
 
 logger = init_logger(__name__)
@@ -58,6 +64,11 @@ class CPUAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The CPU backend only reads head-major block interiors.
+        return (KVCacheLayout.LBHNC,)
 
     @staticmethod
     def get_name() -> str:
@@ -89,20 +100,6 @@ class CPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
         return CPUAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return num_blocks, num_kv_heads, block_size, 2 * head_size
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -146,26 +143,48 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         parallel_config = vllm_config.parallel_config
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.num_heads = vllm_config.model_config.get_num_attention_heads(
-            parallel_config
-        )
+        # The scheduler metadata built here sizes a scratchpad from the query
+        # head count, so it must come from this group's layers: the model-wide
+        # count is wrong for models that vary it per layer (e.g. Laguna).
+        self.num_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or vllm_config.model_config.get_num_attention_heads(parallel_config)
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
-        self.window_size = getattr(kv_cache_spec, "sliding_window", -1)
-        if self.window_size is None:
-            self.window_size = -1
+        self.window_size = self._group_sliding_window()
         self.block_size = vllm_config.cache_config.block_size
-        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
             self.dtype,
             self.block_size,
             self.head_dim,
-            kv_cache_dtype_str,
+            self.kv_cache_dtype,
         )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.is_encoder_only_attention = isinstance(
             kv_cache_spec, EncoderOnlyAttentionSpec
         )
+
+    def _group_sliding_window(self) -> int:
+        """The window shared by every layer in this group, else -1 (no window).
+
+        Taken from the layers rather than the group spec: one KV cache group can
+        hold both windowed and global layers (e.g. Gemma-3 with the hybrid KV
+        cache manager disabled), and the scheduler metadata built here is shared
+        by the whole group, so it may only assume a window all of them agree on.
+        """
+        layers = get_layers_from_vllm_config(
+            self.vllm_config, Attention, self.layer_names
+        )
+        windows = {
+            layer.impl.sliding_window
+            for layer in layers.values()
+            if isinstance(layer.impl, CPUAttentionBackendImpl)
+        }
+        if len(windows) != 1:
+            return -1
+        window = windows.pop()
+        return -1 if window is None else window
 
     def build(
         self,
@@ -234,6 +253,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             isa=self.isa,
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
             dynamic_causal=dynamic_casual,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -349,8 +369,11 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # For encoder attention
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+        is_encoder_attention = self.attn_type in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        )
+        if is_encoder_attention:
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -361,14 +384,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
+        if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,

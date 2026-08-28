@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import lru_cache, partial
+from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
     Generic,
     NamedTuple,
     Protocol,
     TypeAlias,
-    cast,
 )
 
-import regex as re
 import torch
 from typing_extensions import TypeVar, assert_never
 
@@ -28,7 +26,6 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.processor import call_hf_processor_mm_only
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
@@ -38,12 +35,7 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
-from ..parse import (
-    DictEmbeddingItems,
-    EmbeddingItems,
-    MultiModalDataItems,
-    MultiModalUUIDItems,
-)
+from ..parse import MultiModalDataItems, MultiModalUUIDItems
 from .context import BaseProcessingInfo, TimingContext
 from .dummy_inputs import BaseDummyInputsBuilder
 from .inputs import ProcessorInputs
@@ -59,74 +51,36 @@ else:
 
 logger = init_logger(__name__)
 
-_S = TypeVar("_S", str, list[int])
-
-
-PromptSeq: TypeAlias = str | list[int]
-"""A token sequence (list of token IDs) or text."""
-
 
 @lru_cache(maxsize=2048)
-def _cached_encode(
+def cached_encode(
     tokenizer: TokenizerLike,
     text: str,
     *,
+    truncation: bool | None = None,
     add_special_tokens: bool = True,
 ) -> list[int]:
-    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
-
-
-@lru_cache(maxsize=2048)
-def _cached_decode(
-    tokenizer: TokenizerLike,
-    token_ids: tuple[int, ...],
-    *,
-    skip_special_tokens: bool = False,
-) -> str:
-    return tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens)
-
-
-def _seq2text(
-    tokenizer: TokenizerLike | None,
-    seq: PromptSeq,
-    *,
-    use_cache: bool = True,
-) -> str:
-    if isinstance(seq, str):
-        return seq
-
-    if tokenizer is None:
-        raise ValueError("You cannot decode tokens when `skip_tokenizer_init=True`")
-
-    if not use_cache:
-        return tokenizer.decode(seq)
-
-    return _cached_decode(tokenizer, tuple(seq))
-
-
-def _seq2tokens(
-    tokenizer: TokenizerLike | None,
-    seq: PromptSeq,
-    *,
-    use_cache: bool = True,
-) -> list[int]:
-    if isinstance(seq, str):
-        if tokenizer is None:
-            raise ValueError("You cannot encode text when `skip_tokenizer_init=True`")
-
-        if not use_cache:
-            return tokenizer.encode(seq, add_special_tokens=False)
-
-        return _cached_encode(tokenizer, seq, add_special_tokens=False)
-
-    return seq
+    """Encode text while caching repeated tokenizer calls."""
+    return tokenizer.encode(
+        text,
+        truncation=truncation,
+        add_special_tokens=add_special_tokens,
+    )
 
 
 class _GetMatchIndex(Protocol):
     def __call__(
         self,
-        tokenizer: TokenizerLike | None,
-        prompt: PromptSeq,
+        prompt: list[int],
+        start_idx: int = 0,
+    ) -> int | None: ...
+
+
+class _GetTextMatchIndex(Protocol):
+    def __call__(
+        self,
+        tokenizer: TokenizerLike,
+        prompt: str,
         start_idx: int = 0,
     ) -> int | None: ...
 
@@ -137,6 +91,14 @@ class PromptIndex:
 
     get_match_index: _GetMatchIndex
 
+    get_text_match_index: _GetTextMatchIndex
+    """
+    Resolves the index against a decoded text prompt.
+
+    Used only by the private text-based fallback of
+    [`BaseMultiModalProcessor._apply_prompt_updates`][vllm.multimodal.processing.BaseMultiModalProcessor].
+    """
+
 
 class PromptIndexTargets:
     @staticmethod
@@ -146,35 +108,40 @@ class PromptIndexTargets:
 
         This results in a match even if the prompt is empty.
         """
-        return PromptIndex(lambda tokenizer, prompt, start_idx=0: 0)
+        return PromptIndex(
+            lambda prompt, start_idx=0: 0,
+            lambda tokenizer, prompt, start_idx=0: 0,
+        )
 
     @staticmethod
-    def prefix(seq: PromptSeq) -> PromptIndex:
+    def prefix(seq: list[int]) -> PromptIndex:
         """
         Resolves to a location in the prompt after the given prefix.
         """
 
         def get_match_index(
-            tokenizer: TokenizerLike | None,
-            prompt: PromptSeq,
+            prompt: list[int],
             start_idx: int = 0,
         ) -> int | None:
             if start_idx != 0:
                 return None
 
-            prefix = seq
+            match_idx = len(seq)
+            return match_idx if prompt[:match_idx] == seq else None
 
-            if isinstance(prompt, str):
-                # Make both `str`
-                prefix = _seq2text(tokenizer, prefix, use_cache=False)
-            else:
-                # Make both `list[int]`
-                prefix = _seq2tokens(tokenizer, prefix, use_cache=False)
+        def get_text_match_index(
+            tokenizer: TokenizerLike,
+            prompt: str,
+            start_idx: int = 0,
+        ) -> int | None:
+            if start_idx != 0:
+                return None
 
+            prefix = tokenizer.decode(seq)
             match_idx = len(prefix)
             return match_idx if prompt[:match_idx] == prefix else None
 
-        return PromptIndex(get_match_index)
+        return PromptIndex(get_match_index, get_text_match_index)
 
     @staticmethod
     def end() -> PromptIndex:
@@ -183,33 +150,36 @@ class PromptIndexTargets:
 
         This results in a match even if the prompt is empty.
         """
-        return PromptIndex(lambda tokenizer, prompt, start_idx=0: len(prompt))
+        return PromptIndex(
+            lambda prompt, start_idx=0: len(prompt),
+            lambda tokenizer, prompt, start_idx=0: len(prompt),
+        )
 
 
-UpdateTarget: TypeAlias = PromptSeq | PromptIndex
+UpdateTarget: TypeAlias = list[int] | PromptIndex
 """
-The token sequence or text to update.
+The token sequence to update.
 """
 
 PromptUpdateTarget: TypeAlias = Callable[[int], UpdateTarget] | UpdateTarget
 """
 Given the index of the processed item within
 [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
-output the corresponding token sequence (or text).
+output the corresponding token sequence.
 
-For convenience, you can directly pass in the token sequence (or text)
+For convenience, you can directly pass in the token sequence
 instead of a function if it does not depend on the input.
 """
 
 
 @dataclass
-class PromptUpdateDetails(Generic[_S]):
-    """Details about the token sequence or text that are part of the update."""
+class PromptUpdateDetails:
+    """Details about the token sequence that is part of the update."""
 
-    full: _S
+    full: list[int]
     """The full content."""
 
-    is_embed: Callable[[TokenizerLike | None, PromptSeq], torch.Tensor] | None = None
+    is_embed: Callable[[list[int]], torch.Tensor] | None = None
     """
     Given [`full`][vllm.multimodal.processing.PromptUpdateDetails.full],
     return a boolean mask of shape `(len(full),)` indicating which positions
@@ -222,56 +192,36 @@ class PromptUpdateDetails(Generic[_S]):
     """
 
     @staticmethod
-    def from_seq(seq: _S) -> "PromptUpdateDetails[_S]":
+    def from_seq(seq: list[int]) -> "PromptUpdateDetails":
         return PromptUpdateDetails(full=seq)
 
     @staticmethod
-    def select_text(
-        seq: _S,
-        embed_text: str,
-    ) -> "PromptUpdateDetails[_S]":
-        def is_embed(tokenizer: TokenizerLike | None, full: PromptSeq) -> torch.Tensor:
-            embed_token_ids = _seq2tokens(tokenizer, embed_text, use_cache=False)
-            token_ids = _seq2tokens(tokenizer, full)
-
-            return torch.isin(
-                torch.tensor(token_ids),
-                torch.tensor(embed_token_ids),
-            )
-
-        return PromptUpdateDetails(full=seq, is_embed=is_embed)
-
-    @staticmethod
     def select_token_id(
-        seq: _S,
+        seq: list[int],
         embed_token_id: int,
-    ) -> "PromptUpdateDetails[_S]":
-        def is_embed(tokenizer: TokenizerLike | None, full: PromptSeq) -> torch.Tensor:
-            token_ids = _seq2tokens(tokenizer, full)
-
-            return torch.tensor(token_ids) == embed_token_id
+    ) -> "PromptUpdateDetails":
+        def is_embed(full: list[int]) -> torch.Tensor:
+            return torch.tensor(full) == embed_token_id
 
         return PromptUpdateDetails(full=seq, is_embed=is_embed)
 
     @staticmethod
     def select_token_ids(
-        seq: _S,
+        seq: list[int],
         embed_token_ids: list[int],
-    ) -> "PromptUpdateDetails[_S]":
-        def is_embed(tokenizer: TokenizerLike | None, full: PromptSeq) -> torch.Tensor:
-            token_ids = _seq2tokens(tokenizer, full)
-
+    ) -> "PromptUpdateDetails":
+        def is_embed(full: list[int]) -> torch.Tensor:
             return torch.isin(
-                torch.tensor(token_ids),
+                torch.tensor(full),
                 torch.tensor(embed_token_ids),
             )
 
         return PromptUpdateDetails(full=seq, is_embed=is_embed)
 
 
-PromptUpdateInfo: TypeAlias = PromptSeq | PromptUpdateDetails
+PromptUpdateInfo: TypeAlias = list[int] | PromptUpdateDetails
 """
-The token sequence or text that are part of the update.
+The token sequence that is part of the update.
 
 If only part of the content corresponds to feature placeholders, you can
 use [`PromptUpdateDetails`][vllm.multimodal.processing.PromptUpdateDetails] to
@@ -282,9 +232,9 @@ PromptUpdateContent: TypeAlias = Callable[[int], PromptUpdateInfo] | PromptUpdat
 """
 Given the index of the processed item within
 [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
-output the corresponding token sequence (or text).
+output the corresponding token sequence.
 
-For convenience, you can directly pass in the token sequence (or text)
+For convenience, you can directly pass in the token sequence
 instead of a function if it does not depend on the input.
 """
 
@@ -298,13 +248,20 @@ class UpdateMode(str, Enum):
 class PromptUpdate(ABC):
     """
     Defines how to update a prompt with placeholder tokens.
+
+    Note:
+        The target and content are token sequences. When converting text
+        to token sequences, remember to encode it with
+        `add_special_tokens=False` to match how the prompt itself is
+        tokenized. Otherwise, the updated prompt may contain duplicated
+        special tokens or fail to match the target.
     """
 
     modality: str
     """The modality for which the update is made."""
 
     target: PromptUpdateTarget
-    """The token sequence (or text) to update."""
+    """The token sequence to update."""
 
     @property
     @abstractmethod
@@ -363,8 +320,8 @@ class PromptInsertion(PromptUpdate):
     ```python
     PromptInsertion(
         modality="image",
-        target="<s>",
-        insertion="<image>" * image_feature_size,
+        target=[bos_token_id],
+        insertion=[image_token_id] * image_feature_size,
     )
     ```
 
@@ -374,7 +331,7 @@ class PromptInsertion(PromptUpdate):
     PromptInsertion(
         modality="image",
         target=PromptIndexTargets.start(),
-        insertion="<image>" * image_feature_size,
+        insertion=[image_token_id] * image_feature_size,
     )
     ```
 
@@ -383,8 +340,8 @@ class PromptInsertion(PromptUpdate):
     ```python
     PromptInsertion(
         modality="image",
-        target=PromptIndexTargets.prefix("Images:"),
-        insertion="<image>" * image_feature_size,
+        target=PromptIndexTargets.prefix(images_prefix_token_ids),
+        insertion=[image_token_id] * image_feature_size,
     )
     ```
 
@@ -394,7 +351,7 @@ class PromptInsertion(PromptUpdate):
     PromptInsertion(
         modality="image",
         target=PromptIndexTargets.end(),
-        insertion="<image>" * image_feature_size,
+        insertion=[image_token_id] * image_feature_size,
     )
     ```
     """
@@ -403,10 +360,10 @@ class PromptInsertion(PromptUpdate):
     """
     Given the index of the processed item within
     [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
-    output the token sequence (or text) to insert right after
+    output the token sequence to insert right after
     [`target`][vllm.multimodal.processing.PromptUpdate.target].
 
-    For convenience, you can directly pass in the token sequence (or text)
+    For convenience, you can directly pass in the token sequence
     instead of a function if it does not depend on the input.
     """
 
@@ -433,8 +390,8 @@ class PromptReplacement(PromptUpdate):
     ```python
     PromptReplacement(
         modality="image",
-        target="<image>",
-        replacement="<image>" * image_feature_size,
+        target=[image_token_id],
+        replacement=[image_token_id] * image_feature_size,
     )
     ```
 
@@ -445,32 +402,12 @@ class PromptReplacement(PromptUpdate):
     ```python
     PromptReplacement(
         modality="image",
-        target="<image>",
-        replacement=PromptUpdateDetails(
-            full="".join(
-                [
-                    "<image_bos>",
-                    "<image>" * image_feature_size,
-                    "<image_eos>",
-                ]
-            ),
-            features="<image>" * image_feature_size,
-        ),
-    )
-    ```
-
-    To avoid unnecessary tokenization during prompt replacement,
-    we recommended passing token sequences instead of text:
-
-    ```python
-    PromptReplacement(
-        modality="image",
         target=[image_token_id],
         replacement=PromptUpdateDetails(
             full=(
                 [image_bos_id] + [image_token_id] * image_feature_size + [image_eos_id]
             ),
-            features=[image_token_id] * image_feature_size,
+            is_embed=lambda full: torch.tensor(full) == image_token_id,
         ),
     )
     ```
@@ -480,10 +417,10 @@ class PromptReplacement(PromptUpdate):
     """
     Given the index of the processed item within
     [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
-    output the token sequence (or text) to replace
+    output the token sequence to replace
     [`target`][vllm.multimodal.processing.PromptUpdate.target].
 
-    For convenience, you can directly pass in the token sequence (or text)
+    For convenience, you can directly pass in the token sequence
     instead of a function if it does not depend on the input.
     """
 
@@ -526,7 +463,7 @@ class PromptTargetMatch(NamedTuple):
 class ResolvedPromptUpdate:
     """
     A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
-    lazy attributes resolved, apart from those related to tokenization.
+    lazy attributes resolved.
     """
 
     modality: str
@@ -539,7 +476,7 @@ class ResolvedPromptUpdate:
     """Defines how to update the prompt."""
 
     target: UpdateTarget
-    """The token sequence (or text) to update."""
+    """The token sequence to update."""
 
     content: PromptUpdateDetails = field(repr=False)
     """The placeholder tokens that are part of the update."""
@@ -547,7 +484,6 @@ class ResolvedPromptUpdate:
     def iter_token_matches(
         self,
         prompt: list[int],
-        tokenizer: TokenizerLike | None,
         *,
         start_idx: int = 0,
     ) -> Generator[PromptTargetMatch]:
@@ -555,51 +491,14 @@ class ResolvedPromptUpdate:
         target = self.target
 
         if isinstance(target, PromptIndex):
-            match_idx = target.get_match_index(tokenizer, prompt, start_idx)
+            match_idx = target.get_match_index(prompt, start_idx)
             if match_idx is not None:
                 yield PromptTargetMatch(match_idx, match_idx)
 
             return
 
-        target_token_ids = _seq2tokens(tokenizer, target)
-
-        for match in iter_token_matches(prompt, target_token_ids, start_idx=start_idx):
+        for match in iter_token_matches(prompt, target, start_idx=start_idx):
             yield PromptTargetMatch(match.start_idx, match.end_idx)
-
-    def iter_text_matches(
-        self,
-        prompt: str,
-        tokenizer: TokenizerLike | None,
-        *,
-        start_idx: int = 0,
-    ) -> Generator[PromptTargetMatch]:
-        """Yield each instance of `self.target` found in `prompt`."""
-        target = self.target
-
-        if isinstance(target, PromptIndex):
-            match_idx = target.get_match_index(tokenizer, prompt, start_idx)
-            if match_idx is not None:
-                yield PromptTargetMatch(match_idx, match_idx)
-
-            return
-
-        target_text = _seq2text(tokenizer, target)
-
-        for match in re.finditer(re.escape(target_text), prompt, pos=start_idx):
-            yield PromptTargetMatch(match.start(), match.end())
-
-    def iter_matches(
-        self,
-        prompt: list[int] | str,
-        tokenizer: TokenizerLike | None,
-        *,
-        start_idx: int = 0,
-    ) -> Generator[PromptTargetMatch]:
-        """Yield each instance of `self.target` found in `prompt`."""
-        if isinstance(prompt, str):
-            return self.iter_text_matches(prompt, tokenizer, start_idx=start_idx)
-
-        return self.iter_token_matches(prompt, tokenizer, start_idx=start_idx)
 
     def with_target(self, target: UpdateTarget):
         return replace(self, target=target)
@@ -627,13 +526,25 @@ def iter_token_matches(
 
     Note that empty matches are ignored.
     """
+    if start_idx < 0:
+        raise ValueError("start_idx must be non-negative")
+
     prompt_len = len(token_ids)
     match_len = len(match_ids)
 
     if match_len == 0:
         return
 
-    while start_idx < prompt_len - match_len + 1:
+    first_id = match_ids[0]
+    last_start_idx = prompt_len - match_len
+
+    while start_idx <= last_start_idx:
+        # Fast-forward to the next candidate position using a C-level scan
+        try:
+            start_idx = token_ids.index(first_id, start_idx, last_start_idx + 1)
+        except ValueError:
+            return
+
         end_idx = start_idx + match_len
 
         if token_ids[start_idx:end_idx] == match_ids:
@@ -694,62 +605,202 @@ class PlaceholderFeaturesInfo:
         )
 
 
-_MatchToApply = tuple[tuple[str, int], tuple[PromptTargetMatch, int]]
+class _MatchedUpdate(NamedTuple):
+    """A resolved update selected for a match in the original prompt."""
+
+    priority: int
+    """The original item order used to preserve match tie-breaking."""
+
+    update: ResolvedPromptUpdate
+    """The selected update for the multimodal item."""
+
+    update_idx: int
+    """The selected update's index within the item's alternatives."""
+
+    match: PromptTargetMatch
+    """The target range in the original prompt."""
 
 
-def _find_matches(
-    prompt: _S,
+_UpdateQueue: TypeAlias = deque[tuple[int, Sequence[ResolvedPromptUpdate]]]
+"""
+Items with the same ordered match rules, stored as `(priority, alternatives)`.
+"""
+
+_QueueMatch: TypeAlias = tuple[_UpdateQueue, PromptTargetMatch, int]
+"""A queue together with its next match and selected alternative index."""
+
+
+def _target_key(target: UpdateTarget) -> tuple[str, object]:
+    """Return a hashable key that preserves target matching semantics."""
+    if isinstance(target, PromptIndex):
+        return ("index", id(target))
+
+    return ("tokens", tuple(target))
+
+
+def _compile_prompt_update_queues(
     mm_prompt_updates: "MultiModalPromptUpdates",
-    tokenizer: TokenizerLike | None,
+) -> dict[
+    tuple[tuple[UpdateMode, tuple[str, object]], ...],
+    _UpdateQueue,
+]:
+    """Group items with identical match rules into ordered queues."""
+    queues_by_signature = dict[
+        tuple[tuple[UpdateMode, tuple[str, object]], ...],
+        _UpdateQueue,
+    ]()
+    priority = 0
+
+    for modality_updates in mm_prompt_updates.values():
+        for updates in modality_updates:
+            signature = tuple(
+                (update.mode, _target_key(update.target)) for update in updates
+            )
+            queues_by_signature.setdefault(signature, deque()).append(
+                (priority, updates)
+            )
+            priority += 1
+
+    return queues_by_signature
+
+
+_IterMatches: TypeAlias = Callable[
+    [ResolvedPromptUpdate, int],
+    Generator[PromptTargetMatch, None, None],
+]
+"""Yields each match of an update's target, given the search start index."""
+
+
+def _find_queue_match(
+    queue: _UpdateQueue,
+    iter_matches: _IterMatches,
     *,
-    prev_end_idx: int = 0,
-    current_result: "MultiModalPromptUpdatesApplyResult",
-) -> tuple[UpdateMode | None, list[_MatchToApply]]:
-    mode: UpdateMode | None = None
-    mm_matches = dict[tuple[str, int], tuple[PromptTargetMatch, int]]()
+    start_idx: int,
+    mode: UpdateMode | None = None,
+) -> tuple[PromptTargetMatch, int] | None:
+    """Find the first matching alternative for the next queued item."""
+    _, updates = queue[0]
+    for update_idx, update in enumerate(updates):
+        if mode is not None and update.mode != mode:
+            continue
 
-    for modality, modality_updates in mm_prompt_updates.items():
-        for item_idx, item_updates in enumerate(modality_updates):
-            if current_result[modality][item_idx] is not None:
-                continue  # Updates have already been applied for this item
+        match = next(iter_matches(update, start_idx), None)
+        if match is not None:
+            return match, update_idx
 
-            for update_idx, update in enumerate(item_updates):
-                if (modality, item_idx) in mm_matches:
-                    break  # Already found a match for this item
+    return None
 
-                for match in update.iter_matches(
-                    prompt,
-                    tokenizer,
-                    start_idx=prev_end_idx,
-                ):
-                    # All matches should share the same mode
-                    if mode is None:
-                        mode = update.mode
-                    elif mode != update.mode:
-                        continue
 
-                    mm_matches[(modality, item_idx)] = match, update_idx
-                    break  # Get only the first valid match per item
+def _next_priority(queue: _UpdateQueue) -> int:
+    """Return the original priority of the next queued item."""
+    priority, _ = queue[0]
+    return priority
 
-    # Prioritize earlier matches
-    matches_to_apply = sorted(mm_matches.items(), key=lambda item: item[1][0])
 
-    # To avoid conflicts, only replace one non-empty item at a time
-    if mode == UpdateMode.REPLACE:
-        matches_to_apply_ = list[_MatchToApply]()
-        has_non_empty_matches = False
+def _plan_prompt_updates_with(
+    mm_prompt_updates: "MultiModalPromptUpdates",
+    iter_matches: _IterMatches,
+) -> tuple[list[_MatchedUpdate], "MultiModalPromptUpdatesApplyResult"]:
+    """Plan non-overlapping prompt updates before rendering the output."""
+    queues = list(_compile_prompt_update_queues(mm_prompt_updates).values())
+    result: MultiModalPromptUpdatesApplyResult = {
+        modality: [None] * len(items) for modality, items in mm_prompt_updates.items()
+    }
+    planned_updates = list[_MatchedUpdate]()
+    prev_end_idx = 0
 
-        for item in matches_to_apply:
-            _, (match, _) = item
-            if match.start_idx == match.end_idx:
-                matches_to_apply_.append(item)
-            elif not has_non_empty_matches:
-                has_non_empty_matches = True
-                matches_to_apply_.append(item)
+    while queues:
+        first_matches = list[_QueueMatch]()
+        for queue in queues:
+            queue_match = _find_queue_match(
+                queue,
+                iter_matches,
+                start_idx=prev_end_idx,
+            )
+            if queue_match is not None:
+                prompt_match, update_idx = queue_match
+                first_matches.append((queue, prompt_match, update_idx))
 
-        matches_to_apply = matches_to_apply_
+        if not first_matches:
+            break
 
-    return mode, matches_to_apply
+        mode_queue, _, mode_update_idx = min(
+            first_matches,
+            key=lambda item: _next_priority(item[0]),
+        )
+        _, mode_updates = mode_queue[0]
+        mode = mode_updates[mode_update_idx].mode
+
+        mode_matches = list[_QueueMatch]()
+        for queue, prompt_match, first_update_idx in first_matches:
+            if queue[0][1][first_update_idx].mode == mode:
+                mode_matches.append((queue, prompt_match, first_update_idx))
+                continue
+
+            queue_match = _find_queue_match(
+                queue,
+                iter_matches,
+                start_idx=prev_end_idx,
+                mode=mode,
+            )
+            if queue_match is not None:
+                prompt_match, update_idx = queue_match
+                mode_matches.append((queue, prompt_match, update_idx))
+
+        updates_to_apply = list[_MatchedUpdate]()
+        non_empty_replacements = list[_QueueMatch]()
+        for queue, match, update_idx in mode_matches:
+            if mode == UpdateMode.REPLACE and match.start_idx != match.end_idx:
+                non_empty_replacements.append((queue, match, update_idx))
+            else:
+                while queue:
+                    priority, updates = queue.popleft()
+                    updates_to_apply.append(
+                        _MatchedUpdate(
+                            priority=priority,
+                            update=updates[update_idx],
+                            update_idx=update_idx,
+                            match=match,
+                        )
+                    )
+
+        if non_empty_replacements:
+            queue, match, update_idx = min(
+                non_empty_replacements,
+                key=lambda item: (item[1], _next_priority(item[0])),
+            )
+            priority, updates = queue.popleft()
+            updates_to_apply.append(
+                _MatchedUpdate(
+                    priority=priority,
+                    update=updates[update_idx],
+                    update_idx=update_idx,
+                    match=match,
+                )
+            )
+
+        updates_to_apply.sort(key=lambda item: (item.match, item.priority))
+        for matched_update in updates_to_apply:
+            update = matched_update.update
+            result[update.modality][update.item_idx] = matched_update.update_idx
+            prev_end_idx = matched_update.match.end_idx
+        planned_updates.extend(updates_to_apply)
+        queues = [queue for queue in queues if queue]
+
+    return planned_updates, result
+
+
+def _plan_prompt_updates(
+    prompt: list[int],
+    mm_prompt_updates: "MultiModalPromptUpdates",
+) -> tuple[list[_MatchedUpdate], "MultiModalPromptUpdatesApplyResult"]:
+    """Plan non-overlapping prompt updates before rendering the output."""
+    return _plan_prompt_updates_with(
+        mm_prompt_updates,
+        lambda update, start_idx: update.iter_token_matches(
+            prompt, start_idx=start_idx
+        ),
+    )
 
 
 def _all_items_found(
@@ -763,75 +814,36 @@ def _all_items_found(
 
 
 def _apply_matches(
-    prompt: _S,
+    prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
-    tokenizer: TokenizerLike | None,
-) -> tuple[list[_S], "MultiModalPromptUpdatesApplyResult"]:
-    mm_item_counts = {m: len(items) for m, items in mm_prompt_updates.items()}
-
-    out_seqs = list[str | list[int]]()
-    out_result: MultiModalPromptUpdatesApplyResult = {
-        m: [None] * len(items) for m, items in mm_prompt_updates.items()
-    }
-
-    # Early exit if no items to find
-    mm_found_counts = {
-        m: sum(r is not None for r in res) for m, res in out_result.items()
-    }
-    if _all_items_found(mm_item_counts, mm_found_counts):
-        return [prompt], out_result
+) -> tuple[list[list[int]], "MultiModalPromptUpdatesApplyResult"]:
+    out_seqs = list[list[int]]()
+    matched_updates, result = _plan_prompt_updates(prompt, mm_prompt_updates)
 
     prev_end_idx = 0
-    while True:
-        mode, matches_to_apply = _find_matches(
-            prompt,
-            mm_prompt_updates,
-            tokenizer,
-            prev_end_idx=prev_end_idx,
-            current_result=out_result,
-        )
+    for matched_update in matched_updates:
+        update = matched_update.update
+        match = matched_update.match
 
-        if mode is None:
-            break  # No more matches to find
+        if update.mode == UpdateMode.INSERT:
+            end_idx_to_insert = match.end_idx
+        elif update.mode == UpdateMode.REPLACE:
+            end_idx_to_insert = match.start_idx
+        else:
+            assert_never(update.mode)
 
-        for (modality, item_idx), (match, update_idx) in matches_to_apply:
-            matched_update = mm_prompt_updates[modality][item_idx][update_idx]
-            matched_content = matched_update.content.full
-
-            if mode == UpdateMode.INSERT:
-                end_idx_to_insert = match.end_idx
-            elif mode == UpdateMode.REPLACE:
-                end_idx_to_insert = match.start_idx
-            else:
-                assert_never(mode)
-
-            out_seqs.append(prompt[prev_end_idx:end_idx_to_insert])
-            out_seqs.append(
-                _seq2text(tokenizer, matched_content)
-                if isinstance(prompt, str)
-                else _seq2tokens(tokenizer, matched_content)
-            )
-            out_result[modality][item_idx] = update_idx
-
-            # Exclude overlapping matches
-            prev_end_idx = match.end_idx
-
-        # Early exit if all items found
-        mm_found_counts = {
-            m: sum(r is not None for r in res) for m, res in out_result.items()
-        }
-        if _all_items_found(mm_item_counts, mm_found_counts):
-            break
+        out_seqs.append(prompt[prev_end_idx:end_idx_to_insert])
+        out_seqs.append(update.content.full)
+        prev_end_idx = match.end_idx
 
     out_seqs.append(prompt[prev_end_idx:])
 
-    return cast(list[_S], out_seqs), out_result
+    return out_seqs, result
 
 
 def apply_token_matches(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
-    tokenizer: TokenizerLike | None,
 ) -> tuple[list[int], "MultiModalPromptUpdatesApplyResult"]:
     """
     Apply the updates in `mm_prompt_updates` to `prompt`.
@@ -840,32 +852,66 @@ def apply_token_matches(
     the same placeholder tokens. In that case, the modality that
     appears earlier in `mm_prompt_updates` takes priority.
     """
-    token_id_seqs, result = _apply_matches(prompt, mm_prompt_updates, tokenizer)
+    token_id_seqs, result = _apply_matches(prompt, mm_prompt_updates)
 
     return flatten_2d_lists(token_id_seqs), result
 
 
-def apply_text_matches(
-    prompt: str,
+def _apply_token_matches_with_placeholders(
+    token_ids: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
-    tokenizer: TokenizerLike | None,
-) -> tuple[str, "MultiModalPromptUpdatesApplyResult"]:
-    """
-    Apply the updates in `mm_prompt_updates` to `prompt`.
+) -> tuple[
+    list[int],
+    "MultiModalPromptUpdatesApplyResult",
+    Mapping[str, list[PlaceholderFeaturesInfo]],
+]:
+    matched_updates, result = _plan_prompt_updates(token_ids, mm_prompt_updates)
+    placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
+        modality: [] for modality in mm_prompt_updates
+    }
 
-    Matches are exclusive even when multiple modalities share
-    the same placeholder tokens. In that case, the modality that
-    appears earlier in `mm_prompt_updates` takes priority.
-    """
-    texts, result = _apply_matches(prompt, mm_prompt_updates, tokenizer)
+    new_token_ids = list[int]()
+    prev_end_idx = 0
+    for matched_update in matched_updates:
+        update = matched_update.update
+        match = matched_update.match
 
-    return "".join(texts), result
+        if update.mode == UpdateMode.INSERT:
+            end_idx_to_insert = match.end_idx
+        elif update.mode == UpdateMode.REPLACE:
+            end_idx_to_insert = match.start_idx
+        else:
+            assert_never(update.mode)
+
+        new_token_ids.extend(token_ids[prev_end_idx:end_idx_to_insert])
+        start_idx = len(new_token_ids)
+
+        tokens = update.content.full
+        if tokens:
+            content_is_embed = update.content.is_embed
+            if content_is_embed is not None:
+                content_is_embed = content_is_embed(tokens)
+
+            placeholders[update.modality].append(
+                PlaceholderFeaturesInfo(
+                    modality=update.modality,
+                    item_idx=update.item_idx,
+                    start_idx=start_idx,
+                    tokens=tokens,
+                    is_embed=content_is_embed,
+                )
+            )
+            new_token_ids.extend(tokens)
+
+        prev_end_idx = match.end_idx
+
+    new_token_ids.extend(token_ids[prev_end_idx:])
+    return new_token_ids, result, placeholders
 
 
 def _iter_placeholders(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
-    tokenizer: TokenizerLike | None,
 ) -> Iterable[PlaceholderFeaturesInfo]:
     """
     Yield each set of placeholder tokens found in `prompt`.
@@ -885,47 +931,59 @@ def _iter_placeholders(
     prompt_len = len(prompt)
     start_idx = 0
 
-    while start_idx < prompt_len:
-        found = False
+    # The current (unfound) item's updates for each modality; rebuilt
+    # whenever an item is found. Items are only resolved once the scan
+    # reaches them.
+    candidates: list[tuple[str, ResolvedPromptUpdate, list[int]]] | None = None
 
-        for modality, modality_updates in mm_prompt_updates.items():
-            item_idx = item_idx_by_modality[modality]
-            if item_idx >= mm_item_counts.get(modality, 0):
+    while start_idx < prompt_len:
+        if candidates is None:
+            candidates = [
+                (modality, update, update.content.full)
+                for modality, modality_updates in mm_prompt_updates.items()
+                if item_idx_by_modality[modality] < mm_item_counts.get(modality, 0)
+                for update in modality_updates[item_idx_by_modality[modality]]
+            ]
+            if not candidates:
+                return
+
+        found = False
+        first_token = prompt[start_idx]
+
+        for modality, update, content_tokens_full in candidates:
+            content_len_full = len(content_tokens_full)
+            end_idx_full = start_idx + content_len_full
+
+            if content_len_full == 0 or end_idx_full > prompt_len:
                 continue
 
-            for update in modality_updates[item_idx]:
+            # Check the first token before comparing the full slice
+            if (
+                first_token == content_tokens_full[0]
+                and prompt[start_idx:end_idx_full] == content_tokens_full
+            ):
                 content = update.content
-                content_tokens_full = _seq2tokens(tokenizer, content.full)
-                content_len_full = len(content_tokens_full)
-                end_idx_full = start_idx + content_len_full
+                content_is_embed = content.is_embed
+                if content_is_embed is not None:
+                    content_is_embed = content_is_embed(content.full)
 
-                if content_len_full == 0 or end_idx_full > prompt_len:
-                    continue
+                yield PlaceholderFeaturesInfo(
+                    modality=modality,
+                    item_idx=item_idx_by_modality[modality],
+                    start_idx=start_idx,
+                    tokens=content_tokens_full,
+                    is_embed=content_is_embed,
+                )
 
-                if prompt[start_idx:end_idx_full] == content_tokens_full:
-                    content_is_embed = content.is_embed
-                    if content_is_embed is not None:
-                        content_is_embed = content_is_embed(tokenizer, content.full)
-
-                    yield PlaceholderFeaturesInfo(
-                        modality=modality,
-                        item_idx=item_idx,
-                        start_idx=start_idx,
-                        tokens=content_tokens_full,
-                        is_embed=content_is_embed,
-                    )
-
-                    # Exclude overlapping matches
-                    start_idx = end_idx_full
-                    item_idx_by_modality[modality] += 1
-                    found = True
-                    break
-
-            if found:
+                # Exclude overlapping matches
+                start_idx = end_idx_full
+                item_idx_by_modality[modality] += 1
                 if _all_items_found(mm_item_counts, item_idx_by_modality):
                     return
 
-                break  # Go back to the outer while loop
+                candidates = None
+                found = True
+                break
 
         if not found:
             start_idx += 1
@@ -934,9 +992,8 @@ def _iter_placeholders(
 def find_mm_placeholders(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
-    tokenizer: TokenizerLike | None,
 ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-    it = _iter_placeholders(prompt, mm_prompt_updates, tokenizer)
+    it = _iter_placeholders(prompt, mm_prompt_updates)
     return dict(full_groupby_modality(it))
 
 
@@ -946,7 +1003,7 @@ A collection of the `is_cached` flag for each item, with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
 """
 
-MultiModalPromptUpdates = Mapping[str, list[Sequence[ResolvedPromptUpdate]]]
+MultiModalPromptUpdates = Mapping[str, Sequence[Sequence[ResolvedPromptUpdate]]]
 """
 A collection of prompt updates with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
@@ -993,11 +1050,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def __call__(
         self,
-        prompt: str,
+        prompt: str | list[int],
         mm_items: MultiModalDataItems,
         mm_uuid_items: MultiModalUUIDItems | None = None,
         hf_processor_mm_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalInput:
+        if isinstance(prompt, str):
+            tokenizer = self.info.get_tokenizer()
+            prompt = tokenizer.encode(
+                prompt,
+                **self.info.default_tok_params.get_encode_kwargs(),
+            )
+
         processor_inputs = ProcessorInputs(
             prompt,
             mm_items,
@@ -1076,9 +1140,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         new_token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        tokenizer = self.info.get_tokenizer()
-
-        return find_mm_placeholders(new_token_ids, mm_prompt_updates, tokenizer)
+        return find_mm_placeholders(new_token_ids, mm_prompt_updates)
 
     def _get_hf_mm_data(
         self,
@@ -1094,207 +1156,100 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return processor_data, passthrough_data
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str | None:
+        """
+        Get the text to pass to the HF processor alongside the multi-modal
+        data.
+
+        By default, no text is passed. If the HF processor requires that
+        text and multi-modal items correspond to each other, you should
+        override this method to return dummy text generated by
+        [`DummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder].
+        """
+        return None
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
-        # Not to be confused with `mm_data` in `self.apply`.
-        # This refers to the data to be passed to HF processor.
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """
+        Pre-process the multi-modal data and HF processor keyword arguments
+        before they are passed to the HF processor.
+
+        By default, both are returned as-is. If the HF processor expects the
+        multi-modal data under different keys than those provided by the
+        multi-modal items (e.g. `audio` instead of `audios`), or requires
+        additional keyword arguments (e.g. `sampling_rate`), you should
+        override this method.
+        """
+        return mm_data, hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
         """
-        Call the HF processor on the prompt text and
-        associated multi-modal data.
+        Post-process the output of the HF processor.
+
+        By default, the output is returned as-is. If you need to modify the
+        output of the HF processor before it is converted into multi-modal
+        keyword arguments, you should override this method.
         """
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        """
-        Return whether the HF processor applies prompt updates.
-
-        For most HF processors, this should be `True` when multi-modal
-        data items are passed, but `False` when multi-modal embeddings
-        are passed.
-        """
-        return not any(
-            isinstance(items, (EmbeddingItems, DictEmbeddingItems))
-            for items in mm_items.values()
-        )
-
-    def _apply_hf_processor_text_mm(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature, bool]:
-        """
-        Apply the HF processor on the prompt text and multi-modal data
-        together.
-
-        In addition, return whether prompt updates have been applied.
-        """
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        processed_data = self._call_hf_processor(
-            prompt=prompt_text,
-            mm_data=processor_data,
-            mm_kwargs=hf_processor_mm_kwargs,
-            tok_kwargs=tokenization_kwargs,
-        )
-        processed_data.update(passthrough_data)
-
-        input_ids = processed_data.pop("input_ids")
-        if not isinstance(input_ids, list):
-            input_ids = input_ids.tolist()
-
-        (prompt_ids,) = input_ids
-
-        is_update_applied = self._hf_processor_applies_updates(
-            prompt_text=prompt_text,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
-        return prompt_ids, processed_data, is_update_applied
-
-    def _apply_hf_processor_text_only(
-        self,
-        prompt_text: str,
-        tokenization_kwargs: Mapping[str, object],
-    ) -> list[int]:
-        """
-        Apply the HF processor on the prompt text only.
-
-        Since HF processor requires that text and multi-modal items
-        correspond to each other, we create dummy multi-modal items
-        to go along with the text.
-        """
-        prompt_ids, _, _ = self._apply_hf_processor_text_mm(
-            prompt_text=prompt_text,
-            mm_items=MultiModalDataItems({}),
-            hf_processor_mm_kwargs={},
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
-        return prompt_ids
-
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        """
-        Apply the HF processor on the prompt tokens only.
-
-        Most HF processors accept prompt text but not prompt tokens.
-        If the HF processor adds or removes tokens that are not related to
-        multi-modal data, you should override this method so it is consistent
-        with the output of
-        [`_apply_hf_processor_text_only`][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_text_only]
-        on the
-        corresponding text.
-        """
-        return prompt_tokens
-
-    def _apply_hf_processor_mm_only(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """
-        Apply the HF processor on the multi-modal data only.
-
-        Since HF processor requires that text and multi-modal items
-        correspond to each other, we generate dummy text using
-        [`DummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
-        to go along with the multi-modal data.
-        """
-        # Custom logic based on text inputs
-        if type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor:
-            mm_counts = mm_items.get_all_counts()
-
-            _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
-                prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
-                mm_items=mm_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-            )
-
-            return mm_processed_data
-
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        processed_data = self.info.ctx.call_hf_processor(
-            partial(
-                call_hf_processor_mm_only,
-                self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            ),
-            processor_data,
-            dict(**hf_processor_mm_kwargs, **tokenization_kwargs),
-        )
-        processed_data.update(passthrough_data)
-
         return processed_data
 
     def _apply_hf_processor_main(
         self,
-        prompt: str | list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        enable_hf_prompt_update: bool,
-    ) -> tuple[list[int], BatchFeature, bool]:
+    ) -> BatchFeature:
         """
-        Apply the HF processor on the prompt text and multi-modal data.
-
-        In addition, return whether prompt updates have been applied
-        (for most HF processors, this should be `True`).
-
-        Note:
-            If `enable_hf_prompt_update=False`, we use HF processor
-            to perform prompt updates if available; HF processor requires
-            that the prompt corresponds to multi-modal items.
+        Apply the HF processor on the multi-modal data.
         """
-        if isinstance(prompt, str):
-            if enable_hf_prompt_update:
-                return self._apply_hf_processor_text_mm(
-                    prompt_text=prompt,
-                    mm_items=mm_items,
-                    hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-            prompt_ids = self._apply_hf_processor_text_only(prompt, tokenization_kwargs)
+        if processor_data:
+            processor_data, hf_processor_mm_kwargs = self._preprocess_hf_mm_data(
+                processor_data, hf_processor_mm_kwargs
+            )
+
+            prompt_text = self._get_hf_processor_text(mm_items.get_all_counts())
+            if prompt_text is not None:
+                processor_data = dict(text=prompt_text, **processor_data)
+
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                processor_data,
+                hf_processor_mm_kwargs,
+            )
+            processed_data.update(passthrough_data)
         else:
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt)
+            from transformers.feature_extraction_utils import BatchFeature
 
-        mm_processed_data = self._apply_hf_processor_mm_only(
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
+            processed_data = BatchFeature(dict(passthrough_data))
+
+        return self._postprocess_hf_mm_data(
+            processor_data,
+            hf_processor_mm_kwargs,
+            processed_data,
         )
 
-        return prompt_ids, mm_processed_data, False
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        """
+        Post-process the prompt token IDs before locating or applying
+        multi-modal prompt updates.
+
+        By default, the prompt is returned as-is. If the HF processor (or
+        chat template) applies additional transformations to the prompt
+        that are not reflected in its multi-modal outputs, you should
+        override this method to replicate them.
+        """
+        return prompt
 
     def _get_cache_missing_items(
         self,
@@ -1399,18 +1354,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingInfo:
         with timing_ctx.record("apply_hf_processor"):
-            (
-                prompt_ids,
-                mm_processed_data,
-                is_update_applied,
-            ) = self._apply_hf_processor_main(
-                prompt=inputs.prompt,
+            mm_processed_data = self._apply_hf_processor_main(
                 mm_items=inputs.mm_data_items,
                 hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
-                tokenization_kwargs=inputs.tokenization_kwargs,
-                enable_hf_prompt_update=True,
             )
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
@@ -1422,7 +1370,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             inputs.mm_data_items,
@@ -1436,13 +1387,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_updates=mm_prompt_updates,
         )
 
-        return prompt_ids, mm_info, is_update_applied
+        return mm_info
 
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingInfo:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
@@ -1454,7 +1405,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
@@ -1463,20 +1417,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_hashes=mm_hashes,
             )
 
-        # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
+        # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
         with timing_ctx.record("apply_hf_processor"):
-            (
-                prompt_ids,
-                mm_missing_processed_data,
-                is_update_applied,
-            ) = self._apply_hf_processor_main(
-                prompt=inputs.prompt,
+            mm_missing_processed_data = self._apply_hf_processor_main(
                 mm_items=mm_missing_data_items,
                 hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
-                tokenization_kwargs=inputs.tokenization_kwargs,
-                enable_hf_prompt_update=False,
             )
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
@@ -1507,58 +1454,128 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_updates=mm_prompt_updates,
         )
 
-        return prompt_ids, mm_info, is_update_applied
+        return mm_info
 
     def _apply_token_matches(
         self,
         prompt: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
-        tokenizer = self.info.get_tokenizer()
-        return apply_token_matches(prompt, mm_prompt_updates, tokenizer)
+        return apply_token_matches(prompt, mm_prompt_updates)
 
-    def _apply_text_matches(
-        self,
-        prompt: str,
-        mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[str, MultiModalPromptUpdatesApplyResult]:
-        tokenizer = self.info.get_tokenizer()
-        return apply_text_matches(prompt, mm_prompt_updates, tokenizer)
-
-    def _apply_prompt_updates(
+    def _apply_token_matches_with_placeholders(
         self,
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        """Apply multi-modal prompt updates to token IDs."""
-        tokenizer = self.info.get_tokenizer()
-
-        new_token_ids, match_result = self._apply_token_matches(
+    ) -> tuple[
+        list[int],
+        MultiModalPromptUpdatesApplyResult,
+        Mapping[str, list[PlaceholderFeaturesInfo]],
+    ]:
+        return _apply_token_matches_with_placeholders(
             token_ids,
             mm_prompt_updates,
         )
 
-        # If the search text does not represent a special token,
-        # it may have different token IDs in the prompt, because
-        # the tokens may go across the boundaries of the search text.
-        # ----
-        # e.g. when searching for "foo" in "food", if "food" itself makes
-        # up a token, then the token ID of "foo" will not appear at all
-        # ----
-        # Since it is inefficient to search for all possible tokenizations
-        # of the search text in the prompt, we instead perform string-based
-        # updates on the decoded token IDs, then encode them back.
-        if not all(
-            all(update_idx is not None for update_idx in update_idxs)
-            for update_idxs in match_result.values()
-        ):
-            new_text, match_result = self._apply_text_matches(
-                _seq2text(tokenizer, token_ids, use_cache=False),
-                mm_prompt_updates,
+    def _iter_text_matches(
+        self,
+        update: ResolvedPromptUpdate,
+        prompt_text: str,
+        tokenizer: TokenizerLike,
+        *,
+        start_idx: int = 0,
+    ) -> Generator[PromptTargetMatch, None, None]:
+        """Yield each instance of `update.target` found in `prompt_text`."""
+        target = update.target
+
+        if isinstance(target, PromptIndex):
+            match_idx = target.get_text_match_index(tokenizer, prompt_text, start_idx)
+            if match_idx is not None:
+                yield PromptTargetMatch(match_idx, match_idx)
+
+            return
+
+        target_text = tokenizer.decode(target)
+        if not target_text:
+            return
+
+        idx = prompt_text.find(target_text, start_idx)
+        while idx != -1:
+            end_idx = idx + len(target_text)
+            yield PromptTargetMatch(idx, end_idx)
+            idx = prompt_text.find(target_text, end_idx)
+
+    def _apply_prompt_updates_via_text(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+        *,
+        encode_segments_separately: bool = False,
+    ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
+        """
+        Apply multi-modal prompt updates in text space, then encode the
+        result.
+
+        A non-special-token target may be tokenized differently inside the
+        prompt because the tokens may go across the boundaries of the target
+        (e.g. when searching for "foo" in "food", if "food" itself makes up
+        a token, then the token ID of "foo" will not appear at all). Since
+        it is inefficient to search for all possible tokenizations of the
+        target in the prompt, we instead perform text-based updates on the
+        decoded token IDs, then encode them back.
+        """
+        tokenizer = self.info.get_tokenizer()
+        prompt_text = tokenizer.decode(token_ids)
+
+        matched_updates, result = _plan_prompt_updates_with(
+            mm_prompt_updates,
+            lambda update, start_idx: self._iter_text_matches(
+                update, prompt_text, tokenizer, start_idx=start_idx
+            ),
+        )
+
+        out_texts = list[str]()
+        prev_end_idx = 0
+        for matched_update in matched_updates:
+            update = matched_update.update
+            match = matched_update.match
+
+            if update.mode == UpdateMode.INSERT:
+                end_idx_to_insert = match.end_idx
+            elif update.mode == UpdateMode.REPLACE:
+                end_idx_to_insert = match.start_idx
+            else:
+                assert_never(update.mode)
+
+            out_texts.append(prompt_text[prev_end_idx:end_idx_to_insert])
+            out_texts.append(tokenizer.decode(update.content.full))
+            prev_end_idx = match.end_idx
+
+        out_texts.append(prompt_text[prev_end_idx:])
+
+        if encode_segments_separately:
+            # Encode each segment separately instead of joining into one
+            # text and encoding it in a single pass. Joining first would
+            # let BPE merge tokens across a segment boundary, silently
+            # changing how a non-special-token placeholder is tokenized.
+            new_token_ids = flatten_2d_lists(
+                [
+                    cached_encode(tokenizer, text, add_special_tokens=False)
+                    for text in out_texts
+                ]
+            )
+        else:
+            new_token_ids = cached_encode(
+                tokenizer, "".join(out_texts), add_special_tokens=False
             )
 
-            new_token_ids = _seq2tokens(tokenizer, new_text, use_cache=False)
+        return new_token_ids, result
 
+    def _matched_updates_from_result(
+        self,
+        mm_prompt_updates: MultiModalPromptUpdates,
+        match_result: MultiModalPromptUpdatesApplyResult,
+    ) -> dict[str, list[Sequence[ResolvedPromptUpdate]]]:
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
         for modality, update_idxs in match_result.items():
             for item_idx, update_idx in enumerate(update_idxs):
@@ -1571,9 +1588,43 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     [mm_prompt_updates[modality][item_idx][update_idx]]
                 )
 
+        return dict(matched_updates)
+
+    def _apply_prompt_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs."""
+        new_token_ids, match_result, placeholders = (
+            self._apply_token_matches_with_placeholders(
+                token_ids,
+                mm_prompt_updates,
+            )
+        )
+
+        if all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            placeholders = {
+                modality: modality_placeholders
+                for modality, modality_placeholders in placeholders.items()
+                if modality_placeholders
+            }
+            return new_token_ids, placeholders
+
+        # A non-special-token target may be tokenized differently inside
+        # the prompt, so fall back to performing the updates on the
+        # decoded text, then encoding the result back.
+        new_token_ids, match_result = self._apply_prompt_updates_via_text(
+            token_ids,
+            mm_prompt_updates,
+        )
+
         placeholders = self._find_mm_placeholders(
             new_token_ids,
-            dict(matched_updates),
+            self._matched_updates_from_result(mm_prompt_updates, match_result),
         )
 
         return new_token_ids, placeholders
@@ -1594,7 +1645,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "There is likely a problem with your "
                     "implementation of merged multi-modal processor for this "
                     "model (usually arising from an inconsistency between "
-                    "`_call_hf_processor` and `_get_mm_fields_config`)."
+                    "`_apply_hf_processor_main` and `_get_mm_fields_config`)."
                 )
 
     def _validate_mm_updates(
@@ -1629,8 +1680,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     f"Expected there to be {item_count} prompt placeholders "
                     f"corresponding to {item_count} {modality} items, but "
                     f"instead found {len(placeholders)} prompt placeholders! "
-                    "Make sure the implementation of `_call_hf_processor` and "
-                    "`_get_mm_fields_config` are consistent with each other."
+                    "Make sure the implementation of `_apply_hf_processor_main` "
+                    "and `_get_mm_fields_config` are consistent with each other."
                 )
 
     def _maybe_apply_prompt_updates(
@@ -1639,24 +1690,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
-        is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
-        if is_update_applied:
-            mm_placeholders = self._find_mm_placeholders(
-                prompt_ids,
-                mm_prompt_updates,
-            )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-        else:
-            prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                prompt_ids,
-                mm_prompt_updates,
-            )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        prompt_ids, mm_placeholders = self._apply_prompt_updates(
+            prompt_ids,
+            mm_prompt_updates,
+        )
+
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         return prompt_ids, mm_placeholders
 
@@ -1670,28 +1714,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         The main steps are:
 
-        1. Apply HF Processor on prompt text and multi-modal data together,
-           outputting token IDs and processed tensors.
-        2. Find and update sequences in the token IDs with placeholder tokens.
+        1. Perform MM-specific post-processing to the token inputs.
+        2. Apply HF Processor on multi-modal data together with optional
+           dummy text, outputting processed multi-modal data tensors.
+        3. Find and update sequences in the token IDs with placeholder tokens.
            The number of placeholder tokens equals the feature size of the
            multi-modal data outputted by the multi-modal encoder.
-        3. Extract information about the placeholder tokens from the
+        4. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._cached_apply_hf_processor(inputs, timing_ctx)
+        prompt_ids = self._postprocess_prompt(inputs.prompt)
+        mm_info = self._cached_apply_hf_processor(inputs, timing_ctx)
 
-        # NOTE: tokenization_kwargs are not required to init processor
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
                 mm_items=inputs.mm_data_items,
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=is_update_applied,
             )
 
         mm_placeholder_ranges = {
@@ -1713,9 +1753,9 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     @abstractmethod
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         """
         Create input prompt for the encoder. HF processor will be applied on
         this prompt during profiling and generation.
@@ -1732,7 +1772,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _get_enc_dec_inputs(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
         encoder_inputs: MultiModalInput,
     ):
@@ -1774,7 +1814,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             inputs.mm_data_items,
             inputs.mm_uuid_items,
             hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
-            tokenization_kwargs=inputs.tokenization_kwargs,
         )
 
         encoder_inputs = super().apply(encoder_processor_inputs, timing_ctx)

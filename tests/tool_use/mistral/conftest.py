@@ -3,10 +3,10 @@
 
 import pytest
 import pytest_asyncio
-from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 from .utils import ARGS, CONFIGS, ServerConfig
 
@@ -22,7 +22,7 @@ def server_config(request):
         )
 
     # download model and tokenizer using transformers
-    snapshot_download(config["model"])
+    hf_api().snapshot_download(config["model"])
     yield CONFIGS[request.param]
 
 

@@ -14,11 +14,13 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
@@ -26,7 +28,53 @@ from vllm.v1.kv_cache_interface import (
 pytestmark = pytest.mark.cpu_test
 
 
-def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
+def test_external_computed_blocks_do_not_corrupt_free_pool():
+    block_size = 4
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    manager = FullAttentionManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "request"
+    manager.allocate_new_blocks(
+        request_id,
+        num_tokens=3 * block_size,
+        num_tokens_main_model=3 * block_size,
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    # Speculative allocations can exceed the blocks implied by the eventual
+    # external computed-token count. This must not request a negative number
+    # of blocks, which inflates the free-queue counter.
+    manager.allocate_external_computed_blocks(
+        request_id,
+        num_local_computed_tokens=0,
+        num_external_computed_tokens=block_size,
+    )
+
+    assert block_pool.get_num_free_blocks() == num_free_blocks
+    assert len(manager.req_to_blocks[request_id]) == 3
+
+
+def get_sliding_window_manager(
+    sliding_window_spec,
+    block_pool,
+    enable_caching=True,
+    needs_kv_cache_zeroing=False,
+):
     # Tests don't exercise admission gating; pass a large cap that is a no-op.
     return SlidingWindowManager(
         sliding_window_spec,
@@ -34,12 +82,16 @@ def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=T
         enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=sliding_window_spec.block_size,
+        needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
 
 
 def get_chunked_local_attention_manager(
-    chunked_local_attention_spec, block_pool, enable_caching=True
+    chunked_local_attention_spec,
+    block_pool,
+    enable_caching=True,
+    needs_kv_cache_zeroing=False,
 ):
     return ChunkedLocalAttentionManager(
         chunked_local_attention_spec,
@@ -47,8 +99,65 @@ def get_chunked_local_attention_manager(
         enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=chunked_local_attention_spec.block_size,
+        needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def test_sliding_window_records_new_blocks_for_zeroing():
+    block_size = 2
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(
+        spec,
+        block_pool,
+        enable_caching=False,
+        needs_kv_cache_zeroing=True,
+    )
+
+    blocks = manager.allocate_new_blocks(
+        "request", num_tokens=4, num_tokens_main_model=4
+    )
+
+    assert manager.records_new_block_ids
+    assert manager.take_new_block_ids() == [block.block_id for block in blocks]
+    assert manager.take_new_block_ids() == []
+
+
+def test_chunked_local_attention_records_new_blocks_for_zeroing():
+    block_size = 2
+    spec = ChunkedLocalAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        attention_chunk_size=4,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_chunked_local_attention_manager(
+        spec,
+        block_pool,
+        enable_caching=False,
+        needs_kv_cache_zeroing=True,
+    )
+
+    blocks = manager.allocate_new_blocks(
+        "request", num_tokens=4, num_tokens_main_model=4
+    )
+
+    assert manager.records_new_block_ids
+    assert manager.take_new_block_ids() == [block.block_id for block in blocks]
+    assert manager.take_new_block_ids() == []
 
 
 def test_chunked_local_attention_possible_cached_prefix():

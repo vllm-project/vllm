@@ -20,6 +20,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -54,6 +56,27 @@ class ECConnectorMetadata(ABC):  # noqa: B024
     """
 
     pass
+
+
+class ECConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker ECConnector -> Scheduler ECConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler ECConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "ECConnectorWorkerMetadata"
+    ) -> "ECConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `ECConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class ECConnectorBase(ABC):
@@ -190,6 +213,16 @@ class ECConnectorBase(ABC):
         """
         return None, None
 
+    def build_connector_worker_meta(self) -> ECConnectorWorkerMetadata | None:
+        """
+        Build the ECConnector worker metadata for this engine step.
+
+        Returns:
+            ECConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -275,3 +308,15 @@ class ECConnectorBase(ABC):
             get_finished().
         """
         return False, None
+
+    def has_pending_push_work(self) -> bool:
+        """Return True if the connector has push-mode work that requires
+        the engine main loop to keep stepping (e.g. for EPD,
+        Producer has push work when Xfer is in progress - Consumer
+        is reading it).
+        This mirrors exactly the KV Connector's has_pending_push_work().
+
+        Connectors that don't implement push-based EC transfer should
+        leave this as False.
+        """
+        return False

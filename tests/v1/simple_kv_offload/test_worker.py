@@ -10,6 +10,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -19,6 +20,8 @@ from vllm.platforms import current_platform
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
+from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
@@ -100,6 +103,13 @@ def _drive_store(
 
         if int((cpu[:, 0].to(torch.int32) != val).sum().item()):
             corrupt += 1
+
+    # Drain the compute stream before returning: in the no-barrier control
+    # phase the store never waits on compute, so the host loop runs far ahead
+    # and leaves a backlog of sleep+fill kernels in flight. Without this, the
+    # leftover control-phase fills race the barrier phase's fill->copy window
+    # on the shared gpu tensor and flakily corrupt one iteration.
+    compute_stream.synchronize()
     return corrupt
 
 
@@ -181,3 +191,120 @@ def test_build_params_src_access_order():
         gpu, cpu, stream, src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
     )
     assert ordered.attrs.srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
+
+
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+    )
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device="cuda",
+    )
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+    cache_config = MagicMock(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[MagicMock(size=raw.nbytes)],
+    )
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=cache_config,
+        cpu_capacity_bytes=raw.nbytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    worker.register_kv_caches(
+        {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+    )
+
+    assert worker.gpu_kv_caches is not None
+    if layout.is_layer_compact and not layout.is_block_compact:
+        expected_regions = num_layers * spec.num_heads
+        expected_block_bytes = spec.page_size_bytes // spec.num_heads
+    elif layout.is_layer_compact:
+        expected_regions = num_layers
+        expected_block_bytes = spec.page_size_bytes
+    else:
+        expected_regions = 1
+        expected_block_bytes = spec.page_size_bytes * num_layers
+    assert len(worker.gpu_kv_caches) == expected_regions
+    assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
+        (num_blocks, expected_block_bytes)
+    }
+
+
+def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
+    num_blocks = 4
+    block_bytes = 32
+    cache_bytes = num_blocks * block_bytes
+    raw = torch.zeros(4096, dtype=torch.int8, device="cuda")
+    cache = raw[:cache_bytes].view(num_blocks, block_bytes)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=MagicMock(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[MagicMock(size=cache_bytes)],
+        ),
+        cpu_capacity_bytes=cache_bytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    worker.register_kv_caches({"layer.0": cache})
+
+    assert worker.gpu_kv_caches is not None
+    assert list(worker.gpu_kv_caches) == ["layer.0"]
+    assert worker.gpu_kv_caches["layer.0"].shape == (num_blocks, block_bytes)
+
+
+def test_register_separate_kv_head_groups(monkeypatch):
+    # LHBNC hoists the K/V head groups outside the block dim, so each layer's
+    # blocks are registered as one region per group (K, V).
+    layout = KVCacheLayout.LHBNC
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+        num_head_slots=2,
+        state_content_bytes=2 * 2 * 2,
+    )
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device="cuda",
+    )
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=MagicMock(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[MagicMock(size=raw.nbytes)],
+        ),
+        cpu_capacity_bytes=raw.nbytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    worker.register_kv_caches(
+        {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+    )
+
+    assert worker.gpu_kv_caches is not None
+    assert len(worker.gpu_kv_caches) == num_layers * spec.num_heads
+    per_group_block_bytes = (
+        spec.num_kv_heads * spec.block_size * spec.head_size * spec.dtype.itemsize
+    )
+    assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
+        (num_blocks, per_group_block_bytes)
+    }
