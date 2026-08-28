@@ -217,14 +217,21 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
     )
 
 
-def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
+def test_split_is_boundary_locked_independently_of_eagle_block_drop() -> None:
     (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
 
     with_drop = _split(request, request.num_tokens, use_eagle_block_drop=True)
     without_drop = _split(request, request.num_tokens, use_eagle_block_drop=False)
 
+    # Unconditional boundary stops lock chunk ends to the state grid, so in
+    # non-checkpoint mode the split no longer depends on the Eagle
+    # block-drop back-off: an aligned start ends at the next state boundary
+    # either way instead of spanning to the trailing cache boundary (the
+    # spanning chunk is exactly the k-1-null-interior-slots case above).
+    # The back-off still lowers `last_cache_position` for the partial-tail
+    # and checkpoint interactions; it just can no longer move a chunk end.
     assert with_drop == MAMBA_BLOCK_SIZE
-    assert without_drop == 2 * MAMBA_BLOCK_SIZE
+    assert without_drop == MAMBA_BLOCK_SIZE
 
 
 def _run_chunked_prefill(
@@ -458,11 +465,13 @@ def _hetero_split(request: Request, num_new_tokens: int) -> int:
         cache_config=SimpleNamespace(block_size=HETERO_ATTN_BLOCK_SIZE),
         mamba_state_block_size=HETERO_MAMBA_BLOCK_SIZE,
         use_eagle=True,
+        use_eagle_block_drop=True,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         mamba_partial_cache_hit=False,
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
 
@@ -486,6 +495,36 @@ def test_heterogeneous_block_sizes_stop_chunks_on_the_mamba_grid() -> None:
     assert ends[0] % HETERO_MAMBA_BLOCK_SIZE == 0, (
         f"first chunk ended at {ends[0]}, off the mamba state grid "
         f"(816-grid stop); ends={ends}"
+    )
+
+
+def test_aligned_start_does_not_span_multiple_state_blocks() -> None:
+    """A full token budget must not skip interior state boundaries.
+
+    With the stop conditional on a mid-block start, a chunk beginning exactly
+    on a boundary could run to the budget-clamped end whenever the budget
+    exceeds one block, crossing k boundaries and leaving the k-1 interior
+    state slots permanently null (one state column is materialized per step).
+    """
+    prompt_len = 5 * HETERO_MAMBA_BLOCK_SIZE + 30
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    # Request the FULL remaining prompt every step, as a solo prefill with a
+    # budget larger than 2 blocks would (no per-block rationing).
+    pos, ends = 0, []
+    while pos < prompt_len:
+        request.num_computed_tokens = pos
+        num_new = _hetero_split(request, prompt_len - pos)
+        assert num_new > 0, f"no progress at {pos}"
+        pos += num_new
+        ends.append(pos)
+    expected_grid_ends = [
+        (i + 1) * HETERO_MAMBA_BLOCK_SIZE
+        for i in range(prompt_len // HETERO_MAMBA_BLOCK_SIZE)
+    ]
+    materialized = [e for e in ends if e % HETERO_MAMBA_BLOCK_SIZE == 0]
+    assert materialized == expected_grid_ends, (
+        f"state-grid chunk ends {materialized} != consecutive boundaries "
+        f"{expected_grid_ends}; interior slots stayed null (spanning chunk)"
     )
 
 
