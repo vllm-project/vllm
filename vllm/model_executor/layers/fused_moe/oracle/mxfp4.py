@@ -330,9 +330,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-        # TRITON_UNFUSED has bug with MTP support
-        # TODO re-enable after kernel is fixed
-        # TRITON_UNFUSED
+        Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,

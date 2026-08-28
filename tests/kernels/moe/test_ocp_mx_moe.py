@@ -1866,6 +1866,36 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+def test_triton_unfused_is_offered_only_for_bf16_activation():
+    """TRITON_UNFUSED runs W4A16 whatever activation the checkpoint asks for,
+    so the auto priority list may only offer it when no activation key is
+    requested.
+
+    #45896 added it as an unconditional ROCm fallback placed after the
+    activation filter, which silently ran W4A16 for `amd/MiniMax-M3-MXFP4`;
+    #46491 reverted that. Reaching it through the priority list keeps the
+    filter in the path, and this pins that difference.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        _filter_by_activation,
+        _get_priority_backends_for_gpt_oss,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+        kMxfp4Dynamic,
+        kMxfp8Dynamic,
+    )
+
+    backends = _get_priority_backends_for_gpt_oss()
+    assert Mxfp4MoeBackend.TRITON_UNFUSED in backends
+    assert Mxfp4MoeBackend.TRITON_UNFUSED in _filter_by_activation(backends, None)
+    for activation_key in (kFp8StaticTensorSym, kMxfp8Dynamic, kMxfp4Dynamic):
+        assert Mxfp4MoeBackend.TRITON_UNFUSED not in _filter_by_activation(
+            backends, activation_key
+        )
+
+
 # Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that
 # `moe_kernel_quantize_input` actually dispatches on. Its final `else` returns
 # the activation untouched, so a name it does not know (e.g. "mxfp6" instead of
