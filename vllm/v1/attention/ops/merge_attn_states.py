@@ -6,6 +6,68 @@ import torch
 from vllm.platforms import current_platform
 
 
+def _merge_attn_states_torch(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+    output_lse: torch.Tensor | None = None,
+    prefill_tokens_with_context: int | None = None,
+    output_scale: torch.Tensor | None = None,
+) -> None:
+    assert output_scale is None, "CPU fallback does not support FP8 output"
+
+    num_tokens = output.shape[0]
+    if prefill_tokens_with_context is None:
+        prefill_tokens_with_context = num_tokens
+
+    prefix_lse = torch.where(
+        torch.isinf(prefix_lse) & (prefix_lse > 0),
+        torch.full_like(prefix_lse, float("-inf")),
+        prefix_lse,
+    )
+    suffix_lse = torch.where(
+        torch.isinf(suffix_lse) & (suffix_lse > 0),
+        torch.full_like(suffix_lse, float("-inf")),
+        suffix_lse,
+    )
+
+    if prefill_tokens_with_context < num_tokens:
+        output[prefill_tokens_with_context:].copy_(
+            suffix_output[prefill_tokens_with_context:]
+        )
+        if output_lse is not None:
+            output_lse[:, prefill_tokens_with_context:].copy_(
+                suffix_lse[:, prefill_tokens_with_context:]
+            )
+
+    if prefill_tokens_with_context == 0:
+        return
+
+    prefix_lse = prefix_lse[:, :prefill_tokens_with_context].float()
+    suffix_lse = suffix_lse[:, :prefill_tokens_with_context].float()
+    max_lse = torch.maximum(prefix_lse, suffix_lse)
+    prefix_se = torch.exp(prefix_lse - max_lse)
+    suffix_se = torch.exp(suffix_lse - max_lse)
+    out_se = prefix_se + suffix_se
+    both_empty = max_lse == float("-inf")
+
+    prefix_scale = (prefix_se / out_se).transpose(0, 1).unsqueeze(-1)
+    suffix_scale = (suffix_se / out_se).transpose(0, 1).unsqueeze(-1)
+    merged = (
+        prefix_output[:prefill_tokens_with_context].float() * prefix_scale
+        + suffix_output[:prefill_tokens_with_context].float() * suffix_scale
+    )
+    merged.masked_fill_(both_empty.transpose(0, 1).unsqueeze(-1), 0.0)
+    output[:prefill_tokens_with_context].copy_(merged.to(output.dtype))
+
+    if output_lse is not None:
+        merged_lse = torch.log(out_se) + max_lse
+        merged_lse.masked_fill_(both_empty, float("-inf"))
+        output_lse[:, :prefill_tokens_with_context].copy_(merged_lse)
+
+
 def merge_attn_states(
     output: torch.Tensor,
     prefix_output: torch.Tensor,
@@ -85,6 +147,17 @@ def merge_attn_states(
         from vllm._custom_ops import merge_attn_states
 
         return merge_attn_states(
+            output,
+            prefix_output,
+            prefix_lse,
+            suffix_output,
+            suffix_lse,
+            output_lse,
+            prefill_tokens_with_context,
+            output_scale,
+        )
+    elif current_platform.is_cpu():
+        return _merge_attn_states_torch(
             output,
             prefix_output,
             prefix_lse,
