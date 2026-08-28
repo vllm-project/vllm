@@ -26,6 +26,13 @@ class InputBuffers:
         self.device = device
 
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
+        # Snapshot of input_ids taken after combine_sampled_and_draft_tokens and
+        # before clamping -1 scheduler placeholders to 0. The rejection sampler
+        # reads this so it still sees -1 (and rejects placeholder drafts) while
+        # the embedding lookup uses the clamped input_ids.
+        self.draft_sampled_raw = torch.zeros(
+            max_num_tokens, dtype=torch.int32, device=device
+        )
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
         self.is_padding = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
         self.query_start_loc = torch.zeros(
@@ -90,6 +97,10 @@ class InputBatch:
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
+    # [num_tokens_after_padding] snapshot of input_ids before -1 placeholders
+    # are clamped to 0; read by the rejection sampler to reject placeholder
+    # drafts. See InputBuffers.draft_sampled_raw.
+    draft_sampled_raw: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
     # [num_tokens_after_padding]
@@ -160,6 +171,8 @@ class InputBatch:
         query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
 
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
+        # Keep draft_sampled_raw in sync on the dummy path.
+        draft_sampled_raw = input_buffers.draft_sampled_raw[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
         input_buffers.is_padding[:num_tokens].fill_(True)
@@ -196,6 +209,7 @@ class InputBatch:
             has_prefill=False,
             max_seq_len_np=None,
             input_ids=input_ids,
+            draft_sampled_raw=draft_sampled_raw,
             positions=positions,
             is_padding=is_padding,
             logits_indices=logits_indices,

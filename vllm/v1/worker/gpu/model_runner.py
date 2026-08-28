@@ -1248,6 +1248,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
 
+        # PD first-token step: scheduler pads with -1 placeholder drafts to
+        # keep the uniform decode shape (see scheduler pad_spec_decode). The
+        # req_states.draft_tokens buffer is still zero (BOS) because propose()
+        # has not run yet, so combine_sampled_and_draft_tokens would write BOS
+        # into input_ids and the rejection sampler would treat it as a valid
+        # draft. Write -1 into the buffer so the sampler rejects placeholders
+        # and samples the bonus token from target_logits. Guard on all-zero:
+        # subsequent steps hold real drafts from propose() that must not be
+        # clobbered.
+        if self.speculative_config is not None and draft_tokens:
+            for i, req_id in enumerate(req_ids):
+                toks = draft_tokens.get(req_id)
+                if toks and toks[0] < 0:
+                    req_idx = int(idx_mapping_np[i])
+                    n = len(toks)
+                    if bool(torch.all(self.req_states.draft_tokens[req_idx, :n] == 0)):
+                        self.req_states.draft_tokens[req_idx, :n] = torch.tensor(
+                            toks, dtype=torch.int64, device=self.device
+                        )
+
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
@@ -1262,6 +1282,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
         )
+
+        # Snapshot input_ids (which may contain -1 placeholders from PD
+        # first-token spec-decode padding) into draft_sampled_raw, then clamp
+        # input_ids to >=0 so the embedding lookup is safe. The rejection
+        # sampler reads draft_sampled_raw so it still sees -1 and rejects the
+        # placeholder drafts (accepted_length=0 -> bonus token sampled from
+        # target_logits).
+        if self.speculative_config is not None:
+            self.input_buffers.draft_sampled_raw[:num_tokens_after_padding].copy_(
+                self.input_buffers.input_ids[:num_tokens_after_padding]
+            )
+            self.input_buffers.input_ids[:num_tokens_after_padding].clamp_(min=0)
 
         # CPU upper bound on seq_lens; padded entries left at zero.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
@@ -1308,6 +1340,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_prefill=batch_req_state.has_prefill,
             max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
+            draft_sampled_raw=self.input_buffers.draft_sampled_raw[
+                :num_tokens_after_padding
+            ],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
             logits_indices=logits_indices,
