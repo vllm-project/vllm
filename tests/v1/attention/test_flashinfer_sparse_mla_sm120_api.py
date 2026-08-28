@@ -4,10 +4,13 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
+from vllm.models.deepseek_v4.attention import _resolve_dsv4_kv_cache_dtype
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
+    DeepseekV4FlashInferMLASparseBackend,
     _required_sm120_sparse_topk,
 )
 from vllm.platforms.interface import DeviceCapability
@@ -92,3 +95,42 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
+
+
+@pytest.mark.parametrize("requested", ["auto", "fp8", "fp8_e4m3"])
+def test_dsv4_fp8_ds_mla_layout_resolves_auto_and_fp8(requested: str) -> None:
+    """The fp8_ds_mla layout has no unquantized fallback, so the default
+    "auto" must resolve to fp8_ds_mla instead of crashing (#47174)."""
+    cache_config = SimpleNamespace(cache_dtype=requested)
+    dtype_str, torch_dtype = _resolve_dsv4_kv_cache_dtype(True, requested, cache_config)
+    assert dtype_str == "fp8_ds_mla"
+    assert torch_dtype == torch.uint8
+    assert cache_config.cache_dtype == "fp8_ds_mla"
+
+
+def test_dsv4_fp8_ds_mla_layout_rejects_bf16_with_actionable_error() -> None:
+    with pytest.raises(ValueError, match="--kv-cache-dtype fp8"):
+        _resolve_dsv4_kv_cache_dtype(True, "bfloat16", None)
+
+
+def test_dsv4_plain_layout_keeps_auto_as_bf16() -> None:
+    dtype_str, torch_dtype = _resolve_dsv4_kv_cache_dtype(False, "auto", None)
+    assert dtype_str == "auto"
+    assert torch_dtype == torch.bfloat16
+
+
+def test_sm120_dsv4_backend_accepts_auto_kv_cache_dtype(monkeypatch) -> None:
+    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
+
+    reason = DeepseekV4FlashInferMLASparseBackend.supports_combination(
+        head_size=512,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=256,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=True,
+        use_mm_prefix=False,
+        device_capability=DeviceCapability(12, 0),
+    )
+    assert reason is None
