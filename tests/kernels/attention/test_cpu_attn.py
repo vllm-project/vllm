@@ -1209,11 +1209,11 @@ def test_varlen_with_paged_kv_amx_fp8(
 
     Verifies that:
     - QK uses _tile_dpfp8ps (native FP8 MMA, no K dequant).
-    - E4M3 PV uses native FP8 MMA; E5M2 uses the BF16 fallback.
+    - PV uses native FP8 MMA for both E4M3 and E5M2.
     - Output cosine similarity vs fp32 reference > 0.99.
     """
-    if kv_cache_dtype == "fp8_e4m3" and block_size % 64 != 0:
-        pytest.skip("native E4M3 PV requires block_size divisible by 64")
+    if block_size % 64 != 0:
+        pytest.skip("native FP8 PV requires block_size divisible by 64")
 
     varlen_with_paged_kv(
         seq_lens=seq_lens,

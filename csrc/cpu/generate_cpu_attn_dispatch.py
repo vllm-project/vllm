@@ -16,13 +16,13 @@ HEAD_DIMS_16 = [48, 80, 112]
 # ISA types
 ISA_TYPES = {
     "AMX": 0,
-    "AMX_FP8": 7,
     "VEC": 1,
     "VEC16": 2,
     "NEON": 3,
     "VXE": 4,
     "RVV": 5,
     "VSX": 6,
+    "AMX_FP8": 7,
 }
 
 # KV cache index: 0 = auto (same as scalar_t), 1 = fp8_e4m3, 2 = fp8_e5m2
@@ -65,12 +65,21 @@ def _make_case(
     encoded = encode_params(head_dim, isa, kv_cache)
     actual_isa = isa_override if isa_override else isa
     cpp_type = KV_CACHE_CPP_TYPES[kv_cache]
-    attn_impl = (
-        f"cpu_attention::AttentionImpl<"
-        f"cpu_attention::ISA::{actual_isa}, \\\n"
-        f"                                                       "
+    native_impl = (
+        f"cpu_attention::AttentionImpl<cpu_attention::ISA::{actual_isa}, "
         f"scalar_t, head_dim, {cpp_type}>"
     )
+    if actual_isa == "AMX_FP8":
+        fallback_impl = (
+            f"cpu_attention::AttentionImpl<cpu_attention::ISA::AMX, "
+            f"scalar_t, head_dim, {cpp_type}>"
+        )
+        attn_impl = (
+            "std::conditional_t<std::is_same_v<scalar_t, c10::BFloat16>, "
+            f"{native_impl}, {fallback_impl}>"
+        )
+    else:
+        attn_impl = native_impl
     comment = (
         f"head_dim={head_dim}, isa={isa}"
         if kv_cache == "auto"
@@ -99,7 +108,8 @@ def generate_cases_for_isa_group(isa_list: list[str], include_fp8: bool = False)
         for isa in isa_list:
             if isa not in ISA_FOR_32:
                 continue
-            cases.append(_make_case(head_dim, isa, "auto"))
+            isa_override = "AMX" if isa == "AMX_FP8" else None
+            cases.append(_make_case(head_dim, isa, "auto", isa_override))
 
     # Non-FP8 cases for head_dims divisible by 16 only
     for head_dim in HEAD_DIMS_16:
@@ -113,7 +123,10 @@ def generate_cases_for_isa_group(isa_list: list[str], include_fp8: bool = False)
                 for isa in isa_list:
                     if isa not in ISA_FOR_FP8:
                         continue
-                    cases.append(_make_case(head_dim, isa, fp8_type))
+                    isa_override = (
+                        "AMX" if isa == "AMX_FP8" and head_dim % 64 else None
+                    )
+                    cases.append(_make_case(head_dim, isa, fp8_type, isa_override))
 
     return "\n".join(cases)
 

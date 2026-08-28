@@ -5,12 +5,11 @@
 //
 // Architecture:
 //   QK phase: native FP8×FP8 MMA via _tile_dpfp8ps / _tile_dpbf8ps
-//             Q is quantized from BF16 to FP8-E4M3 in copy_q_heads_tile().
+//             Q is quantized from BF16 to the KV cache FP8 type.
 //             K cache is stored in the native AMX-FP8 layout (1 byte/element).
-//   PV phase (E4M3 V cache): native FP8 MMA with 64-byte VNNI4 tiles.
-//             Softmax writes P once in compact E4M3 form for reuse across all
+//   PV phase: native FP8 MMA with 64-byte VNNI4 tiles.
+//             Softmax writes P once in compact FP8 form for reuse across all
 //             output-dimension groups.
-//   PV phase (E5M2 V cache): falls back to BF16 MMA with on-the-fly deq (TODO).
 //
 // Scale bookkeeping for QK:
 //   true_score = Q_fp32 · K_fp32
@@ -19,16 +18,12 @@
 //   execute_attention() applies: scale *= q_dynamic_scale * k_scale
 //   where q_dynamic_scale is computed per-tile in copy_q_heads_tile().
 //
-// Scale bookkeeping for PV (E4M3, native path):
+// Scale bookkeeping for PV:
 //   raw_C = dot(P_fp8, V_fp8)
 //          ≈ dot(P/p_scale, V_real/v_scale)
 //          = dot(P, V_real) / (p_scale * v_scale)
 //   In final_output: multiply by output_v_scale = p_scale * v_scale.
 //
-// Scale bookkeeping for PV (E5M2, BF16 dequant fallback):
-//   V_bf16 = V_fp8 * v_scale * bias   (bias = 2^112 for E5M2)
-//   output corrected via output_v_scale = v_scale * 2^112 in get_output_v_scale().
-
 #ifndef CPU_ATTN_AMX_FP8_HPP
 #define CPU_ATTN_AMX_FP8_HPP
 
@@ -95,29 +90,38 @@ inline void reshape_and_cache_k_amx_fp8_impl(
   }
 }
 
-#if __GNUC__ >= 15
+template <typename fp8_t>
 __attribute__((target("avx10.2"), noinline))
-void quantize_probability_row_e4m3(
-      const float* __restrict__ src, uint8_t* __restrict__ dst,
-      int32_t cols) {
-    const __m512 scale = _mm512_set1_ps(448.0f);
-    for (int32_t col = 0; col < cols; col += 16) {
-      const __m512 scaled = _mm512_mul_ps(_mm512_loadu_ps(src + col), scale);
-      const __m256h fp16 = (__m256h)_mm512_cvtps_ph(
-          scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+void quantize_probability_row(const float* __restrict__ src,
+                              uint8_t* __restrict__ dst, int32_t cols) {
+  constexpr float fp8_max =
+      std::is_same_v<fp8_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
+  const __m512 scale = _mm512_set1_ps(fp8_max);
+  for (int32_t col = 0; col < cols; col += 16) {
+    const __m512 scaled = _mm512_mul_ps(_mm512_loadu_ps(src + col), scale);
+    const __m256h fp16 = (__m256h)_mm512_cvtps_ph(
+        scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    if constexpr (std::is_same_v<fp8_t, c10::Float8_e4m3fn>) {
       _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + col),
                        _mm256_cvtph_hf8(fp16));
+    } else {
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + col),
+                       _mm256_cvtph_bf8(fp16));
     }
-            }
+  }
+}
 
+template <typename fp8_t>
 __attribute__((target("avx10.2"), noinline))
-void quantize_q_tile_e4m3(
+void quantize_q_tile(
     const c10::BFloat16* __restrict__ src, uint8_t* __restrict__ dst,
     int32_t q_num, int32_t q_heads_per_kv, int64_t q_num_stride,
     int64_t q_head_stride, int64_t head_dim, float inv_scale) {
   const __m512 scale = _mm512_set1_ps(inv_scale);
-  const __m512 max_value = _mm512_set1_ps(448.0f);
-  const __m512 min_value = _mm512_set1_ps(-448.0f);
+  constexpr float fp8_max =
+      std::is_same_v<fp8_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
+  const __m512 max_value = _mm512_set1_ps(fp8_max);
+  const __m512 min_value = _mm512_set1_ps(-fp8_max);
   const int64_t head_size_block_num = head_dim / AMX_TILE_ROW_BYTES;
   int32_t packed_row = 0;
 
@@ -141,46 +145,29 @@ void quantize_q_tile_e4m3(
             values, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
         const int64_t block = e / AMX_TILE_ROW_BYTES;
         const int64_t offset = e % AMX_TILE_ROW_BYTES;
-        _mm_storeu_si128(
-            reinterpret_cast<__m128i*>(packed_head +
-                                       block * AMX_TILE_BYTES + offset),
-            _mm256_cvtph_hf8(fp16));
+        __m128i fp8;
+        if constexpr (std::is_same_v<fp8_t, c10::Float8_e4m3fn>) {
+          fp8 = _mm256_cvtph_hf8(fp16);
+        } else {
+          fp8 = _mm256_cvtph_bf8(fp16);
+        }
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(
+                             packed_head + block * AMX_TILE_BYTES + offset),
+                         fp8);
       }
     }
   }
 }
-            #else
-            FORCE_INLINE void quantize_probability_row_e4m3(
-              const float* __restrict__ src, uint8_t* __restrict__ dst, int32_t cols) {
-              const __m512 scale = _mm512_set1_ps(448.0f * 0x1p-120f);
-              const __m512i payload_mask = _mm512_set1_epi32(0x07F00000u);
-              const __m512i sign_mask =
-                _mm512_set1_epi32(static_cast<int>(0x80000000u));
-              const __m512i max_payload = _mm512_set1_epi32(0x7E);
-              for (int32_t col = 0; col < cols; col += 16) {
-              const __m512i bits = _mm512_castps_si512(
-                _mm512_mul_ps(_mm512_loadu_ps(src + col), scale));
-              const __m512i sign =
-                _mm512_srli_epi32(_mm512_and_si512(bits, sign_mask), 24);
-              const __m512i payload = _mm512_min_epu32(
-                _mm512_srli_epi32(_mm512_and_si512(bits, payload_mask), 20),
-                max_payload);
-              _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + col),
-                       _mm512_cvtepi32_epi8(_mm512_or_si512(sign, payload)));
-              }
-            }
-            #endif
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // TileGemm224<uint8_t, kv_cache_t>:  2-2-4 pattern for AMX_FP8.
 //
 // QK phase: native FP8 × FP8 MMA (_tile_dphf8ps / _tile_dpbf8ps).
-// PV phase: native wide FP8 MMA (colsb=64 tiles) for E4M3 V cache.
+// PV phase: native wide FP8 MMA (colsb=64 tiles).
 //   P is quantized once per KV tile and reused by every output-dimension group.
 //   V (FP8 E4M3) loaded directly from cache (no dequant).
 //   Result correction is folded into the final output scale.
-//   E5M2 V cache: falls back to BF16×FP8 dequant path (TODO: native E5M2).
 // ---------------------------------------------------------------------------
 template <typename kv_cache_t>
 class TileGemm224<uint8_t, kv_cache_t> {
@@ -188,24 +175,20 @@ class TileGemm224<uint8_t, kv_cache_t> {
                     std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
                 "kv_cache_t must be Float8_e4m3fn or Float8_e5m2");
 
-  // For PV E5M2 fallback: BF16 probs × FP8 E5M2 V (dequant to BF16).
-  using pv_gemm_fallback_t = TileGemm224<c10::BFloat16, kv_cache_t>;
-
   // FP8 tile size in uint8_t elements (= AMX_TILE_BYTES, one per byte).
   static constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES;  // 1024
 
  public:
-  static constexpr bool prequantize_probabilities =
-      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>;
+  static constexpr bool prequantize_probabilities = true;
 
   FORCE_INLINE static void quantize_probability_row(
       const float* src, uint8_t* dst, int32_t cols) {
-    quantize_probability_row_e4m3(src, dst, cols);
+    cpu_attention::quantize_probability_row<kv_cache_t>(src, dst, cols);
   }
 
   // ------------------------------------------------------------------
   // QK: k_times = head_dim / 64 (each FP8 tile covers 64 k-elements).
-  // PV: native wide FP8 MMA for E4M3; BF16 dequant fallback for E5M2.
+  // PV: native wide FP8 MMA.
   // ------------------------------------------------------------------
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size, void* __restrict__ a_tile,
@@ -216,21 +199,10 @@ class TileGemm224<uint8_t, kv_cache_t> {
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
     if constexpr (phase == AttentionGemmPhase::PV) {
-      if constexpr (!std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        // E5M2 V cache: fall back to BF16×FP8 dequant path until native
-        // E5M2 PV is implemented (TODO).
-        pv_gemm_fallback_t::template gemm<phase, k_size>(
-            m_size, reinterpret_cast<c10::BFloat16*>(a_tile),
-            reinterpret_cast<kv_cache_t*>(b_tile), c_tile, lda, ldb, ldc,
-            block_size, dynamic_k_size, accum_c);
-        return;
-      }
-
-      // -------- Native wide FP8 PV (E4M3 × E4M3 → FP32) --------
+      // -------- Native wide FP8 PV (FP8 × FP8 → FP32) --------
       //
-      // Fixed p_scale = 1/448 lets the tile accumulate all k-steps before the
-      // correction is applied to the final output.
-      // get_output_v_scale() includes the fixed 1/448 correction.
+      // A fixed FP8-dependent P scale lets the tile accumulate all k-steps
+      // before get_output_v_scale() applies the correction.
 
       const int32_t m_0 = std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
       const int32_t m_1 = m_size - m_0;
@@ -270,12 +242,22 @@ class TileGemm224<uint8_t, kv_cache_t> {
         _tile_loadd(0, a0, lda);
         _tile_stream_loadd(2, v2, v_stride);
         _tile_stream_loadd(3, v3, v_stride);
-        _tile_dphf8ps(4, 0, 2);
-        _tile_dphf8ps(5, 0, 3);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(4, 0, 2);
+          _tile_dphf8ps(5, 0, 3);
+        } else {
+          _tile_dpbf8ps(4, 0, 2);
+          _tile_dpbf8ps(5, 0, 3);
+        }
         if (m_1 > 0) {
           _tile_loadd(1, a1, lda);
-          _tile_dphf8ps(6, 1, 2);
-          _tile_dphf8ps(7, 1, 3);
+          if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+            _tile_dphf8ps(6, 1, 2);
+            _tile_dphf8ps(7, 1, 3);
+          } else {
+            _tile_dpbf8ps(6, 1, 2);
+            _tile_dpbf8ps(7, 1, 3);
+          }
         }
         a0 += a_advance; a1 += a_advance;
         v2 += v_advance; v3 += v_advance;
@@ -302,8 +284,7 @@ class TileGemm224<uint8_t, kv_cache_t> {
       std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
     const int32_t m_1 = m_size - m_0;
     const int32_t c_tile_stride = ldc * sizeof(float);
-    constexpr int32_t output_group_num =
-        std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 2 : 1;
+    constexpr int32_t output_group_num = 2;
     for (int32_t output_group = 0; output_group < output_group_num;
          ++output_group) {
       uint8_t* __restrict__ a_tile_0 = static_cast<uint8_t*>(a_tile);
@@ -365,7 +346,7 @@ class TileGemm224<uint8_t, kv_cache_t> {
   }
 
   FORCE_INLINE static void init_tile_config(int32_t m, __tilecfg& config) {
-    // QK and native E4M3 PV share one 64-byte tile configuration.
+    // QK and PV share one 64-byte tile configuration.
     const int32_t m_0 =
       std::min(m, static_cast<int32_t>(AMX_TILE_ROW_NUM));
     const int32_t m_1 = m - m_0;
@@ -393,18 +374,15 @@ class TileGemm122<uint8_t, kv_cache_t> {
                     std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
                 "kv_cache_t must be Float8_e4m3fn or Float8_e5m2");
 
-  using pv_gemm_t = TileGemm122<c10::BFloat16, kv_cache_t>;
   static constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES;
 
  public:
-  static constexpr bool prequantize_probabilities =
-      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>;
-  static constexpr int64_t PVHeadDimAlignment =
-      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 64 : 32;
+  static constexpr bool prequantize_probabilities = true;
+  static constexpr int64_t PVHeadDimAlignment = 64;
 
   FORCE_INLINE static void quantize_probability_row(
       const float* src, uint8_t* dst, int32_t cols) {
-    quantize_probability_row_e4m3(src, dst, cols);
+    cpu_attention::quantize_probability_row<kv_cache_t>(src, dst, cols);
   }
 
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -416,16 +394,8 @@ class TileGemm122<uint8_t, kv_cache_t> {
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
     if constexpr (phase == AttentionGemmPhase::PV) {
-      if constexpr (!std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        pv_gemm_t::template gemm<phase, k_size>(
-            m_size, reinterpret_cast<c10::BFloat16*>(a_tile),
-            reinterpret_cast<kv_cache_t*>(b_tile), c_tile, lda, ldb, ldc,
-            block_size, dynamic_k_size, accum_c);
-        return;
-      }
-
-      // Native wide FP8 PV (E4M3, 1-2-2 pattern)
-      // Fixed p_scale=1/448 enables AMX tile accumulation across all k-steps.
+      // Native wide FP8 PV (1-2-2 pattern)
+      // A fixed FP8-dependent P scale enables accumulation across all k-steps.
       constexpr int32_t v_stride = AMX_TILE_ROW_BYTES;
       constexpr int32_t a_advance = AMX_TILE_ROW_BYTES;
       constexpr int32_t v_advance = AMX_TILE_BYTES;
@@ -457,12 +427,22 @@ class TileGemm122<uint8_t, kv_cache_t> {
         _tile_loadd(0, a, lda);
         _tile_stream_loadd(2, v2, v_stride);
         _tile_stream_loadd(3, v3, v_stride);
-        _tile_dphf8ps(6, 0, 2);
-        _tile_dphf8ps(7, 0, 3);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(6, 0, 2);
+          _tile_dphf8ps(7, 0, 3);
+        } else {
+          _tile_dpbf8ps(6, 0, 2);
+          _tile_dpbf8ps(7, 0, 3);
+        }
         _tile_stream_loadd(2, v4, v_stride);
         _tile_stream_loadd(3, v5, v_stride);
-        _tile_dphf8ps(4, 0, 2);
-        _tile_dphf8ps(5, 0, 3);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(4, 0, 2);
+          _tile_dphf8ps(5, 0, 3);
+        } else {
+          _tile_dpbf8ps(4, 0, 2);
+          _tile_dpbf8ps(5, 0, 3);
+        }
         a += a_advance;
         v2 += v_advance; v3 += v_advance;
         v4 += v_advance; v5 += v_advance;
@@ -483,8 +463,7 @@ class TileGemm122<uint8_t, kv_cache_t> {
 
     const int32_t b_stride = AMX_TILE_ROW_BYTES;
     const int32_t c_stride = ldc * sizeof(float);
-    constexpr int32_t output_group_num =
-        std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 2 : 1;
+    constexpr int32_t output_group_num = 2;
     for (int32_t output_group = 0; output_group < output_group_num;
          ++output_group) {
       uint8_t* __restrict__ a_tile_0 = static_cast<uint8_t*>(a_tile);
@@ -583,16 +562,9 @@ class TileGemm122<uint8_t, kv_cache_t> {
 // kv_cache_scalar_t = Float8_e4m3fn or Float8_e5m2
 // ---------------------------------------------------------------------------
 template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
-  requires(!std::is_same_v<scalar_t, c10::BFloat16> ||
-           !std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
-           (head_dim % 64 != 0))
-class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t>
-    : public AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
-};
-
-template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
   requires(std::is_same_v<scalar_t, c10::BFloat16> &&
-           std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> &&
+           (std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
+            std::is_same_v<kv_cache_scalar_t, c10::Float8_e5m2>) &&
            (head_dim % 64 == 0))
 class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
@@ -604,9 +576,7 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
   using partial_output_buffer_t = float;
   using prob_buffer_t = scalar_t;   // BF16 softmax probs (PV phase)
 
-  constexpr static int64_t BlockSizeAlignment =
-      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 64 : 32;
-  // HeadDimAlignment for PV: same as AMX_BF16 (BF16 PV path).
+  constexpr static int64_t BlockSizeAlignment = 64;
   constexpr static int64_t HeadDimAlignment = 2 * (AMX_TILE_ROW_BYTES / 4);
   constexpr static int64_t MaxQHeadNumPerIteration = 32;
   constexpr static int64_t HeadDim = head_dim;
@@ -633,20 +603,10 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
   }
 
   // Output scale for the PV result.
-  // E4M3 V (native FP8 PV): no bias correction needed; the AMX FP8 instruction
-  //   computes correct arithmetic.  Return just v_scale.
-  // E5M2 V (BF16 dequant fallback): deq_tile_amx uses bit-widening which shifts
-  //   the FP8 exponent bias, giving values 2^112 too large.  Correct by
-  //   including the 2^112 bias factor.
   float get_output_v_scale() const noexcept {
-    if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
-      // E5M2 fallback path still uses BF16 dequant with 2^112 bias correction.
-      return v_scale * 0x1p112f;
-    } else {
-      // P is scaled by 448 before native FP8 PV. Apply its inverse once in the
-      // final output scaling instead of multiplying every partial output tile.
-      return v_scale / 448.0f;
-    }
+    constexpr float fp8_max =
+        std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
+    return v_scale / fp8_max;
   }
 
   template <template <typename tile_gemm_t> typename attention>
@@ -681,7 +641,7 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     return BlockSizeAlignment * head_dim;
   }
 
-  // E4M3 uses native VNNI4 packing. E5M2 retains VNNI2 for its BF16 fallback.
+  // Both native FP8 formats use VNNI4 packing.
   constexpr static int64_t v_cache_token_group_stride(
       const int32_t /*block_size*/) {
     return BlockSizeAlignment * (AMX_TILE_ROW_BYTES / 4);
@@ -692,14 +652,14 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     return block_size * HeadDimAlignment;
   }
 
-  // Copy Q heads tile: quantize BF16 → FP8-E4M3 and pack into q_buffer.
+  // Copy Q heads tile: quantize BF16 to the KV cache FP8 type and pack it.
   //
   // Q buffer layout (FP8):
   //   Same tile-prepacking as AMX_BF16 copy_q_heads_tile but with uint8_t
   //   (FP8) elements.  Each FP8 tile row = 64 bytes = 64 FP8 elements.
   //   head_size_block_num = head_dim / 64 (vs head_dim/32 for BF16).
   //
-  // Dynamic scale: max(abs(Q)) / 448.0f is computed over all elements,
+  // Dynamic scale: max(abs(Q)) / fp8_max is computed over all elements,
   // stored in q_dynamic_scale for use in execute_attention().
   void copy_q_heads_tile(
       scalar_t* __restrict__ src,  // [q_num, q_heads_per_kv, head_size] BF16
@@ -708,7 +668,8 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
       const int64_t q_num_stride, const int64_t q_head_stride,
       const float /*scale*/) {
     // ---- Step 1: compute dynamic per-tile Q scale ----
-    constexpr float fp8_e4m3_max = 448.0f;
+    constexpr float fp8_max =
+      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
     float max_abs = 0.0f;
     {
       scalar_t* src_iter = src;
@@ -743,74 +704,25 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
 #endif
     }
     if (max_abs == 0.0f) max_abs = 1.0f;  // avoid div-by-zero
-    const float inv_scale = fp8_e4m3_max / max_abs;
+    const float inv_scale = fp8_max / max_abs;
     // Store true scale for score correction in execute_attention().
-    q_dynamic_scale = max_abs / fp8_e4m3_max;
+    q_dynamic_scale = max_abs / fp8_max;
 
-    // ---- Step 2: quantize BF16 Q → FP8, pack into q_buffer ----
+    // ---- Step 2: quantize BF16 Q to FP8 and pack into q_buffer ----
     // Layout: same tile-prepacking as AMX_BF16, but with FP8 (1 byte/elem).
     //   head_size_block_num = head_dim * sizeof(uint8_t) / AMX_TILE_ROW_BYTES
     //                       = head_dim / 64
     constexpr int64_t bytes_per_head = head_dim * sizeof(uint8_t);
     static_assert(bytes_per_head % AMX_TILE_ROW_BYTES == 0,
                   "head_dim must be divisible by 64 for AMX_FP8");
-    constexpr int64_t head_size_block_num = bytes_per_head / AMX_TILE_ROW_BYTES;
-    // 64 FP8 elements per 64-byte block.
-    constexpr int64_t head_elem_num_per_block = AMX_TILE_ROW_BYTES;
-
-#if __GNUC__ >= 15
-    quantize_q_tile_e4m3(
+    quantize_q_tile<kv_cache_t>(
         src, reinterpret_cast<uint8_t*>(q_buffer), q_num, q_heads_per_kv,
         q_num_stride, q_head_stride, head_dim, inv_scale);
-#else
-    int32_t idx = 0;
-    int8_t* __restrict__ q_buf_iter = reinterpret_cast<int8_t*>(q_buffer);
-    for (int32_t q_idx = 0; q_idx < q_num; ++q_idx, src += q_num_stride) {
-      scalar_t* __restrict__ src_iter = src;
-      for (int32_t h_idx = 0; h_idx < q_heads_per_kv;
-           ++h_idx, src_iter += q_head_stride) {
-        // Quantize head_size_block_num blocks of 64 BF16 → 64 FP8.
-        vec_op::unroll_loop<int32_t, head_size_block_num>(
-            [&](int32_t blk) {
-#if defined(__AVX512F__)
-              vec_op::quant_bf16x32_to_fp8e4m3_avx512(
-                  src_iter + blk * head_elem_num_per_block,
-                  reinterpret_cast<uint8_t*>(
-                      q_buf_iter + blk * AMX_TILE_BYTES),
-                  inv_scale);
-              // Second half of the 64-element block.
-              vec_op::quant_bf16x32_to_fp8e4m3_avx512(
-                  src_iter + blk * head_elem_num_per_block + 32,
-                  reinterpret_cast<uint8_t*>(
-                      q_buf_iter + blk * AMX_TILE_BYTES + 32),
-                  inv_scale);
-#else
-              // Scalar fallback
-              for (int32_t e = 0; e < head_elem_num_per_block; ++e) {
-                float v = static_cast<float>(
-                    src_iter[blk * head_elem_num_per_block + e]);
-                *(reinterpret_cast<uint8_t*>(
-                    q_buf_iter + blk * AMX_TILE_BYTES) + e) =
-                    float_to_fp8e4m3_scalar(v, inv_scale);
-              }
-#endif
-            });
-
-        ++idx;
-        q_buf_iter += AMX_TILE_ROW_BYTES;
-        if ((idx & (AMX_TILE_ROW_NUM - 1)) == 0) {
-          q_buf_iter -= AMX_TILE_ROW_NUM * AMX_TILE_ROW_BYTES;
-          q_buf_iter += head_size_block_num * AMX_TILE_BYTES;
-        }
-      }
-    }
-#endif
   }
 
   // reshape KV to AMX-FP8 friendly layout.
   //   K: native FP8 layout (1 byte/element, 16-token groups × k-slices).
-  //   V: native E4M3 uses VNNI4 packing; E5M2 retains VNNI2 for its BF16
-  //      dequant fallback.
+  //   V: native VNNI4 packing.
   static void reshape_and_cache(
       const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
       kv_cache_t* __restrict__ key_cache, kv_cache_t* __restrict__ value_cache,
@@ -829,18 +741,8 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
         head_num, head_dim, block_size, key_token_num_stride,
         key_head_num_stride, num_blocks_stride, cache_head_num_stride, k_inv);
 
-    // V: reuse halfword-packed FP8 layout from reshape_and_cache_fp8_amx_impl
-    // (only V, key pointers are dummies that we skip by passing nullptr for
-    //  the key cache — use the vec impl for V only).
-    //
-    // reshape_and_cache_fp8_amx_impl writes both K and V; we only want V here.
-    // Call it with a temporary key buffer on the stack to avoid corrupting the
-    // real K cache that we just wrote in native layout.
-    //
-    // A cleaner approach: replicate the V-only portion inline.
     {
-            constexpr int64_t token_num_per_sub_group =
-              std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 4 : 2;
+      constexpr int64_t token_num_per_sub_group = 4;
       constexpr int64_t head_elems_per_group = 16;    // AMX_TILE_ROW_BYTES/4
       const int64_t group_num = head_dim / head_elems_per_group;
       const int64_t group_size = block_size * head_elems_per_group;

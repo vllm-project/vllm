@@ -1022,14 +1022,14 @@ class AttentionMainLoop {
       // BlockSizeAlignment tokens in a block
       const int64_t v_cache_token_group_stride =
           attention_impl_t::v_cache_token_group_stride(block_size);
-      // v_cache_head_group_stride: stride of V cache when move to next
-      // HeadDimAlignment head dims in a block
       constexpr int64_t pv_headdim_alignment = []() {
         if constexpr (requires { tile_gemm_t::PVHeadDimAlignment; }) {
           return tile_gemm_t::PVHeadDimAlignment;
         }
         return headdim_alignment;
       }();
+      // v_cache_head_group_stride: stride of V cache when move to next
+      // HeadDimAlignment head dims in a block
       const int64_t v_cache_head_group_stride =
           pv_headdim_alignment == headdim_alignment
               ? attention_impl_t::v_cache_head_group_stride(block_size)
