@@ -841,7 +841,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
     kernel = DummyKernel()
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: kernel,
+        lambda weight_shape: kernel,
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.ModelWeightParameter",
@@ -880,7 +880,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
 def test_inc_mxfp8_linear_scheme_requires_block_32_input(monkeypatch) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: object(),
+        lambda weight_shape: object(),
     )
     scheme = INCMxfp8LinearScheme()
 

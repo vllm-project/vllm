@@ -34,9 +34,6 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
     - Activations dynamically quantized to MXFP8 during inference
     """
 
-    def __init__(self):
-        self.kernel = init_mxfp8_linear_kernel()
-
     @classmethod
     def get_min_capability(cls) -> int:
         return 75
@@ -79,6 +76,8 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale", weight_scale)
+
+        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.kernel.process_weights_after_loading(layer)
