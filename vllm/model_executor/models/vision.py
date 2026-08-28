@@ -728,14 +728,9 @@ class FusedInputNorm(nn.Module):
             and grid_thw.dtype == torch.uint8
             and self.weight.dtype == torch.float32
         ):
-            grid_thw = grid_thw.contiguous()
-            out = torch.empty(
-                (patches, size),
-                dtype=visual_dtype,
-                device=grid_thw.device,
+            return torch.ops.vllm.xpu_fused_input_norm(
+                grid_thw, self.weight, self.bias, visual_dtype
             )
-            torch.ops._C.fused_input_norm(out, grid_thw, self.weight, self.bias)
-            return out
 
         # Apply the per-channel affine transform directly instead of via
         # F.batch_norm. batch_norm dispatches to cuDNN, whose batch-norm
