@@ -71,6 +71,13 @@ class SchedulerConfig:
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
 
+    min_prefill_chunk_tokens: int = Field(default=0, ge=0)
+    """Defer smaller text prefill chunks while decode work is runnable, then
+    release them as a batch. 0 disables the optimization."""
+
+    max_prefill_chunk_delay_steps: int = Field(default=16, ge=1)
+    """Maximum scheduler steps to defer a small prefill chunk before release."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
@@ -279,6 +286,14 @@ class SchedulerConfig:
                 self.max_num_batched_tokens,
             )
 
+        if self.min_prefill_chunk_tokens > 0:
+            logger.info(
+                "Small prefill batching enabled: minimum=%d tokens, "
+                "maximum delay=%d scheduler steps.",
+                self.min_prefill_chunk_tokens,
+                self.max_prefill_chunk_delay_steps,
+            )
+
         self.verify_max_model_len(max_model_len)
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
@@ -293,6 +308,11 @@ class SchedulerConfig:
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len."
+            )
+
+        if self.min_prefill_chunk_tokens > 0 and not self.enable_chunked_prefill:
+            raise ValueError(
+                "Chunked prefill must be enabled when min_prefill_chunk_tokens > 0."
             )
 
         if self.max_num_batched_tokens < self.max_num_seqs:

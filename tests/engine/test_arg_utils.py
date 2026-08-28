@@ -206,6 +206,21 @@ def test_get_kwargs():
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
 
 
+def test_small_prefill_chunk_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--min-prefill-chunk-tokens",
+            "1024",
+            "--max-prefill-chunk-delay-steps",
+            "8",
+        ]
+    )
+
+    assert args.min_prefill_chunk_tokens == 1024
+    assert args.max_prefill_chunk_delay_steps == 8
+
+
 def test_jit_monitor_verbose_arg():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(["--jit-monitor-verbose"])

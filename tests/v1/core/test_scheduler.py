@@ -53,6 +53,25 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def _update_model_output(
+    scheduler: Scheduler,
+    scheduler_output: SchedulerOutput,
+    sampled_token_ids: list[list[int]],
+) -> None:
+    req_ids = list(scheduler_output.num_scheduled_tokens)
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: index for index, req_id in enumerate(req_ids)},
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [
@@ -335,6 +354,184 @@ def test_schedule_partial_requests():
     assert output.num_scheduled_tokens[requests[0].request_id] == 1
     assert output.num_scheduled_tokens[requests[1].request_id] == 700
     assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+def test_small_prefill_chunks_are_batched():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        min_prefill_chunk_tokens=512,
+        max_prefill_chunk_delay_steps=8,
+    )
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["decode"])
+    (long_req,) = create_requests(num_requests=1, num_tokens=1500, req_ids=["long"])
+    (small_req,) = create_requests(num_requests=1, num_tokens=400, req_ids=["small"])
+
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0]])
+
+    scheduler.add_request(long_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "long": 1023}
+    _update_model_output(scheduler, output, [[0], []])
+
+    scheduler.add_request(small_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1}
+    _update_model_output(scheduler, output, [[0]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {
+        "decode": 1,
+        "long": 477,
+        "small": 400,
+    }
+
+
+def test_small_prefill_chunk_delay_is_bounded():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        min_prefill_chunk_tokens=512,
+        max_prefill_chunk_delay_steps=2,
+    )
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["decode"])
+    (prefill_req,) = create_requests(
+        num_requests=1, num_tokens=1500, req_ids=["prefill"]
+    )
+
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0]])
+
+    scheduler.add_request(prefill_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0], []])
+
+    for _ in range(2):
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens == {"decode": 1}
+        _update_model_output(scheduler, output, [[0]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "prefill": 477}
+
+
+def test_small_prefill_chunk_runs_without_decode():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        min_prefill_chunk_tokens=512,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=400,
+        req_ids=["prefill"],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"prefill": 400}
+
+
+@pytest.mark.parametrize("finish", [True, False], ids=["abort", "preempt"])
+def test_small_prefill_pending_state_is_cleared(finish: bool):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        min_prefill_chunk_tokens=512,
+    )
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["decode"])
+    (prefill_req,) = create_requests(
+        num_requests=1, num_tokens=1500, req_ids=["prefill"]
+    )
+
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0]])
+    scheduler.add_request(prefill_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0], []])
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"decode": 1}
+    assert prefill_req.request_id in scheduler._pending_small_prefill_chunks
+
+    if finish:
+        scheduler.finish_requests(
+            prefill_req.request_id,
+            RequestStatus.FINISHED_ABORTED,
+        )
+    else:
+        scheduler.running.remove(prefill_req)
+        scheduler._preempt_request(prefill_req, 0.0)
+
+    assert prefill_req.request_id not in scheduler._pending_small_prefill_chunks
+
+
+def test_small_prefill_release_survives_allocation_failure(monkeypatch):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        min_prefill_chunk_tokens=512,
+        max_prefill_chunk_delay_steps=1,
+    )
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["decode"])
+    (prefill_req,) = create_requests(
+        num_requests=1, num_tokens=400, req_ids=["prefill"]
+    )
+
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0]])
+    scheduler.add_request(prefill_req)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0]])
+    first_deferred_step = scheduler._pending_small_prefill_chunks["prefill"][1]
+
+    original_allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    fail_prefill_allocation = True
+
+    def allocate_slots(request, *args, **kwargs):
+        if fail_prefill_allocation and request.request_id == "prefill":
+            return None
+        return original_allocate_slots(request, *args, **kwargs)
+
+    monkeypatch.setattr(scheduler.kv_cache_manager, "allocate_slots", allocate_slots)
+    output = scheduler.schedule()
+    _update_model_output(scheduler, output, [[0]])
+    assert scheduler._pending_small_prefill_chunks["prefill"][1] == (
+        first_deferred_step
+    )
+
+    fail_prefill_allocation = False
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "prefill": 400}
+    assert "prefill" not in scheduler._pending_small_prefill_chunks
+
+
+def test_small_prefill_default_path_skips_batching_helper(monkeypatch):
+    scheduler = create_scheduler(max_num_batched_tokens=1024)
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("small-prefill batching helper ran while disabled")
+
+    monkeypatch.setattr(scheduler, "_defer_small_prefill_chunk", fail_if_called)
+    (request,) = create_requests(num_requests=1, num_tokens=400)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert sum(output.num_scheduled_tokens.values()) == 400
+
+
+def test_small_prefill_batching_requires_chunked_prefill():
+    with pytest.raises(ValueError, match="Chunked prefill must be enabled"):
+        SchedulerConfig(
+            enable_chunked_prefill=False,
+            min_prefill_chunk_tokens=512,
+            max_model_len=SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            is_encoder_decoder=False,
+        )
 
 
 @pytest.mark.parametrize("has_running", [True, False])

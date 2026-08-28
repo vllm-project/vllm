@@ -310,6 +310,8 @@ class Scheduler(SchedulerInterface):
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
+        # request_id -> (chunk size, first deferred scheduler step)
+        self._pending_small_prefill_chunks: dict[str, tuple[int, int]] = {}
         # DP prefill balancing: Flag to track whether the last cadence-aligned
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
@@ -498,6 +500,68 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _defer_small_prefill_chunk(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        is_prefill: bool,
+        has_eligible_decode_requests: bool,
+        release_small_prefill_chunks: bool,
+    ) -> bool:
+        min_chunk_tokens = self.scheduler_config.min_prefill_chunk_tokens
+        if (
+            not has_eligible_decode_requests
+            or not is_prefill
+            or request.has_encoder_inputs
+            or num_new_tokens >= min_chunk_tokens
+        ):
+            self._pending_small_prefill_chunks.pop(request.request_id, None)
+            return False
+
+        pending = self._pending_small_prefill_chunks.get(request.request_id)
+        first_deferred_step = self.current_step if pending is None else pending[1]
+        self._pending_small_prefill_chunks[request.request_id] = (
+            num_new_tokens,
+            first_deferred_step,
+        )
+        return not release_small_prefill_chunks
+
+    def _has_eligible_decode_requests(
+        self, token_budget: int, input_budget: int, draft_slots: int
+    ) -> bool:
+        if token_budget <= 0 or input_budget <= draft_slots:
+            return False
+
+        for request in self.running:
+            if (
+                request.is_prefill_chunk
+                or self.current_step < request.next_decode_eligible_step
+            ):
+                continue
+            if (
+                request.num_output_placeholders > 0
+                and request.num_computed_tokens + 2 - request.num_output_placeholders
+                >= request.num_prompt_tokens + request.max_tokens
+            ):
+                continue
+
+            num_new_tokens = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
+            )
+            num_new_tokens = min(
+                num_new_tokens,
+                token_budget,
+                input_budget - draft_slots,
+                self.max_model_len
+                - request.num_computed_tokens
+                - self.num_sampled_tokens_per_step,
+            )
+            if num_new_tokens > 0:
+                return True
+        return False
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -525,6 +589,43 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+
+        min_prefill_chunk_tokens = self.scheduler_config.min_prefill_chunk_tokens
+        small_prefill_batching_enabled = min_prefill_chunk_tokens > 0
+        has_eligible_decode_requests = False
+        release_small_prefill_chunks = False
+        if small_prefill_batching_enabled:
+            has_eligible_decode_requests = self._has_eligible_decode_requests(
+                token_budget, input_budget, draft_slots
+            )
+            if not has_eligible_decode_requests:
+                self._pending_small_prefill_chunks.clear()
+            else:
+                self._pending_small_prefill_chunks = {
+                    req_id: pending
+                    for req_id, pending in self._pending_small_prefill_chunks.items()
+                    if req_id in self.requests
+                }
+                pending_small_prefill_tokens = sum(
+                    num_tokens
+                    for num_tokens, _ in self._pending_small_prefill_chunks.values()
+                )
+                oldest_small_prefill_delay = max(
+                    (
+                        self.current_step - first_deferred_step
+                        for _, first_deferred_step in (
+                            self._pending_small_prefill_chunks.values()
+                        )
+                    ),
+                    default=0,
+                )
+                release_small_prefill_chunks = bool(
+                    self._pending_small_prefill_chunks
+                ) and (
+                    pending_small_prefill_tokens >= min_prefill_chunk_tokens
+                    or oldest_small_prefill_delay
+                    >= self.scheduler_config.max_prefill_chunk_delay_steps
+                )
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -652,6 +753,16 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            if small_prefill_batching_enabled and self._defer_small_prefill_chunk(
+                request=request,
+                num_new_tokens=num_new_tokens,
+                is_prefill=request.is_prefill_chunk,
+                has_eligible_decode_requests=has_eligible_decode_requests,
+                release_small_prefill_chunks=release_small_prefill_chunks,
+            ):
+                req_index += 1
+                continue
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -724,6 +835,8 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if small_prefill_batching_enabled:
+                self._pending_small_prefill_chunks.pop(request_id, None)
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
@@ -1046,6 +1159,21 @@ class Scheduler(SchedulerInterface):
                         # The request cannot be scheduled.
                         break
 
+                if (
+                    small_prefill_batching_enabled
+                    and not load_kv_async
+                    and self._defer_small_prefill_chunk(
+                        request=request,
+                        num_new_tokens=num_new_tokens,
+                        is_prefill=num_computed_tokens < request.num_tokens - 1,
+                        has_eligible_decode_requests=has_eligible_decode_requests,
+                        release_small_prefill_chunks=release_small_prefill_chunks,
+                    )
+                ):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1177,6 +1305,8 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if small_prefill_batching_enabled:
+                    self._pending_small_prefill_chunks.pop(request_id, None)
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1421,6 +1551,7 @@ class Scheduler(SchedulerInterface):
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
+        self._pending_small_prefill_chunks.pop(request.request_id, None)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
@@ -2483,6 +2614,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        self._pending_small_prefill_chunks.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing

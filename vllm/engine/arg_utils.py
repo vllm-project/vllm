@@ -544,6 +544,8 @@ class EngineArgs:
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
+    min_prefill_chunk_tokens: int = SchedulerConfig.min_prefill_chunk_tokens
+    max_prefill_chunk_delay_steps: int = SchedulerConfig.max_prefill_chunk_delay_steps
     max_num_seqs: int | None = None
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
@@ -1568,6 +1570,14 @@ class EngineArgs:
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
+        scheduler_group.add_argument(
+            "--min-prefill-chunk-tokens",
+            **scheduler_kwargs["min_prefill_chunk_tokens"],
+        )
+        scheduler_group.add_argument(
+            "--max-prefill-chunk-delay-steps",
+            **scheduler_kwargs["max_prefill_chunk_delay_steps"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -2368,6 +2378,8 @@ class EngineArgs:
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            min_prefill_chunk_tokens=self.min_prefill_chunk_tokens,
+            max_prefill_chunk_delay_steps=self.max_prefill_chunk_delay_steps,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
