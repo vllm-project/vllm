@@ -4,9 +4,7 @@
 
 The AITER fused reshape+conv kernel learned Qwen3.5's flat ``[q|k|v|z]``
 packing in https://github.com/ROCm/aiter/pull/3251, so flat-layout models take
-the decode fast path too. Builds predating that only understand Qwen3-Next's
-interleaved packing and would read the wrong columns from a flat tensor, so
-flat layouts must keep falling back to the generic path there.
+the decode fast path too instead of falling back to the generic path.
 
 These tests run host-side on CPU: ``_forward_core_rocm`` is bound to a stub
 layer whose ``_forward_core_decode_aiter``/``_forward_core`` record which
@@ -24,7 +22,6 @@ import torch
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
-    _resolve_aiter_conv_layout_kwargs,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -54,20 +51,12 @@ def _make_metadata(
     )
 
 
-def _make_layer(gqa_interleaved_layout: bool, aiter_supports_layout: bool):
+def _make_layer(gqa_interleaved_layout: bool):
     """Stub layer running the real ``_forward_core_rocm``, recording dispatch."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
     layer.gqa_interleaved_layout = gqa_interleaved_layout
     layer.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
-    with patch.object(
-        qwen_gdn_linear_attn,
-        "GDN_AITER_SUPPORTS_QKVZ_LAYOUT",
-        aiter_supports_layout,
-    ):
-        layer._aiter_conv_layout_kwargs = _resolve_aiter_conv_layout_kwargs(
-            layer.qkvz_layout
-        )
 
     layer.calls = []
     layer._forward_core_decode_aiter = lambda **kw: layer.calls.append("aiter")
@@ -98,24 +87,19 @@ def _run(layer, meta) -> str:
     return layer.calls[0]
 
 
-@pytest.mark.parametrize("aiter_supports_layout", [True, False])
-def test_interleaved_always_takes_the_fast_path(aiter_supports_layout: bool) -> None:
-    """Qwen3-Next reached the fast path before ``qkvz_layout`` existed."""
-    layer = _make_layer(True, aiter_supports_layout)
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_pure_decode_takes_the_fast_path(gqa_interleaved_layout: bool) -> None:
+    """Both packings reach the fast path; flat used to be guarded out."""
+    layer = _make_layer(gqa_interleaved_layout)
     assert _run(layer, _make_metadata()) == "aiter"
 
 
-def test_flat_takes_the_fast_path_when_aiter_understands_the_layout() -> None:
-    layer = _make_layer(False, True)
-    with patch.object(qwen_gdn_linear_attn, "GDN_AITER_SUPPORTS_QKVZ_LAYOUT", True):
-        assert _run(layer, _make_metadata()) == "aiter"
-
-
-def test_flat_falls_back_on_aiter_without_qkvz_layout() -> None:
-    """Feeding flat tensors to an interleaved-only kernel destroys accuracy."""
-    layer = _make_layer(False, False)
-    with patch.object(qwen_gdn_linear_attn, "GDN_AITER_SUPPORTS_QKVZ_LAYOUT", False):
-        assert _run(layer, _make_metadata()) == "generic"
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_layout_string_matches_the_packing(gqa_interleaved_layout: bool) -> None:
+    """The value handed to the kernel's ``qkvz_layout`` parameter."""
+    layer = _make_layer(gqa_interleaved_layout)
+    expected = "interleaved" if gqa_interleaved_layout else "flat"
+    assert layer.qkvz_layout == expected
 
 
 @pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
@@ -131,21 +115,5 @@ def test_flat_falls_back_on_aiter_without_qkvz_layout() -> None:
 def test_non_pure_decode_batches_use_the_generic_path(
     gqa_interleaved_layout: bool, meta_kwargs: dict
 ) -> None:
-    layer = _make_layer(gqa_interleaved_layout, True)
-    with patch.object(qwen_gdn_linear_attn, "GDN_AITER_SUPPORTS_QKVZ_LAYOUT", True):
-        assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
-
-
-@pytest.mark.parametrize("qkvz_layout", ["flat", "interleaved"])
-def test_layout_kwarg_is_forwarded_when_supported(qkvz_layout: str) -> None:
-    with patch.object(qwen_gdn_linear_attn, "GDN_AITER_SUPPORTS_QKVZ_LAYOUT", True):
-        assert _resolve_aiter_conv_layout_kwargs(qkvz_layout) == {
-            "qkvz_layout": qkvz_layout
-        }
-
-
-@pytest.mark.parametrize("qkvz_layout", ["flat", "interleaved"])
-def test_layout_kwarg_is_omitted_when_unsupported(qkvz_layout: str) -> None:
-    """Passing it to an old AITER would raise TypeError; its default matches."""
-    with patch.object(qwen_gdn_linear_attn, "GDN_AITER_SUPPORTS_QKVZ_LAYOUT", False):
-        assert _resolve_aiter_conv_layout_kwargs(qkvz_layout) == {}
+    layer = _make_layer(gqa_interleaved_layout)
+    assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
