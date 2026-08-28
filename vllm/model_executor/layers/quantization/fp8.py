@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -28,6 +29,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    backend_to_kernel_cls,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -501,6 +504,47 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_vllm_cutlass=False,
         )
 
+        # TP shards the intermediate dim of the expert weights, so a
+        # per-shard size that is not a multiple of the checkpoint's block
+        # size makes the checkpoint's block scales impossible to shard
+        # exactly. When a finer block size (>= 32) divides both the
+        # checkpoint blocks and all involved dims, the weight scales are
+        # refined to that granularity at load time (a lossless upsampling,
+        # since the refined block divides the checkpoint block) and the
+        # Triton backend is forced: its kernels take the block shape as a
+        # runtime argument.
+        self.weight_scale_refine: tuple[int, int] | None = None
+        self.moe_block_shape = self.weight_block_size
+        if self.block_quant and self._needs_block_scale_refine():
+            assert self.weight_block_size is not None
+            block_n, block_k = self.weight_block_size
+            refine = math.gcd(
+                block_n,
+                block_k,
+                self.moe.intermediate_size_per_partition,
+                self.moe.hidden_dim,
+            )
+            if refine >= 32:
+                self.weight_scale_refine = (block_n // refine, block_k // refine)
+                self.moe_block_shape = [refine, refine]
+                self.fp8_backend = Fp8MoeBackend.TRITON
+                self.experts_cls = backend_to_kernel_cls(Fp8MoeBackend.TRITON)[0]
+                logger.info_once(
+                    "FP8 MoE block scales refined from %s to [%d, %d] to fit "
+                    "the TP-sharded intermediate size %d; using Triton "
+                    "backend.",
+                    str(self.weight_block_size),
+                    refine,
+                    refine,
+                    self.moe.intermediate_size_per_partition,
+                )
+
+    def _needs_block_scale_refine(self) -> bool:
+        assert self.weight_block_size is not None
+        block_n, block_k = self.weight_block_size
+        ispp = self.moe.intermediate_size_per_partition
+        return ispp % block_n != 0 or (self.moe.tp_size > 1 and ispp % block_k != 0)
+
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -519,6 +563,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         if self.block_quant:
             assert self.weight_block_size is not None
+            assert self.moe_block_shape is not None
+            moe_block_shape = self.moe_block_shape
             layer.weight_block_size = self.weight_block_size
             tp_size = get_tensor_model_parallel_world_size()
             block_n, block_k = (
@@ -530,18 +576,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # layers must be divisible by block_n.
             # Required by column parallel or enabling merged weights
             if intermediate_size_per_partition % block_n != 0:
-                raise ValueError(
-                    f"The output_size of gate's and up's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_n = {block_n}."
-                )
+                if self.weight_scale_refine is None:
+                    raise ValueError(
+                        f"The output_size of gate's and up's weight = "
+                        f"{intermediate_size_per_partition} is not divisible by "
+                        f"weight quantization block_n = {block_n}."
+                    )
+                # Use the refined block grid for the scale parameters; the
+                # loader upsamples the checkpoint scales accordingly.
+                block_n, block_k = moe_block_shape
             if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
                 # Required by row parallel
-                raise ValueError(
-                    f"The input_size of down's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_k = {block_k}."
-                )
+                if self.weight_scale_refine is None:
+                    raise ValueError(
+                        f"The input_size of down's weight = "
+                        f"{intermediate_size_per_partition} is not divisible by "
+                        f"weight quantization block_k = {block_k}."
+                    )
+                block_n, block_k = moe_block_shape
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -747,7 +799,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            block_shape=self.weight_block_size,
+            block_shape=self.moe_block_shape,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
