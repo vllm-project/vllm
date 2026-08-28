@@ -169,9 +169,6 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     """The ROCm FP4 AITER gates should depend only on the env toggles and the
     gfx950 hardware check.
 
-    The asm FP4 GEMM no longer has an env toggle -- it is always on for
-    gfx950 -- so it tracks VLLM_ROCM_USE_AITER and the arch check alone.
-
     Expected values are derived from the *actual* platform rather than a patched
     arch (gfx950 -> MI355, gfx942 -> MI300). A failure in this group therefore
     points straight at the hardware it ran on instead of a mocked value.
