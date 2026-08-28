@@ -73,7 +73,7 @@ def _seed_owner(manager, n, hash_bs):
     manager.new_step_starts()
 
 
-def test_connector_local_hit_does_not_overreach_the_mamba_state_boundary():
+def test_connector_divergent_local_hit_reports_mamba_lag():
     """The connector local hit must not over-reach the Mamba state boundary.
 
     E7v2: with a capable KV connector (spec decode on) and a hybrid
