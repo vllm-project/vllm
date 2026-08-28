@@ -5,6 +5,7 @@ import torch
 from vllm.distributed.parallel_state import (
     _init_stateless_group,
     _node_count,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -14,6 +15,7 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 _STANDBY_WORLD: StatelessGroupCoordinator | None = None
 _STANDBY_WORLD_NODE_COUNT: int | None = None
 _STANDBY_DP: StatelessGroupCoordinator | None = None
+_STANDBY_MOE_DP_PCP: StatelessGroupCoordinator | None = None
 _STANDBY_EP: StatelessGroupCoordinator | None = None
 _STANDBY_EPLB: StatelessGroupCoordinator | None = None
 
@@ -47,6 +49,7 @@ def create_standby_groups(
         _STANDBY_WORLD, \
         _STANDBY_WORLD_NODE_COUNT, \
         _STANDBY_DP, \
+        _STANDBY_MOE_DP_PCP, \
         _STANDBY_EP, \
         _STANDBY_EPLB
 
@@ -71,19 +74,34 @@ def create_standby_groups(
     _STANDBY_WORLD_NODE_COUNT = _node_count(_STANDBY_WORLD.tcp_store_group)
 
     tp_size = get_tp_group().world_size
+    pcp_size = get_pcp_group().world_size
     pp_size = get_pp_group().world_size
 
     all_ranks = torch.arange(new_world_size_across_dp).reshape(
-        -1, new_dp_size, pp_size, tp_size
+        -1, new_dp_size, pp_size, pcp_size, tp_size
     )
-    standby_dp_ranks = all_ranks.transpose(1, 3).reshape(-1, new_dp_size).unbind(0)
+    standby_dp_ranks = all_ranks.transpose(1, 4).reshape(-1, new_dp_size).unbind(0)
     standby_dp_ranks = [x.tolist() for x in standby_dp_ranks]
     _STANDBY_DP = _init_stateless_group(
         standby_dp_ranks, "dp", master_ip, backend, coord_store=coord_store
     )
 
+    standby_moe_dp_pcp_ranks = (
+        all_ranks.permute(0, 2, 4, 1, 3).reshape(-1, new_dp_size * pcp_size).unbind(0)
+    )
+    standby_moe_dp_pcp_ranks = [x.tolist() for x in standby_moe_dp_pcp_ranks]
+    _STANDBY_MOE_DP_PCP = _init_stateless_group(
+        standby_moe_dp_pcp_ranks,
+        "moe_dp_pcp_group",
+        master_ip,
+        backend,
+        coord_store=coord_store,
+    )
+
     standby_ep_ranks = (
-        all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
+        all_ranks.transpose(1, 2)
+        .reshape(-1, new_dp_size * pcp_size * tp_size)
+        .unbind(0)
     )
     standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
     _STANDBY_EP = _init_stateless_group(
@@ -106,12 +124,14 @@ def pop_standby_groups() -> dict:
         _STANDBY_WORLD, \
         _STANDBY_WORLD_NODE_COUNT, \
         _STANDBY_DP, \
+        _STANDBY_MOE_DP_PCP, \
         _STANDBY_EP, \
         _STANDBY_EPLB
 
     result = dict(
         world=_STANDBY_WORLD,
         dp=_STANDBY_DP,
+        moe_dp_pcp=_STANDBY_MOE_DP_PCP,
         ep=_STANDBY_EP,
         eplb=_STANDBY_EPLB,
         node_count=_STANDBY_WORLD_NODE_COUNT,
@@ -119,6 +139,7 @@ def pop_standby_groups() -> dict:
     _STANDBY_WORLD = None
     _STANDBY_WORLD_NODE_COUNT = None
     _STANDBY_DP = None
+    _STANDBY_MOE_DP_PCP = None
     _STANDBY_EP = None
     _STANDBY_EPLB = None
     return result

@@ -420,7 +420,12 @@ class ElasticEPScalingExecutor:
         self._wait_for_group_cleanup()
         self._release_cuda_graphs()
         retired_groups = _replace_active_groups(
-            world=None, dp=None, ep=None, eplb=None, node_count=None
+            world=None,
+            dp=None,
+            moe_dp_pcp=None,
+            ep=None,
+            eplb=None,
+            node_count=None,
         )
         self._start_group_cleanup(retired_groups)
         # Finish collective cleanup before this worker is shut down.
