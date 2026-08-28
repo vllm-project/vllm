@@ -1559,13 +1559,18 @@ def group_and_unify_kv_cache_specs(
     Group the KV cache specs and unify each group into one UniformTypeKVCacheSpecs.
     Currently, this is only used for DeepseekV4.
     """
+    non_hidden_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if not isinstance(spec, HiddenStateCacheSpec)
+    }
     if not any(
-        isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()
+        isinstance(spec, SlidingWindowMLASpec) for spec in non_hidden_specs.values()
     ):
         return None
 
     # SlidingWindowMLASpec models with uniform page sizes don't need tuple packing.
-    page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
+    page_sizes = {spec.page_size_bytes for spec in non_hidden_specs.values()}
     if len(page_sizes) <= 1:
         return None
 
@@ -1576,7 +1581,7 @@ def group_and_unify_kv_cache_specs(
     # NOTE: Here we group SWA layers by (block_size, sliding_window), which separates
     # SWA layers, C4I+C4A layers, and C128A layers into three different groups. It can
     # be fragile with only block_size and sliding_window as keys, but fine for now.
-    for name, spec in kv_cache_spec.items():
+    for name, spec in non_hidden_specs.items():
         if isinstance(spec, SlidingWindowMLASpec):
             grouped_swa_mla_specs[(spec.block_size, spec.sliding_window)][name] = spec
         elif isinstance(spec, MLAAttentionSpec):
@@ -1786,6 +1791,21 @@ def get_kv_cache_groups(
         # UniformTypeKVCacheSpecs.
         kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
         _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
+        hidden_specs = {
+            k: v
+            for k, v in kv_cache_spec.items()
+            if isinstance(v, HiddenStateCacheSpec)
+        }
+        if hidden_specs:
+            # Keep UniformTypeKVCacheSpecs so DSV4 packed-layout detection
+            # still sees an all-uniform group list.
+            hidden_uniform = UniformTypeKVCacheSpecs.from_specs(hidden_specs)
+            assert hidden_uniform is not None, (
+                "HiddenStateCacheSpec layers must form a uniform KV group"
+            )
+            kv_cache_groups.append(
+                KVCacheGroupSpec(list(hidden_specs), hidden_uniform)
+            )
         return kv_cache_groups
 
     # Pull HiddenStateCacheSpec layers out before the general multi-group
