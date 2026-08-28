@@ -972,11 +972,17 @@ async def benchmark(
         else contextlib.nullcontext()
     )
 
-    async def limited_request_func(request_func_input, session, pbar):
+    async def limited_request_func(
+        request_func_input, session, pbar, request_arrival_time
+    ):
         async with semaphore:
-            return await request_func(
+            output = await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
+        # Preserve start_time as the time the request was sent. It is used by
+        # throughput calculations; record client-side semaphore delay separately.
+        output.benchmark_queue_time = output.start_time - request_arrival_time
+        return output
 
     probe_outputs: list[RequestFuncOutput] = []
     probe_stop = asyncio.Event()
@@ -1064,10 +1070,11 @@ async def benchmark(
             request_id=request_id,
             chat_messages=request.chat_messages,
         )
+        request_arrival_time = time.perf_counter()
         tasks.append(
             asyncio.create_task(
                 limited_request_func(
-                    request_func_input=request_func_input, session=session, pbar=pbar
+                    request_func_input, session, pbar, request_arrival_time
                 )
             )
         )
@@ -1284,7 +1291,9 @@ async def benchmark(
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
             "itls": [output.itl for output in outputs],
+            "latencies": [output.latency for output in outputs],
             "start_times": [output.start_time for output in outputs],
+            "queue_times": [output.benchmark_queue_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
@@ -1301,8 +1310,44 @@ async def benchmark(
             "input_sequence_throughput": metrics.input_sequence_throughput,
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
+            "latencies": [output.latency for output in outputs],
+            "queue_times": [output.benchmark_queue_time for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    if max_concurrency is not None:
+        queue_times = [
+            output.benchmark_queue_time for output in outputs if output.success
+        ]
+        e2els_including_queue = [
+            output.latency + output.benchmark_queue_time
+            for output in outputs
+            if output.success
+        ]
+        print("{s:{c}^{n}}".format(s=" Client-side Queueing ", n=50, c="-"))
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Mean client queue time (ms):", np.mean(queue_times or 0) * 1000
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Mean E2EL incl. client queue (ms):",
+                np.mean(e2els_including_queue or 0) * 1000,
+            )
+        )
+        result["mean_client_queue_time_ms"] = np.mean(queue_times or 0) * 1000
+        result["mean_e2el_including_client_queue_ms"] = (
+            np.mean(e2els_including_queue or 0) * 1000
+        )
+        for p in selected_percentiles:
+            p_word = str(int(p)) if int(p) == p else str(p)
+            result[f"p{p_word}_client_queue_time_ms"] = (
+                np.percentile(queue_times or 0, p) * 1000
+            )
+            result[f"p{p_word}_e2el_including_client_queue_ms"] = (
+                np.percentile(e2els_including_queue or 0, p) * 1000
+            )
 
     if probe_stats is not None:
         result.update(probe_stats)
