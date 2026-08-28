@@ -2429,6 +2429,9 @@ class ECMooncakeConnector(ECConnectorBase):
             self._consumer_scheduler_metrics["events_received"] += 1
             if data.get("ready"):
                 self._consumer_scheduler_metrics["events_ready"] += 1
+                transfer_id = str(data["transfer_id"])
+                if transfer_id in self._cancelled_transfer_ids:
+                    continue
                 if identifier in self._ready_hashes:
                     # Redundant only for as long as the hash stays ready; hold
                     # on to the spec so an eviction does not strand whoever

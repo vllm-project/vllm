@@ -504,6 +504,41 @@ class TestECMooncakeSchedulerMetadata:
             finally:
                 scheduler.shutdown()
 
+    def test_cancelled_transfer_ignores_late_ready_events(
+        self, mock_vllm_config_consumer
+    ):
+        """Cancelled is terminal even when a ready event was already queued."""
+        transfer_id = "cancelled-transfer"
+        ports = [19101, 19102, 19103, 19104]
+        event = {
+            "mm_hash": "hash",
+            "transfer_id": transfer_id,
+            "ready": True,
+            "reservation_id": "reservation",
+            "nbytes": 16,
+            "shape": [4],
+            "dtype": "float32",
+        }
+
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            try:
+                scheduler._event_shard_count = len(ports)
+                scheduler._cancelled_transfer_ids.add(transfer_id)
+                scheduler._event_zmq_socket = Mock()
+                scheduler._event_zmq_socket.recv_json.side_effect = [
+                    {**event, "shard": port} for port in ports
+                ] + [zmq.Again()]
+
+                scheduler._drain_push_notifications()
+
+                assert transfer_id not in scheduler._pending_specs
+                assert transfer_id not in scheduler._event_ready_shards
+            finally:
+                scheduler.shutdown()
+
     def test_item_that_never_arrives_fails_the_request(
         self, mock_vllm_config_consumer, mock_request_with_3_mm
     ):
