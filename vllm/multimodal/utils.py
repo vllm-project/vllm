@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
-from typing_extensions import deprecated
 
 from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
@@ -217,12 +216,13 @@ def strip_covered_mm_data(
     mm_features: list[MultiModalFeatureSpec],
     num_computed_tokens: int,
     uses_mrope: bool = False,
+    uses_xdrope: bool = False,
 ) -> list[MultiModalFeatureSpec]:
     """Drop the tensor data of mm items whose placeholder span is fully inside
     a prefix-cache-covered region: no encoder run can be scheduled for them,
-    so the workers never consume the payload fields. M-RoPE models are the
-    exception: the worker computes positions for the whole prompt from the
-    CPU-side metadata fields (e.g. grid dims), so those are kept. The
+    so the workers never consume the payload fields. M-RoPE and XD-RoPE models
+    are the exception: the worker computes positions for the whole prompt from
+    the CPU-side metadata fields (e.g. grid dims), so those are kept. The
     scheduler-side ``Request`` keeps the full features."""
     if not mm_features or num_computed_tokens == 0:
         return mm_features
@@ -234,7 +234,7 @@ def strip_covered_mm_data(
             return f
 
         data = None
-        if uses_mrope:
+        if uses_mrope or uses_xdrope:
             data = MultiModalKwargsItem(
                 {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
             )
@@ -323,19 +323,6 @@ def group_and_batch_mm_kwargs(
             pin_memory=pin_memory,
         ):
             yield modality, num_items, mm_kwargs_batch
-
-
-@deprecated(
-    "`group_mm_kwargs_by_modality` has been renamed to `group_and_batch_mm_kwargs`. "
-    "The old name will be removed in v0.19."
-)
-def group_mm_kwargs_by_modality(
-    mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
-    *,
-    device: torch.types.Device = None,
-    pin_memory: bool = False,
-) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    return group_and_batch_mm_kwargs(mm_kwargs, device=device, pin_memory=pin_memory)
 
 
 def fetch_audio(
