@@ -171,6 +171,52 @@ async def test_responses_render_basic(client):
 
 
 @pytest.mark.asyncio
+async def test_responses_render_includes_prior_input_items(client):
+    current_turn = {
+        "role": "user",
+        "content": "Which color should I remember?",
+    }
+    current_turn_response = await client.post(
+        "/v1/responses/render",
+        json={"model": MODEL_NAME, "input": [current_turn]},
+    )
+    multi_turn_response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": [
+                {"role": "user", "content": "Remember the color cobalt."},
+                {"role": "assistant", "content": "I will remember cobalt."},
+                current_turn,
+            ],
+        },
+    )
+
+    assert current_turn_response.status_code == 200
+    assert multi_turn_response.status_code == 200
+    current_turn_token_ids = current_turn_response.json()["token_ids"]
+    multi_turn_token_ids = multi_turn_response.json()["token_ids"]
+    assert len(multi_turn_token_ids) > len(current_turn_token_ids)
+
+
+@pytest.mark.asyncio
+async def test_responses_render_rejects_previous_response_id_over_http(client):
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "Continue the previous response.",
+            "previous_response_id": "resp_previous",
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "previous_response_id"
+
+
+@pytest.mark.asyncio
 async def test_completion_render_basic(client):
     """Test basic completion render endpoint."""
     # Make request to render endpoint
