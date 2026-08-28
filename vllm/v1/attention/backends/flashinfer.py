@@ -5,7 +5,7 @@
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import torch
@@ -230,14 +230,14 @@ def _fill_xqa_ragged_draft_mask_kernel(
         end = row
     local = row - start
     length = end - start
-    bits = 0
+    bits = tl.zeros((), dtype=tl.int32)
     base = col * 16
     for i in tl.static_range(16):
         b = base + i
         allow = b < length
         if CAUSAL:
             allow = allow & (b <= local)
-        bits = bits | tl.where(allow, 1 << i, 0)
+        bits = bits | tl.where(allow, 1 << i, 0).to(tl.int32)
     tl.store(mask_ptr + row * mask_row_stride + col, bits.to(tl.uint16))
 
 
@@ -1480,8 +1480,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         """
         if not _adaptive_xqa_mismatch_safe(self.vllm_config):
             return  # configuration cannot reach the device-ragged XQA path
+        layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(
-            self.vllm_config, AttentionLayerBase, self.layer_names
+            self.vllm_config, layer_type, self.layer_names
         )
         if not layers:
             raise ValueError(
@@ -1611,6 +1612,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         zeroes all rows at or beyond ``q_cu[-1]`` (stale-proof padding).
         """
         buf = self._adaptive_mask_buffer
+        assert buf is not None
         # mask smaller than the batch's packed rows (a partial mask would
         # be read past its valid shape). Host-known token count only —
         # the fill path must never read device values.
@@ -3200,7 +3202,7 @@ class FlashInferImpl(AttentionImpl):
                         "FlashInfer XQA speculative decode is not wired in vLLM yet."
                     )
 
-                # W6 prepare-only: SM100 trtllm-gen varlen metadata maps
+                # Prepare-only: SM100 trtllm-gen varlen metadata maps
                 # to the generic wrapper's cum_seq_lens_q / max_q_len ONLY
                 # when the metadata explicitly authorizes it — never
                 # inferred from a non-None q_cu_seq_lens, which legacy

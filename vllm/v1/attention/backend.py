@@ -648,7 +648,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Returns:
             L, or None for builders reporting ALWAYS, which replay any batch,
             and for builders that cannot replay variable-length batches.
+        """
+        return None
 
+    def _finalize_adaptive_decode(self, decode_query_len: int) -> None:
+        """Receive the runner-resolved decode width after runner init.
+
+        Default no-op; backends with device-ragged decode capability
+        override this to resolve their conditional mismatch mode.
         """
         return None
 

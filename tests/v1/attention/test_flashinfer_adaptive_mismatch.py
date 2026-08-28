@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer conditional device/CPU query-lens mismatch support (SM120 XQA).
 
 Covers the W1-W7 invariant matrix from the flashinfer-adaptive-mismatch

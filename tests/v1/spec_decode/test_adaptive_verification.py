@@ -306,3 +306,144 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
     # The prefill keeps its scheduled tokens; only drafts are dropped.
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+<<<<<<< HEAD
+=======
+
+
+def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
+    # The scheduler sizes the grammar bitmask from the *scheduled* drafts
+    # (len(drafts) + 1 rows per request), but a zero budget rewrites
+    # cu_num_logits_np to bonus-only. Deriving the bitmask -> logits mapping
+    # from those rewritten offsets drops rows and trips the
+    # `num_masks == len(mapping)` assert in apply_grammar_bitmask.
+    manager = make_manager(
+        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
+        np.ones(64),
+    )
+    manager.req_states.req_id_to_index["prefill"] = 2
+    manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
+    manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
+    manager._max_total_logits = 2  # < 3 requests * 1 bonus token
+
+    scheduled_spec_decode_tokens = {"low": [1, 2], "high": [3, 4]}
+    manager.get_num_tokens(
+        {"low": 3, "high": 3, "prefill": 40}, scheduled_spec_decode_tokens
+    )
+    assert manager._batch_budget[2] == 0
+
+    req_ids = ["low", "high", "prefill"]
+    num_draft_tokens_per_req = np.array([2, 2, 0], dtype=np.int32)
+    _, cu_num_logits_np = manager.compact_batch(
+        num_draft_tokens_per_req,
+        np.array([3, 3, 40], dtype=np.int32),
+        np.array([0, 3, 6, 7], dtype=np.int32),
+    )
+
+    mask_stride = manager.num_speculative_steps + manager.num_bonus_tokens
+    mapping = _build_grammar_mapping(
+        req_ids,
+        req_ids,
+        cu_num_logits_np,
+        num_draft_tokens_per_req,
+        manager.num_bonus_tokens,
+        mask_stride,
+    )
+
+    num_bitmask_rows = sum(
+        len(scheduled_spec_decode_tokens.get(req_id, ())) + 1 for req_id in req_ids
+    )
+    assert len(mapping) == num_bitmask_rows
+    # (request, position) keys, so the kernel can mask rows the compacted
+    # device layout no longer has room for.
+    assert mapping == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_manager_gate_accepts_varlen_decode_support(monkeypatch):
+    """VARLEN_DECODE (GDN) satisfies the varlen-decode cudagraph
+    requirement without claiming mixed prefill-decode full capture."""
+    import torch
+
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
+    from vllm.v1.worker.gpu.spec_decode import adaptive_verification as av
+
+    sentinel = object()
+    monkeypatch.setattr(
+        av, "AdaptiveVerificationManager", lambda *args, **kwargs: sentinel
+    )
+    groups = [[SimpleNamespace(backend=GDNAttentionBackend)]]
+    for support in (AttentionCGSupport.VARLEN_DECODE, AttentionCGSupport.ALWAYS):
+        manager = av.maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=True,
+            attn_groups=groups,
+            vllm_config=None,
+            attn_cg_support=AttentionCGSupportInfo(support, "GDN_ATTN"),
+            req_states=object(),
+            query_start_loc=torch.zeros(4, dtype=torch.int32),
+            num_bonus_tokens=1,
+            max_total_logits=1024,
+        )
+        assert manager is sentinel
+
+
+def test_manager_gate_rejects_below_varlen_decode_support(monkeypatch):
+    import pytest
+    import torch
+
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
+    from vllm.v1.worker.gpu.spec_decode import adaptive_verification as av
+
+    monkeypatch.setattr(av, "AdaptiveVerificationManager", lambda *args, **kwargs: None)
+    groups = [[SimpleNamespace(backend=GDNAttentionBackend)]]
+    for support in (
+        AttentionCGSupport.UNIFORM_BATCH,
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE,
+        AttentionCGSupport.NEVER,
+    ):
+        with pytest.raises(ValueError, match="VARLEN_DECODE"):
+            av.maybe_create_adaptive_verification_manager(
+                enable_adaptive_verification=True,
+                attn_groups=groups,
+                vllm_config=None,
+            attn_cg_support=AttentionCGSupportInfo(support, "GDN_ATTN"),
+                req_states=object(),
+                query_start_loc=torch.zeros(4, dtype=torch.int32),
+                num_bonus_tokens=1,
+                max_total_logits=1024,
+            )
+
+
+def test_manager_gate_rejects_query_lens_mismatch_unsupported_backend(monkeypatch):
+    """The two boot gates are independent: a backend that still needs exact
+    CPU query lengths is rejected even at ALWAYS cg support."""
+    import pytest
+    import torch
+
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
+    from vllm.v1.worker.gpu.spec_decode import adaptive_verification as av
+
+    class FakeSSMBackend:
+        @classmethod
+        def supports_device_cpu_query_lens_mismatch(cls):
+            return False
+
+    monkeypatch.setattr(av, "AdaptiveVerificationManager", lambda *args, **kwargs: None)
+    groups = [[SimpleNamespace(backend=FakeSSMBackend)]]
+    with pytest.raises(ValueError, match="FakeSSMBackend.*does not support"):
+        av.maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=True,
+            attn_groups=groups,
+            vllm_config=None,
+            attn_cg_support=AttentionCGSupportInfo(
+                AttentionCGSupport.ALWAYS, "FakeSSMBackend"
+            ),
+            req_states=object(),
+            query_start_loc=torch.zeros(4, dtype=torch.int32),
+            num_bonus_tokens=1,
+            max_total_logits=1024,
+        )
+>>>>>>> a9527fb8d2 (fix: Gate 4 conformance — both pre-commit stages green, mypy clean)

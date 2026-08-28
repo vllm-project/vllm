@@ -57,7 +57,7 @@ the production-flags module (fp8 KV + SWA + spec width 8).
 ## Measurements (deployed wheel, parent W1 harness, ~49K ctx)
 
 | arm | accept rate | warm decode t/s |
-|---|---|---|
+| --- | --- | --- |
 | FlashInfer + DFlash2 static | 3.36 | 141.0 |
 | FlashInfer + DSpark static | 2.04 | 96.6 |
 | Triton + DSpark adaptive (before) | 1.78-2.46 | 40.7 / 32.4 |
