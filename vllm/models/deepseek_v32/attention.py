@@ -313,6 +313,8 @@ class DeepseekV32Attention(MLAAttention):
             else None
         )
         hisparse_cache = self.hisparse_cache
+        layer_attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+        self.impl.prepare_for_batch(layer_attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
