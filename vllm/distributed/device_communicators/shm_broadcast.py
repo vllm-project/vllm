@@ -344,14 +344,11 @@ class ShmRingBuffer:
                     # when attaching to an existing block.
                     assert self.shared_memory.size >= self.total_bytes_of_buffer
                 except FileNotFoundError:
-                    # This object may be deserialized on a node that never
-                    # attaches to it (e.g. a directly pickled ShmRingBuffer,
-                    # or a remote-node deserialize of a Handle whose local
-                    # attach wasn't required); in that case it is legitimately
-                    # unused, so we suppress the error here. Callers that
-                    # require a working local attach (e.g.
-                    # MessageQueue.create_from_handle for a confirmed local
-                    # reader) must check for this and fail clearly themselves.
+                    # we might deserialize the object in a different node
+                    # in this case, this object is not used,
+                    # and we should suppress the error. Callers that require
+                    # a working local attach (e.g. create_from_handle) must
+                    # check for this and fail clearly themselves.
                     pass
 
     def handle(self):
@@ -573,25 +570,12 @@ class MessageQueue:
             assert handle.buffer_handle is not None
             self.buffer = ShmRingBuffer(*handle.buffer_handle)
             if not hasattr(self.buffer, "shared_memory"):
-                # `rank` was already confirmed to be on the writer's node
-                # (see in_the_same_node_as / create_from_process_group), so
-                # attaching to the writer's shm segment is mandatory here.
-                # ShmRingBuffer itself stays silent on a missing segment to
-                # support the legitimate case of a handle deserialized where
-                # local attach isn't required; this is the point where we
-                # know it *was* required, so fail clearly instead of letting
-                # the half-constructed buffer surface a confusing
-                # AttributeError far away from the real cause.
                 name = handle.buffer_handle[3]
                 raise RuntimeError(
-                    f"Rank {rank} was confirmed to be on the writer's node "
-                    f"but failed to attach to its shared memory ring buffer "
-                    f"{name!r}. Possible causes: the writer process exited "
-                    "before or while creating the segment, the shared "
-                    "memory mount is exhausted (see --shm-size / "
-                    "--ipc=host), or this process does not actually share "
-                    "a /dev/shm namespace with the writer despite being on "
-                    "the same host."
+                    f"Rank {rank} is a local reader but could not attach to "
+                    f"shared memory ring buffer {name!r}. The segment may "
+                    "have been unlinked, the handle may be stale, or the "
+                    "processes may not share a /dev/shm namespace."
                 )
             self.current_idx = 0
             self.local_reader_rank = handle.local_reader_ranks.index(rank)

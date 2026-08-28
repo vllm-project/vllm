@@ -723,12 +723,17 @@ def test_shm_ring_buffer_attach_to_missing_segment_stays_unused():
     ShmRingBuffer.__reduce__ -- it is a legitimately unused object, not an
     error by itself. Callers that require a working attach must check for
     this themselves (see MessageQueue.create_from_handle)."""
-    buffer = ShmRingBuffer(
-        n_reader=1,
-        max_chunk_bytes=24 * 1024 * 1024,
-        max_chunks=10,
-        name="vllm-test-x",
-    )
+    with mock.patch.object(
+        shm_broadcast.shared_memory,
+        "SharedMemory",
+        side_effect=FileNotFoundError(),
+    ):
+        buffer = ShmRingBuffer(
+            n_reader=1,
+            max_chunk_bytes=24 * 1024 * 1024,
+            max_chunks=10,
+            name="vllm-test-x",
+        )
     assert not hasattr(buffer, "shared_memory")
 
 
@@ -744,7 +749,14 @@ def test_create_from_handle_raises_when_mandatory_local_attach_fails():
         local_subscribe_addr="ignored-because-we-fail-before-connecting",
         local_notify_addr="ignored-because-we-fail-before-connecting",
     )
-    with pytest.raises(RuntimeError, match="vllm-test-x"):
+    with (
+        mock.patch.object(
+            shm_broadcast.shared_memory,
+            "SharedMemory",
+            side_effect=FileNotFoundError(),
+        ),
+        pytest.raises(RuntimeError, match="vllm-test-x"),
+    ):
         MessageQueue.create_from_handle(handle, rank=0)
 
 
