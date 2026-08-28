@@ -8,7 +8,7 @@ use clap::Parser;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
-use vllm_llm::{EncodeRequest, EngineTask, Llm, PoolingParams, PoolingTask};
+use vllm_llm::{EncodeRequest, Llm, PoolingParams, PoolingTask};
 
 const PROMPT: &str = "Represent this sentence for semantic search: a small cat sleeps on a sofa.";
 const PROMPT_TOKEN_IDS: &[u32] = &[
@@ -45,12 +45,7 @@ fn build_request() -> EncodeRequest {
         request_id: format!("rust-embedding-{}", uuid::Uuid::new_v4()),
         prompt_token_ids: PROMPT_TOKEN_IDS.to_vec(),
         task: PoolingTask::Embed,
-        pooling_params: PoolingParams {
-            use_activation: true,
-            dimensions: None,
-            step_tag_id: None,
-            returned_token_ids: None,
-        },
+        pooling_params: PoolingParams::default(),
         arrival_time: None,
         cache_salt: None,
         trace_headers: None,
@@ -85,10 +80,6 @@ async fn main() -> Result<()> {
         .await
         .context("failed to discover supported engine tasks")?
         .to_vec();
-    ensure!(
-        supported_tasks.contains(&EngineTask::Pooling(PoolingTask::Embed)),
-        "model does not support the embedding task: {supported_tasks:?}"
-    );
     let llm = Llm::new(client);
 
     let output = timeout(
@@ -106,6 +97,10 @@ async fn main() -> Result<()> {
         .map(|&value| f64::from(value).powi(2))
         .sum::<f64>()
         .sqrt();
+    ensure!(
+        (l2_norm - 1.0).abs() < 1e-4,
+        "default embedding activation did not produce a unit vector: L2 norm={l2_norm}"
+    );
     let preview_len = output.output.data.len().min(8);
 
     println!("model={}", args.model);

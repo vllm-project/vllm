@@ -10,11 +10,15 @@ use tokio::time::timeout;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+    UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
-use vllm_engine_core_client::protocol::task::PoolingTask;
+use vllm_engine_core_client::protocol::task::{EngineTask, GenerationTask, PoolingTask};
 use vllm_engine_core_client::protocol::tensor::WireTensor;
+use vllm_engine_core_client::protocol::utility::{
+    EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope,
+};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::{EncodeRequest, Error, Llm, PoolingParams};
@@ -28,7 +32,7 @@ fn sample_request() -> EncodeRequest {
         prompt_token_ids: vec![11, 22],
         task: PoolingTask::Embed,
         pooling_params: PoolingParams {
-            use_activation: false,
+            use_activation: Some(false),
             dimensions: Some(2),
             step_tag_id: None,
             returned_token_ids: None,
@@ -55,6 +59,34 @@ async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
         .unwrap();
 }
 
+async fn answer_supported_tasks(
+    dealer: &mut DealerSocket,
+    push: &mut PushSocket,
+    tasks: Vec<&str>,
+) {
+    let frames = dealer.recv().await.unwrap().into_vec();
+    assert_eq!(frames[0].as_ref(), &[0x03]);
+    let request: EngineCoreUtilityRequest = rmp_serde::from_slice(&frames[1]).unwrap();
+    assert_eq!(request.method_name, "get_supported_tasks");
+
+    send_outputs(
+        push,
+        UtilityCallOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output: UtilityOutput {
+                call_id: request.call_id,
+                failure_message: None,
+                result: Some(UtilityResultEnvelope::without_type_info(
+                    rmpv::ext::to_value(tasks).unwrap(),
+                )),
+            },
+        }
+        .into(),
+    )
+    .await;
+}
+
 async fn connect_llm(handshake_address: String, model_name: &str, ipc: &IpcNamespace) -> Llm {
     let client = EngineCoreClient::connect(
         EngineCoreClientConfig::new_single(handshake_address)
@@ -70,6 +102,37 @@ async fn connect_llm(handshake_address: String, model_name: &str, ipc: &IpcNames
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn encode_rejects_unsupported_task_before_submit() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-task-validation".to_vec(),
+        |dealer, push| {
+            Box::pin(async move {
+                answer_supported_tasks(dealer, push, vec!["generate"]).await;
+            })
+        },
+    );
+
+    let llm = connect_llm(handshake_address, "test-model", &ipc).await;
+    let error = llm.encode(sample_request()).await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnsupportedTask {
+            model_name,
+            requested_task: EngineTask::Pooling(PoolingTask::Embed),
+            supported_tasks,
+        } if model_name == "test-model"
+            && supported_tasks == vec![EngineTask::Generation(GenerationTask::Generate)]
+    ));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn encode_lowers_request_and_collects_final_pooling_tensor() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -80,12 +143,13 @@ async fn encode_lowers_request_and_collects_final_pooling_tensor() {
         b"engine-encode".to_vec(),
         |dealer, push| {
             Box::pin(async move {
+                answer_supported_tasks(dealer, push, vec!["embed"]).await;
                 let request = recv_engine_request(dealer).await;
                 let params = request.pooling_params.as_ref().unwrap();
                 assert_eq!(request.external_req_id.as_deref(), Some("embed-1"));
                 assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
                 assert_eq!(params.task, PoolingTask::Embed);
-                assert!(!params.use_activation);
+                assert_eq!(params.use_activation, Some(false));
                 assert_eq!(params.dimensions, Some(2));
 
                 send_outputs(
@@ -159,6 +223,7 @@ async fn encode_reports_terminal_output_without_pooling_tensor() {
         b"engine-missing-pooling".to_vec(),
         |dealer, push| {
             Box::pin(async move {
+                answer_supported_tasks(dealer, push, vec!["embed"]).await;
                 let request = recv_engine_request(dealer).await;
                 send_outputs(
                     push,
@@ -201,8 +266,9 @@ async fn cancelling_encode_future_aborts_engine_request() {
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
         b"engine-cancel-encode".to_vec(),
-        move |dealer, _push| {
+        move |dealer, push| {
             Box::pin(async move {
+                answer_supported_tasks(dealer, push, vec!["embed"]).await;
                 let request = recv_engine_request(dealer).await;
                 request_received_tx.send(()).unwrap();
 

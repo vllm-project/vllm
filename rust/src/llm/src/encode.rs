@@ -17,16 +17,18 @@ use crate::output::FinishReason;
 use crate::request::prepare_request_id;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
-/// Normalized parameters for one token-level pooling request.
+/// Parameters for one token-level pooling request.
 ///
-/// Model-aware defaults and validation are performed by the caller before
-/// reaching this token-level API.
-#[derive(Debug, Clone, PartialEq)]
+/// Engine-core resolves model-aware defaults and performs model-specific
+/// validation.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PoolingParams {
     /// Whether to apply activation function to the pooler outputs.
-    pub use_activation: bool,
+    /// `None` lets engine-core resolve the model's default.
+    pub use_activation: Option<bool>,
     /// Reduce the dimensions of embeddings if model support matryoshka
     /// representation.
+    /// `None` lets engine-core resolve the model's default.
     pub dimensions: Option<u32>,
     /// If set, only the score corresponding to the `step_tag_id` in the
     /// generated sentence should be returned. Otherwise, the scores for all
@@ -264,7 +266,7 @@ mod tests {
             prompt_token_ids: vec![11, 22],
             task: PoolingTask::Embed,
             pooling_params: PoolingParams {
-                use_activation: false,
+                use_activation: Some(false),
                 dimensions: Some(128),
                 step_tag_id: None,
                 returned_token_ids: None,
@@ -283,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_lowers_normalized_pooling_request() {
+    fn prepare_lowers_pooling_request() {
         let prepared = sample_request().prepare(false).unwrap();
         let request = prepared.engine_request;
 
@@ -293,7 +295,7 @@ mod tests {
         assert_eq!(
             request.pooling_params,
             Some(EngineCorePoolingParams {
-                use_activation: false,
+                use_activation: Some(false),
                 dimensions: Some(128),
                 step_tag_id: None,
                 returned_token_ids: None,
