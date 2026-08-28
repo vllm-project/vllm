@@ -40,7 +40,6 @@ class _ExpandPageIndicesKernel:
         block_table_tensor,
         stride,
         paged_kv_indptr,
-        seq_lens_for_kernel,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
@@ -48,7 +47,9 @@ class _ExpandPageIndicesKernel:
         self.kernel_block_size = KERNEL_BLOCK_SIZE
         for req_idx in range(self.grid[0]):
             out_start = int(paged_kv_indptr[req_idx].item())
-            seq_len = int(seq_lens_for_kernel[req_idx].item())
+            seq_len = int(
+                (paged_kv_indptr[req_idx + 1] - paged_kv_indptr[req_idx]).item()
+            )
             for token_idx in range(seq_len):
                 block_id = int(
                     block_table_tensor[req_idx, token_idx // KERNEL_BLOCK_SIZE].item()
