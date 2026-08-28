@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import sys
+import threading
 from abc import ABC, abstractmethod
 
 import tokenizers
@@ -177,14 +179,62 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
+        prompt_ids = request.prompt_token_ids
+        warm_last_id = None
+        warm_loop = None
+        if prompt_ids is not None and len(prompt_ids) > 1:
+            try:
+                warm_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Sync LLMEngine: no loop to warm on, keep the lazy path.
+                warm_loop = None
+            if warm_loop is not None:
+                warm_last_id = prompt_ids[-1]
+                prompt_ids = prompt_ids[:-1]
+
         # Use native prefill to prime the decode stream with prompt tokens.
         # Look up DecodeStream on the module so backend patches (e.g. the
         # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
         # are honored regardless of import order.
         self.stream = tokenizers.decoders.DecodeStream(
-            ids=request.prompt_token_ids,
+            ids=prompt_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
+
+        # The primed stream defers its O(prompt) prefix decode into the
+        # first step() (tokenizers >= 0.22), which would otherwise run in
+        # the first process_outputs call, inside TTFT. Prime with all but
+        # the last prompt id and step that id in a background thread so
+        # the prefix decode overlaps prefill. The submission is deferred
+        # one loop iteration (call_soon): this constructor runs before the
+        # request is enqueued to the engine core, and step() holds the GIL
+        # for the whole warm, so submitting here could stall the enqueue
+        # by the warm duration. decode_next is shadowed with a one-shot
+        # join and unshadowed on the first token, so the steady per-token
+        # path is the unmodified class method. The Event join strictly
+        # serializes stream access: the consumer thread never touches the
+        # stream before the warm thread is done with it.
+        self._warm_event: threading.Event | None = None
+        self._warm_pending_id: int | None = None
+        if warm_last_id is not None and warm_loop is not None:
+            self._warm_fallback_ids = request.prompt_token_ids
+            self._warm_event = threading.Event()
+            self._warm_pending_id = warm_last_id
+            self._warm_loop = warm_loop
+            try:
+                warm_loop.call_soon(self._submit_warm)
+            except RuntimeError:
+                # Loop already closed: fail closed to the lazy path.
+                self._warm_event = None
+                self._warm_pending_id = None
+                self.stream = tokenizers.decoders.DecodeStream(
+                    ids=self._warm_fallback_ids,
+                    skip_special_tokens=self.skip_special_tokens,
+                )
+            else:
+                self.decode_next = (  # type: ignore[method-assign]
+                    self._join_warm_decode_next
+                )
 
         self.spaces_between_special_tokens = (
             sampling_params.skip_special_tokens
@@ -207,6 +257,71 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             else:
                 # No added tokens.
                 self.spaces_between_special_tokens = True
+
+    def _submit_warm(self) -> None:
+        if self._warm_pending_id is None:
+            # Already warmed inline by _join_warm_decode_next.
+            return
+        last_prompt_id, self._warm_pending_id = self._warm_pending_id, None
+        try:
+            self._warm_loop.run_in_executor(None, self._warm_step, last_prompt_id)
+        except RuntimeError:
+            # Executor already shut down: fail closed to the lazy path.
+            self.stream = tokenizers.decoders.DecodeStream(
+                ids=self._warm_fallback_ids,
+                skip_special_tokens=self.skip_special_tokens,
+            )
+            assert self._warm_event is not None
+            self._warm_event.set()
+
+    def _warm_step(self, last_prompt_id: int) -> None:
+        try:
+            token = self.stream.step(self.tokenizer, last_prompt_id)
+            if token is None and not self._is_added_token(last_prompt_id):
+                # Ambiguous warm result: when the prompt's decode ends
+                # mid-codepoint (U+FFFD), the warmed stream's state can
+                # diverge from the state the lazy full prime reaches after
+                # its first step (the #48854 class). Fail closed to the
+                # lazy path so streamed output stays byte-equal, at lazy
+                # cost only for this prompt class. Added/special-token
+                # tails legitimately return None under skip_special_tokens
+                # and stay byte-equal, so they keep the warm.
+                self.stream = tokenizers.decoders.DecodeStream(
+                    ids=self._warm_fallback_ids,
+                    skip_special_tokens=self.skip_special_tokens,
+                )
+        except Exception:
+            # Fail closed: restore a fully primed lazy stream so the first
+            # decode_next() behaves exactly like the unwarmed path.
+            self.stream = tokenizers.decoders.DecodeStream(
+                ids=self._warm_fallback_ids,
+                skip_special_tokens=self.skip_special_tokens,
+            )
+        finally:
+            assert self._warm_event is not None
+            self._warm_event.set()
+
+    def _is_added_token(self, token_id: int) -> bool:
+        added_token_ids = getattr(self.tokenizer, "added_token_ids", None)
+        if added_token_ids is None:
+            self.tokenizer.added_token_ids = added_token_ids = {
+                tid: tok.content
+                for tid, tok in self.tokenizer.get_added_tokens_decoder().items()
+            }
+        return token_id in added_token_ids
+
+    def _join_warm_decode_next(self, next_token_id: int) -> str:
+        if self._warm_pending_id is not None:
+            # First output arrived before the deferred submission ran
+            # (the constructing task never yielded): warm inline, which
+            # is exactly the lazy path's first-step cost. Runs on the
+            # loop thread like _submit_warm, so they cannot race.
+            last_prompt_id, self._warm_pending_id = self._warm_pending_id, None
+            self._warm_step(last_prompt_id)
+        assert self._warm_event is not None
+        self._warm_event.wait()
+        del self.decode_next
+        return self.decode_next(next_token_id)
 
     def decode_next(self, next_token_id: int) -> str:
         token = self._protected_step(next_token_id)
