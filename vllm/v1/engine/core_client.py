@@ -1233,13 +1233,27 @@ class AsyncMPClient(MPClient):
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
-        result = msgspec.convert(res, FaultToleranceResult)
+        status = self._engine_status[self.engine_ranks_managed[0]]
+        # Reject a second recovery while one is in flight
+        if status.get("ft_state") == "recovering":
+            return FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason="another recovery is in progress",
+            )
+        status["ft_state"] = "recovering"
+        status["last_ft_request_id"] = ft_request.request_id
+        status.pop("ft_error", None)
+        try:
+            res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+            result = msgspec.convert(res, FaultToleranceResult)
+        except Exception as e:
+            result = FaultToleranceResult(ft_request.request_id, False, str(e))
         if not result.success:
-            status = self._engine_status.get(self.engine_ranks_managed[0])
-            if status is not None:
-                status["last_ft_request_id"] = result.request_id
-                status["ft_error"] = result.reason
+            status = self._engine_status[self.engine_ranks_managed[0]]
+            status["ft_state"] = "failed"
+            status["last_ft_request_id"] = result.request_id
+            status["ft_error"] = result.reason
         return result
 
     async def get_status(self):
