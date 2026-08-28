@@ -24,7 +24,9 @@ BLOCK_SIZE = 16
 def _setup_fused_inputs(device: str = "cuda"):
     torch.manual_seed(42)
     q = torch.randn(
-        NUM_TOKENS, NUM_Q_HEADS, QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM,
+        NUM_TOKENS,
+        NUM_Q_HEADS,
+        QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM,
         device=device,
     )
     positions = torch.randint(0, 8192, (NUM_TOKENS,), device=device)
@@ -44,14 +46,24 @@ def _setup_fused_inputs(device: str = "cuda"):
     cos_cache = cos_sin_cache[:, :half]
     sin_cache = cos_sin_cache[:, half:]
     return (
-        q_nope, q_pe, kv_c, k_pe, kv_cache, q_out,
-        slot_mapping, k_scale, q_scale, positions,
-        cos_cache, sin_cache,
+        q_nope,
+        q_pe,
+        kv_c,
+        k_pe,
+        kv_cache,
+        q_out,
+        slot_mapping,
+        k_scale,
+        q_scale,
+        positions,
+        cos_cache,
+        sin_cache,
     )
 
 
 def _skip_if_no_kernel():
     from vllm._aiter_ops import rocm_aiter_ops
+
     if not rocm_aiter_ops.has_fused_rope_mla_kv_cache():
         pytest.skip("fused_qk_rope_concat_and_cache_mla kernel absent on this build")
 
@@ -59,18 +71,39 @@ def _skip_if_no_kernel():
 def test_rope_applied_to_pe():
     """q_out[..., QK_NOPE_HEAD_DIM:] must differ from q_pe — RoPE was applied."""
     from vllm._aiter_ops import rocm_aiter_ops
+
     _skip_if_no_kernel()
 
     device = "cuda"
-    (q_nope, q_pe, kv_c, k_pe, kv_cache, q_out,
-     slot_mapping, k_scale, q_scale, positions,
-     cos_cache, sin_cache) = _setup_fused_inputs(device)
+    (
+        q_nope,
+        q_pe,
+        kv_c,
+        k_pe,
+        kv_cache,
+        q_out,
+        slot_mapping,
+        k_scale,
+        q_scale,
+        positions,
+        cos_cache,
+        sin_cache,
+    ) = _setup_fused_inputs(device)
 
     rocm_aiter_ops.fused_rope_and_mla_kv_cache_write(
-        q_nope=q_nope, q_pe=q_pe, kv_c=kv_c, k_pe=k_pe,
-        kv_cache=kv_cache, q_out=q_out, slot_mapping=slot_mapping,
-        k_scale=k_scale, q_scale=q_scale, positions=positions,
-        cos_cache=cos_cache, sin_cache=sin_cache, is_neox=True,
+        q_nope=q_nope,
+        q_pe=q_pe,
+        kv_c=kv_c,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        q_out=q_out,
+        slot_mapping=slot_mapping,
+        k_scale=k_scale,
+        q_scale=q_scale,
+        positions=positions,
+        cos_cache=cos_cache,
+        sin_cache=sin_cache,
+        is_neox=True,
     )
 
     assert not torch.allclose(q_out[..., QK_NOPE_HEAD_DIM:], q_pe), (
@@ -81,25 +114,44 @@ def test_rope_applied_to_pe():
 def test_slot_mapping_respected():
     """Only slots in slot_mapping should be written — others stay zero."""
     from vllm._aiter_ops import rocm_aiter_ops
+
     _skip_if_no_kernel()
 
     device = "cuda"
-    (q_nope, q_pe, kv_c, k_pe, kv_cache, q_out,
-     _slot_mapping, k_scale, q_scale, positions,
-     cos_cache, sin_cache) = _setup_fused_inputs(device)
+    (
+        q_nope,
+        q_pe,
+        kv_c,
+        k_pe,
+        kv_cache,
+        q_out,
+        _slot_mapping,
+        k_scale,
+        q_scale,
+        positions,
+        cos_cache,
+        sin_cache,
+    ) = _setup_fused_inputs(device)
 
     # Write only to slots 0 and 1; all other cache entries must stay zero.
     slot_mapping = torch.tensor([0, 1, 0, 1], dtype=torch.long, device=device)
 
     rocm_aiter_ops.fused_rope_and_mla_kv_cache_write(
-        q_nope=q_nope, q_pe=q_pe, kv_c=kv_c, k_pe=k_pe,
-        kv_cache=kv_cache, q_out=q_out, slot_mapping=slot_mapping,
-        k_scale=k_scale, q_scale=q_scale, positions=positions,
-        cos_cache=cos_cache, sin_cache=sin_cache, is_neox=True,
+        q_nope=q_nope,
+        q_pe=q_pe,
+        kv_c=kv_c,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        q_out=q_out,
+        slot_mapping=slot_mapping,
+        k_scale=k_scale,
+        q_scale=q_scale,
+        positions=positions,
+        cos_cache=cos_cache,
+        sin_cache=sin_cache,
+        is_neox=True,
     )
 
     assert kv_cache[0, 0].any(), "Slot 0 should be written"
     assert kv_cache[0, 1].any(), "Slot 1 should be written"
     assert not kv_cache[0, 2:].any(), "Slots 2+ must remain zero"
-
-
