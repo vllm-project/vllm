@@ -50,7 +50,10 @@ logger = init_logger(__name__)
 
 
 def is_breakable_cudagraph_enabled() -> bool:
-    return bool(envs.VLLM_USE_BREAKABLE_CUDAGRAPH)
+    # None (unset) means default-on; only an explicit "0" disables.
+    # Per-config yielding to an explicit compilation mode is resolved in
+    # VllmConfig._maybe_enable_breakable_cudagraph.
+    return envs.VLLM_USE_BREAKABLE_CUDAGRAPH is not False
 
 
 F = TypeVar("F", bound=Callable[..., Any])

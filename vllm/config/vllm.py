@@ -712,10 +712,6 @@ class VllmConfig:
         return bool(architectures & default_breakable_cudagraph_architectures())
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
-
         # Breakable cudagraphs are on by default, but yield when
         # compilation was explicitly enabled: an explicitly-set compilation
         # mode implies the torch.compile-based piecewise path instead.
@@ -723,8 +719,8 @@ class VllmConfig:
             self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.NONE
         )
-        env_set = "VLLM_USE_BREAKABLE_CUDAGRAPH" in os.environ
-        if env_set and explicitly_compiled and is_breakable_cudagraph_enabled():
+        enabled_env = envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+        if enabled_env and explicitly_compiled:
             raise ValueError(
                 "VLLM_USE_BREAKABLE_CUDAGRAPH=1 conflicts with the explicitly "
                 f"set compilation mode {self.compilation_config.mode}: "
@@ -732,9 +728,8 @@ class VllmConfig:
                 "compilation. Either set VLLM_USE_BREAKABLE_CUDAGRAPH=0 or "
                 "drop the explicit compilation mode."
             )
-        enabled = is_breakable_cudagraph_enabled() and not (
-            not env_set and explicitly_compiled
-        )
+        # None (unset) means default-on unless compilation is explicit.
+        enabled = enabled_env if enabled_env is not None else not explicitly_compiled
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
