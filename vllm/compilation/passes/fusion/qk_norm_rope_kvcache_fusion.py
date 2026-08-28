@@ -911,6 +911,13 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     is_interleaved=is_interleaved,
                                 ).register(self.patterns)
 
+            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so
+            # homogeneous attention layers produce duplicate search patterns.
+            # As in the other LayerName-aware fusion passes, one supported
+            # layer registers all shape/style variants for the model.
+            if _USE_LAYERNAME:
+                break
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
