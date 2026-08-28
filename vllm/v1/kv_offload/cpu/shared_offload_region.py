@@ -36,7 +36,8 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
             )
         if time.monotonic() > deadline:
             raise TimeoutError(
-                f"Timed out waiting for mmap file to reach {expected_size} bytes"
+                "Timed out waiting for mmap file to reach "
+                f"{expected_size} bytes; actual size is {file_stat.st_size} bytes"
             )
         time.sleep(0.005)
 
@@ -149,9 +150,14 @@ class SharedOffloadRegion:
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
                 logger.info(
-                    "Created mmap file %s (%.2f GB)",
+                    "Created mmap file %s (%d bytes, %.2f GB; blocks=%d, "
+                    "row_stride=%d, worker_page=%d)",
                     self.mmap_path,
+                    self.total_size_bytes,
                     self.total_size_bytes / 1e9,
+                    self.num_blocks,
+                    self._row_stride,
+                    cpu_page_size,
                 )
 
             self.mmap_obj = mmap.mmap(

@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
@@ -28,7 +29,7 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 
 
 def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
@@ -39,6 +40,19 @@ def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         if group.role is KVCacheGroupRole.HISPARSE_INDEXER
     )
+
+
+def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
+    """Return the physical bytes occupied by one block of a cache group.
+
+    Worker configs may retain ``UniformTypeKVCacheSpecs`` while scheduler
+    configs flatten that wrapper to one representative per-layer spec.  Keep
+    the result invariant across those two representations.
+    """
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return spec.page_size_bytes
+    return spec.page_size_bytes * len(group.layer_names)
 
 
 def build_offloading_config(
@@ -124,7 +138,7 @@ def build_offloading_config(
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
     elif kv_cache_config.num_blocks > 0:
         worker_kv_bytes_per_block = sum(
-            group.kv_cache_spec.page_size_bytes for _, group in selected_groups
+            _group_kv_bytes_per_block(group) for _, group in selected_groups
         )
 
     single_group_spec = (
