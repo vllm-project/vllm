@@ -1042,6 +1042,7 @@ class EngineArgs:
             type=lambda s: [
                 int(device_id) if device_id.isdigit() else device_id
                 for device_id in (part.strip() for part in s.split(","))
+                if device_id
             ],
             default=None,
             help="Comma-separated physical GPU device IDs or UUIDs to use "

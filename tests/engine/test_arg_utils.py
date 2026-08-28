@@ -842,6 +842,14 @@ class TestDeviceIds:
         parsed = parser.parse_args(["--model", "m", "--device-ids", "0, 2, 4"])
         assert parsed.device_ids == [0, 2, 4]
 
+    def test_cli_parsing_drops_empty_tokens(self):
+        """Trailing/duplicate commas must not leave empty tokens, which would
+        otherwise trip the misleading "mix integer IDs and UUIDs" error."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(["--model", "m", "--device-ids", "0,1,"])
+        assert parsed.device_ids == [0, 1]
+
     def test_visible_ordinal_to_physical_ignores_assigned_ids(self, monkeypatch):
         """visible_device_id_to_physical_device_id maps torch device ordinals,
         independent of the logical-to-physical mapping.
