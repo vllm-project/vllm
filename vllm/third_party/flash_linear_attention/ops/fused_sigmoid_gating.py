@@ -222,7 +222,20 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    # The readout `o = state @ q` is accumulated in fp32 inside the kernel, but
+    # was materialized in the input (activation) dtype. The gated-delta-net
+    # recurrent state is an *unnormalized* accumulator that grows over long,
+    # low-decay context (it is normalized only at the readout by RMSNormGated),
+    # so with an fp32 SSM state cache the readout can exceed fp16's ~65504 range
+    # and overflow to +/-inf -> NaN after normalization. Materialize the output
+    # in the state's precision so an fp32 state is not silently downcast and
+    # overflowed; an fp16 state keeps the original (faster) dtype unchanged.
+    o_dtype = (
+        torch.float32
+        if initial_state is not None and initial_state.dtype == torch.float32
+        else q.dtype
+    )
+    o = q.new_empty(NK, *v.shape, dtype=o_dtype)
     if inplace_final_state:
         final_state = initial_state
     else:
