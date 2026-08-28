@@ -33,8 +33,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
-    TopKWeightAndReduceNoOP,
 )
 
 from .flashinfer_ep_common import FlashInferEPPrepareAndFinalizeBase
@@ -200,21 +200,22 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        # The Standard experts either delegate weight+reduce to us
-        # (TopKWeightAndReduceDelegate) or have already applied the dispatched
-        # per-token routing weights and reduced their local picks
-        # (TopKWeightAndReduceNoOP, e.g. the Triton experts). Both are correct here:
-        # FlashInfer HT combine applies NO weights (routing weights were captured at
-        # dispatch and consumed by the experts) and only reduces the per-rank partial
-        # sums across ranks — so there is no double weighting in either case.
-        assert isinstance(
-            weight_and_reduce_impl,
-            (TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP),
-        ), (
-            "FlashInfer moe_ep HT combine reduces per-rank partials across ranks "
-            "(weights bound at dispatch); the experts must not request a different "
-            f"weight/reduce, got {type(weight_and_reduce_impl).__name__}."
-        )
+        # HT combine applies no weights (FWD ncclEpCombine rejects a topk_weights
+        # input), so the top-k weight+reduce must be done before it: by the
+        # experts (NoOP) or, when they delegate, here. topk_weights/topk_ids are
+        # the recv-space tensors from prepare() -- modular_kernel shadows the
+        # caller's originals -- so they index fused_expert_output's rows.
+        if fused_expert_output.numel() != 0:
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            fused_expert_output = weight_and_reduce_impl.apply(
+                output=None,
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
         from flashinfer.moe_ep import CombineInputParams
 
         handle = self._pop_handle()
