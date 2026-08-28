@@ -74,3 +74,46 @@ def test_completion_request_accepts_minus_one_as_unlimited():
         }
     )
     assert request.thinking_token_budget is None
+
+
+def test_chat_completion_request_post_thinking_to_sampling_params():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 1.0,
+            "post_thinking": {"temperature": 0.4, "top_p": 0.95, "top_k": 20},
+        }
+    )
+    params = request.to_sampling_params(max_tokens=16, default_sampling_params={})
+    assert params.temperature == 1.0
+    assert params.post_thinking is not None
+    assert params.post_thinking.temperature == 0.4
+    assert params.post_thinking.top_p == 0.95
+    assert params.post_thinking.top_k == 20
+
+
+def test_chat_completion_request_inherits_server_default_post_thinking():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    )
+    params = request.to_sampling_params(
+        max_tokens=16,
+        default_sampling_params={"post_thinking": {"temperature": 0.4}},
+    )
+    assert params.post_thinking is not None
+    assert params.post_thinking.temperature == 0.4
+
+
+def test_chat_completion_request_rejects_invalid_post_thinking_temperature():
+    with pytest.raises(VLLMValidationError, match="temperature"):
+        ChatCompletionRequest.model_validate(
+            {
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "hello"}],
+                "post_thinking": {"temperature": 3.5},
+            }
+        )

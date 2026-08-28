@@ -53,6 +53,22 @@ class PenaltiesState:
         if do_penalty:
             self._new_penalties_reqs.append(req_idx)
 
+    def update_knobs(
+        self,
+        req_idx: int,
+        repetition_penalty: float,
+        frequency_penalty: float,
+        presence_penalty: float,
+    ) -> None:
+        self.repetition_penalty.np[req_idx] = repetition_penalty
+        self.frequency_penalty.np[req_idx] = frequency_penalty
+        self.presence_penalty.np[req_idx] = presence_penalty
+        self.use_penalty[req_idx] = (
+            repetition_penalty != 1.0
+            or frequency_penalty != 0.0
+            or presence_penalty != 0.0
+        )
+
     def apply_staged_writes(self) -> None:
         if self._new_penalties_reqs:
             idx_mapping = async_tensor_h2d(

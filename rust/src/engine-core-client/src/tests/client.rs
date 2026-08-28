@@ -2664,6 +2664,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             max_tokens: 16,
             min_tokens: 0,
             thinking_token_budget: None,
+            post_thinking: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,

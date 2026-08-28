@@ -117,6 +117,8 @@ pub(super) struct GenerationConfig {
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+    pub post_thinking:
+        Option<vllm_engine_core_client::protocol::sampling::PostThinkingParams>,
 }
 
 /// Deserialize a generation-config `top_k` into the text sampling model.

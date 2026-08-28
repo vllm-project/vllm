@@ -130,6 +130,15 @@ class InputProcessor:
                     "enabled. Start the engine with --enable-trace-replay "
                     "to use it."
                 )
+            if params.post_thinking is not None and (
+                    self.vllm_config.reasoning_config is None
+                    or not self.vllm_config.reasoning_config.enabled
+            ):
+                raise VLLMValidationError(
+                    "post_thinking is set but reasoning_config is "
+                    "not configured. Please set --reasoning-parser "
+                    "and/or --reasoning-config to use post_thinking."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS

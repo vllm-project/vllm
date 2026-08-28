@@ -7,7 +7,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{
+    PostThinkingParams, RepetitionDetectionParams,
+};
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
@@ -160,6 +162,12 @@ pub struct CompletionRequest {
     /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
+
+    /// Sampling knobs to use after the model exits the thinking block.
+    /// Unset fields inherit the primary sampling parameters. Requires a
+    /// configured reasoning parser.
+    #[serde(default)]
+    pub post_thinking: Option<PostThinkingParams>,
 
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
