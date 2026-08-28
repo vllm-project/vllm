@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
@@ -356,3 +358,78 @@ def test_prefill_stats_truncates_failed_external_source_segments():
         "p2p": 200,
         "cpu": 50,
     }
+
+
+def test_prefill_stats_normalizes_external_source_segments():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=8,
+        external_cached_token_sources=[
+            ("p2p", 0),
+            ("cpu", 3),
+            ("cpu", 5),
+            ("disk", 0),
+        ],
+    )
+
+    assert prefill_stats.external_cached_token_sources == [("cpu", 8)]
+
+    prefill_stats.truncate_external_cached_tokens(0)
+
+    assert prefill_stats.external_cached_token_sources == []
+    assert prefill_stats.num_external_cached_tokens == 0
+    assert prefill_stats.num_cached_tokens == 4
+    assert prefill_stats.num_computed_tokens == 12
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        [("", 8)],
+        [("cpu", -1), ("disk", 9)],
+        [("cpu", 7)],
+        [("cpu", 9)],
+    ],
+)
+def test_prefill_stats_rejects_malformed_external_source_segments(
+    sources: list[tuple[str, int]],
+):
+    prefill_stats = PrefillStats()
+
+    with pytest.raises(AssertionError):
+        prefill_stats.set(
+            num_prompt_tokens=16,
+            num_local_cached_tokens=4,
+            num_external_cached_tokens=8,
+            external_cached_token_sources=sources,
+        )
+
+
+def test_prompt_token_stats_accumulates_sources_across_outputs():
+    stats = PromptTokenStats()
+    first = PrefillStats()
+    first.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=4,
+        external_cached_token_sources=[("cpu", 4)],
+    )
+    second = PrefillStats()
+    second.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=2,
+        num_external_cached_tokens=6,
+        external_cached_token_sources=[("cpu", 2), ("disk", 4)],
+    )
+
+    stats.update_from_output(first)
+    stats.update_from_output(second)
+
+    assert stats.cached_tokens_by_source == {
+        "device": 6,
+        "cpu": 6,
+        "disk": 4,
+    }
+    assert sum(stats.cached_tokens_by_source.values()) == stats.cached_tokens == 16
