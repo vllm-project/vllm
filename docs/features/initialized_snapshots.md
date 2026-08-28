@@ -24,7 +24,9 @@ Snapshots currently require:
   `cuda-checkpoint`-compatible helper, and `nvidia-smi` on `PATH`.
 - Root or passwordless `sudo` for CRIU.
 - `io_uring` disabled before launch because CRIU cannot dump it. Use
-  `kernel.io_uring_disabled=1` for an unprivileged process or `=2` host-wide.
+  `kernel.io_uring_disabled=1` for an unprivileged process. A process running
+  as root, including the `docker exec` flow below, bypasses `=1`, so use `=2`
+  host-wide.
 - No established TCP connection to a peer outside the captured process tree.
 - A remote model ID and an immutable 40-character `--revision`. Local model
   directories and mutable revisions are not supported.
@@ -52,6 +54,8 @@ and root ownership. This example also keeps the container filesystem and
 `/dev/shm` namespace stable for the lifetime of the artifact:
 
 ```bash
+sudo sysctl kernel.io_uring_disabled=2
+
 snapshot_root="$(pwd)/vllm-snapshots"
 sudo install -d -m 0700 -o root -g root "${snapshot_root}"
 
