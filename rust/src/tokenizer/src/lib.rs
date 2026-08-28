@@ -39,6 +39,15 @@ pub trait Tokenizer: Send + Sync {
     /// Convert one token ID into the tokenizer's raw token string.
     fn id_to_token(&self, id: u32) -> Option<String>;
 
+    /// Borrow tokenizer added-vocabulary entries as `(token, id)` pairs.
+    ///
+    /// Backends that do not expose the distinction between model vocabulary
+    /// and added vocabulary return an empty list.
+    // TODO: add support to all tokenizer backends
+    fn added_vocab(&self) -> &[(String, u32)] {
+        &[]
+    }
+
     /// Return the vocabulary size. Backends that cannot report it fall back to
     /// `usize::MAX`, an effectively unbounded value used only by test stubs.
     fn vocab_size(&self) -> usize {

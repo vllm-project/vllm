@@ -12,6 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -48,7 +49,11 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
-            (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+            (
+                Mamba2AttentionMetadataBuilder,
+                GDNAttentionMetadataBuilder,
+                ShortConvAttentionMetadataBuilder,
+            ),
         ):
             return {}
         return {
@@ -265,6 +270,24 @@ class MambaHybridModelState(DefaultModelState):
                     spec_decode_mask, num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+
+        if self._align_mode:
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            aligned_index_builders = []
+            for group_idx, group_id in enumerate(mamba_group_ids):
+                for group in attn_groups[group_id]:
+                    builder = group.get_metadata_builder(0)
+                    if hasattr(builder, "mamba_aligned_state_indices"):
+                        aligned_index_builders.append((group_idx, builder))
+            if aligned_index_builders:
+                ctx = self._ensure_align_ctx(
+                    kv_cache_config, mamba_group_ids, block_tables
+                )
+                all_group_indices = ctx.compute_aligned_state_indices(
+                    input_batch.seq_lens, num_reqs
+                )
+                for group_idx, builder in aligned_index_builders:
+                    builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
