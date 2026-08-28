@@ -798,6 +798,8 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "encoder_compilation_time",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
