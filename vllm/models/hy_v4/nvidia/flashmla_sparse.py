@@ -217,6 +217,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
+        actual_num_heads: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
@@ -226,15 +227,20 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell. Pad from q's head count, not
         # self.num_heads: under DCP the heads are all-gathered before this.
-        actual_num_heads = q.shape[1]
+        if actual_num_heads is None:
+            actual_num_heads = q.shape[1]
         padded_num_heads = (
             (actual_num_heads + self.prefill_padding - 1)
             // self.prefill_padding
             * self.prefill_padding
         )
-        attn_sink = self._sinks_for_query(q, head_dim=1, kernel_heads=padded_num_heads)
+        # q_concat_buffer may already include the kernel-required padding.
+        # The sink remains defined only for the real query heads.
+        attn_sink = self._sinks_for_query(
+            q[:, :actual_num_heads], head_dim=1, kernel_heads=padded_num_heads
+        )
 
-        if actual_num_heads < padded_num_heads:
+        if q.shape[1] < padded_num_heads:
             logger.warning_once(
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for BF16 sparse prefill kernel"
