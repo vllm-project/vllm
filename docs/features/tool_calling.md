@@ -472,6 +472,16 @@ Supported models:
 
 Flags: `--tool-call-parser apertus`
 
+### HyperCLOVAX-SEED-Think-14B Models (`hyperclovax_seed_think_14b`)
+
+Supported models:
+
+* `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B`
+
+This model emits tool calls as a JSON array following a `<|im_start|>assistant -> tool/function_call` delimiter, and wraps reasoning in `/think` blocks. Use it together with the matching reasoning parser so the reasoning/tool boundary is detected correctly (which also lets the structured-output grammar engage for `tool_choice="required"`).
+
+Flags: `--tool-call-parser hyperclovax_seed_think_14b --reasoning-parser hyperclovax_seed_think_14b --chat-template examples/tool_chat_template_hyperclovax_seed_think_14b.jinja`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
