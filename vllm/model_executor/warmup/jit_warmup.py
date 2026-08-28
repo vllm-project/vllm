@@ -10,12 +10,18 @@ import inspect
 import itertools
 import operator
 import textwrap
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
+
+from tqdm import tqdm
+
+from vllm.distributed.parallel_state import is_global_first_rank
+from vllm.logger import init_logger
 
 __all__ = [
     "JitWarmupRegistry",
@@ -28,6 +34,8 @@ __all__ = [
 
 
 CompileKeyT = TypeVar("CompileKeyT")
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -666,8 +674,30 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
 
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
-        for compile_key in self.get_warmup_keys(*args, **kwargs):
+        keys = self.get_warmup_keys(*args, **kwargs)
+        total = len(keys)
+        name = type(self).__name__
+        if total == 0:
+            logger.info("Warming up %s: 0 keys, skip", name)
+            return
+        logger.info("Warming up %s: %d keys", name, total)
+        t0 = time.monotonic()
+        # Progress bar on rank 0 only; other ranks compile silently to avoid
+        # duplicated output across TP/PP workers (mirrors deep_gemm_warmup).
+        iterator = tqdm(
+            keys,
+            desc=f"Warming up {name}",
+            total=total,
+            disable=not is_global_first_rank(),
+        )
+        for compile_key in iterator:
             self.compile(compile_key)
+        logger.info(
+            "Warming up %s: %d keys finished in %.2fs",
+            name,
+            total,
+            time.monotonic() - t0,
+        )
 
 
 class JitWarmupRegistry:
