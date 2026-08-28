@@ -248,6 +248,40 @@ def test_stage1_correctness(
     _assert_close("stage1", out, ref, atol=5e-2, rtol=5e-2)
 
 
+def test_stage1_split_k_correctness() -> None:
+    case = _make_case(tokens=16, experts=8, model_dim=512, inter_dim=128, topk=2)
+    sorted_ids, _, sorted_expert_ids, num_valid_ids = _route(case, TILE_M)
+    ref = torch_moe_stage1(
+        case.hidden,
+        case.w1_bf16_qdq,
+        case.w2_bf16_qdq,
+        case.topk_weights,
+        case.topk_ids,
+        dtype=DTYPE,
+        activation=ActivationType.Silu,
+        quant_type=QuantType.No,
+        doweight=False,
+    )
+
+    out = nvfp4_moe_stage1(
+        case.hidden,
+        case.w1_packed_flydsl,
+        case.w1_scale_flydsl,
+        case.w1_global_scale,
+        sorted_ids,
+        sorted_expert_ids,
+        num_valid_ids,
+        topk=case.topk,
+        inter_dim=case.inter_dim,
+        tile_m=TILE_M,
+        tile_n=TILE_N,
+        tile_k=TILE_K,
+        k_batch=2,
+    )
+    torch.accelerator.synchronize()
+    _assert_close("stage1 split-K", out, ref, atol=5e-2, rtol=5e-2)
+
+
 @pytest.mark.parametrize("model_dim", MODEL_DIMS)
 @pytest.mark.parametrize("inter_dim", INTER_DIMS)
 @pytest.mark.parametrize("topk", [8])

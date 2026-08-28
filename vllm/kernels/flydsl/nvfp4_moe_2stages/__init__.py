@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Literal
 
 import torch
+from aiter.ops.activation import silu_and_mul
 from aiter.ops.flydsl.kernels.tensor_shim import _run_compiled, ptr_arg
 
 from .stage1 import compile_moe_gemm1
@@ -151,6 +152,21 @@ def nvfp4_moe_stage1(
         if sorted_weights is not None
         else _empty(activations.device, torch.float32)
     )
+    is_split_k = k_batch > 1
+    # Split-K atomically accumulates separate gate/up projections. Allocate the
+    # required initialized temporary directly rather than empty() followed by
+    # zero_(). The activation below reduces its last dimension back to I.
+    partial_output = (
+        torch.zeros(
+            (activations.shape[0], topk, 2 * inter_dim),
+            dtype=torch.bfloat16,
+            device=activations.device,
+        )
+        if is_split_k
+        else None
+    )
+    kernel_output = partial_output if partial_output is not None else output
+
     executable = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -163,13 +179,13 @@ def nvfp4_moe_stage1(
         in_dtype="nvfp4_bf16",
         group_size=16,
         out_dtype="bf16",
-        use_cshuffle_epilog=None if k_batch > 1 else False,
+        use_cshuffle_epilog=None if is_split_k else False,
         k_batch=k_batch,
     )
     _run_compiled(
         executable,
         *(
-            ptr_arg(output),
+            ptr_arg(kernel_output),
             ptr_arg(activations),
             ptr_arg(weight),
             ptr_arg(_empty(activations.device)),
@@ -186,6 +202,11 @@ def nvfp4_moe_stage1(
             torch.cuda.current_stream(),
         ),
     )
+    if partial_output is not None:
+        silu_and_mul(
+            output.view(-1, inter_dim),
+            partial_output.view(-1, 2 * inter_dim),
+        )
     return output
 
 

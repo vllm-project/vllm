@@ -1,9 +1,16 @@
-from typing import Any, Callable
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import math
+from collections.abc import Callable
+from typing import Any
+
 import pandas as pd
 import torch
 import torch.profiler as tpf
+
+from vllm.utils.platform_utils import cuda_get_device_properties
 
 
 def _compute_num_rotate_copies(
@@ -13,19 +20,23 @@ def _compute_num_rotate_copies(
 ) -> int:
     """Estimate how many input copies are needed to overflow the L2 cache,
     matching the logic in ``aiter.test_common.perftest``."""
-    gpu_id = torch.cuda.current_device()
-    input_size = sum(
-        element.nbytes
-        for element in args
-        if isinstance(element, torch.Tensor) and element.device.index == gpu_id
-    ) + 1
+    gpu_id = torch.accelerator.current_device_index()
+    input_size = (
+        sum(
+            element.nbytes
+            for element in args
+            if isinstance(element, torch.Tensor) and element.device.index == gpu_id
+        )
+        + 1
+    )
 
     function(*args)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
-    properties = torch.cuda.get_device_properties(gpu_id)
-    free_memory = torch.cuda.mem_get_info(gpu_id)[0]
-    l2_cache_size = getattr(properties, "L2_cache_size", 4096 * 1024)
+    (l2_cache_size,) = cuda_get_device_properties(
+        gpu_id, ("L2_cache_size",), init_cuda=True
+    )
+    free_memory = torch.accelerator.get_memory_info(gpu_id)[0]
     cache_size = min(
         l2_cache_size * 64 * 128,
         (free_memory + input_size) * 0.9,
@@ -42,10 +53,7 @@ def _build_rotated_args(
 ) -> list[tuple[Any, ...]]:
     """Build a list of deep-copied argument tuples for L2 cache rotation."""
     num_copies = _compute_num_rotate_copies(function, args, num_iters)
-    rotated = [
-        tuple(copy.deepcopy(arg) for arg in args)
-        for _ in range(num_copies - 1)
-    ]
+    rotated = [tuple(copy.deepcopy(arg) for arg in args) for _ in range(num_copies - 1)]
     rotated.append(args)
     return rotated
 
@@ -75,8 +83,9 @@ def _get_trace_perf_us(
     the first iteration as warmup, removes IQR outliers, and returns
     ``device_time_sum / actual_iters``.
     """
-    warm_iter = 1
-    effective_iters = num_iters - warm_iter
+    if num_iters <= 1:
+        raise ValueError("num_iters must be greater than one")
+    profiler_warmup_iters = 1
 
     columns = [
         "name",
@@ -97,7 +106,10 @@ def _get_trace_perf_us(
     ].reset_index(drop=True)
 
     if device_dataframe.empty:
-        return 0.0
+        raise RuntimeError(
+            "Profiler captured no GPU events; the benchmarked kernel may have "
+            "failed to launch"
+        )
 
     kernel_names = device_dataframe["name"].tolist()
     total_device_events = len(kernel_names)
@@ -115,14 +127,21 @@ def _get_trace_perf_us(
             break
 
     actual_complete_iters = total_device_events // kernels_per_iter
+    if actual_complete_iters != num_iters:
+        raise RuntimeError(
+            "Profiler captured an unexpected number of complete iterations: "
+            f"expected {num_iters}, got {actual_complete_iters} "
+            f"({total_device_events} GPU events, {kernels_per_iter} per iteration)"
+        )
     usable_events = actual_complete_iters * kernels_per_iter
     device_dataframe = device_dataframe.iloc[:usable_events]
 
     grouped = device_dataframe.groupby(
-        device_dataframe.index // kernels_per_iter, sort=False,
+        device_dataframe.index // kernels_per_iter,
+        sort=False,
     ).agg({"self_device_time_total": "sum"})
 
-    grouped = grouped.iloc[warm_iter:].reset_index(drop=True)
+    grouped = grouped.iloc[profiler_warmup_iters:].reset_index(drop=True)
 
     if len(grouped) > 30:
         q1 = grouped["self_device_time_total"].quantile(0.25)
@@ -136,9 +155,12 @@ def _get_trace_perf_us(
         ]
 
     if grouped.empty:
-        return 0.0
+        raise RuntimeError("Profiler captured no complete measured iterations")
 
-    return grouped["self_device_time_total"].sum() / len(grouped)
+    average_us = grouped["self_device_time_total"].sum() / len(grouped)
+    if not math.isfinite(average_us) or average_us <= 0:
+        raise RuntimeError(f"Profiler returned invalid GPU time: {average_us!r} us")
+    return average_us
 
 
 def _profiler_bench_us(
@@ -160,7 +182,7 @@ def _profiler_bench_us(
 
     for _ in range(num_warmup):
         function(*args)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     with tpf.profile(
         activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
@@ -170,6 +192,6 @@ def _profiler_bench_us(
         for iteration in range(num_iters):
             current_args = rotated_args[iteration % num_rotate]
             function(*current_args)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     return _get_trace_perf_us(profiler, num_iters)
