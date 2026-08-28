@@ -351,8 +351,8 @@ class DeepseekV32Attention(MLAAttention):
             kv_c_out = torch.empty_like(kv_c)
             k_pe_out = torch.empty_like(k_pe)
         else:
-            kv_c_out = kv_c
-            k_pe_out = k_pe
+            kv_c_out = torch.empty_like(kv_c)
+            k_pe_out = torch.empty_like(k_pe)
         q_c = fused_norm_rope(
             positions,
             q_c,
