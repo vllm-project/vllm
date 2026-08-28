@@ -9,7 +9,6 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
-    from vllm.parser.engine.parser_engine import ParserEngine
     from vllm.reasoning import ReasoningParser
     from vllm.tool_parsers import ToolParser
 
@@ -18,29 +17,8 @@ logger = init_logger(__name__)
 
 class ParserManager:
     """
-    Provides a unified Parser from the reasoning and tool parser registries.
-
-    Parser engine adapters backed by the same engine are collapsed back into
-    that engine. Other parser pairs are composed through ``DelegatingParser``.
+    Provides a unified Parser by composing reasoning and tool parser adapters.
     """
-
-    @staticmethod
-    def _get_parser_engine_cls(
-        parser_cls: type[object] | None,
-    ) -> type[ParserEngine] | None:
-        if parser_cls is None:
-            return None
-        parser_engine_cls = getattr(parser_cls, "_parser_engine_cls", None)
-        if parser_engine_cls is None:
-            return None
-
-        from vllm.parser.engine.parser_engine import ParserEngine
-
-        if not isinstance(parser_engine_cls, type) or not issubclass(
-            parser_engine_cls, ParserEngine
-        ):
-            return None
-        return parser_engine_cls
 
     @classmethod
     def get_tool_parser(
@@ -105,8 +83,7 @@ class ParserManager:
         """
         Get a Parser that handles both reasoning and tool parsing.
 
-        Reuses a shared parser engine when possible, otherwise composes the
-        individual parsers into a ``DelegatingParser`` subclass.
+        Composes the individual parsers into a ``DelegatingParser`` subclass.
 
         Args:
             tool_parser_name: The name of the tool parser.
@@ -136,11 +113,6 @@ class ParserManager:
             HarmonyParser.reasoning_parser_cls = reasoning_parser_cls
             HarmonyParser.tool_parser_cls = tool_parser_cls
             return HarmonyParser
-
-        reasoning_engine_cls = cls._get_parser_engine_cls(reasoning_parser_cls)
-        tool_engine_cls = cls._get_parser_engine_cls(tool_parser_cls)
-        if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
-            return reasoning_engine_cls
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser
