@@ -47,7 +47,9 @@ def test_initialize_kv_cache_finalizes_persistent_workspace(
     worker.model_config = SimpleNamespace(enable_return_routed_experts=False)
     worker._maybe_get_memory_pool_context = lambda **kwargs: nullcontext()
     worker.model_runner = SimpleNamespace(
-        initialize_kv_cache=lambda config: events.append("initialize_kv_cache"),
+        initialize_kv_cache=lambda config, **kwargs: events.append(
+            "initialize_kv_cache"
+        ),
         reserve_persistent_attention_workspace=lambda: events.append(
             "reserve_workspace"
         ),

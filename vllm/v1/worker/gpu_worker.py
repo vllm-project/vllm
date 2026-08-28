@@ -262,9 +262,6 @@ class Worker(WorkerBase):
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
-            self.model_runner.post_kv_cache_wake_up()
-
         self.synchronize_device()
 
     def checkpoint_prepare(self) -> None:
@@ -723,8 +720,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(
+                tag="kv_cache"
+            ),
+        )
         if requires_persistent_attention_workspace_profiling(self.vllm_config):
             self.model_runner.reserve_persistent_attention_workspace()
 
