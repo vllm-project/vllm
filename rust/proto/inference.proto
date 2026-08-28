@@ -53,6 +53,21 @@ message GenerateRequest {
 
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 15;
+
+  KVHintsEnvelope kv_hints = 16;
+}
+
+message KVHintsEnvelope {
+  string protocol_version = 1;
+  string message_id = 2;
+  repeated KVHintAction actions = 3;
+}
+
+message KVHintAction {
+  string action_id = 1;
+  string action_type = 2;
+  string action_version = 3;
+  google.protobuf.Struct payload = 4;
 }
 
 message RandomSampling {
