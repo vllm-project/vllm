@@ -38,9 +38,22 @@ from vllm.triton_utils.allocation import set_triton_allocator
 
 def _is_capturing_or_compiling() -> bool:
     # The accelerator API dispatches to the active backend.
-    return (
-        torch.compiler.is_compiling()
-        or torch.accelerator.current_stream().is_capturing()
+    if torch.compiler.is_compiling():
+        return True
+    stream = torch.accelerator.current_stream()
+    if hasattr(stream, "is_capturing"):
+        return stream.is_capturing()
+    # torch.Stream.is_capturing() is absent on some prerelease builds (seen on
+    # 2.12.0a0 NGC images), where this raised AttributeError and took down every
+    # batched-MoE forward. Supported releases have it; this only keeps such
+    # builds usable. Deliberately CUDA-specific, and deliberately not defaulting
+    # to False -- claiming "not capturing" when we cannot tell would disable a
+    # capture-safety guard rather than surface the problem.
+    if torch.cuda.is_available():
+        return torch.cuda.is_current_stream_capturing()
+    raise RuntimeError(
+        f"cannot determine graph-capture state: {type(stream).__name__} has no "
+        "is_capturing() and no CUDA device is available"
     )
 
 
