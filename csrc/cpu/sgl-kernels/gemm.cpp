@@ -116,8 +116,7 @@ inline void copy_stub(scalar_t* __restrict__ out, const float* __restrict__ inpu
   int64_t d;
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
-    fVec data0 = fVec::loadu(input + d);
-    fVec data1 = fVec::loadu(input + d + fVec::size());
+    auto [data0, data1] = load_float_vec2(input + d);
     bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
     out_vec.store(out + d);
   }
@@ -135,9 +134,7 @@ inline void copy_stub(float* __restrict__ out, const scalar_t* __restrict__ inpu
   int64_t d;
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
-    fVec data0, data1;
-    bVec b_vec = bVec::loadu(input + d);
-    std::tie(data0, data1) = at::vec::convert_to_float(b_vec);
+    auto [data0, data1] = load_float_vec2(input + d);
     data0.store(out + d);
     data1.store(out + d + fVec::size());
   }
@@ -156,9 +153,9 @@ inline void copy_add_stub(
   int64_t d;
 #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
-    fVec data0 = fVec::loadu(input + d) + fVec::loadu(bias + d);
-    fVec data1 = fVec::loadu(input + d + fVec::size()) + fVec::loadu(bias + d + fVec::size());
-    bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
+    auto [data0, data1] = load_float_vec2(input + d);
+    auto [bias0, bias1] = load_float_vec2(bias + d);
+    bVec out_vec = convert_from_float_ext<scalar_t>(data0 + bias0, data1 + bias1);
     out_vec.store(out + d);
   }
   for (; d < size; ++d) {
@@ -176,7 +173,6 @@ inline void scalar_sigmoid_and_mul(
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   // scalar sigmoid
-  const fVec one = fVec(1.f);
   fVec X;
   if constexpr (has_bias) {
     assert(bias != nullptr);
@@ -184,18 +180,13 @@ inline void scalar_sigmoid_and_mul(
   } else {
     X = fVec(input[0]);
   }
-  X = one / (one + X.neg().exp_u20());
+  X = fast_sigmoid(X);
 
   // vec mul
   constexpr int kVecSize = bVec::size();
   for (int d = 0; d < SIZE; d += kVecSize) {
-    bVec m_bvec = bVec::loadu(mul + d);
-    fVec m_fvec0, m_fvec1;
-    std::tie(m_fvec0, m_fvec1) = at::vec::convert_to_float(m_bvec);
-    m_fvec0 = m_fvec0 * X;
-    m_fvec1 = m_fvec1 * X;
-
-    bVec out_vec = convert_from_float_ext<scalar_t>(m_fvec0, m_fvec1);
+    auto [m_fvec0, m_fvec1] = load_float_vec2(mul + d);
+    bVec out_vec = convert_from_float_ext<scalar_t>(m_fvec0 * X, m_fvec1 * X);
     out_vec.store(out + d);
   }
 }
@@ -727,10 +718,10 @@ at::Tensor convert_scale_packed(at::Tensor& scale) {
   return packed_scale;
 }
 
-// mat1 : [M, K]
+// mat1 : [*, K]
 // mat2 : [N, K] ([K, N] if use_fma_gemm)
 // bias : [N]
-// out  : [M, N]
+// out  : [*, N]
 //
 at::Tensor
 weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at::Tensor>& bias, bool is_vnni) {
@@ -740,23 +731,25 @@ weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at:
     use_fma_gemm = true;
   }
 
-  int64_t M = mat1.size(0);
-  int64_t K = mat1.size(1);
-  int64_t N = use_fma_gemm ? mat2.size(1) : mat2.size(0);
-
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
   CHECK_INPUT(mat2);
-  CHECK_DIM(2, mat1);
+  const int64_t ndim = mat1.ndimension();
+  auto input_sizes = mat1.sizes().vec();
+  int64_t N = use_fma_gemm ? mat2.size(1) : mat2.size(0);
+  int64_t K = use_fma_gemm ? mat1.size(1) : mat2.size(1);
+  int64_t M = use_fma_gemm ? mat1.size(0) : mat1.numel() / K;
   CHECK_DIM(2, mat2);
-  if (!use_fma_gemm) {
-    CHECK_EQ(mat1.size(1), K);
+  if (use_fma_gemm) {
+    CHECK_DIM(2, mat1);
+  } else {
+    CHECK_EQ(mat1.size(ndim - 1), K);
   }
 
   auto dispatch_type = mat1.scalar_type();
   auto out = at::empty({M, N}, mat1.options());
   // strides
   int64_t out_strideM = out.stride(0);
-  int64_t mat1_strideM = mat1.stride(0);
+  int64_t mat1_strideM = mat1.stride(-2);
 
   const bool has_bias = bias.has_value();
   const float* bias_data = nullptr;
@@ -792,7 +785,8 @@ weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at:
     }
   });
 
-  return out;
+  input_sizes[ndim - 1] = N;
+  return out.view(input_sizes);
 }
 
 // mat1         : [M, K]

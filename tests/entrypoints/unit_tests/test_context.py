@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from openai_harmony import Author, Message, Role, StreamState, TextContent
+from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
     SimpleContext,
-    StreamingHarmonyContext,
     TurnMetrics,
 )
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
 
 
 def create_mock_request_output(
@@ -68,25 +68,59 @@ async def generate_mock_outputs(
         )
 
 
-@pytest.fixture
-def mock_parser():
-    """Set up a mock parser for tests."""
-    with patch(
-        "vllm.entrypoints.openai.responses.context.get_streamable_parser_for_assistant"
-    ) as mock_parser_factory:
-        # Create a mock parser object
-        parser = MagicMock()
-        parser.messages = []
-        parser.current_channel = None
-        parser.state = StreamState.EXPECT_START
-        mock_parser_factory.return_value = parser
-        yield parser
+class FakeHarmonyParser(HarmonyParser):
+    def __init__(self):
+        # Skip HarmonyParser initialization and script outputs directly.
+        self.reasoning_parser = None
+        self.tool_parser = None
+        self._chunk_results: list[ChunkResult] = []
+        self._flush_results: list[list[Segment]] = []
+        self.processed_chunks: list[list[int]] = []
+
+    def enqueue_chunk_result(
+        self,
+        segments: list[Segment] | None = None,
+        reasoning_token_count: int = 0,
+    ) -> None:
+        self._chunk_results.append(
+            ChunkResult(
+                segments=[] if segments is None else segments,
+                reasoning_token_count=reasoning_token_count,
+            )
+        )
+
+    def enqueue_flush_result(self, segment: list[Segment]) -> None:
+        self._flush_results.append(segment)
+
+    def process_chunk(self, token_ids) -> ChunkResult:
+        self.processed_chunks.append(list(token_ids))
+        if self._chunk_results:
+            return self._chunk_results.pop(0)
+        return ChunkResult(segments=[], reasoning_token_count=0)
+
+    def flush(self) -> list[Segment]:
+        if self._flush_results:
+            return self._flush_results.pop(0)
+        return []
+
+
+def make_harmony_context(
+    messages=None, available_tools=None, function_tool_names=None
+) -> tuple[HarmonyContext, FakeHarmonyParser]:
+    fake_parser = FakeHarmonyParser()
+    context = HarmonyContext(
+        messages=[] if messages is None else messages,
+        available_tools=[] if available_tools is None else available_tools,
+        function_tool_names=function_tool_names,
+        response_parser=fake_parser,
+    )
+    return context, fake_parser
 
 
 def test_single_turn_token_counting():
     """Test token counting behavior for a single turn."""
     # Create a context
-    context = HarmonyContext(messages=[], available_tools=[])
+    context, _ = make_harmony_context()
 
     # Create a mock RequestOutput with specific token counts
     mock_output = create_mock_request_output(
@@ -118,7 +152,7 @@ def test_single_turn_token_counting():
 async def test_multi_turn_token_counting():
     """Test token counting behavior across multiple turns with tool output."""
     # Create a context
-    context = HarmonyContext(messages=[], available_tools=["browser"])
+    context, _ = make_harmony_context(available_tools=["browser"])
 
     # Simulate a conversation with 3 turns
     # Turn 1: prefill 5, decode 3, tool 7
@@ -177,7 +211,7 @@ async def test_multi_turn_token_counting():
 
 def test_empty_output_tokens():
     """Test behavior when RequestOutput has empty output tokens."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context, _ = make_harmony_context()
 
     # Create a RequestOutput with empty output tokens
     mock_output = create_mock_request_output(
@@ -197,7 +231,7 @@ def test_empty_output_tokens():
 
 def test_missing_prompt_token_ids():
     """Test behavior when RequestOutput has None prompt_token_ids."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context, _ = make_harmony_context()
 
     mock_output = create_mock_request_output(
         prompt_token_ids=None,  # No prompt token IDs
@@ -216,12 +250,10 @@ def test_missing_prompt_token_ids():
     assert context.num_tool_output_tokens == 0
 
 
-def test_reasoning_tokens_counting(mock_parser):
+def test_reasoning_tokens_counting():
     """Test that reasoning tokens are counted correctly."""
-    context = HarmonyContext(messages=[], available_tools=[])
-
-    # Mock parser to simulate reasoning channel
-    mock_parser.current_channel = "analysis"  # Reasoning channel
+    context, parser = make_harmony_context()
+    parser.enqueue_chunk_result(reasoning_token_count=4)
 
     mock_output = create_mock_request_output(
         prompt_token_ids=[1, 2, 3],
@@ -236,13 +268,11 @@ def test_reasoning_tokens_counting(mock_parser):
     assert context.num_output_tokens == 4
 
 
-def test_preamble_tokens_not_counted_as_reasoning(mock_parser):
+def test_preamble_tokens_not_counted_as_reasoning():
     """Preambles (commentary with no recipient) are visible user text,
     not hidden reasoning. They must NOT inflate num_reasoning_tokens."""
-    context = HarmonyContext(messages=[], available_tools=[])
-
-    mock_parser.current_channel = "commentary"
-    mock_parser.current_recipient = None  # preamble
+    context, parser = make_harmony_context()
+    parser.enqueue_chunk_result(reasoning_token_count=0)
 
     mock_output = create_mock_request_output(
         prompt_token_ids=[1, 2, 3],
@@ -255,13 +285,11 @@ def test_preamble_tokens_not_counted_as_reasoning(mock_parser):
     assert context.num_output_tokens == 3
 
 
-def test_commentary_with_recipient_counted_as_reasoning(mock_parser):
+def test_commentary_with_recipient_counted_as_reasoning():
     """Commentary directed at a tool (recipient != None) is hidden from
     the user, so it should still count as reasoning tokens."""
-    context = HarmonyContext(messages=[], available_tools=[])
-
-    mock_parser.current_channel = "commentary"
-    mock_parser.current_recipient = "python"
+    context, parser = make_harmony_context()
+    parser.enqueue_chunk_result(reasoning_token_count=3)
 
     mock_output = create_mock_request_output(
         prompt_token_ids=[1, 2, 3],
@@ -276,7 +304,7 @@ def test_commentary_with_recipient_counted_as_reasoning(mock_parser):
 
 def test_zero_tokens_edge_case():
     """Test behavior with all zero token counts."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context, _ = make_harmony_context()
 
     # Create a request with empty lists (not None) for both prompt and
     # output tokens
@@ -299,10 +327,7 @@ def test_zero_tokens_edge_case():
 @pytest.mark.asyncio
 async def test_single_turn_no_tool_output():
     """Test that first turn never generates tool output tokens."""
-    context = HarmonyContext(
-        messages=[],
-        available_tools=["browser"],  # Tools available
-    )
+    context, _ = make_harmony_context(available_tools=["browser"])
 
     # Even with large prompt in first turn, no tool tokens should be counted
     mock_output = create_mock_request_output(
@@ -324,7 +349,7 @@ async def test_negative_tool_tokens_edge_case():
     tokens. We should log an error and clamp the value to 0."""
     # Use patch to check if logger.error was called
     with patch("vllm.entrypoints.openai.responses.context.logger.error") as mock_log:
-        context = HarmonyContext(messages=[], available_tools=["browser"])
+        context, _ = make_harmony_context(available_tools=["browser"])
 
         # First turn
         mock_output1 = create_mock_request_output(
@@ -360,15 +385,15 @@ async def test_negative_tool_tokens_edge_case():
 
 
 @pytest.mark.asyncio
-async def test_streaming_multi_turn_token_counting(mock_parser):
+async def test_streaming_multi_turn_token_counting():
     """Test token counting for streaming multi-turn conversations.
 
-    This test focuses on how StreamingHarmonyContext counts tokens in a
+    This test focuses on how HarmonyContext counts tokens in a
     multi-turn conversation with streaming (token-by-token) outputs and
     message boundaries.
     """
     # Create a streaming context
-    context = StreamingHarmonyContext(messages=[], available_tools=["browser"])
+    context, parser = make_harmony_context(available_tools=["browser"])
 
     num_prompt_tokens = [3, 8, 13]
     num_output_tokens = [3, 3, 2]
@@ -413,10 +438,8 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     assert context.num_tool_output_tokens == 0  # No tool output in first turn
     assert context.first_tok_of_message is True  # Ready for next message
 
-    # Second turn: reasoning tokens in analysis channel
-    mock_parser.current_channel = "analysis"  # Set to reasoning channel
-
     # First token of second turn
+    parser.enqueue_chunk_result(reasoning_token_count=1)
     context.append_output(
         create_mock_request_output(
             prompt_token_ids=[
@@ -436,6 +459,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     )
 
     # More tokens in reasoning channel
+    parser.enqueue_chunk_result(reasoning_token_count=1)
     context.append_output(
         create_mock_request_output(
             output_token_ids=[202],
@@ -443,6 +467,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
         )
     )
 
+    parser.enqueue_chunk_result(reasoning_token_count=1)
     context.append_output(
         create_mock_request_output(
             output_token_ids=[203],
@@ -459,9 +484,6 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     # Formula: this turn prompt tokens - last turn prompt - last turn output
     expected_tool_tokens = 8 - 3 - 3  # = 2
     assert context.num_tool_output_tokens == expected_tool_tokens
-
-    # Third turn: regular output channel
-    mock_parser.current_channel = "final"  # Switch back to regular channel
 
     # Third turn (with more cached tokens)
     context.append_output(
@@ -520,13 +542,8 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
 
 
 @pytest.mark.asyncio
-async def test_streaming_message_synchronization(mock_parser):
-    """Test message synchronization logic from lines 413-417 in context.py.
-
-    This test verifies that when parser.messages contains more messages than
-    the context's _messages (minus initial messages), the context properly
-    extends its message list with the new parser messages.
-    """
+async def test_streaming_message_synchronization():
+    """Completed messages from append-local and flush segments sync into context."""
 
     # Create a streaming context with some initial messages
     initial_messages = [
@@ -536,23 +553,30 @@ async def test_streaming_message_synchronization(mock_parser):
             recipient=Role.ASSISTANT,
         )
     ]
-    context = StreamingHarmonyContext(messages=initial_messages, available_tools=[])
+    context, parser = make_harmony_context(messages=initial_messages)
 
     # Verify initial state
     assert len(context._messages) == 1
     assert context.num_init_messages == 1
 
-    # Mock parser to have more messages than context
-    # Simulate parser having processed 3 new messages
-    mock_parser.messages = [
-        Message(
-            author=Author(role=Role.ASSISTANT, name="assistant"),
-            content=[TextContent(text="Response 1")],
-            recipient=Role.USER,
-        ),
-    ]
+    response_text = "First response"
+    message = Message(
+        author=Author(role=Role.ASSISTANT, name="assistant"),
+        content=[TextContent(text=response_text)],
+        recipient=Role.USER,
+    )
+    parser.enqueue_chunk_result(
+        segments=[
+            Segment(
+                channel="commentary",
+                recipient=None,
+                delta="",
+                completed_message=message,
+            )
+        ]
+    )
 
-    # This should trigger the message synchronization logic
+    # This should sync the completed message from the latest append
     context.append_output(
         create_mock_request_output(
             prompt_token_ids=[1, 2, 3], output_token_ids=[101], finished=False
@@ -563,36 +587,48 @@ async def test_streaming_message_synchronization(mock_parser):
     assert len(context._messages) == 2
 
     # Verify the new messages were added correctly
-    assert context._messages[1].content[0].text == "Response 1"
+    assert context._messages[1].content[0].text == response_text
 
-    # Test the specific condition from line 413-414:
-    # len(self._messages) - self.num_init_messages < len(self.parser.messages)
     messages_minus_init = len(context._messages) - context.num_init_messages
-    parser_messages_count = len(mock_parser.messages)
+    assert messages_minus_init == 1
 
-    # After synchronization, they should be equal (no longer less than)
-    assert messages_minus_init == parser_messages_count
+    response_text = "Second response"
+    message = Message(
+        author=Author(role=Role.ASSISTANT, name="assistant"),
+        content=[TextContent(text=response_text)],
+        recipient=Role.USER,
+    )
+    flush_segments = [
+        Segment(
+            channel="final",
+            recipient=None,
+            delta=response_text,
+            completed_message=None,
+        ),
+        Segment(
+            channel="final",
+            recipient=None,
+            delta="",
+            completed_message=message,
+        ),
+    ]
+    parser.enqueue_flush_result(flush_segments)
 
-    # Test edge case: add one more parser message
-    mock_parser.messages.append(
-        Message(
-            author=Author(role=Role.ASSISTANT, name="assistant"),
-            content=[TextContent(text="Response 4")],
-            recipient=Role.USER,
+    # Create another output to trigger synchronization via flush()
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2, 3], output_token_ids=[102], finished=True
         )
     )
 
-    # Create another output to trigger synchronization again
-    mock_output2 = create_mock_request_output(
-        prompt_token_ids=[1, 2, 3], output_token_ids=[102], finished=True
-    )
-
-    context.append_output(mock_output2)
-
-    # Verify the fourth message was added, num_init_messages is still 1
+    # Verify the flushed response was added, num_init_messages is still 1
     assert len(context._messages) == 3
     assert context.num_init_messages == 1
-    assert context._messages[2].content[0].text == "Response 4"
+    assert context._messages[2].content[0].text == response_text
+    assert context.last_append_flush_status is True
+    assert len(context.last_append_segments) == 2
+    assert context.last_append_segments[-2].delta == response_text
+    assert context.last_append_segments[-1].completed_message is message
 
 
 def test_turn_metrics_copy_and_reset():

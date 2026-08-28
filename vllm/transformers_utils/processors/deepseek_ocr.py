@@ -161,10 +161,12 @@ class DeepseekOCRProcessor(ProcessorMixin):
         image_size: int = IMAGE_SIZE,
         base_size: int = BASE_SIZE,
         strategy: Literal["v1", "v2"] = "v1",
+        max_crops: int = MAX_CROPS,
         **kwargs,
     ):
         self.image_size = image_size
         self.base_size = base_size
+        self.max_crops = max_crops
 
         # image token calculation strategy for
         # Deepseek-OCR and Deepseek-OCR-2
@@ -248,9 +250,8 @@ class DeepseekOCRProcessor(ProcessorMixin):
                 - num_image_tokens (List[int]): the number of image tokens
         """
 
-        assert prompt is not None and images is not None, (
-            "prompt and images must be used at the same time."
-        )
+        if prompt is None or images is None:
+            raise ValueError("prompt and images must be used at the same time.")
 
         sft_format = prompt
 
@@ -309,7 +310,13 @@ class DeepseekOCRProcessor(ProcessorMixin):
     ):
         """Tokenize text with <image> tags."""
 
-        assert conversation.count(self.image_token) == len(images)
+        num_image_tags = conversation.count(self.image_token)
+        if num_image_tags != len(images):
+            raise ValueError(
+                f"Number of {self.image_token!r} tokens in prompt "
+                f"({num_image_tags}) does not match number of images "
+                f"({len(images)})."
+            )
         text_splits = conversation.split(self.image_token)
         images_list, images_crop_list, images_seq_mask, images_spatial_crop = (
             [],
@@ -332,7 +339,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
                 crop_ratio = [1, 1]
             elif cropping:
                 images_crop_raw, crop_ratio = dynamic_preprocess(
-                    image, image_size=self.image_size
+                    image, image_size=self.image_size, max_num=self.max_crops
                 )
             else:
                 crop_ratio = [1, 1]

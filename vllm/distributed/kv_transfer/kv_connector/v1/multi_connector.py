@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -204,10 +204,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._extra_async_saves: dict[str, int] = {}
 
     @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        if not self._connectors:
-            return False
-        return all(c.prefer_cross_layer_blocks for c in self._connectors)
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_divergent_local_hybrid_hits for c in self._connectors
+        )
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return any(c.requires_kv_delivery for c in self._connectors)
 
     @classmethod
     def _get_connector_classes_and_configs(
@@ -234,13 +238,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             )
         return ret
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        # Register on all connectors
-        for c in self._connectors:
-            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
@@ -353,9 +350,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
-        # TODO(https://github.com/vllm-project/vllm/issues/33400)
-        # Currently no connectors return non-None
-        return None
+        child_counts = [
+            connector.get_finished_count() for connector in self._connectors
+        ]
+        if any(count is None for count in child_counts):
+            return None
+        counts = {count for count in child_counts if count is not None}
+        if len(counts) > 1:
+            raise ValueError(
+                "MultiConnector children returned incompatible finished counts: "
+                f"{sorted(counts)}"
+            )
+        return next(iter(counts), None)
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         metadata_list: list[KVConnectorWorkerMetadata | None] | None = None
@@ -403,14 +409,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
-        empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
-                # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                # Other connectors still receive the request's real blocks
+                c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
@@ -492,12 +497,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 async_saves += 1
             if txfer_params is not None:
                 if kv_txfer_params is not None:
-                    # TODO we can probably change this to merge the dicts here,
-                    # checking for key clashes.
-                    raise RuntimeError(
-                        "Only one connector can produce KV transfer params"
-                    )
-                kv_txfer_params = txfer_params
+                    clashes = set(kv_txfer_params) & set(txfer_params)
+                    if clashes:
+                        raise RuntimeError(
+                            "Key clash in kv_transfer_params from multiple "
+                            f"connectors: {clashes}"
+                        )
+                    kv_txfer_params.update(txfer_params)
+                else:
+                    kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
 

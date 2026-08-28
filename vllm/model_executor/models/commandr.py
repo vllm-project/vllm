@@ -32,7 +32,11 @@ from transformers import Cohere2Config, CohereConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -44,11 +48,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-    row_parallel_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import row_parallel_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -58,7 +58,6 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -90,18 +89,61 @@ class LayerNorm(nn.Module):
         return hidden_states, residuals
 
 
+@torch.compile(backend=current_platform.simple_compile_backend)
+def rms_norm_func(hidden_states, weight, variance_epsilon):
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
+
+    hidden_states = weight.to(torch.float32) * hidden_states
+    return hidden_states.to(input_dtype)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, param_shape=None, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(param_shape))
+        self.variance_epsilon = eps
+        set_weight_attrs(self.weight, {"weight_loader": row_parallel_weight_loader})
+
+    def forward(self, hidden_states, residuals=None):
+        hidden_states = rms_norm_func(hidden_states, self.weight, self.variance_epsilon)
+        return hidden_states, residuals
+
+
+def select_norm_impl(config: CohereConfig) -> tuple[type[nn.Module], float]:
+    """
+    Returns the normalization layer class and epsilon value to use.
+    If `config.rms_norm_eps` is present, use RMSNorm.
+    Otherwise default to LayerNorm with `config.layer_norm_eps`.
+    """
+    rms_eps = getattr(config, "rms_norm_eps", None)
+    if rms_eps is not None:
+        return RMSNorm, rms_eps
+
+    return LayerNorm, config.layer_norm_eps
+
+
 # Copied from transformers.models.llama.modeling_llama.LlamaMLP Llama->Cohere
 class CohereMLP(nn.Module):
     def __init__(
         self,
-        config: CohereConfig | Cohere2Config,
+        config: CohereConfig,
+        intermediate_size: int | None = None,
         quant_config: QuantizationConfig | None = None,
+        # so we can reduce the attention and MLP outputs together
+        reduce_results: bool = False,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
+        if intermediate_size is None:
+            self.intermediate_size = config.intermediate_size
+        else:
+            self.intermediate_size = intermediate_size
         self.gate_up_proj = MergedColumnParallelLinear(
             self.hidden_size,
             [self.intermediate_size] * 2,
@@ -114,6 +156,7 @@ class CohereMLP(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
@@ -136,11 +179,15 @@ class CohereAttention(nn.Module):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
+        self.layer_idx = extract_layer_index(prefix)
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
         self.num_heads = self.total_num_heads // tp_size
-        self.head_dim = self.hidden_size // self.total_num_heads
+        if hasattr(config, "head_dim"):
+            self.head_dim = config.head_dim
+        else:
+            self.head_dim = self.hidden_size // self.total_num_heads
         self.total_num_kv_heads = config.num_key_value_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
@@ -157,6 +204,7 @@ class CohereAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
+        assert isinstance(self.max_position_embeddings, int)
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
@@ -173,6 +221,9 @@ class CohereAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            # NOTE: reduction will happen in the decoder layer forward
+            # so we can combine the attention and MLP outputs together
+            reduce_results=False,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -184,11 +235,14 @@ class CohereAttention(nn.Module):
         # Model v2 has interleaved sliding windows, v1 does not
         self.v1 = isinstance(config, CohereConfig)
 
+        # cohere swa layer sees [pos - sliding_window, pos], i.e. sliding_window + 1
+        # tokens.  vLLM's FlashAttention backend does (value - 1, 0), so we pass
+        # sliding_window + 1 here to match the training convention.  The same +1
+        # propagates into the KV-cache eviction formula
+        # (single_type_kv_cache_manager.py), keeping both paths consistent.
         self.sliding_window = None
-        if not self.v1:
-            layer_idx = extract_layer_index(prefix)
-            if config.layer_types[layer_idx] == "sliding_attention":
-                self.sliding_window = config.sliding_window
+        if not self.v1 and config.layer_types[self.layer_idx] == "sliding_attention":
+            self.sliding_window = config.sliding_window + 1
 
         self.attn = Attention(
             self.num_heads,
@@ -200,13 +254,13 @@ class CohereAttention(nn.Module):
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
         )
+        norm_cls, norm_eps = select_norm_impl(config)
         if self.use_qk_norm:
-            self.q_norm = LayerNorm(
-                param_shape=(self.num_heads, self.head_dim), eps=config.layer_norm_eps
+            self.q_norm = norm_cls(
+                param_shape=(self.num_heads, self.head_dim), eps=norm_eps
             )
-            self.k_norm = LayerNorm(
-                param_shape=(self.num_kv_heads, self.head_dim),
-                eps=config.layer_norm_eps,
+            self.k_norm = norm_cls(
+                param_shape=(self.num_kv_heads, self.head_dim), eps=norm_eps
             )
 
     def _apply_qk_norm(self, q, k):
@@ -244,18 +298,16 @@ class CohereDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.self_attn = CohereAttention(
             config,
             cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-
         self.mlp = CohereMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
-        self.input_layernorm = LayerNorm(
-            param_shape=(config.hidden_size), eps=config.layer_norm_eps
-        )
+        norm_cls, norm_eps = select_norm_impl(config)
+        self.input_layernorm = norm_cls(param_shape=(config.hidden_size), eps=norm_eps)
 
     def forward(
         self,
@@ -271,8 +323,14 @@ class CohereDecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
         hidden_states_mlp = self.mlp(hidden_states)
+        parallel_block_output = hidden_states_attention + hidden_states_mlp
         # Add everything together
-        hidden_states = residual + hidden_states_attention + hidden_states_mlp
+        if self.tp_size > 1:
+            # do the reduction in 1 shot instead of 2 separate all reduce
+            parallel_block_output = tensor_model_parallel_all_reduce(
+                parallel_block_output
+            )
+        hidden_states = residual + parallel_block_output
 
         return hidden_states, residual
 
@@ -301,9 +359,10 @@ class CohereModel(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = LayerNorm(
-            param_shape=(config.hidden_size), eps=config.layer_norm_eps
-        )
+
+        norm_cls, norm_eps = select_norm_impl(config)
+        self.norm = norm_cls(param_shape=(config.hidden_size), eps=norm_eps)
+
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -341,66 +400,29 @@ class CohereModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+        # ModelOpt NVFP4 checkpoints carry raw quantizer-module state
+        # (e.g. "*.weight_quantizer._double_scale"); drop them before loading.
+        # See #41925.
+        orig_to_new_substr={"_quantizer.": None},
+        orig_to_new_prefix={"lm_head": None},
+    )
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
-    # ModelOpt NVFP4 checkpoints carry raw quantizer-module state
-    # (e.g. "*.weight_quantizer._double_scale"); drop them before loading. See #41925.
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={"_quantizer.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -408,9 +430,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        # currently all existing command R models have `tie_word_embeddings`
-        # enabled
-        assert config.tie_word_embeddings
 
         self.quant_config = quant_config
         self.logits_processor = LogitsProcessor(
@@ -454,7 +473,5 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["lm_head", "rotary_emb.inv_freq"]
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
