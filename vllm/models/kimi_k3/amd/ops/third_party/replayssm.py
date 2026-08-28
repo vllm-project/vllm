@@ -14,6 +14,7 @@ __all__ = [
     "flush_threshold_ok",
     "replayssm_buffer_shapes",
     "replayssm_commit",
+    "replayssm_fold",
     "replayssm_sigmoid_gating_delta_rule",
 ]
 
@@ -77,6 +78,123 @@ def replayssm_commit(
         max_query_len,
         cache_len,
         num_warps=1,
+    )
+
+
+@triton.jit(do_not_specialize=["N"])
+def _replayssm_fold_kernel(
+    ckpt,
+    buf_k,
+    buf_u,
+    buf_g,
+    fold_len,
+    slot_idx,
+    N,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    stride_ckpt_slot: tl.constexpr,
+    stride_bufk_slot: tl.constexpr,
+    stride_bufk_pos: tl.constexpr,
+    stride_bufu_slot: tl.constexpr,
+    stride_bufu_pos: tl.constexpr,
+    stride_bufg_slot: tl.constexpr,
+    stride_bufg_pos: tl.constexpr,
+):
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    if i_n >= N:
+        return
+    slot = tl.load(slot_idx + i_n).to(tl.int64)
+    if slot < 0:
+        return
+    h = tl.load(fold_len + i_n).to(tl.int32)
+    if h == 0:
+        return
+
+    o_k = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_v[:, None] & mask_k[None, :]
+
+    p_ckpt = (
+        ckpt + slot * stride_ckpt_slot + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+    )
+    b_h = tl.load(p_ckpt, mask=mask_h, other=0.0).to(tl.float32)
+
+    # Same replay recurrence as the forward kernel's prologue.
+    for j in range(h):
+        b_rg = tl.load(
+            buf_g + slot * stride_bufg_slot + j * stride_bufg_pos + i_hv * K + o_k,
+            mask=mask_k,
+            other=0.0,
+        ).to(tl.float32)
+        b_h *= exp(b_rg)[None, :]
+        b_rk = tl.load(
+            buf_k + slot * stride_bufk_slot + j * stride_bufk_pos + i_hv * K + o_k,
+            mask=mask_k,
+            other=0.0,
+        ).to(tl.float32)
+        b_ru = tl.load(
+            buf_u + slot * stride_bufu_slot + j * stride_bufu_pos + i_hv * V + o_v,
+            mask=mask_v,
+            other=0.0,
+        ).to(tl.float32)
+        b_h += b_ru[:, None] * b_rk[None, :]
+
+    tl.store(p_ckpt, b_h.to(p_ckpt.dtype.element_ty), mask=mask_h)
+
+
+def replayssm_fold(
+    ckpt: torch.Tensor,
+    buf_k: torch.Tensor,
+    buf_u: torch.Tensor,
+    buf_g: torch.Tensor,
+    fold_len: torch.Tensor,
+    slot_idx: torch.Tensor,
+) -> None:
+    """Collapse each slot's committed records into its checkpoint, in place.
+
+    Kernels that consume the recurrent state directly (the chunk/prefill path)
+    cannot see the ring, so a slot leaving the ReplaySSM decode path must have
+    its records materialized first. ``fold_len`` is the cursor snapshot taken
+    when the step's metadata was built; the caller is responsible for zeroing
+    ``write_pos`` for these slots so every layer folds the same records.
+    """
+    n = slot_idx.numel()
+    if n == 0:
+        return
+    HV, V, K = ckpt.shape[1], ckpt.shape[2], ckpt.shape[3]
+    BK = triton.next_power_of_2(K)
+    assert triton.cdiv(K, BK) == 1, "K must fit one block"
+    BV = min(triton.next_power_of_2(V), 64)
+    NV = triton.cdiv(V, BV)
+
+    _replayssm_fold_kernel[(NV, n * HV)](
+        ckpt=ckpt,
+        buf_k=buf_k,
+        buf_u=buf_u,
+        buf_g=buf_g,
+        fold_len=fold_len,
+        slot_idx=slot_idx,
+        N=n,
+        HV=HV,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        stride_ckpt_slot=ckpt.stride(0),
+        stride_bufk_slot=buf_k.stride(0),
+        stride_bufk_pos=buf_k.stride(1),
+        stride_bufu_slot=buf_u.stride(0),
+        stride_bufu_pos=buf_u.stride(1),
+        stride_bufg_slot=buf_g.stride(0),
+        stride_bufg_pos=buf_g.stride(1),
+        num_warps=1,
+        num_stages=3,
     )
 
 
