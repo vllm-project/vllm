@@ -212,6 +212,11 @@ def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
     return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
 
 
+# Upper bound for ``max_tokens``. The engine keeps per-request sequence lengths
+# in int32 numpy arrays, so anything beyond int32 range cannot be represented.
+_MAX_TOKENS_LIMIT = 2**31 - 1
+
+
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -600,6 +605,17 @@ class SamplingParams(
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
+                parameter="max_tokens",
+                value=self.max_tokens,
+            )
+        # The engine stores per-request sequence lengths in int32 arrays, so a
+        # value that cannot be represented there must be rejected here rather
+        # than crashing a worker. This is a representability bound only; the
+        # per-request bound against max_model_len belongs at the endpoint.
+        if self.max_tokens is not None and self.max_tokens > _MAX_TOKENS_LIMIT:
+            raise VLLMValidationError(
+                f"max_tokens must be at most {_MAX_TOKENS_LIMIT}, "
+                f"got {self.max_tokens}.",
                 parameter="max_tokens",
                 value=self.max_tokens,
             )
