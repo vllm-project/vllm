@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
+from tests.utils import multi_gpu_test
 from vllm import LLM, PoolingParams
 from vllm.lora.request import LoRARequest
 
@@ -92,9 +94,18 @@ def test_native_classification_model_with_modules_to_save(
     )
 
 
-def test_multiple_classification_loras_in_one_batch(
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "tp_size",
+    [
+        1,
+        2,
+    ],
+)
+def test_batched_loras(
     qwen3_guard_star_trek_lora_files: str,
     qwen3_guard_new_zealand_lora_files: str,
+    tp_size: int,
 ) -> None:
     names = ["star_trek", "new_zealand"]
     prompts = [PROMPTS[name] for name in names]
@@ -120,6 +131,7 @@ def test_multiple_classification_loras_in_one_batch(
         enforce_eager=True,
         max_model_len=512,
         gpu_memory_utilization=0.5,
+        tensor_parallel_size=tp_size,
     )
     actual = _classify_logits(llm, prompts, requests)
 
