@@ -111,6 +111,9 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     scheduler.use_host_buffer = False
     scheduler.is_bidirectional_kv_xfer_enabled = False
     scheduler._is_hma_required = False
+    scheduler.kv_cache_config = MagicMock(
+        select_transfer_block_ids=lambda block_ids: block_ids
+    )
 
     def cached(block_id):
         return KVCacheBlock(block_id=block_id, _block_hash=object())
