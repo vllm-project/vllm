@@ -41,6 +41,12 @@ def test_cached_prompt_tokens_are_exposed_by_physical_source():
             for sample in metric.samples:
                 if sample.name == "vllm:prompt_tokens_cached_by_source_total":
                     samples[sample.labels["source"]] = sample.value
-        assert samples == {"device": 3, "cpu": 4}
+        assert samples == {
+            "device": 3,
+            "cpu": 4,
+            "disk": 0,
+            "mixed": 0,
+            "external": 0,
+        }
     finally:
         unregister_vllm_metrics()

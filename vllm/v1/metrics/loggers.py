@@ -726,6 +726,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             ),
             labelnames=labelnames + ["source"],
         )
+        # Register built-in sources at zero before the first request. A
+        # Prometheus scraper that establishes its baseline at server startup
+        # must not lose the first counter increment when a labeled series is
+        # created lazily during warmup. Connector-defined custom sources stay
+        # dynamic and are registered when first observed.
+        for source in PromptTokenStats.BUILTIN_CACHED_SOURCES:
+            for labelvalues in per_engine_labelvalues.values():
+                self.counter_prompt_tokens_cached_by_source.labels(*labelvalues, source)
 
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
