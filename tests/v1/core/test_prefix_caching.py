@@ -210,6 +210,7 @@ def make_hisparse_kv_cache_manager(
     host_num_blocks: int,
     *,
     max_model_len: int = 128,
+    max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
     **config_kwargs,
 ) -> KVCacheManager:
@@ -217,6 +218,7 @@ def make_hisparse_kv_cache_manager(
     return make_kv_cache_manager(
         config,
         max_model_len=max_model_len,
+        max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
     )
@@ -4119,6 +4121,30 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
 
     assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
+
+
+def test_can_fit_full_sequence_hisparse_caps_resident_pages():
+    manager = make_hisparse_kv_cache_manager(
+        num_blocks=11,
+        host_num_blocks=9,
+        max_model_len=8 * HISPARSE_BLOCK_SIZE,
+        max_in_flight_tokens=2 * HISPARSE_BLOCK_SIZE,
+    )
+    request = make_request(
+        "long-hisparse",
+        list(range(8 * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+
+    assert (
+        manager.allocate_slots(
+            request,
+            num_new_tokens=HISPARSE_BLOCK_SIZE,
+            full_sequence_must_fit=True,
+        )
+        is not None
+    )
 
 
 def test_cache_hit_local_and_external():

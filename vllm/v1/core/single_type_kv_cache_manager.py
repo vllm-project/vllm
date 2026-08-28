@@ -960,11 +960,14 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        del num_tokens_main_model, apply_admission_cap
+        del num_tokens_main_model
         assert not new_computed_blocks
         existing = len(self.req_to_blocks.get(request_id, ()))
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
+        if apply_admission_cap:
+            assert self._max_admission_blocks_per_request is not None
+            required = min(required, self._max_admission_blocks_per_request)
         return max(required - max(existing, host_pages), 0)
 
     def get_num_host_import_blocks_to_allocate(
@@ -2129,7 +2132,7 @@ def get_manager_for_kv_cache_spec(
     # FullAttentionSpec sizing without a separate admission cap.
     if isinstance(
         kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec),
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
     ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
