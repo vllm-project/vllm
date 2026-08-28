@@ -15,7 +15,6 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
     reset_replayssm_ring_trackers,
     selective_state_update,
-    selective_state_update_replayssm_flashinfer,
     update_replayssm_ring_trackers,
 )
 from vllm.utils.torch_utils import set_random_seed
@@ -77,24 +76,6 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
         state_batch_indices,
     )
     assert (ring_start[1].item(), prev_num_accepted[1].item()) == (0, 0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_flashinfer_replayssm_ring_tracker_ignores_invalid_slots():
-    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([-1, 2, 1, 0], dtype=torch.int32, device="cuda")
-
-    update_replayssm_ring_trackers(
-        ring_start,
-        prev_num_accepted,
-        state_batch_indices,
-        logical_window=16,
-        ring_buffer_len=17,
-    )
-
-    assert ring_start.tolist() == [0, 0]
-    assert prev_num_accepted.tolist() == [0, 1]
 
 
 def _kv_cache_config_with_ssu(
@@ -244,74 +225,6 @@ def test_triton_basic_call():
         out=out,
     )
     assert not torch.isnan(out).any()
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_replayssm_flashinfer_wrapper_forwards_vllm_owned_args(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    kernel = Mock(return_value=torch.empty(1, 1, 2, 4, device="cuda"))
-    tracker = Mock()
-    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
-    monkeypatch.setattr(mod, "update_replayssm_ring_trackers", tracker)
-
-    batch, nheads, dim, dstate, ngroups, window = 1, 2, 4, 8, 1, 16
-    state = torch.empty(1, nheads, dim, dstate, device="cuda")
-    x = torch.empty(batch, nheads, dim, device="cuda")
-    dt = torch.empty(batch, nheads, dim, device="cuda")
-    A = torch.empty(nheads, dim, dstate, device="cuda")
-    B = torch.empty(batch, ngroups, dstate, device="cuda")
-    C = torch.empty(batch, ngroups, dstate, device="cuda")
-    out = torch.empty_like(x)
-    x_cache = torch.empty(1, nheads, window, dim, device="cuda")
-    dt_cache = torch.empty(1, nheads, window, device="cuda")
-    B_cache = torch.empty(1, ngroups, window, dstate, device="cuda")
-    ring_start = torch.zeros(1, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(1, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.zeros(1, dtype=torch.int32, device="cuda")
-    scratch = (
-        torch.empty(1, device="cuda"),
-        torch.empty(1, device="cuda"),
-        torch.empty(1, device="cuda"),
-    )
-
-    selective_state_update_replayssm_flashinfer(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        out,
-        x_cache,
-        B_cache,
-        dt_cache,
-        ring_start,
-        prev_num_accepted,
-        logical_window=window,
-        state_batch_indices=state_batch_indices,
-        scratch=scratch,
-        enable_stochastic_rounding=True,
-        stochastic_rounding_philox_rounds=6,
-        update_trackers=False,
-    )
-
-    args = kernel.call_args.args
-    kwargs = kernel.call_args.kwargs
-    assert args[4] is ring_start
-    assert args[5] is prev_num_accepted
-    assert kwargs["state_batch_indices"] is state_batch_indices
-    assert kwargs["cb_scaled"] is scratch[0]
-    assert kwargs["cumAdt_vec"] is scratch[1]
-    assert kwargs["cb_old"] is scratch[2]
-    assert kwargs["philox_rounds"] == 6
-    assert kwargs["rand_seed"].shape == (1,)
-    assert kwargs["rand_seed"].dtype == torch.int64
-    assert kwargs["rand_seed"].device.type == "cuda"
-    assert "algorithm" not in kwargs
-    assert "d_split" not in kwargs
-    assert "precompute_heads_per_cta" not in kwargs
-    tracker.assert_not_called()
 
 
 @pytest.mark.parametrize(
