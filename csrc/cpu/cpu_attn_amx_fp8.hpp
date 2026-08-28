@@ -673,15 +673,12 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     float max_abs = 0.0f;
     {
       scalar_t* src_iter = src;
-#if defined(__AVX512F__)
       __m512 max_abs_vec = _mm512_setzero_ps();
       const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
-#endif
       for (int32_t q = 0; q < q_num; ++q, src_iter += q_num_stride) {
         scalar_t* head_iter = src_iter;
         for (int32_t h = 0; h < q_heads_per_kv;
              ++h, head_iter += q_head_stride) {
-#if defined(__AVX512F__)
           for (int64_t e = 0; e < head_dim; e += 16) {
             const __m256i bf16 = _mm256_loadu_si256(
                 reinterpret_cast<const __m256i*>(head_iter + e));
@@ -691,17 +688,9 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
                 _mm512_and_si512(fp32_bits, abs_mask));
             max_abs_vec = _mm512_max_ps(max_abs_vec, abs_values);
           }
-#else
-          for (int64_t e = 0; e < head_dim; ++e) {
-            float v = static_cast<float>(head_iter[e]);
-            max_abs = std::max(max_abs, std::abs(v));
-          }
-#endif
         }
       }
-#if defined(__AVX512F__)
       max_abs = _mm512_reduce_max_ps(max_abs_vec);
-#endif
     }
     if (max_abs == 0.0f) max_abs = 1.0f;  // avoid div-by-zero
     const float inv_scale = fp8_max / max_abs;
