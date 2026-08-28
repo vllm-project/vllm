@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
@@ -140,10 +141,7 @@ impl EngineCoreOutput {
 
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
         self.new_logprobs = (self.new_logprobs.take())
             .map(|value| value.resolve(frames, "new_logprobs"))
             .transpose()?;
@@ -246,10 +244,7 @@ impl From<DpControlOutput> for EngineCoreOutputs {
 impl EngineCoreOutputs {
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
         if let Self::RequestBatch(batch) = self {
             for output in &mut batch.outputs {
                 output.resolve_in_place(frames)?;
@@ -365,10 +360,7 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
 
 /// Decode one ordinary or multipart engine-core output message into the strong
 /// typed public protocol shape.
-pub fn decode_engine_core_outputs<Frame>(frames: &[Frame]) -> Result<EngineCoreOutputs>
-where
-    Frame: AsRef<[u8]>,
-{
+pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
     let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
