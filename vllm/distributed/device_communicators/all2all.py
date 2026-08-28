@@ -1251,6 +1251,19 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
             logger.debug("Creating FlashInfer EP fleet with args %s", kwargs)
             fleet = self._make_fleet(kwargs)
             self._fleets[key] = fleet
+            if len(self._fleets) > 1 and self.support_fault_tolerance:
+                # Each Fleet owns its own EP group and mask, but the FT entry
+                # points below read a single primary Fleet, so a fault in a
+                # secondary one is invisible. Don't report liveness we can't see.
+                self.support_fault_tolerance = False
+                logger.warning(
+                    "Disabling FlashInfer-EP fault tolerance: this model needs "
+                    "%d EP fleets (layers differ in expert count or hidden "
+                    "size), and mask state is per-fleet, so faults in a "
+                    "secondary fleet would go undetected. A failed EP rank "
+                    "will now abort instead.",
+                    len(self._fleets),
+                )
         return fleet
 
     # ----------------------------------------------------------- fault tolerance
@@ -1289,6 +1302,29 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
         if self._ft_last_mask is None or self._ft_last_mask.shape != current.shape:
             self._ft_last_mask = torch.ones_like(current)
         return (current != self._ft_last_mask).any()
+
+    def clean_buffers(self) -> None:
+        """Post-fault cleanup: reset transport mask state on every fleet.
+
+        clear_faults(readmit=True) is ncclEpMaskClean plus the async-error
+        clear. It is collective over survivors, so every surviving rank must
+        call it -- which the sentinel retry path does.
+        """
+        for fleet in self._fleets.values():
+            try:
+                fleet.clear_faults(readmit=True)
+            except RuntimeError:
+                # readmit=True needs a handle to exist (ncclEpMaskClean asserts
+                # on the staging buffer the first create_handle allocates); no
+                # handle means no forward ran, so just re-arm detection.
+                with contextlib.suppress(Exception):
+                    fleet.clear_faults(readmit=False)
+            except Exception:
+                logger.exception(
+                    "FlashInfer-EP clean_buffers failed for one fleet; "
+                    "continuing with the rest."
+                )
+        self._ft_last_mask = None
 
     def destroy(self):
         for fleet in self._fleets.values():
