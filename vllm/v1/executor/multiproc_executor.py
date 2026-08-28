@@ -1030,28 +1030,33 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
-            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
-                indefinite=True
-            )
-            try:
-                if isinstance(method, str):
-                    func = getattr(self.worker, method)
-                elif isinstance(method, bytes):
-                    func = partial(cloudpickle.loads(method), self.worker)
+            self._execute_worker_rpc(self.rpc_broadcast_mq.dequeue(indefinite=True))
 
-                output = func(*args, **kwargs)
+    def _execute_worker_rpc(
+        self,
+        rpc_request: tuple[str | bytes, tuple[Any, ...], dict[str, Any], int | None],
+    ) -> None:
+        """Execute one RPC in a separate frame from the dequeue loop."""
+        method, args, kwargs, output_rank = rpc_request
+        try:
+            if isinstance(method, str):
+                func = getattr(self.worker, method)
+            elif isinstance(method, bytes):
+                func = partial(cloudpickle.loads(method), self.worker)
 
-                if output_rank is None or self.rank == output_rank:
-                    self.handle_output(output)
-            except Exception as e:
-                # Notes have been introduced in python 3.11
-                if hasattr(e, "add_note"):
-                    e.add_note(traceback.format_exc())
-                logger.exception("WorkerProc hit an exception.")
-                # exception might not be serializable, so we convert it to
-                # string, only for logging purpose.
-                if output_rank is None or self.rank == output_rank:
-                    self.handle_output(e)
+            output = func(*args, **kwargs)
+
+            if output_rank is None or self.rank == output_rank:
+                self.handle_output(output)
+        except Exception as e:
+            # Notes have been introduced in python 3.11
+            if hasattr(e, "add_note"):
+                e.add_note(traceback.format_exc())
+            logger.exception("WorkerProc hit an exception.")
+            # enqueue_output converts the exception to a FAILURE response
+            # containing its string representation before transport.
+            if output_rank is None or self.rank == output_rank:
+                self.handle_output(e)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:

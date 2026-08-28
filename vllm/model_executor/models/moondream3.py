@@ -57,6 +57,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.moondream3 import (
@@ -942,20 +943,11 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     image_placeholder: str = "<image>"
     bos_image_placeholder: str = "<|endoftext|><image>"
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Moondream3's processor handles images directly rather than exposing a
-        # separate `image_processor`, so keep the cache path on text+MM calls.
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-
     @cached_property
     def bos_image_placeholder_tokens(self) -> list[int]:
         tokenizer = self.info.get_tokenizer()
-        token_ids = tokenizer.encode(
+        token_ids = cached_encode(
+            tokenizer,
             self.bos_image_placeholder,
             add_special_tokens=False,
         )
