@@ -151,7 +151,6 @@ roster by itself.
 | `--probe-timeout` | Per-probe timeout. |
 | `--fail-threshold` | Consecutive failed probes before an instance stops being routed to. |
 | `--evicted-ttl` | Seconds to keep probing an unreachable instance before forgetting it. `0` probes forever. |
-| `--no-rewrite` | Forward media to the decoder unchanged instead of replacing it with a reference to the encoder's embedding. For A/B timing the rewrite itself. |
 
 ### Inspecting the roster
 

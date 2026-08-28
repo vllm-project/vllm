@@ -24,7 +24,6 @@ class DisaggProxySubcommand(CLISubcommand):
 
         app = build_app(
             EPDProxyConfig(
-                no_rewrite=args.no_rewrite,
                 probe_interval=args.probe_interval,
                 probe_timeout=args.probe_timeout,
                 fail_threshold=args.fail_threshold,
@@ -52,15 +51,6 @@ class DisaggProxySubcommand(CLISubcommand):
         )
         parser.add_argument("--host", default="0.0.0.0")
         parser.add_argument("--port", type=int, default=8000)
-        parser.add_argument(
-            "--no-rewrite",
-            action="store_true",
-            help=(
-                "Forward media to the decoder unchanged instead of replacing "
-                "it with a reference to the encoder's embedding. For A/B "
-                "timing the rewrite itself."
-            ),
-        )
         parser.add_argument(
             "--probe-interval",
             type=float,

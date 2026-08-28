@@ -40,13 +40,6 @@ MM_TYPES = {"image_url", "audio_url", "input_audio"}
 
 @dataclass
 class EPDProxyConfig:
-    """Attributes:
-    no_rewrite: Forward the media to the decoder unchanged instead of
-        replacing it with a reference to the encoder's embedding. Only
-        useful for A/B timing the rewrite itself.
-    """
-
-    no_rewrite: bool = False
     probe_interval: float = 5.0
     probe_timeout: float = 2.0
     fail_threshold: int = 3
@@ -206,32 +199,22 @@ class EPDProxy:
             return {}
 
         logger.info("[%s] Encoding %d media item(s)", req_id, len(mm_items))
-        item_uuids: dict[int, str] = {}
+        item_uuids: list[str] = []
         tasks = []
         for idx, (item, encoder) in enumerate(zip(mm_items, route.encoders)):
             child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
-            # With no_rewrite the decoder receives the raw media and derives
-            # the key by hashing it, so the encoder must do the same: passing
-            # a uuid here would make the two disagree and silently defeat the
-            # transfer.
-            item_uuid = None if self.config.no_rewrite else content_uuid(item)
-            if item_uuid is not None:
-                item_uuids[idx] = item_uuid
+            item_uuid = content_uuid(item)
+            item_uuids.append(item_uuid)
             encoder_req: dict = {
                 "model": req_data.get("model"),
                 "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            item if item_uuid is None else {**item, "uuid": item_uuid}
-                        ],
-                    }
+                    {"role": "user", "content": [{**item, "uuid": item_uuid}]}
                 ],
                 # No max_tokens cap: the encoder never samples, it finishes
                 # once the prompt is encoded and its embeddings are published.
                 "stream": False,
             }
-            if route.consumer_zmq is not None and item_uuid is not None:
+            if route.consumer_zmq is not None:
                 encoder_req["ec_transfer_params"] = {
                     "consumer_zmq": route.consumer_zmq,
                     "ec_items": [{"mm_hash": item_uuid}],
@@ -248,7 +231,7 @@ class EPDProxy:
         return await self._collect_encoder_metadata(results, item_uuids, req_id)
 
     async def _collect_encoder_metadata(
-        self, results: list, item_uuids: dict[int, str], req_id: str
+        self, results: list, item_uuids: list[str], req_id: str
     ) -> dict[int, dict]:
         item_meta: dict[int, dict] = {}
         for idx, result in enumerate(results):
@@ -278,10 +261,25 @@ class EPDProxy:
             except Exception:
                 logger.warning("[%s] Unreadable encoder metadata #%d", req_id, idx)
                 reported = []
-            if reported and idx in item_uuids:
+            if reported:
                 # One item per encoder request, so the first entry is this one's.
                 item_meta[idx] = {**reported[0], "mm_hash": item_uuids[idx]}
         return item_meta
+
+    @staticmethod
+    async def _raise_for_upstream(resp: aiohttp.ClientResponse, stage: str) -> None:
+        """Fail with what the instance said, not just its status code.
+
+        `raise_for_status` drops the body, and the body is where the reason
+        lives -- a decoder that was not started with the flag the rewritten
+        request needs answers 400 and explains why.
+        """
+        if resp.status == 200:
+            return
+        detail = await resp.text()
+        raise HTTPException(
+            status_code=resp.status, detail=f"{stage} request failed: {detail}"
+        )
 
     async def prefill(self, req_data: dict, route: _Route, req_id: str) -> dict:
         """Run the prefill stage and carry its transfer params to the decoder."""
@@ -309,12 +307,7 @@ class EPDProxy:
             json=prefill_request,
             headers={"x-request-id": req_id},
         ) as resp:
-            if resp.status != 200:
-                detail = await resp.text()
-                raise HTTPException(
-                    status_code=resp.status,
-                    detail=f"Prefill request failed: {detail}",
-                )
+            await self._raise_for_upstream(resp, "Prefill")
             body = await resp.json()
 
         # The prefill instance reports where its KV lives; the decoder pulls
@@ -329,8 +322,7 @@ class EPDProxy:
         self, req_data: dict, route: _Route, req_id: str
     ) -> dict:
         item_meta = await self.encode(req_data, route, req_id)
-        if not self.config.no_rewrite:
-            req_data = rewrite_for_decode(req_data, item_meta)
+        req_data = rewrite_for_decode(req_data, item_meta)
         return await self.prefill(req_data, route, req_id)
 
     async def forward(self, req_data: dict, route: _Route, req_id: str) -> dict:
@@ -341,7 +333,7 @@ class EPDProxy:
             json=req_data,
             headers={"x-request-id": req_id},
         ) as resp:
-            resp.raise_for_status()
+            await self._raise_for_upstream(resp, "Decode")
             return await resp.json()
 
     async def forward_stream(
@@ -354,7 +346,7 @@ class EPDProxy:
             json=req_data,
             headers={"x-request-id": req_id},
         ) as resp:
-            resp.raise_for_status()
+            await self._raise_for_upstream(resp, "Decode")
             async for chunk in resp.content.iter_chunked(1024):
                 if chunk:
                     yield chunk.decode("utf-8", errors="ignore")

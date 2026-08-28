@@ -1597,7 +1597,7 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        self._resolve_allow_missing_mm_embeddings()
+        self._resolve_mm_embedding_inputs()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
 
@@ -2284,8 +2284,8 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _resolve_allow_missing_mm_embeddings(self) -> None:
-        """Allow `*_embeds` tensors to be omitted on disaggregated consumers.
+    def _resolve_mm_embedding_inputs(self) -> None:
+        """Accept embedding inputs, tensor optional, on disaggregated consumers.
 
         An EC consumer loads embeddings from its connector. A KV consumer
         receives the prompt KV produced from those embeddings, so it does not
@@ -2306,11 +2306,24 @@ class VllmConfig:
         mm_config.allow_missing_mm_embeddings = (
             ec_config is not None and ec_config.is_ec_consumer
         ) or (kv_config is not None and kv_config.is_kv_consumer)
-        if mm_config.allow_missing_mm_embeddings:
+        if not mm_config.allow_missing_mm_embeddings:
+            return
+
+        if not mm_config.enable_mm_embeds:
+            # A consumer is sent the media as an `*_embeds` reference, which
+            # the frontend rejects outright unless embedding inputs are
+            # enabled at all. Letting the tensor be omitted decides nothing
+            # if the request never gets that far, so enabling one without the
+            # other fails every multimodal request rather than some of them.
+            mm_config.enable_mm_embeds = True
             logger.info_once(
-                "EC/KV consumer: pre-computed-embedding inputs may "
-                "omit the embedding tensor."
+                "EC/KV consumer: accepting pre-computed-embedding inputs, "
+                "which this role is sent by definition."
             )
+        logger.info_once(
+            "EC/KV consumer: pre-computed-embedding inputs may "
+            "omit the embedding tensor."
+        )
 
     def _resolve_mm_encoder_only(self) -> None:
         """Enable encoder-only mode for a dedicated EC producer."""
