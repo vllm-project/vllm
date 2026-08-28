@@ -594,12 +594,21 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
 # fallback off for this parser because forcing raw JSON conflicts with the wire
 # format and can crash EngineCore under speculative decoding. The structural tag
 # constrains markers AND payload together, which is the whole point.
-_INKLING_MESSAGE_MODEL = "<|message_model|>"
+#
+# The tag constrains the GENERATED SUFFIX, so it begins at the content-kind
+# marker, NOT at `<|message_model|>`. Inkling's chat template prefills the role
+# marker into the generation prompt -- it ends
+# `...<|end_message|><|message_model|>` -- so generation resumes inside the
+# model message and never re-emits it. Anchoring the tag at `<|message_model|>`
+# forces a DUPLICATE role marker: verified with xgrammar, that grammar rejects
+# the correct suffix and accepts only the doubled form. It appears to work
+# because the parser absorbs the duplicate, but it manufactures exactly the
+# unconsumed-control-marker residue that dynamo#12510 exists to strip.
 _INKLING_CONTENT_TEXT = "<|content_text|>"
 _INKLING_TOOL_JSON = "<|content_invoke_tool_json|>"
 _INKLING_END_MESSAGE = "<|end_message|>"
-_INKLING_TOOL_OPEN = _INKLING_MESSAGE_MODEL + _INKLING_TOOL_JSON
-_INKLING_TEXT_OPEN = _INKLING_MESSAGE_MODEL + _INKLING_CONTENT_TEXT
+_INKLING_TOOL_OPEN = _INKLING_TOOL_JSON
+_INKLING_TEXT_OPEN = _INKLING_CONTENT_TEXT
 
 
 def _inkling_call_schema(tool: FunctionToolParam) -> dict[str, Any]:
