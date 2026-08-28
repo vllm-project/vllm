@@ -88,6 +88,9 @@ class EncoderCudaGraphConfig:
     )
     """Independently captured encoder paths keyed by their forward name."""
 
+    enable_secondary_capture_axis: bool = False
+    """Whether to enable secondary capture axis."""
+
 
 @dataclass
 class EncoderCudaGraphCaptureInputs:

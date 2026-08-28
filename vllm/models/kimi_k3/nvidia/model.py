@@ -3,7 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any, cast
 
 import torch
@@ -1907,7 +1907,10 @@ class KimiK3ForConditionalGeneration(
         ]
 
     def select_encoder_cudagraph_items(
-        self, mm_kwargs: dict[str, Any], indices: list[int]
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         grid_thws = self._get_grid_thws(mm_kwargs)
         pixel_values = self._get_pixel_values(mm_kwargs)
@@ -1944,6 +1947,7 @@ class KimiK3ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

@@ -24,7 +24,7 @@
 """Inference-only Ernie VL model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -1648,7 +1648,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         ]
 
     def select_encoder_cudagraph_items(
-        self, mm_kwargs: dict[str, Any], indices: list[int]
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         grid_thw = mm_kwargs["image_grid_thw"]
         pixel_values = mm_kwargs["pixel_values"]
@@ -1674,6 +1677,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         device,
         dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
