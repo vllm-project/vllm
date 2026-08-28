@@ -14,7 +14,22 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import get_ep_group
+from vllm.distributed.device_communicators.all2all import (
+    AgRsAll2AllManager,
+    All2AllManagerBase,
+    FlashInferNVLinkOneSidedManager,
+)
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase,
+)
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -23,6 +38,70 @@ from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_backend"),
+    [
+        pytest.param(
+            "cuda",
+            "flashinfer_nvlink_one_sided",
+            marks=pytest.mark.skipif(
+                not has_flashinfer_nvlink_one_sided(),
+                reason="FlashInfer NVLink one-sided not available",
+            ),
+        ),
+        ("non_cuda", "allgather_reducescatter"),
+    ],
+)
+def test_default_ep_communicator_uses_platform_all2all_backend(
+    monkeypatch, platform, expected_backend
+):
+    def init_device_communicator(
+        self,
+        cpu_group,
+        device,
+        device_group,
+        unique_name,
+        global_ranks,
+        global_world_size,
+        *,
+        use_all2all,
+    ):
+        self.cpu_group = cpu_group
+        self.device = device
+        self.device_group = device_group
+        self.unique_name = unique_name
+        self.world_size = 1
+        self.use_all2all = unique_name.startswith("ep:") and use_all2all
+        self.all2all_backend = get_current_vllm_config().parallel_config.all2all_backend
+        self.all2all_manager = None
+
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.is_cuda", lambda: platform == "cuda"
+    )
+    monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
+    monkeypatch.setattr(All2AllManagerBase, "__init__", lambda self, *args: None)
+
+    vllm_config = VllmConfig(parallel_config=ParallelConfig())
+    with set_current_vllm_config(vllm_config):
+        device_comm_cls = CudaCommunicator
+        device_communicator = device_comm_cls(
+            cpu_group=object(),
+            device=torch.device("cuda:0"),
+            device_group=object(),
+            unique_name="ep:test",
+            use_all2all=True,
+        )
+
+    assert device_communicator.all2all_backend == expected_backend
+    if platform == "cuda":
+        assert isinstance(
+            device_communicator.all2all_manager, FlashInferNVLinkOneSidedManager
+        )
+    else:
+        assert isinstance(device_communicator.all2all_manager, AgRsAll2AllManager)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
