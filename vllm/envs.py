@@ -175,7 +175,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
-    VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
+    VLLM_USE_BREAKABLE_CUDAGRAPH: bool = True
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -765,9 +765,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
         os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
     ),
-    # Experimental: breakable cudagraph does not rely on torch.compile
+    # Breakable cudagraph does not rely on torch.compile
     "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
-        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
+        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "1") == "1"
     ),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').

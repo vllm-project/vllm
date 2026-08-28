@@ -329,41 +329,35 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         default_breakable_cudagraph_architectures.cache_clear()
 
 
-@pytest.mark.parametrize(
-    ("architecture", "is_rocm", "expected"),
-    [
-        ("DeepseekV32ForCausalLM", False, True),
-        ("DeepseekV32ForCausalLM", True, False),
-        ("DeepseekV32MTPModel", False, True),
-        ("DeepseekV32MTPModel", True, False),
-        ("GlmMoeDsaForCausalLM", False, True),
-        ("GlmMoeDsaForCausalLM", True, False),
-    ],
-)
-def test_dsa_breakable_cudagraph_platform_default(
-    monkeypatch, architecture, is_rocm, expected
-):
-    from vllm.config.vllm import default_breakable_cudagraph_architectures
+@pytest.mark.parametrize("is_rocm", [False, True])
+def test_breakable_cudagraph_default_on_opt_out(monkeypatch, is_rocm):
+    """VLLM_USE_BREAKABLE_CUDAGRAPH defaults to on (all platforms and
+    architectures); setting it to 0 opts out."""
+    import vllm.envs as envs
     from vllm.platforms import current_platform
 
-    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    envs.disable_envs_cache()
     monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
-    default_breakable_cudagraph_architectures.cache_clear()
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(architectures=[architecture]),
-        compilation_config=CompilationConfig(),
-    )
-    config._uses_breakable_cudagraph_by_default = lambda: (
-        VllmConfig._uses_breakable_cudagraph_by_default(config)
-    )
 
-    try:
-        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
-        if expected:
-            assert config.compilation_config.mode == CompilationMode.NONE
-    finally:
-        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_breakable_cudagraph_architectures.cache_clear()
+    def make_config():
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
+            compilation_config=CompilationConfig(),
+        )
+        config._uses_breakable_cudagraph_by_default = lambda: (
+            VllmConfig._uses_breakable_cudagraph_by_default(config)
+        )
+        return config
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is True
+    assert config.compilation_config.mode == CompilationMode.NONE
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
+    assert config.compilation_config.mode is None
 
 
 @pytest.mark.parametrize(

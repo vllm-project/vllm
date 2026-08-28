@@ -244,14 +244,15 @@ class _BreakableEntry:
 
 
 class BreakableCUDAGraphWrapper:
-    """Drop-in replacement for :class:`CUDAGraphWrapper` that uses
+    """PIECEWISE-mode replacement for :class:`CUDAGraphWrapper` that uses
     :class:`BreakableCUDAGraphCapture` instead of a single monolithic
     ``torch.cuda.graph()`` capture.
 
-    Same dispatch contract as ``CUDAGraphWrapper``:
+    Dispatch contract:
         * If no ``forward_context`` is available, run the underlying
           callable eagerly.
-        * If runtime mode mismatch / NONE, run eagerly.
+        * If the runtime mode is not PIECEWISE, run eagerly -- FULL
+          dispatches are left to an enclosing ``CUDAGraphWrapper``.
         * Otherwise, lazily capture per ``batch_descriptor`` and replay
           on subsequent invocations with the same descriptor.
     """
@@ -270,12 +271,9 @@ class BreakableCUDAGraphWrapper:
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
     ) -> None:
-        # Unlike the original CUDAGraphWrapper which strictly matches a
-        # single runtime_mode, this wrapper captures whatever the
-        # dispatcher emits (any non-NONE runtime_mode) -- breakable's
-        # capture is identical for prefill and decode, so there's nothing
-        # to dispatch on at the runtime_mode level. Entries are keyed by
-        # BatchDescriptor which already encodes batch shape / uniformity.
+        # Entries are keyed by BatchDescriptor which already encodes
+        # batch shape / uniformity; only PIECEWISE dispatches are
+        # intercepted (see __call__).
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -315,11 +313,11 @@ class BreakableCUDAGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        # Capture whenever the dispatcher says "some cudagraph mode" --
-        # breakable produces the same artifact regardless of PIECEWISE
-        # vs FULL, so we match either. Entries are keyed by batch
-        # descriptor, which already encodes prefill/decode distinctions.
-        if cudagraph_runtime_mode == CUDAGraphMode.NONE:
+        # Only intercept PIECEWISE dispatches; FULL dispatches are handled
+        # by an enclosing CUDAGraphWrapper (or run eagerly when there is
+        # none). Entries are keyed by batch descriptor, which already
+        # encodes prefill/decode distinctions.
+        if cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None

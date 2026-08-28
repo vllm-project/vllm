@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
@@ -533,7 +534,7 @@ class SpecDecodeBaseProposer:
 
         if self.method in ("eagle3", "dflash"):
             model = self.model
-            if isinstance(model, BreakableCUDAGraphWrapper):
+            while isinstance(model, (BreakableCUDAGraphWrapper, CUDAGraphWrapper)):
                 model = model.unwrap()
             assert isinstance(
                 model,

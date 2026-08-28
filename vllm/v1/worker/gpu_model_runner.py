@@ -3381,22 +3381,23 @@ class GPUModelRunner(
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
-        if isinstance(
-            self.model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
+        model = self.model
+        # get raw model out of (possibly nested) cudagraph wrappers.
+        while isinstance(
+            model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
         ):
-            # get raw model out of the cudagraph wrapper.
-            return self.model.unwrap()
-        return self.model
+            model = model.unwrap()
+        return model
 
     def get_draft_model(self) -> nn.Module | None:
         drafter = getattr(self, "drafter", None)
         if drafter is None:
             return None
         model = getattr(drafter, "model", None)
-        if isinstance(
+        while isinstance(
             model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
         ):
-            return cast(nn.Module, model.unwrap())
+            model = model.unwrap()
         return cast(nn.Module | None, model)
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -5510,27 +5511,41 @@ class GPUModelRunner(
         # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWrapper and CudagraphDispatcher of vllm.
 
-        # wrap the model with full cudagraph wrapper if needed.
+        # wrap the model with cudagraph wrappers if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
-        if (
+        # Breakable cudagraphs replace only the torch.compile-based
+        # PIECEWISE path; FULL cudagraphs (if any) are still applied on top
+        # via CUDAGraphWrapper below.
+        use_breakable = (
             is_breakable_cudagraph_enabled()
-            and cudagraph_mode != CUDAGraphMode.NONE
+            and cudagraph_mode.has_piecewise_cudagraphs()
             and not self.parallel_config.use_ubatching
-        ):
+        )
+        if use_breakable:
             self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
                 drafter.model = BreakableCUDAGraphWrapper(
                     drafter.model, self.vllm_config
                 )
-        elif (
+        if (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
+            if use_breakable:
+                # Keep the drafter graphed for FULL dispatches; it has no
+                # torch.compile piecewise graphs when breakable is used.
+                drafter = getattr(self, "drafter", None)
+                if drafter is not None and hasattr(drafter, "model"):
+                    drafter.model = CUDAGraphWrapper(
+                        drafter.model,
+                        self.vllm_config,
+                        runtime_mode=CUDAGraphMode.FULL,
+                    )
         elif self.parallel_config.use_ubatching:
             if cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
