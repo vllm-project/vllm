@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
+from vllm.distributed.parallel_state import _get_moe_dp_pcp_group_ranks
 from vllm.forward_context import DPMetadata, _compute_sp_num_tokens
 from vllm.v1.worker.gpu_worker import _dp_local_rank_offset
 
@@ -56,82 +57,84 @@ def test_ep_dispatch_sizes_preserve_dp_pcp_order_without_sp():
         assert sizes == [10, 7, 5, 3]
 
 
-def test_ag_rs_detects_combined_pcp_dp_without_using_ep_group(monkeypatch):
-    dp_group = object()
+def test_moe_dp_pcp_group_ranks_fix_tp_coordinate():
+    all_ranks = torch.arange(8).reshape(1, 2, 1, 2, 2)
+
+    group_ranks = _get_moe_dp_pcp_group_ranks(
+        all_ranks,
+        data_parallel_size=2,
+        prefill_context_parallel_size=2,
+    )
+
+    assert group_ranks == [[0, 2, 4, 6], [1, 3, 5, 7]]
+
+
+def test_ag_rs_selects_moe_dp_pcp_group_for_non_sp(monkeypatch):
+    moe_dp_pcp_group = object()
     pcp_group = SimpleNamespace(world_size=2)
     dp_metadata = SimpleNamespace(num_tokens_across_dp_pcp_cpu=torch.tensor([1]))
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
     manager.dp_world_size = 2
 
     monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_dp_group",
-        lambda: dp_group,
-    )
-    monkeypatch.setattr(
         "vllm.distributed.device_communicators.all2all.get_pcp_group",
         lambda: pcp_group,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
+        lambda: moe_dp_pcp_group,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.all2all.has_moe_dp_pcp_group",
+        lambda: True,
     )
     monkeypatch.setattr(
         "vllm.distributed.device_communicators.all2all.get_forward_context",
         lambda: SimpleNamespace(dp_metadata=dp_metadata),
     )
 
-    assert manager._uses_combined_dp_pcp(is_sequence_parallel=False)
-    assert manager._get_comm_group(is_sequence_parallel=False) is dp_group
+    assert manager._uses_moe_dp_pcp_group(is_sequence_parallel=False)
+    assert manager._get_comm_group(is_sequence_parallel=False) is moe_dp_pcp_group
 
 
-def test_ag_rs_combined_pcp_dp_collective_order(monkeypatch):
+def test_ag_rs_moe_dp_pcp_uses_one_collective_for_each_direction(monkeypatch):
     calls = []
 
-    class FakePcpGroup:
-        world_size = 2
-        rank_in_group = 0
+    class FakeMoeDpPcpGroup:
+        world_size = 4
+        rank_in_group = 2
 
         def all_gatherv(self, tensors, dim, sizes):
-            calls.append(("pcp_ag", sizes))
+            calls.append(("moe_dp_pcp_ag", sizes))
             assert tensors[0].tolist() == [20, 21]
-            return [torch.tensor([20, 21, 22]) for _ in tensors]
-
-        def reduce_scatterv(self, tensor, dim, sizes):
-            calls.append(("pcp_rs", sizes))
-            assert tensor.tolist() == [20, 21, 22]
-            return tensor[:2]
-
-    class FakeDpGroup:
-        world_size = 2
-        rank_in_group = 1
-
-        def all_gatherv(self, tensors, dim, sizes):
-            calls.append(("dp_ag", sizes))
-            assert tensors[0].tolist() == [20, 21, 22]
             return [torch.tensor([10, 11, 12, 20, 21, 22]) for _ in tensors]
 
         def reduce_scatterv(self, tensor, dim, sizes):
-            calls.append(("dp_rs", sizes))
+            calls.append(("moe_dp_pcp_rs", sizes))
             assert tensor.tolist() == [10, 11, 12, 20, 21, 22]
-            return tensor[3:]
+            return tensor[3:5]
 
     monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_dp_group",
-        lambda: FakeDpGroup(),
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_pcp_group",
-        lambda: FakePcpGroup(),
+        "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
+        lambda: FakeMoeDpPcpGroup(),
     )
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
     sizes = [1, 2, 2, 1]
+    group = FakeMoeDpPcpGroup()
+    manager._get_comm_group = lambda is_sequence_parallel: group
+    manager._get_sizes = lambda num_local_tokens, comm_group: sizes
+    manager._uses_staged_dp_pcp = lambda is_sequence_parallel: False
 
-    gathered = manager._dispatch_combined_dp_pcp(
-        [torch.tensor([20, 21])], sizes
+    hidden_states, _, _ = manager.dispatch(
+        torch.tensor([20, 21]),
+        torch.tensor([1, 1]),
+        torch.tensor([0, 0]),
     )
-    combined = manager._combine_combined_dp_pcp(gathered[0], sizes)
+    combined = manager.combine(hidden_states)
 
-    assert gathered[0].tolist() == [10, 11, 12, 20, 21, 22]
+    assert hidden_states.tolist() == [10, 11, 12, 20, 21, 22]
     assert combined.tolist() == [20, 21]
     assert calls == [
-        ("pcp_ag", [2, 1]),
-        ("dp_ag", [3, 3]),
-        ("dp_rs", [3, 3]),
-        ("pcp_rs", [2, 1]),
+        ("moe_dp_pcp_ag", [1, 2, 2, 1]),
+        ("moe_dp_pcp_rs", [1, 2, 2, 1]),
     ]
