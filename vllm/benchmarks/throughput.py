@@ -305,7 +305,7 @@ async def run_vllm_async(
     disable_detokenize: bool = False,
     warmup_requests: list[SampleRequest] | None = None,
 ) -> float:
-    from vllm.entrypoints.openai.api_server import (
+    from vllm.entrypoints.launchers.api_server.entry import (
         build_async_engine_client_from_engine_args,
     )
 
