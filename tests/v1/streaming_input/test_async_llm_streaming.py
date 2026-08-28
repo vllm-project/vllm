@@ -170,3 +170,74 @@ async def test_generate_with_async_generator():
     assert outputs[2].finished is True
     # Both inputs were processed
     assert inputs_received == ["Hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_session_does_not_mutate_caller_prompt():
+    """Streaming sessions must not mutate the caller-provided prompt list.
+
+    Regression test for #54215: tokens from later stream chunks used to be
+    appended to the list object passed in the first chunk, so any later
+    request reusing that list silently carried the session's tokens.
+    """
+    request_id = "test-mutate"
+    sampling_params = SamplingParams(max_tokens=4)
+
+    llm = MagicMock(spec=AsyncLLM)
+    llm.vllm_config = MagicMock()
+    llm.vllm_config.cache_config.kv_sharing_fast_prefill = False
+    llm.model_config = MagicMock()
+    llm.model_config.max_model_len = 2048
+    llm.log_requests = False
+    llm.errored = False
+    llm._pause_cond = asyncio.Condition()
+    llm._paused = False
+    llm._run_output_handler = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+
+    # Record the prompt objects handed to the input processor.
+    processed_prompts = []
+    added = []
+
+    def fake_process_inputs(**kwargs):
+        req = MagicMock()
+        req.request_id = f"req-{len(processed_prompts)}"
+        req.external_req_id = None
+        req.prompt_embeds = None
+        req.sampling_params = kwargs.get("params")
+        processed_prompts.append(kwargs["prompt"])
+        return req
+
+    async def fake_add_request(req, *args, **kwargs):
+        added.append(req)
+
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs = MagicMock(side_effect=fake_process_inputs)
+    llm.input_processor.assign_request_id = MagicMock()
+    llm._add_request = fake_add_request
+    # Bind the real method: the spec-based mock would otherwise replace it
+    # with an AsyncMock that never runs handle_inputs.
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm, AsyncLLM
+    )
+
+    P = [100 + (i % 40) for i in range(64)]
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=P, sampling_params=sampling_params)
+        yield StreamingInput(prompt=[777] * 7, sampling_params=sampling_params)
+        yield StreamingInput(prompt=[888] * 5, sampling_params=sampling_params)
+
+    queue = await llm._add_streaming_input_request(
+        request_id, input_generator(), sampling_params
+    )
+    await queue._input_stream_task
+
+    # The caller's list must be untouched by the session.
+    assert len(P) == 64
+    assert [100 + (i % 40) for i in range(64)] == P
+    # The session's chunk tokens must not leak into the caller's list.
+    assert 777 not in P and 888 not in P
+    # The input processor must have received a copy, not the caller's object.
+    assert processed_prompts[1] is not P
+    assert processed_prompts[1] == P

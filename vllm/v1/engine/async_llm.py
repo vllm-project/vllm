@@ -492,9 +492,14 @@ class AsyncLLM(EngineClient):
                     else:
                         sp = sampling_params
                     # TODO(nick): Avoid re-validating reused sampling parameters
+                    prompt = input_chunk.prompt
+                    if isinstance(prompt, list):
+                        # Copy so session updates never mutate the caller's
+                        # list object (see issue #54215).
+                        prompt = list(prompt)
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
-                        prompt=input_chunk.prompt,
+                        prompt=prompt,
                         params=sp,
                         resumable=True,
                         **inputs,  # type: ignore[arg-type]
