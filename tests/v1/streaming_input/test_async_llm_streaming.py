@@ -221,10 +221,10 @@ async def test_streaming_session_does_not_mutate_caller_prompt():
         llm, AsyncLLM
     )
 
-    P = [100 + (i % 40) for i in range(64)]
+    caller_prompt = [100 + (i % 40) for i in range(64)]
 
     async def input_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt=P, sampling_params=sampling_params)
+        yield StreamingInput(prompt=caller_prompt, sampling_params=sampling_params)
         yield StreamingInput(prompt=[777] * 7, sampling_params=sampling_params)
         yield StreamingInput(prompt=[888] * 5, sampling_params=sampling_params)
 
@@ -234,10 +234,11 @@ async def test_streaming_session_does_not_mutate_caller_prompt():
     await queue._input_stream_task
 
     # The caller's list must be untouched by the session.
-    assert len(P) == 64
-    assert [100 + (i % 40) for i in range(64)] == P
+    assert len(caller_prompt) == 64
+    assert [100 + (i % 40) for i in range(64)] == caller_prompt
     # The session's chunk tokens must not leak into the caller's list.
-    assert 777 not in P and 888 not in P
-    # The input processor must have received a copy, not the caller's object.
-    assert processed_prompts[1] is not P
-    assert processed_prompts[1] == P
+    assert 777 not in caller_prompt and 888 not in caller_prompt
+    # The input processor must have received a copy for the first chunk,
+    # not the caller's object.
+    first_chunk = next(p for p in processed_prompts if p == caller_prompt)
+    assert first_chunk is not caller_prompt
