@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
