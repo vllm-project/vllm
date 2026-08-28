@@ -17,6 +17,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
+from vllm.utils.flashinfer import has_flashinfer_moe_ep
 from vllm.utils.import_utils import has_nixl_ep
 
 MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
@@ -102,7 +103,13 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
     monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={rank},step={step}")
 
 
-def _ft_server_args() -> list[str]:
+# FT-capable all2all backends, gated on what this build actually provides.
+FT_BACKENDS = ["nixl_ep"] if has_nixl_ep() else []
+if has_flashinfer_moe_ep("nccl_ep"):
+    FT_BACKENDS.append("flashinfer_ep_low_latency")
+
+
+def _ft_server_args(backend: str = "nixl_ep") -> list[str]:
     return [
         "--enforce-eager",
         "--dtype",
@@ -113,7 +120,7 @@ def _ft_server_args() -> list[str]:
         "128",
         "--enable-expert-parallel",
         "--all2all-backend",
-        "nixl_ep",
+        backend,
         "--enable-fault-tolerance",
         "--cpu-distributed-timeout-seconds",
         str(CPU_DISTRIBUTED_TIMEOUT_S),
@@ -122,7 +129,7 @@ def _ft_server_args() -> list[str]:
     ]
 
 
-def _ft_manager():
+def _ft_manager(backend: str = "nixl_ep"):
     """Build the shared DP+EP fault-tolerant server topology (one engine/server)."""
     from tests.v1.distributed.test_external_lb_dp import ExternalLBServerManager
 
@@ -130,7 +137,7 @@ def _ft_manager():
         MODEL_NAME,
         DP_SIZE,
         api_server_count=1,  # FT requires a single API server per engine
-        base_server_args=_ft_server_args(),
+        base_server_args=_ft_server_args(backend),
         tp_size=1,
     )
 
@@ -265,9 +272,10 @@ def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str 
     return engine_status.get("ft_error") if engine_status else None
 
 
-@pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
+@pytest.mark.skipif(not FT_BACKENDS, reason="No FT-capable all2all backend built")
+@pytest.mark.parametrize("ft_backend", FT_BACKENDS)
 @multi_gpu_test(num_gpus=2)
-def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
+def test_injected_fault_retry_recovers_all_ranks(ft_backend, monkeypatch, tmp_path):
     """An exception injected into the inference path drives full retry recovery.
 
     Injecting an exception into ``sync_cudagraph_and_dp_padding`` at a chosen
@@ -283,7 +291,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     fault_step = int(os.getenv("FT_FAULT_STEP", "50"))
     _install_fault_injection(monkeypatch, tmp_path, rank=1, step=fault_step)
 
-    with _ft_manager() as servers:
+    with _ft_manager(ft_backend) as servers:
         assert len(servers) == DP_SIZE
         rank0 = _server_for_rank(servers, 0)
         rank1 = _server_for_rank(servers, 1)
@@ -315,9 +323,10 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         _assert_serving_and_healthy((rank0, rank1))
 
 
-@pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
+@pytest.mark.skipif(not FT_BACKENDS, reason="No FT-capable all2all backend built")
+@pytest.mark.parametrize("ft_backend", FT_BACKENDS)
 @multi_gpu_test(num_gpus=2)
-def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
+def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry(ft_backend):
     """One worker kill surfaces two status transitions at once.
 
     SIGKILLing only rank 1's worker leaves both EngineCores alive, so the same
@@ -332,7 +341,7 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
     HTTP layer (202 = background dispatch) but rejects it in the engine,
     recording the reason as ``ft_error``.
     """
-    with _ft_manager() as servers:
+    with _ft_manager(ft_backend) as servers:
         assert len(servers) == DP_SIZE
         survivor = _server_for_rank(servers, 0)
         victim = _server_for_rank(servers, 1)

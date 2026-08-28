@@ -50,6 +50,27 @@ class FlashInferEPLLPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
     def max_num_tokens_per_rank(self) -> int | None:
         return self.max_tokens_per_rank
 
+    # NCCL-EP instantiates its low-latency kernels for a fixed set of hidden
+    # sizes (contrib/nccl_ep/device/macros.cuh SWITCH_HIDDEN); anything else
+    # trips EP_HOST_ASSERT(false and "Unsupported hidden") in low_latency.cu
+    # and aborts the worker. Note this is NOT the same list DeepEP-LL uses --
+    # NCCL-EP has no 3072 case.
+    # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends on it.
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168, 8192]
+    assert sorted(set(SUPPORTED_HIDDEN_SIZES)) == SUPPORTED_HIDDEN_SIZES
+
+    @staticmethod
+    def maybe_roundup_layer_hidden_size(hidden_size: int) -> int:
+        # Round up to the closest supported hidden size.
+        for x in FlashInferEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
+            if x >= hidden_size:
+                return x
+        raise ValueError(
+            f"Hidden Size {hidden_size} is greater than the maximum supported "
+            f"hidden size "
+            f"{FlashInferEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES[-1]}"
+        )
+
     def _assert_bf16(self, quant_config: FusedMoEQuantConfig) -> None:
         if quant_config is not None and quant_config.quant_dtype is not None:
             raise NotImplementedError(

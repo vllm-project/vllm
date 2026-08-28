@@ -64,6 +64,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    has_flashinfer_moe_ep,
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
@@ -126,6 +127,11 @@ if has_deep_ep():
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
+# flashinfer.moe_ep over either transport; VLLM_FLASHINFER_EP_TRANSPORT picks
+# which, so one build gate covers both backend names.
+if has_flashinfer_moe_ep("nccl_ep") or has_flashinfer_moe_ep("nixl_ep"):
+    BACKENDS += ["flashinfer_ep_low_latency", "flashinfer_ep_high_throughput"]
+
 DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
 MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency"}
 
@@ -148,6 +154,9 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
+    # bf16 only: nccl-ep asserts ncclBfloat16 in dispatch and combine.
+    "flashinfer_ep_low_latency":    {None},
+    "flashinfer_ep_high_throughput": {None},
 }
 
 # Map from backend -> (DP/EP support, DP support, TP support, SP support)
@@ -160,6 +169,8 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "deepep_low_latency":          (True, False, False,  True),
     "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
+    "flashinfer_ep_low_latency":    (True, False, False,  True),
+    "flashinfer_ep_high_throughput": (True, False, False, True),
 }
 # fmt: on
 
@@ -535,6 +546,20 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             "of padding problems",
         )
 
+    # routed_input_transform routes the experts at latent_size (= k // 2), so
+    # the transport is built for that, not k. NCCL-EP only instantiates its LL
+    # kernels for the sizes in SUPPORTED_HIDDEN_SIZES, and k // 2 lands outside
+    # that set for every k here (2048 -> 1024), which kills the worker.
+    if (
+        config.use_routed_input_transform
+        and config.backend == "flashinfer_ep_low_latency"
+    ):
+        return (
+            False,
+            "routed_input_transform routes at k // 2, which is not a "
+            "SUPPORTED_HIDDEN_SIZES value for flashinfer_ep_low_latency.",
+        )
+
     # routed_input_transform + quantization + high hidden dimensions
     # TODO: Disable >= 2048 for now due to insane errors.
     if (
@@ -611,6 +636,17 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             )
 
             if config.k not in NixlEPPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
+                return (
+                    False,
+                    f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
+                )
+
+        if config.backend == "flashinfer_ep_low_latency":
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_ep_ll import (  # noqa: E501
+                FlashInferEPLLPrepareAndFinalize,
+            )
+
+            if config.k not in FlashInferEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
                 return (
                     False,
                     f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
