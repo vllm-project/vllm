@@ -115,7 +115,7 @@ Whether vLLM enforces the tool parameter schema during generation depends on the
 | --- | --- | --- |
 | Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
 | `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | Only when `strict: true` is set on at least one tool | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`. Without it, the model generates freely and tool calls are extracted from raw text. |
+| `"auto"` | When `strict: true` is set on at least one tool, or the server override is enabled | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`, or when `VLLM_ENFORCE_STRICT_TOOL_CALLING=true`. Otherwise, the model generates freely and tool calls are extracted from raw text. |
 | `"none"` | N/A | No tool calls are produced. |
 
 ### Strict Mode
@@ -128,9 +128,10 @@ For best compatibility with strict schema enforcement, define tool parameter sch
 * Mark all fields in `properties` as required.
 * Represent optional fields by allowing `null`, for example `{"type": ["string", "null"]}`.
 
-vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable (defaults to `true`). When set to `false`, vLLM does not attach structural tags for tool calling regardless of the per-tool `strict` field. This environment variable only affects structural-tag based tool calling; it does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
+vLLM also provides a global override via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable. When unset (the default), the request's per-tool `strict` fields control automatic tool calling as described above. Set it to `true` to attach structural tags and enforce every tool's parameter schema even when clients omit `strict`, or to `false` to disable structural tags regardless of the per-tool field. This override only affects structural-tag based tool calling; it does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
 
 ```bash
+VLLM_ENFORCE_STRICT_TOOL_CALLING=true vllm serve ...
 VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
 ```
 
@@ -152,7 +153,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 !!! note
-    With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
+    With `tool_choice="auto"`, schema-level constraint requires either at least one tool with `strict: true` or the server override `VLLM_ENFORCE_STRICT_TOOL_CALLING=true`. When either condition is met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
