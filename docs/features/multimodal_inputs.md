@@ -1367,4 +1367,11 @@ Just like with offline inference, you can skip sending media if you expect cache
             "uuid": image_uuid,
         },
 
+        # video_url:
+        {
+            "type": "video_url",
+            "video_url": {},
+            "uuid": video_uuid,
+        },
+
     ```
