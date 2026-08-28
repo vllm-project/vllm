@@ -86,11 +86,6 @@ class BlockTables:
         )
 
     def init_block_table_layout_tensors(self) -> None:
-        # Called at init and after a CuMem kv_cache wake-up. The ptr tensors
-        # cache raw data_ptr() values that go stale once the underlying tensors
-        # are reallocated on wake; the size tensors need re-populating because
-        # their storage lives under the kv_cache pool tag and comes back with
-        # undefined contents.
         self.block_table_ptrs = self._make_ptr_tensor(
             [b.gpu for b in self.block_tables]
         )
