@@ -2284,11 +2284,18 @@ class GPUModelRunner(
                     non_blocking=True,
                 )
         elif self.uses_xdrope_dim > 0:
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL).
+            # xdrope_positions is allocated as [uses_xdrope_dim, max_num_tokens
+            # + 1] with the same trailing-column trick as mrope_positions above,
+            # so cpu[:, :N] is a strided view of the pinned buffer and the
+            # single-slice copy_() runs into the same pageable-fallback silent
+            # sync described in PR #51841. Split into per-row copies for the
+            # same reason.
+            for row in range(self.xdrope_positions.gpu.shape[0]):
+                self.xdrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.xdrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
