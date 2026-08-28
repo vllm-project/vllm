@@ -200,9 +200,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             return ret
 
         # Log warnings allocating excessive buffers on device
-        if has_device_tensors(bound_args):
+        if has_device_tensors(bound_args) and layer not in LOADING_LAYERS:
             LOADING_LAYERS.add(layer)
-            if len(LOADING_LAYERS) >= 2:
+            if len(LOADING_LAYERS) == 2:
                 names = sorted([layer.__class__.__name__ for layer in LOADING_LAYERS])
                 mem_used = sum(
                     get_info_size(LAYERWISE_INFO[layer]) for layer in LOADING_LAYERS

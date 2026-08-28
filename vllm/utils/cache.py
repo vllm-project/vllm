@@ -157,6 +157,23 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
     def put(self, key: _K, value: _V) -> None:
         self.__setitem__(key, value)
 
+    def put_if_fits(self, key: _K, value: _V) -> bool:
+        """Insert `value` if it is not larger than the cache capacity.
+
+        Unlike `put`, this does not raise when a single item exceeds
+        `maxsize`. Size is computed once inside the insert path.
+
+        Returns:
+            `True` if the item was cached, otherwise `False`.
+        """
+        try:
+            self[key] = value
+        except ValueError as e:
+            if str(e) != "value too large":
+                raise
+            return False
+        return True
+
     def pin(self, key: _K) -> None:
         """
         Pins a key in the cache preventing it from being

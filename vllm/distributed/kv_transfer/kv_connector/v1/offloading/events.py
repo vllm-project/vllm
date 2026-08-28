@@ -27,7 +27,11 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    maybe_convert_block_hash,
+    resolve_block_hashes,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     get_kv_cache_spec_kind,
@@ -255,22 +259,26 @@ class OffloadingEventsTracker:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
         per-block ``block_size``."""
-        hbf = group_config.hashes_per_chunk
-        assert hbf > 0
+        hashes_per_chunk = group_config.hashes_per_chunk
+        assert hashes_per_chunk > 0
         assert chunk_idx >= 0
-        # per-block token count (= the GPU/hash block size)
-        tokens_per_hash = group_config.tokens_per_chunk // hbf
-        # chunk c covers hash-blocks [c*hbf, (c+1)*hbf); its tail block's hash
-        # is the chunk's OffloadKey.
-        first_hash_idx = chunk_idx * hbf
-        last_hash_idx = first_hash_idx + hbf
+        tokens_per_hash = group_config.tokens_per_chunk // hashes_per_chunk
+        # Each chunk's final raw hash is its OffloadKey.
+        first_hash_idx = chunk_idx * hashes_per_chunk
+        last_hash_idx = first_hash_idx + hashes_per_chunk
         assert first_hash_idx >= 0
         assert last_hash_idx <= len(req.block_hashes)
-        chunk_hashes: list[BlockHash] = []
-        for block_hash in req.block_hashes[first_hash_idx:last_hash_idx]:
+        raw_chunk_hashes = req.block_hashes[first_hash_idx:last_hash_idx]
+        chunk_hashes = resolve_block_hashes(
+            raw_chunk_hashes,
+            tokens_per_hash,
+            group_config.tokens_per_block,
+        )
+        for block_hash in chunk_hashes:
             assert block_hash is not None
-            chunk_hashes.append(block_hash)
-        assert len(chunk_hashes) == hbf
+        assert len(chunk_hashes) == (
+            group_config.tokens_per_chunk // group_config.tokens_per_block
+        )
 
         if group_config.sliding_window_size_in_chunks is not None:
             # The recording methods filter these out before calling this helper.
@@ -298,7 +306,7 @@ class OffloadingEventsTracker:
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
-            block_size=tokens_per_hash,
+            block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
             extra_keys=None,
