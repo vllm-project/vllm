@@ -113,6 +113,83 @@ def test_deepseek_v4_explicitly_disables_thinking(kwargs):
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
 
 
+@pytest.mark.parametrize(
+    ("enable_thinking", "thinking_token"),
+    [(False, "</think>"), (True, "<think>")],
+)
+def test_deepseek_v4_appends_assistant_transition_after_trailing_system(
+    enable_thinking, thinking_token
+):
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "system", "content": "Be concise."},
+        ],
+        tokenize=False,
+        enable_thinking=enable_thinking,
+        reasoning_effort="low",
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜>You are helpful."
+        f"<｜User｜>What is 2+2?Be concise.<｜Assistant｜>{thinking_token}"
+    )
+
+
+def test_deepseek_v4_does_not_transition_after_mid_conversation_system():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "What is 3+3?"},
+            {"role": "assistant", "content": "6"},
+            {"role": "system", "content": "Answer in French."},
+            {"role": "user", "content": "What is 5+5?"},
+        ],
+        tokenize=False,
+        enable_thinking=False,
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>What is 3+3?"
+        "<｜Assistant｜></think>6<｜end▁of▁sentence｜>"
+        "Answer in French.<｜User｜>What is 5+5?"
+        "<｜Assistant｜></think>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("enable_thinking", "expected"),
+    [
+        (
+            False,
+            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
+            "<｜end▁of▁sentence｜>",
+        ),
+        (
+            True,
+            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
+            "<｜end▁of▁sentence｜>",
+        ),
+    ],
+)
+def test_deepseek_v4_transitions_from_system_to_assistant(enable_thinking, expected):
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "system", "content": "rules"},
+            {
+                "role": "assistant",
+                "reasoning": "reason",
+                "content": "answer",
+            },
+        ],
+        tokenize=False,
+        enable_thinking=enable_thinking,
+        reasoning_effort="low",
+    )
+
+    assert prompt == expected
+
+
 def test_deepseek_v4_unknown_role_raises_value_error():
     # Invalid roles are client errors: they must surface as ValueError
     # (mapped to HTTP 400 by the OpenAI serving layer), not
@@ -326,3 +403,27 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def test_deepseek_v4_rejects_empty_developer_content():
+    with pytest.raises(ValueError):
+        _tokenizer().apply_chat_template(
+            [{"role": "developer", "content": ""}],
+            tokenize=False,
+            enable_thinking=True,
+            reasoning_effort="low",
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"thinking_mode": "bogus"},
+        {"thinking_mode": "thinking", "reasoning_effort": "turbo"},
+    ],
+)
+def test_deepseek_v4_encode_messages_rejects_invalid_arguments(kwargs):
+    from vllm.tokenizers.deepseek_v4_encoding import encode_messages
+
+    with pytest.raises(ValueError):
+        encode_messages([{"role": "user", "content": "Hello"}], **kwargs)
