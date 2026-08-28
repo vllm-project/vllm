@@ -579,7 +579,7 @@ async def forward_stream(
                     ((_first or _t3) - _t2) * 1e3,
                     (_t3 - _t2) * 1e3,
                 )
-                logger.info("[%s] Streaming completed", req_id)
+                logger.info("[%s] Streaming ended", req_id)
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")
 
