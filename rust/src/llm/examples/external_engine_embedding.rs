@@ -3,12 +3,12 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
-use vllm_llm::{EncodeRequest, Llm, PoolingParams, PoolingTask};
+use vllm_llm::{EncodeRequest, EngineTask, Llm, PoolingParams, PoolingTask};
 
 const PROMPT: &str = "Represent this sentence for semantic search: a small cat sleeps on a sofa.";
 const PROMPT_TOKEN_IDS: &[u32] = &[
@@ -80,6 +80,15 @@ async fn main() -> Result<()> {
     })
     .await
     .context("failed to connect to external vLLM engine")?;
+    let supported_tasks = client
+        .get_supported_tasks()
+        .await
+        .context("failed to discover supported engine tasks")?
+        .to_vec();
+    ensure!(
+        supported_tasks.contains(&EngineTask::Pooling(PoolingTask::Embed)),
+        "model does not support the embedding task: {supported_tasks:?}"
+    );
     let llm = Llm::new(client);
 
     let output = timeout(
@@ -100,6 +109,7 @@ async fn main() -> Result<()> {
     let preview_len = output.output.data.len().min(8);
 
     println!("model={}", args.model);
+    println!("supported_tasks={supported_tasks:?}");
     println!("prompt={PROMPT:?}");
     println!("prompt_token_count={}", output.prompt_token_ids.len());
     println!("cached_token_count={}", output.cached_token_count);

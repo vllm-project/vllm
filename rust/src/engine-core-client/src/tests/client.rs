@@ -32,8 +32,9 @@ use crate::protocol::output::{
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::SchedulerStats;
+use crate::protocol::task::{EngineTask, GenerationTask, PoolingTask};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
-use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
+use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
@@ -2426,6 +2427,66 @@ fn spawn_mock_utility_engine(
             .await;
         })
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supported_tasks_are_typed_and_cached_lazily() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-tasks".to_vec(),
+        |dealer, push| {
+            Box::pin(async move {
+                let frames = recv_engine_message(dealer).await;
+                assert_eq!(frames[0].as_ref(), &[0x03]);
+                let request: EngineCoreUtilityRequest = rmp_serde::from_slice(&frames[1]).unwrap();
+                assert_eq!(request.method_name, "get_supported_tasks");
+
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        output: UtilityOutput {
+                            call_id: request.call_id,
+                            failure_message: None,
+                            result: Some(utility_result_value(vec!["generate", "embed"])),
+                        },
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                assert!(timeout(Duration::from_millis(200), dealer.recv()).await.is_err());
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let expected = [
+        EngineTask::Generation(GenerationTask::Generate),
+        EngineTask::Pooling(PoolingTask::Embed),
+    ];
+    assert_eq!(client.get_supported_tasks().await.unwrap(), expected);
+    assert_eq!(client.get_supported_tasks().await.unwrap(), expected);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

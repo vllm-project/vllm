@@ -7,8 +7,9 @@ use futures::StreamExt as _;
 use vllm_engine_core_client::EngineCoreOutputStream;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
-use vllm_engine_core_client::protocol::pooling::{EngineCorePoolingParams, PoolingTask};
+use vllm_engine_core_client::protocol::pooling::EngineCorePoolingParams;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::task::PoolingTask;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 use crate::error::{Error, Result};

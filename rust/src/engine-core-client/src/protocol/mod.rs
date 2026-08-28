@@ -33,6 +33,7 @@ pub mod request;
 pub mod sampling;
 pub mod stats;
 pub mod structured_outputs;
+pub mod task;
 pub mod tensor;
 pub mod utility;
 

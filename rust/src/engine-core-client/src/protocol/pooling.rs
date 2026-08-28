@@ -1,30 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-/// Pooling task executed by the model.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/6ec92bcbc8/vllm/tasks.py#L10-L17>
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PoolingTask {
-    /// Produce one embedding for each input sequence.
-    Embed,
-    /// Produce sequence-level classification outputs.
-    Classify,
-    /// Produce token-level embeddings.
-    TokenEmbed,
-    /// Produce token-level classification outputs.
-    TokenClassify,
-    /// Run a plugin-defined pooling task.
-    Plugin,
-    /// Produce sequence embeddings and token classifications together.
-    #[serde(rename = "embed&token_classify")]
-    EmbedAndTokenClassify,
-}
+use super::task::PoolingTask;
 
 /// API parameters for pooling models.
 ///
