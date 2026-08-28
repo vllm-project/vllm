@@ -356,7 +356,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
 
         positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs]
+        packed = self.padded_buffer[:num_reqs, :num_tokens]
         packed.fill_(self.eos_token_id)
         request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
         request_indices.clamp_(max=num_reqs - 1)
