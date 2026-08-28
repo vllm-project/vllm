@@ -249,3 +249,27 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_find_process_using_port_skips_stale_pid(monkeypatch):
+    """A stale PID on the first matching connection must not short-circuit the
+    scan; a later connection with a live PID should still be returned."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(network_utils.sys, "platform", "linux")
+
+    port = 65500
+    stale = SimpleNamespace(laddr=SimpleNamespace(port=port), pid=999999)
+    live = SimpleNamespace(laddr=SimpleNamespace(port=port), pid=424242)
+    monkeypatch.setattr(network_utils.psutil, "net_connections", lambda: [stale, live])
+
+    def fake_process(pid):
+        if pid == 999999:
+            raise network_utils.psutil.NoSuchProcess(pid)
+        return SimpleNamespace(pid=pid)
+
+    monkeypatch.setattr(network_utils.psutil, "Process", fake_process)
+
+    proc = network_utils.find_process_using_port(port)
+    assert proc is not None
+    assert proc.pid == 424242
