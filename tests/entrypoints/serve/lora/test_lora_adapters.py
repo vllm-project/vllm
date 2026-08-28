@@ -26,7 +26,7 @@ BADREQUEST_CASES = [
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},
-        "only supports modules_to_save being None",
+        "Unsupported modules_to_save",
     ),
 ]
 
@@ -57,6 +57,8 @@ def server_with_lora_modules_json(request, qwen3_lora_files):
         "2",
         "--max-num-seqs",
         "64",
+        "--gpu-memory-utilization",
+        "0.90",
     ]
 
     # Enable the /v1/load_lora_adapter endpoint
