@@ -141,6 +141,26 @@ def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
     assert without_drop == 2 * MAMBA_BLOCK_SIZE
 
 
+def test_dflash_does_not_back_off_last_cache_position() -> None:
+    """DFlash/DSpark never write target blocks, so the split must not back
+    off the last prefix-cache position by a mamba block.
+
+    Regression for #53477: the old `use_eagle` back-off made prompts shorter
+    than two mamba blocks skip the final block-aligned chunk, so the mamba
+    recurrent state was never materialized at a block boundary and the next
+    turn's prefix-cache lookup recomputed the whole context.
+    """
+    (request,) = create_requests(1, num_tokens=PROMPT_LEN, block_size=ATTN_BLOCK_SIZE)
+    assert (
+        _split(request, PROMPT_LEN, use_eagle_block_drop=False)
+        == MAMBA_BLOCK_SIZE
+    )
+    assert (
+        _split(request, PROMPT_LEN, use_eagle_block_drop=True)
+        == PROMPT_LEN
+    )
+
+
 def _run_chunked_prefill(
     manager: KVCacheManager, request: Request, budgets: list[int]
 ) -> dict[int, int]:

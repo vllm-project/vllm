@@ -281,7 +281,10 @@ class Scheduler(SchedulerInterface):
                     else 1
                 )
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
-            if self.use_eagle and not self.use_eagle_block_drop:
+            if (
+                speculative_config.use_eagle_preserves_target_kv_cache()
+                and not self.use_eagle_block_drop
+            ):
                 logger.warning(
                     "EAGLE trailing prefix-cache block dropping is disabled. "
                     "This is experimental and may affect speculative-token "
@@ -418,9 +421,11 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
+        # The last block-aligned position whose state can be cached.
+        # Eagle-family drafters pollute the target's last matching
+        # full-attention block with their lookahead KV write, so back off one
+        # block to avoid a Mamba cache miss. DFlash/DSpark draft from their own
+        # KV cache and never write target blocks.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
         if self.use_eagle_block_drop:
             last_cache_position = max(last_cache_position - block_size, 0)

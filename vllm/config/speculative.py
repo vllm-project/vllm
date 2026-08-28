@@ -1852,8 +1852,23 @@ class SpeculativeConfig:
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def use_eagle_block_drop(self) -> bool:
-        """Whether volatile trailing cache blocks should be discarded."""
-        return self.use_eagle() and not self.disable_eagle_block_drop
+        """Whether volatile trailing cache blocks should be discarded.
+
+        Only eagle-family drafters share (and pollute via lookahead KV write)
+        the target's full-attention KV cache groups; DFlash/DSpark draft from
+        their own KV cache and never write target blocks (#53477), so the
+        drop applies to eagle/eagle3/mtp only, unless explicitly disabled.
+        """
+        return (
+            self.use_eagle_preserves_target_kv_cache()
+            and not self.disable_eagle_block_drop
+        )
+
+    def use_eagle_preserves_target_kv_cache(self) -> bool:
+        # Only eagle-family drafters share (and pollute via lookahead KV
+        # write) the target's full-attention KV cache groups; DFlash/DSpark
+        # draft from their own KV cache and never write target blocks.
+        return self.method in ("eagle", "eagle3", "mtp")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
