@@ -26,7 +26,7 @@
 import collections
 import collections.abc
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, Any, TypeAlias, cast
+from typing import Annotated, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -583,15 +583,17 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
 class MiDashengLMMultiModalProcessor(
     BaseMultiModalProcessor[MiDashengLMProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, Any],
-    ) -> BatchFeature:
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
-        # + Padding
         min_audio_len = self.info.get_min_audio_len()
         processed_audios = [
             np.pad(
@@ -608,20 +610,7 @@ class MiDashengLMMultiModalProcessor(
         if processed_audios:
             mm_data["audio"] = processed_audios
 
-        if not mm_data.get("audio", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        mm_kwargs = dict(
-            **mm_kwargs,
-        )
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
     def _get_mm_fields_config(
         self,
@@ -673,7 +662,7 @@ class MiDashengLMMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_midashenglm,
             )
         ]

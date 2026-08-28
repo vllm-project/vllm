@@ -133,14 +133,15 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H100) V1 E2E Hybrid Chunked Prefill"
-  key: v1-e2e-4xh100
+- label: ":nvidia: (B200) V1 E2E Hybrid Chunked Prefill"
+  key: v1-e2e-hybrid-chunked-prefill-b200
   timeout_in_minutes: 35
-  device: h100
-  num_devices: 4
+  device: b200-k8s
+  num_devices: 1
   optional: true
   source_file_dependencies:
     - vllm/v1/attention/backends/utils.py
+    - vllm/v1/core/
     - vllm/v1/worker/gpu_model_runner.py
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
@@ -149,7 +150,7 @@ steps:
     amd:
       label: ":amd: (MI300) V1 E2E Hybrid Chunked Prefill"
       dind: false
-      device: mi300_4
+      device: mi300_1
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
