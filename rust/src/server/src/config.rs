@@ -11,7 +11,9 @@ use educe::Educe;
 use serde::Serialize;
 use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
-use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+use vllm_chat::{
+    ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
+};
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -165,6 +167,8 @@ pub struct Config {
     pub coordinator_mode: CoordinatorMode,
     /// Backend model identifier used for engine-core loading.
     pub model: String,
+    /// Which generation-config sampling defaults to inherit.
+    pub generation_config: GenerationConfigMode,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,
     /// the first entry is used as the primary ID in responses and all entries
     /// are accepted in requests. When empty, falls back to `model`.

@@ -130,6 +130,8 @@ def create_vllm_config(
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
+    # Connectors are constructed after layout resolution; mirror that here.
+    cache_config.kv_cache_layout = "LBNHC"
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
         kv_connector_module_path=kv_connector_module_path,
@@ -522,6 +524,10 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=has_mamba,
+    )
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -580,6 +586,10 @@ def make_nixl_push_scheduler(
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=has_mamba,
+    )
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size.
     vllm_config = MagicMock()
