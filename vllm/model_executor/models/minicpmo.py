@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -502,7 +503,13 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
             out_mm_kwargs=out_mm_kwargs,
         )
 
-        audio_placeholder = self.info.audio_pattern
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        audio_placeholder = cached_encode(
+            tokenizer, self.info.audio_pattern, add_special_tokens=False
+        )
+        unk_token_ids = [vocab["<unk>"]]
 
         def get_audio_replacement(item_idx: int):
             audios = mm_items.get_items(
@@ -517,9 +524,13 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
             else:
                 audio_len = audios.get_audio_length(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_audio_prompt_texts(audio_len),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_audio_prompt_texts(audio_len),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         return [
