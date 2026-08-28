@@ -103,7 +103,7 @@ def test_processor_multi_video(
     """Verify that multi-video processing produces correct placeholders.
 
     This exercises the token-level replacement path in
-    ``_call_hf_processor`` which avoids the quadratic text-level
+    ``_apply_hf_processor_main`` which avoids the quadratic text-level
     prompt expansion.
     """
     ctx = build_model_context(
@@ -153,7 +153,7 @@ def test_processor_multi_video_list_kwargs(
     ``mm_processor_kwargs`` (one ``fps``/``num_frames`` per video) must not
     crash.
 
-    Before the fix, ``_call_hf_processor`` copied the whole kwargs to every
+    Before the fix, ``_apply_hf_processor_main`` copied the whole kwargs to every
     video without slicing, so ``_get_video_second_idx`` received the list
     where a scalar was expected and raised ``TypeError``.
     """

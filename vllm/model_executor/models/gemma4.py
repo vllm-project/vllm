@@ -63,6 +63,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
@@ -351,15 +352,19 @@ class Gemma4MoE(nn.Module):
             )
 
         # MoERunner experts with custom Gemma4 routing
+        intermediate_size = getattr(
+            config,
+            "moe_intermediate_size",
+            getattr(config, "expert_intermediate_size", None),
+        )
+        if intermediate_size is None:
+            raise ValueError("Gemma4 MoE requires an expert intermediate size")
+
         self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.top_k_experts,
             hidden_size=config.hidden_size,
-            intermediate_size=getattr(
-                config,
-                "moe_intermediate_size",
-                getattr(config, "expert_intermediate_size", None),
-            ),
+            intermediate_size=intermediate_size,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -380,7 +385,6 @@ class Gemma4Attention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        use_k_eq_v: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attn_logits_soft_cap: float | None = None,
@@ -389,7 +393,6 @@ class Gemma4Attention(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = hidden_size
-        self.use_k_eq_v = use_k_eq_v
 
         tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -570,27 +573,9 @@ class Gemma4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         # Gemma4 uses different head dimensions for sliding vs full attention
-        layer_type = config.layer_types[layer_idx]
-        self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
-            head_dim = getattr(config, "global_head_dim", config.head_dim)
-        else:
-            head_dim = config.head_dim
-
-        # Determine if this full-attention layer uses k_eq_v
-        # (laptop variant: no v_proj, K reused as V on full attention layers)
-        use_k_eq_v = self.is_full_attention and getattr(
-            config, "attention_k_eq_v", False
-        )
-
-        # For k_eq_v full-attention layers, use num_global_key_value_heads
-        # as the KV head count when k_eq_v is enabled.
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
-            num_kv_heads = config.num_key_value_heads
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
 
         self.self_attn = Gemma4Attention(
             config=config,
@@ -599,7 +584,6 @@ class Gemma4DecoderLayer(nn.Module):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            use_k_eq_v=use_k_eq_v,
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
@@ -644,6 +628,11 @@ class Gemma4DecoderLayer(nn.Module):
         self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
             config, "use_second_mlp_block", False
         )
+        self.router: Gemma4Router | None
+        self.moe: Gemma4MoE | None
+        self.post_feedforward_layernorm_1: RMSNorm | None
+        self.post_feedforward_layernorm_2: RMSNorm | None
+        self.pre_feedforward_layernorm_2: RMSNorm | None
         if self.enable_moe_block:
             self.router = Gemma4Router(
                 config,
@@ -672,6 +661,9 @@ class Gemma4DecoderLayer(nn.Module):
             self.pre_feedforward_layernorm_2 = None
 
         # Per-Layer Embedding (PLE) components — present in each decoder layer
+        self.per_layer_input_gate: ReplicatedLinear | None
+        self.per_layer_projection: ReplicatedLinear | None
+        self.post_per_layer_input_norm: RMSNorm | None
         if (
             self.hidden_size_per_layer_input is not None
             and self.hidden_size_per_layer_input > 0
@@ -736,6 +728,11 @@ class Gemma4DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.enable_moe_block:
+            assert self.post_feedforward_layernorm_1 is not None
+            assert self.pre_feedforward_layernorm_2 is not None
+            assert self.router is not None
+            assert self.moe is not None
+            assert self.post_feedforward_layernorm_2 is not None
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
@@ -751,6 +748,8 @@ class Gemma4DecoderLayer(nn.Module):
 
         # Apply PLE (Per-Layer Embedding) if configured
         if per_layer_input is not None and self.per_layer_input_gate is not None:
+            assert self.per_layer_projection is not None
+            assert self.post_per_layer_input_norm is not None
             gate = self.per_layer_input_gate(hidden_states)
             gate = torch.nn.functional.gelu(gate, approximate="tanh")
             gated_per_layer = gate * per_layer_input
@@ -885,6 +884,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         """
         if self.per_layer_model_projection is None:
             return None
+        assert self.per_layer_projection_norm is not None
         per_layer_projection = self.per_layer_model_projection(inputs_embeds)
         per_layer_projection = per_layer_projection * self.per_layer_projection_scale
         per_layer_projection = per_layer_projection.reshape(
@@ -991,6 +991,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         )
 
         # Per-Layer Embedding (PLE) components
+        self.embed_tokens_per_layer: VocabParallelEmbedding | None
+        self.per_layer_model_projection: ColumnParallelLinear | None
+        self.per_layer_projection_norm: RMSNorm | None
         if (
             self.hidden_size_per_layer_input is not None
             and self.hidden_size_per_layer_input > 0
@@ -1492,9 +1495,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 else:
                     if name.endswith(".bias") and name not in params_dict:
                         continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Skip if name doesn't exist in params_dict (e.g., individual
@@ -1713,16 +1717,16 @@ class Gemma4ForCausalLM(
 
                 yield name, weight
 
-        # Skip multimodal weights — handled by the multimodal wrapper.
-        # Also skip lm_head when weights are tied.
-        skip = [
-            "audio_tower.",
-            "vision_tower.",
-            "embed_audio.",
-            "embed_vision.",
-        ]
-        if self.config.tie_word_embeddings:
-            skip.append("lm_head.")
-
-        loader = AutoWeightsLoader(self, skip_substrs=skip)
-        return loader.load_weights(_weight_iterator())
+        # Drop multimodal weights, which are handled by the multimodal wrapper.
+        # `_weight_iterator` already applies this model's renames by hand, so
+        # `hf_to_vllm_mapper` is deliberately not passed here.
+        mapper = WeightsMapper(
+            orig_to_new_substr={
+                "audio_tower.": None,
+                "vision_tower.": None,
+                "embed_audio.": None,
+                "embed_vision.": None,
+            }
+        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(_weight_iterator(), mapper=mapper)

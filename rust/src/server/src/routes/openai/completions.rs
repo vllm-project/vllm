@@ -21,12 +21,14 @@ use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, TextOutputStream,
-    TextOutputStreamExt as _,
+    TextOutputStreamExt as _, TextRequest,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
+pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
     prompt_logprobs_to_maps, text_len,
@@ -34,15 +36,26 @@ use super::utils::logprobs::{
 use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
+use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::types::{
-    CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
-    CompletionStreamChoice, CompletionStreamResponse,
+    CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
+    CompletionStreamResponse,
 };
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, unix_timestamp};
+use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
+
+pub(crate) fn lower_completion_request(
+    request: CompletionRequest,
+    lora_resolution: &LoraModelResolution,
+    ctx: ResolvedRequestContext,
+    tokenizer: &dyn Tokenizer,
+) -> Result<TextRequest, ApiError> {
+    prepare_completion_request(request, lora_resolution, ctx, tokenizer)
+        .map(|prepared| prepared.text_request)
+}
 
 /// Validate one completions request and proxy it into the shared `vllm-text`
 /// stack.
@@ -53,7 +66,8 @@ pub async fn completions(
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
     let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
@@ -173,7 +187,6 @@ async fn collect_completion(
         Some(prompt_logprobs_to_maps(
             collected.prompt_logprobs.as_ref(),
             collected.prompt_token_ids.as_ref(),
-            return_tokens_as_token_ids,
         )?)
     } else {
         None

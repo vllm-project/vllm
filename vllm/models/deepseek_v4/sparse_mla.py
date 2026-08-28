@@ -32,8 +32,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _C128A_TOPK_ALIGNMENT = 128
 
 
-class DeepseekV4FlashMLABackend(AttentionBackend):
-    """DeepSeek-V4 sparse-MLA backend.
+class DeepseekV4SparseMLABackend(AttentionBackend):
+    """DeepSeek-V4 sparse-MLA backend base.
 
     Subclasses ``AttentionBackend`` directly (not the V3.2
     ``FlashMLASparseBackend``): DeepSeek-V4 runs its own attention layer
@@ -54,12 +54,8 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
         return [256]
 
     @staticmethod
-    def get_name() -> str:
-        return "FLASHMLA_SPARSE_DSV4"
-
-    @staticmethod
-    def get_builder_cls() -> type["DeepseekV4FlashMLAMetadataBuilder"]:
-        return DeepseekV4FlashMLAMetadataBuilder
+    def get_builder_cls() -> type["DeepseekV4SparseMLAMetadataBuilder"]:
+        return DeepseekV4SparseMLAMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type[Any]:
@@ -67,7 +63,7 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
         # not the generic ``Attention``/``MLAAttention`` layer, so the backend's
         # impl class is never instantiated.
         raise NotImplementedError(
-            "DeepseekV4FlashMLABackend has no separate impl class; DeepSeek-V4 "
+            "DeepseekV4SparseMLABackend has no separate impl class; DeepSeek-V4 "
             "attention runs through DeepseekV4Attention."
         )
 
@@ -91,21 +87,6 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
-        else:
-            return (num_blocks, block_size, head_size)
 
 
 @dataclass
@@ -131,7 +112,7 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     c128a_prefill_topk_indices: torch.Tensor | None = None
 
 
-class DeepseekV4FlashMLAMetadataBuilder(
+class DeepseekV4SparseMLAMetadataBuilder(
     AttentionMetadataBuilder[DeepseekV4FlashMLAMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -155,8 +136,8 @@ class DeepseekV4FlashMLAMetadataBuilder(
             (max_num_batched_tokens,), dtype=torch.int32, device=device
         )
 
-        assert hasattr(self.kv_cache_spec, "compress_ratio")
-        self.compress_ratio = self.kv_cache_spec.compress_ratio
+        assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+        self.compress_ratio = self.kv_cache_spec.tokens_per_state
 
         # Pre-allocate compressed slot mapping buffer for CUDA graph address
         # stability when compress_ratio > 1.
@@ -210,7 +191,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
                 cm.query_start_loc,
                 cm.seq_lens,
                 cm.block_table_tensor.clamp_(min=0),
-                int(self.kv_cache_spec.storage_block_size),
+                int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
@@ -268,6 +249,8 @@ class DeepseekV4FlashMLAMetadataBuilder(
             ),
             self.c128a_max_compressed,
         )
+        assert active_topk_width >= cm.max_seq_len // self.compress_ratio
+        assert active_topk_width % _C128A_TOPK_ALIGNMENT == 0
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
@@ -294,6 +277,20 @@ class DeepseekV4FlashMLAMetadataBuilder(
         return result
 
 
+class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA_SPARSE_DSV4"
+
+    @staticmethod
+    def get_builder_cls() -> type[DeepseekV4FlashMLAMetadataBuilder]:
+        return DeepseekV4FlashMLAMetadataBuilder
+
+
 def build_c128a_topk_metadata(
     positions: torch.Tensor,
     compress_ratio: int,
@@ -312,30 +309,34 @@ def build_c128a_topk_metadata(
     Decode tokens: position → block_table lookup → global slot ids + topk_lens.
     Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
 
-    Writes into packed views of pre-allocated buffers for CUDA graph stability.
+    Writes into pre-allocated buffers for CUDA graph address stability.
+    Returns slices of the buffers.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
+    assert max_compressed_tokens % _C128A_TOPK_ALIGNMENT == 0
+    assert (
+        0
+        < max_compressed_tokens
+        <= min(global_decode_buffer.shape[1], prefill_buffer.shape[1])
+    )
+    assert global_decode_buffer.stride(-1) == prefill_buffer.stride(-1) == 1
 
-    # view(-1) as 1-d array and then expanded to
-    # [num_decode_tokens, max_compressed_tokens]
-    global_decode = global_decode_buffer.view(-1)[
-        : num_decode_tokens * max_compressed_tokens
-    ].view(num_decode_tokens, max_compressed_tokens)
+    global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
-    prefill_local = prefill_buffer.view(-1)[
-        : num_prefill_tokens * max_compressed_tokens
-    ].view(num_prefill_tokens, max_compressed_tokens)
+    prefill_local = prefill_buffer[:num_prefill_tokens, :max_compressed_tokens]
+    assert global_decode.stride(0) == global_decode_buffer.stride(0)
+    assert prefill_local.stride(0) == prefill_buffer.stride(0)
 
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
 
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
         global_decode_buffer,
-        max_compressed_tokens,
+        global_decode_buffer.stride(0),
         decode_lens_buffer,
         prefill_buffer,
-        max_compressed_tokens,
+        prefill_buffer.stride(0),
         positions,
         compress_ratio,
         max_compressed_tokens,

@@ -10,7 +10,8 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
-    LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
+    LogProbs, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Usage, default_true,
+    deserialize_request_top_k, validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -30,7 +31,7 @@ fn default_completion_max_tokens() -> Option<u32> {
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
     /// ID of the model to use
-    pub model: String,
+    pub model: Option<String>,
 
     /// The prompt(s) to generate completions for.
     ///
@@ -49,7 +50,7 @@ pub struct CompletionRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
 
     /// Include the log probabilities on the logprobs most likely tokens
-    pub logprobs: Option<u32>,
+    pub logprobs: Option<i32>,
 
     /// The maximum number of tokens to generate (defaults to 16 when absent,
     /// matching the Python vLLM / OpenAI API convention)
@@ -96,6 +97,7 @@ pub struct CompletionRequest {
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
@@ -164,6 +166,9 @@ pub struct CompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+
     /// Tokens represented as strings of the form 'token_id:{token_id}' in
     /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
@@ -172,6 +177,7 @@ pub struct CompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
+    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving
@@ -226,7 +232,7 @@ pub(super) struct CompletionChoice {
     pub logprobs: Option<LogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
 }

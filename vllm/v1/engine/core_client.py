@@ -608,9 +608,12 @@ class MPClient(EngineCoreClient):
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
-                ) as (engine_manager, coordinator, addresses, tensor_queue):
-                    self.resources.coordinator = coordinator
-                    self.resources.engine_manager = engine_manager
+                ) as engine_launch:
+                    self.resources.coordinator = engine_launch.coordinator
+                    self.resources.engine_manager = engine_launch.engine_manager
+                    coordinator = engine_launch.coordinator
+                    addresses = engine_launch.addresses
+                    tensor_queue = engine_launch.tensor_queue
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:
@@ -755,6 +758,7 @@ class MPClient(EngineCoreClient):
         # worker for hybrid Mamba models.
         cache_config = vllm_config.cache_config
         cache_config.block_size = response.block_size
+        cache_config.mamba_block_size = response.mamba_block_size
         # Keep these as per-engine cache_config_info values; do not sum across DP.
         cache_config.kv_cache_size_tokens = (
             getattr(cache_config, "kv_cache_size_tokens", None)
@@ -1634,9 +1638,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         parallel_config = self.vllm_config.parallel_config
         num_experts = self.vllm_config.model_config.get_num_experts()
-        num_redundant_experts = (
+        num_physical_experts = (
             num_experts + parallel_config.eplb_config.num_redundant_experts
-        ) * new_data_parallel_size // cur_data_parallel_size - num_experts
+        )
+        num_redundant_experts = (
+            num_physical_experts * new_data_parallel_size // cur_data_parallel_size
+            - num_experts
+        )
+        if num_redundant_experts < 0:
+            # Scaling keeps physical experts per engine fixed, so below this
+            # size the logical experts no longer fit.
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}, "
+                f"minimum is "
+                f"{-(-num_experts * cur_data_parallel_size // num_physical_experts)}"
+            )
         if new_data_parallel_size < cur_data_parallel_size:
             await self._prepare_scale_down_elastic_ep(new_data_parallel_size)
         else:

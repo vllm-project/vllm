@@ -3,17 +3,15 @@
 
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
 import msgspec
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -33,7 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import EngineInput, mm_input
+from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
@@ -45,6 +43,7 @@ from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 from .mm_serde import decode_mm_kwargs_item
 from .protocol import (
@@ -143,7 +142,29 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(e)
 
         engine_input: EngineInput
-        if features := request.features:
+        if request.content_parts:
+            tracker = AsyncMultiModalItemTracker(self.model_config)
+            mm_parser = tracker.create_parser()
+            for part in request.content_parts:
+                ptype = part.get("type", "")
+                url = part.get("url")
+                uuid = part.get("uuid")
+                if ptype == "image_url":
+                    mm_parser.parse_image(url, uuid)
+                elif ptype == "audio_url":
+                    mm_parser.parse_audio(url, uuid)
+                elif ptype == "video_url":
+                    mm_parser.parse_video(url, uuid)
+            mm_data, mm_uuids = await tracker.resolve_items()
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            if mm_data:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids:
+                prompt["multi_modal_uuids"] = mm_uuids
+            (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                [prompt]
+            )
+        elif features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
@@ -182,6 +203,16 @@ class ServingTokens(GenerateBaseServing):
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 
+        # Pass disaggregated-serving parameters through to the engine.
+        if request.kv_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["kv_transfer_params"] = request.kv_transfer_params
+            sampling_params.extra_args = extra
+        if request.ec_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["ec_transfer_params"] = request.ec_transfer_params
+            sampling_params.extra_args = extra
+
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
@@ -197,8 +228,9 @@ class ServingTokens(GenerateBaseServing):
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
-        if request.stream:
-            sampling_params.output_kind = RequestOutputKind.DELTA
+        sampling_params.output_kind = (
+            RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
+        )
 
         self._log_inputs(
             request_id,
@@ -215,6 +247,7 @@ class ServingTokens(GenerateBaseServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        session_id = self._get_session_id_from_headers(raw_request)
 
         result_generator = self.engine_client.generate(
             engine_input,
@@ -224,6 +257,7 @@ class ServingTokens(GenerateBaseServing):
             trace_headers=trace_headers,
             priority=request.priority,
             data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
         )
 
         assert result_generator is not None
@@ -264,6 +298,8 @@ class ServingTokens(GenerateBaseServing):
         choices: list[GenerateResponseChoice] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
+            self._raise_if_error(output.finish_reason, request_id)
+
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
@@ -278,17 +314,15 @@ class ServingTokens(GenerateBaseServing):
             else:
                 logprobs = None
 
-            # Encode routed_experts for transport. JSON can't carry raw
-            # bytes, so we write the ndarray as a ``.npy`` byte stream
-            # and base64-encode it. ``pybase64`` is ~3x faster than the
-            # stdlib ``base64`` on large payloads thanks to SIMD.
-            # This is the only base64 hop in the pipeline -- the
-            # engine<->API-server link is binary msgpack + zmq.
-            routed_experts_b64 = None
-            if output.routed_experts is not None:
-                buf = io.BytesIO()
-                np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            routed_experts_b64 = (
+                numpy2base64(output.routed_experts)
+                if output.routed_experts is not None
+                else None
+            )
+
+            sampling_mask = None
+            if output.sampling_mask is not None:
+                sampling_mask = output.sampling_mask.token_ids
 
             choice_data = GenerateResponseChoice(
                 index=output.index,
@@ -296,6 +330,7 @@ class ServingTokens(GenerateBaseServing):
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                sampling_mask=sampling_mask,
             )
 
             choices.append(choice_data)
@@ -405,13 +440,11 @@ class ServingTokens(GenerateBaseServing):
                     else:
                         logprobs = None
 
-                    routed_experts_b64 = None
-                    if output.routed_experts is not None:
-                        buf = io.BytesIO()
-                        np.save(buf, output.routed_experts)
-                        routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                            "ascii"
-                        )
+                    routed_experts_b64 = (
+                        numpy2base64(output.routed_experts)
+                        if output.routed_experts is not None
+                        else None
+                    )
 
                     chunk = GenerateStreamResponse(
                         request_id=request_id,

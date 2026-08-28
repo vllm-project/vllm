@@ -26,8 +26,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -216,7 +216,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -243,7 +243,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             # They are combined to a single scale after weight loading.
             if self.model_type != "gpt_oss":
                 w13_weight_scale = torch.nn.Parameter(
-                    torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+                    torch.ones(
+                        num_experts, self.moe.w13_num_shards, dtype=torch.float32
+                    ),
+                    requires_grad=False,
                 )
             else:
                 # For gpt_oss, the w1(gate) & w3(up) are fused as one.
@@ -267,7 +270,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -306,7 +309,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -400,7 +403,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 # For non-gpt_oss, process w1 and w3 shards separately
                 for expert_id in range(layer.local_num_experts):
                     start = 0
-                    for shard_id in range(2):
+                    for shard_id in range(self.moe.w13_num_shards):
                         dq_weight = per_tensor_dequantize(
                             layer.w13_weight[expert_id][start : start + shard_size, :],
                             layer.w13_weight_scale[expert_id][shard_id],
@@ -443,10 +446,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
-
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
@@ -560,7 +559,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -586,7 +585,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -605,7 +604,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         else:
             # per-tensor: one scalar per expert (two for the fused w1/w3)
             w13_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, 2, dtype=torch.float32),
+                torch.ones(num_experts, self.moe.w13_num_shards, dtype=torch.float32),
                 requires_grad=False,
             )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)
@@ -644,7 +643,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
 
         # ZERO POINTS (loaded but discarded after loading; kernel uses symmetric)
         w13_input_zero_point = torch.nn.Parameter(
-            torch.zeros(num_experts, 2, dtype=torch.int8),
+            torch.zeros(num_experts, self.moe.w13_num_shards, dtype=torch.int8),
             requires_grad=False,
         )
         layer.register_parameter("w13_input_zero_point", w13_input_zero_point)
@@ -661,7 +660,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             w13_weight_zero_point = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.int8,
                 ),
                 requires_grad=False,
@@ -672,7 +671,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             )
         else:
             w13_weight_zero_point = torch.nn.Parameter(
-                torch.zeros(num_experts, 2, dtype=torch.int8),
+                torch.zeros(num_experts, self.moe.w13_num_shards, dtype=torch.int8),
                 requires_grad=False,
             )
             w2_weight_zero_point = torch.nn.Parameter(
@@ -689,7 +688,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -762,7 +761,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
 
             for expert_id in range(layer.local_num_experts):
                 start = 0
-                for shard_id in range(2):
+                for shard_id in range(self.moe.w13_num_shards):
                     dq_weight = per_tensor_dequantize(
                         layer.w13_weight[expert_id][start : start + shard_size, :],
                         layer.w13_weight_scale[expert_id][shard_id],
@@ -806,7 +805,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -905,7 +903,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // 8,  # INT32 packing for W4
                 dtype=params_dtype,
             ),
@@ -927,7 +925,8 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
         # Per-tensor fp8 weight scales
         w13_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+            torch.ones(num_experts, self.moe.w13_num_shards, dtype=torch.float32),
+            requires_grad=False,
         )
         w2_weight_scale = torch.nn.Parameter(
             torch.ones(num_experts, dtype=torch.float32), requires_grad=False
@@ -944,7 +943,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         w13_weight_scale_2 = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=torch.float32,
             ),
             requires_grad=False,
@@ -978,7 +977,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         for expert_id in range(layer.local_num_experts):
             start = 0
             max_w13_scale_fp8 = max_w13_scales[expert_id]
-            for shard_id in range(2):
+            for shard_id in range(self.moe.w13_num_shards):
                 if layer.w13_weight_scale[expert_id][shard_id] != max_w13_scale_fp8:
                     int4_rescale = (
                         layer.w13_weight_scale[expert_id][shard_id] / max_w13_scale_fp8
@@ -1028,7 +1027,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
             moe_config=layer.moe_config,
-            expert_map=layer.expert_map,
+            expert_mask=layer.expert_mask,
         )
 
 
@@ -1064,8 +1063,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 )
         else:
             self.input_dtype = None
-
-        self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
@@ -1193,7 +1190,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 self.get_packed_dim(hidden_size, self.weight_dtype),
                 dtype=params_dtype,
             ),
@@ -1220,7 +1217,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // OCP_MX_BLOCK_SIZE,
                 dtype=params_dtype,
             ),
@@ -1245,7 +1242,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -1324,10 +1321,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         torch.accelerator.empty_cache()
 
         # Build quant config and kernel
@@ -1340,6 +1333,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -1449,7 +1443,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -1499,13 +1493,12 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         layer.quant_config = self.quant_config
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
-        w13_num_shards = 2 if self.moe.is_act_and_mul else 1
 
         # GEMM 1 - w13 weight
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                w13_num_shards * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // 2,
                 dtype=weight_dtype,
@@ -1533,7 +1526,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                w13_num_shards * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // self.group_size,
                 dtype=weight_scale_dtype,
             ),
@@ -1563,7 +1556,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         )
 
         w13_weight_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            torch.empty(num_experts, self.moe.w13_num_shards, dtype=torch.float32),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
@@ -1578,7 +1571,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
 
         # Input global scales (per-tensor FP32 scales)
         w13_input_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            torch.empty(num_experts, self.moe.w13_num_shards, dtype=torch.float32),
             requires_grad=False,
         )
         layer.register_parameter("w13_input_scale_2", w13_input_scale_2)
@@ -1596,15 +1589,16 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        if not torch.allclose(
+        # Match existing NVFP4 MoE paths: fused w13 uses the w1 global scale.
+        if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
-            raise ValueError("Different global scales for w1 and w3 is not supported.")
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected."
+            )
 
-        # Use a single gscale for w13
-        w13_weight_scale_2 = torch.maximum(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ).contiguous()
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         w2_weight_scale_2 = layer.w2_weight_scale_2
 
@@ -1651,7 +1645,6 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1665,6 +1658,9 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale_2,
             a2_scale=layer.w2_input_scale_2,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
 
