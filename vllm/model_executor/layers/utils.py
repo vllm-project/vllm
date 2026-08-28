@@ -368,6 +368,27 @@ direct_register_custom_op(
 )
 
 
+@functools.cache
+def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
+    """Eagerly allocate wvSplitKrc's process-lifetime static workspaces.
+
+    They are otherwise created lazily on the first qualifying GEMM
+    (csrc/rocm/skinny_gemms.cu), which can be the first real request — after
+    the KV cache backing buffer exists. If one landed in that segment's
+    rounding tail, it would pin the entire segment at engine shutdown.
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        return
+    try:
+        x = torch.zeros(16, 1024, dtype=torch.bfloat16, device=device)
+        weight = torch.zeros(32, 1024, dtype=torch.bfloat16, device=device)
+        ops.wvSplitKrc(x, weight, num_compute_units())
+    except Exception:
+        logger.debug("wvSplitKrc workspace warmup failed", exc_info=True)
+
+
 # Above this weight size, oneDNN's onednn_mm consistently matches or beats
 # the SGL AMX kernel once M grows past decode-sized batches, and is within
 # noise of it at decode-sized M -- so larger weights default to oneDNN
