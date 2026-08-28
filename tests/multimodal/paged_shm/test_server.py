@@ -431,6 +431,21 @@ class TestErrors:
         with pytest.raises(RuntimeError, match="Server error"):
             client.read(uuid)
 
+    def test_close_read_with_uuid_fails(self, client):
+        uuid = _unique_uuid()
+        data = b"test close_read"
+        client.write(uuid, data)
+
+        # open_read returns an allocation with a token
+        alloc = client.open_read(uuid, timeout=0.0)
+        token = alloc.read_token
+        # Try to close with UUID - should raise
+        with pytest.raises(RuntimeError, match="close_read only accepts read tokens"):
+            client.close_read(uuid)
+        # Proper cleanup
+        client.close_read(token)
+        client.delete(uuid)
+
 
 # ---------------------------------------------------------------------------
 # Server metadata
@@ -783,9 +798,8 @@ class TestTimeout:
         assert not t.is_alive(), "open_read did not complete in time"
         assert "err" not in err_holder, f"open_read failed: {err_holder.get('err')}"
         assert "item" in result_holder
-        assert result_holder["item"].blocks
-
-        client.close_read(uuid)
+        item = result_holder["item"]
+        client.close_read(item.read_token)
         client.delete(uuid)
 
     def test_open_read_timeout_negative_infinite(self, client):
@@ -816,8 +830,8 @@ class TestTimeout:
         assert not t.is_alive(), "open_read did not complete after close_write"
         assert "err" not in err_holder, f"open_read failed: {err_holder.get('err')}"
         assert "item" in result_holder
-
-        client.close_read(uuid)
+        item = result_holder["item"]
+        client.close_read(item.read_token)
         client.delete(uuid)
 
     def test_open_write_timeout_expires(self, client):
@@ -988,7 +1002,7 @@ class TestPreAllocatedBlocks:
         result = client._storage.read_to_numpy(size, blocks)
         assert result.tobytes() == data
 
-        client.close_read(uuid)
+        client.close_read(item.read_token)
         client.delete(uuid)
 
 

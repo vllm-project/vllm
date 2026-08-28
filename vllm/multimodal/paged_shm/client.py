@@ -17,19 +17,25 @@ Key Features:
     commit/rollback, and lock release automatically.
   - **Thread‑Safe**: Maintains a pool of ZMQ REQ sockets for concurrent access
     from multiple threads.
-  - **Read Tokens**: Generate an opaque token during write that can be used
-    to read the data without exposing the UUID.  The token holds a read
-    reference automatically.  It can be **open_read** multiple times (e.g.,
-    by multiple Tensor Parallelism workers) without being consumed, but it
-    can be **close_read** only once – subsequent calls will fail.  This design
-    ensures that the underlying UUID's reference count is never accidentally
-    decremented more than once, preventing premature release.  It is ideal
-    for TP deployments where an API server (Renderer) writes a single copy
-    and each GPU worker (EncoderRunner) reads the same data via the token;
-    the token is released exactly once after all workers have finished.
   - **Asynchronous Writes**: Offload data copy and finalization (close_write)
     to a thread pool, overlapping shared memory transfer with ZMQ IPC
     round‑trip latency, improving throughput for large data.
+  - **Read Tokens**: The server can generate an opaque token during write
+    (`generate_read_token=True`).  This token provides a safe way to read data.
+    Alternatively, a client may call `open_read` with a raw UUID, which causes
+    the server to generate a new token, increment the global reference count,
+    and return both data and the new token.  This is useful for bootstrapping
+    the first reader.  Both the UUID and the token paths are supported and
+    fully functional.
+    Key properties:
+      * The server automatically reserves a **read reference** for each token
+        at `close_write` time, effectively **pinning** the data in the cache
+        until the token is released via `close_read(token)`.
+      * The token can be used in `open_read` multiple times (e.g., by
+        multiple Tensor Parallelism workers) **without consuming it**; each
+        call returns the data blocks.
+      * The token **must** be passed to `close_read` exactly once to release
+        the reserved read reference and destroy the token.
 """
 
 import contextlib
@@ -215,41 +221,59 @@ class _ReadContext:
     Context manager that acquires a read lock on enter and releases it on exit.
     Exposes ``size`` and ``blocks`` attributes.
 
-    The `uuid` passed to the constructor may be a real UUID or a read token.
-    The context manager will preserve the original identifier for use in
-    `close_read`, ensuring that tokens are properly consumed on the server.
+    The `uuid_or_token` parameter can be either:
+      - A **raw UUID** (the server will generate a new token, increment the
+        reference count, and return the token along with the data).
+      - A **read token** (the server returns the data without modifying the
+        reference count; the token holds a reserved reference).
+
+    The context manager automatically stores the actual read token returned by
+    the server and uses it for `close_read` on exit.
+
+    **Important**: (For now, consider it a feature, not a bug.)
+    If you provide pre‑obtained `blocks` and `size` (i.e., you
+    already have the block list from a previous call), the context manager
+    will **not** call `open_read` and therefore will **not** automatically
+    call `close_read` on exit.  In such cases, you must manage the read
+    reference yourself (e.g., by explicitly calling `client.close_read(token)`
+    after the context).
     """
 
     def __init__(
         self,
         client: "PagedShmClient",
-        uuid: str,
+        uuid_or_token: str,
         size: int | None = None,
         blocks: list[int] | None = None,
         timeout: float = 0.0,
     ):
         self._client = client
-        self._uuid = uuid  # original identifier (token or UUID)
-        self._real_uuid: str | None = None
+        self._uuid_or_token = uuid_or_token
         self._timeout = timeout
         self.size = size or 0
         self.blocks = blocks or []
+        # This will be set to the actual token after open_read
+        self._token_for_close: str | None = None
 
     def __enter__(self) -> "_ReadContext":
         if self.blocks and self.size > 0:
-            # User provided blocks/size; assume _uuid is the real UUID.
-            self._real_uuid = self._uuid
+            # User provided blocks/size – skip open_read; no token to close.
             return self
-        items = self._client.open_read(self._uuid, timeout=self._timeout)
-        self._real_uuid = items.uuid
+        items = self._client.open_read(self._uuid_or_token, timeout=self._timeout)
         self.size = items.size
         self.blocks = items.blocks
+        # Store the actual read token returned by the server
+        self._token_for_close = items.read_token
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Use the original identifier so that if it was a token,
-        # the server can consume it.
-        self._client.close_read(self._uuid)
+        # Close using the actual token (only if we acquired it in __enter__)
+        # **Important**:
+        # This implies that if the user passes in 'size' and 'blocks',
+        # the token will not be closed.
+        # For now, consider it a feature, not a bug.
+        if self._token_for_close is not None:
+            self._client.close_read(self._token_for_close)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +282,12 @@ class _ReadContext:
 
 
 class PagedShmClientWithoutStorage(_BaseClient):
+    """
+    ZMQ client without local storage (does not attach to shared memory).
+    Useful for administration or light-weight clients that only need to
+    send commands.
+    """
+
     def __init__(
         self,
         address: str,
@@ -303,32 +333,37 @@ class PagedShmClientWithoutStorage(_BaseClient):
         """
         Finalise a write operation for the given UUID.
         The server will automatically reserve one read reference for each
-        generated read token associated with this UUID.
+        generated read token associated with this UUID, effectively pinning
+        the item in the cache until each token is closed.
         """
         payload = json.dumps({"uuid": uuid})
         self._request(CLOSE_WRITE, payload)
 
     def open_read(self, uuid_or_token: str, timeout: float = 0.0) -> ShmAllocation:
         """
-        Acquire a read reference to an item and return its block list.
-        Accepts UUID or read token. If a token is used, it is not consumed
-        until close_read is called, and may be used multiple times for open_read.
+        Acquire a read lock (if UUID) or return data (if token) for an item.
+
+        - If `uuid_or_token` is a **real UUID**, the server will:
+            * Generate a new read token.
+            * Increment the global reference count (via `manager.open_read`).
+            * Return the data blocks along with the newly created token.
+        - If `uuid_or_token` is a **read token** (previously obtained), the server:
+            * Returns the data blocks without modifying the reference count
+              (the token already holds a reserved reference).
+            * The token is NOT consumed; it can be reused by multiple readers.
         """
         payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
         resp = self._request(OPEN_READ, payload)
         resp_dict = json.loads(resp)
         return ShmAllocation(**resp_dict["data"])
 
-    def close_read(self, uuid_or_token: str) -> None:
+    def close_read(self, token: str) -> None:
         """
-        Release a read reference. Accepts UUID or read token.
-
-        If a read token is provided, the token will be destroyed on the server
-        (i.e., removed from the token mapping).  The token must have been used
-        in a prior open_read call (or pre-incremented via the automatic
-        reservation on close_write).
+        Release a read reference. **Must be called with a read token**.
+        The token is destroyed on the server and its reserved read reference
+        is released.
         """
-        self._request(CLOSE_READ, uuid_or_token)
+        self._request(CLOSE_READ, token)
 
     def wait_for_readable(self, uuid_or_token: str, timeout: float = 0.0) -> None:
         """Wait for an item to become readable. Does NOT acquire a read lock."""
@@ -350,12 +385,12 @@ class PagedShmClientWithoutStorage(_BaseClient):
         resp = self._request(GET_MANAGER_STATES)
         return json.loads(resp)
 
-    def get_info(self, uuid: str) -> dict[str, Any]:
+    def get_info(self, uuid_or_token: str) -> dict[str, Any]:
         """
-        Return object info for the given UUID.
-        Also accepts read tokens (they are resolved on the server).
+        Return object info for the given UUID or read token.
+        (Resolved on the server.)
         """
-        resp = self._request(GET_INFO, uuid)
+        resp = self._request(GET_INFO, uuid_or_token)
         return json.loads(resp)
 
     def debug_cleanup(self) -> None:
@@ -377,21 +412,6 @@ class PagedShmClient(PagedShmClientWithoutStorage):
     Maintains a pool of ZMQ REQ sockets for thread‑safe concurrent access.
     All public operations that require read/write locks are exposed through
     high‑level methods that internally use context managers.
-
-    Parameters
-    ----------
-    address : str
-        IPC address of the server (e.g., ``"ipc:///tmp/xxx"``).
-    init_pool_size : int
-        Initial number of ZMQ sockets to pre‑allocate.
-    max_pool_size : int
-        Maximum number of ZMQ sockets in the pool.
-    socket_timeout_ms : int
-        Send/receive timeout for ZMQ sockets in milliseconds.
-    pin : bool
-        If True, the client‑side shared memory will be pinned for fast GPU transfers.
-    pool_workers : int
-        Number of threads in the internal thread pool for asynchronous writes.
     """
 
     def __init__(
@@ -469,7 +489,7 @@ class PagedShmClient(PagedShmClientWithoutStorage):
 
     def read_context(
         self,
-        uuid: str,
+        uuid_or_token: str,
         size: int | None = None,
         blocks: list[int] | None = None,
         timeout: float = 0.0,
@@ -477,11 +497,19 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         """
         Create a context manager for a read operation.
 
-        The `uuid` may be a real UUID or a read token.  The context manager
-        will automatically release the read lock on exit; if a token was used,
-        it will be consumed on the server.
+        `uuid_or_token` can be either a raw UUID or a read token.
+        - If UUID, the server generates a new token and increments ref_count.
+        - If token, the token is reused without changing ref_count.
+
+        The context manager automatically obtains the correct token from the
+        server and uses it for the final `close_read` call.
+
+        **Important**: If you provide pre‑obtained `blocks` and `size`, no
+        `open_read` is performed and therefore no `close_read` is called
+        on exit; you must manage the read reference manually.
+        For now, consider it a feature, not a bug.
         """
-        return _ReadContext(self, uuid, size, blocks, timeout)
+        return _ReadContext(self, uuid_or_token, size, blocks, timeout)
 
     # ------------------------------------------------------------------
     # High‑level convenience methods
@@ -500,12 +528,9 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         """
         Write an item to the shared memory store.
 
-        If `generate_read_token` is True, the server will generate a read token
-        that can be used to read the item without knowing the UUID.  The token
-        is returned as part of the result.  The server automatically reserves
-        a read reference for each generated token, ensuring the item remains
-        cached as long as any token exists.  Token holders must call
-        `close_read(token)` to release their reference.
+        If `generate_read_token` is True, the server generates a read token
+        and reserves a read reference for it at `close_write` time.
+        This token is returned and can be used for reading.
 
         Returns:
             - If `async_write` is False and `generate_read_token` is False:
@@ -579,7 +604,18 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         device: DeviceLikeType = "cpu",
         timeout: float = 0.0,
     ) -> np.ndarray | torch.Tensor:
-        """Read an item from shared memory. Accepts UUID or read token."""
+        """
+        Read an item from shared memory.
+
+        `uuid_or_token` can be either a raw UUID or a read token.
+        The method uses `read_context` internally, so it automatically
+        handles token generation and cleanup.
+
+        **Important**:
+        Unless you provide pre‑obtained `blocks` and `size`, in which
+        case you must manage the read reference manually.
+        For now, consider it a feature, not a bug.
+        """
         with self.read_context(uuid_or_token, size, blocks, timeout=timeout) as ctx:
             if ctx.size == 0:
                 if device == "cpu":
@@ -601,14 +637,14 @@ class PagedShmClient(PagedShmClientWithoutStorage):
     # ------------------------------------------------------------------
 
     @contextmanager
-    def get_iterator_numpy(self, uuid: str, timeout: float = 0.0):
-        with self.read_context(uuid, timeout=timeout) as ctx:
+    def get_iterator_numpy(self, uuid_or_token: str, timeout: float = 0.0):
+        with self.read_context(uuid_or_token, timeout=timeout) as ctx:
             it = self._storage.get_iterator_numpy(ctx.size, ctx.blocks)()
             yield it
 
     @contextmanager
-    def get_iterator_tensor(self, uuid: str, timeout: float = 0.0):
-        with self.read_context(uuid, timeout=timeout) as ctx:
+    def get_iterator_tensor(self, uuid_or_token: str, timeout: float = 0.0):
+        with self.read_context(uuid_or_token, timeout=timeout) as ctx:
             it = self._storage.get_iterator_tensor(ctx.size, ctx.blocks)()
             yield it
 
