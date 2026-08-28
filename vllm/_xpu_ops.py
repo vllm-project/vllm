@@ -599,7 +599,7 @@ def _xpu_fused_input_norm_impl(
     weight: torch.Tensor | None,
     bias: torch.Tensor | None,
     visual_dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     patches, size = x.shape
     out = torch.empty(
         (patches, size),
@@ -615,7 +615,7 @@ def _xpu_fused_input_norm_fake(
     weight: torch.Tensor | None,
     bias: torch.Tensor | None,
     visual_dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     patches, size = x.shape
     out = torch.empty(
         (patches, size),
