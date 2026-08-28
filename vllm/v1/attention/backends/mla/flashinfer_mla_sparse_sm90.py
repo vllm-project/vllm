@@ -15,10 +15,9 @@ top-k row and whose ``kv_len`` is its valid count. Causality is already
 encoded by the indexer's selection, so ``causal=False``.
 
 CUDA-graph handling: ``plan()`` copies its inputs to host unconditionally,
-so it must stay outside graph capture. A process-wide state object owns the
-wrapper (created eagerly at impl construction with the model's head count
-and KV dtype), reserved capture-stable device buffers, and the plan
-parameters. The wrapper bakes the per-row ``kv_len`` into its int schedule
+so it must stay outside graph capture. Each metadata builder owns a wrapper,
+reserved capture-stable device buffers, and the plan parameters. The wrapper
+bakes the per-row ``kv_len`` into its int schedule
 at plan() time — ``run()`` never reads the device-side buffer — so the
 metadata builder replans every step (outside capture) with exact host-side
 lengths derived from the batch's sequence lengths; a full-width schedule
@@ -33,6 +32,7 @@ per-token x 128-channel-group ``ckv_scale_arr`` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
 """
 
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import torch
@@ -62,22 +62,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
-
-# The BatchMLAPagedAttentionWrapper keeps its plan/schedule state inside the
-# workspace between plan() and run() (across layers and steps, including CUDA
-# graph replays). The shared step workspace is clobbered by the indexer and
-# MoE kernels that run between MLA layers, so this must be a private buffer
-# with a stable address.
-_SM90_WORKSPACE: torch.Tensor | None = None
-
-
-def _get_sm90_workspace(device: torch.device) -> torch.Tensor:
-    global _SM90_WORKSPACE
-    if _SM90_WORKSPACE is None:
-        _SM90_WORKSPACE = torch.empty(
-            _WORKSPACE_BYTES, dtype=torch.uint8, device=device
-        )
-    return _SM90_WORKSPACE
 
 
 class FlashInferMLASparseSM90Backend(AttentionBackend):
@@ -141,6 +125,8 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
                 "MLA support (ckv_scale_arr in "
                 "BatchMLAPagedAttentionWrapper.run, FlashInfer >= 0.6.18)"
             )
+        if not use_sparse:
+            return "FLASHINFER_MLA_SPARSE_SM90 requires sparse MLA"
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
@@ -152,8 +138,6 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
                 return "FLASHINFER_MLA_SPARSE_SM90 requires kv_lora_rank=512"
             if hf.qk_rope_head_dim not in (0, 64):
                 return "FLASHINFER_MLA_SPARSE_SM90 requires qk_rope_head_dim in (0, 64)"
-            if not hasattr(hf, "index_topk"):
-                return "FLASHINFER_MLA_SPARSE_SM90 requires a sparse model"
         return None
 
     @staticmethod
@@ -172,12 +156,10 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
 
 
 class _SM90State:
-    """Process-wide wrapper, capture-stable buffers, and plan parameters.
+    """Builder-owned wrapper, capture-stable buffers, and plan parameters.
 
-    One instance serves every MLA layer: the plan depends only on the batch
-    shape, not the layer. Created eagerly at the first impl construction
-    (always before any graph capture), so the head count and KV dtype are
-    known when planning.
+    One instance serves every MLA layer in an attention group because the plan
+    depends only on the batch shape, not the layer.
     """
 
     def __init__(
@@ -193,7 +175,7 @@ class _SM90State:
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
-        float_workspace = _get_sm90_workspace(device)
+        self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
         self.device = device
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
@@ -211,7 +193,7 @@ class _SM90State:
             (max_tokens,), topk_width, dtype=torch.int32, device=device
         )
         self.wrapper = BatchMLAPagedAttentionWrapper(
-            float_workspace,
+            self.workspace,
             qo_indptr=torch.zeros(max_tokens + 1, dtype=torch.int32, device=device),
             kv_indptr=torch.zeros(max_tokens + 1, dtype=torch.int32, device=device),
             kv_indices=self.kv_indices,
@@ -274,17 +256,15 @@ class _SM90State:
         )
 
 
-_SM90_STATE: _SM90State | None = None
-
-
-def _get_sm90_state() -> "_SM90State | None":
-    return _SM90_STATE
+@dataclass
+class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
+    state: _SM90State | None = None
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
     """Reuse the common sparse metadata (req ids, topk buffer access)."""
 
-    metadata_cls = FlashInferMLASparseMetadata
+    metadata_cls = FlashInferMLASparseSM90Metadata
 
     def __init__(
         self,
@@ -294,6 +274,27 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        attention_layer = vllm_config.compilation_config.static_forward_context[
+            layer_names[0]
+        ]
+        impl = attention_layer.impl
+        if not isinstance(impl, FlashInferMLASparseSM90Impl):
+            raise TypeError(
+                "FlashInferMLASparseSM90Builder requires an SM90 FlashInfer "
+                f"implementation, got {type(impl).__name__}."
+            )
+        topk_indices_buffer = impl.topk_indices_buffer
+        assert topk_indices_buffer is not None
+        self.state = _SM90State(
+            device,
+            impl.num_heads,
+            kv_cache_spec.dtype,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            topk_indices_buffer.shape[1],
+            kv_lora_rank=impl.kv_lora_rank,
+            qk_rope_head_dim=impl.qk_rope_head_dim,
+            sm_scale=impl.scale,
+        )
         # seq_lens_cpu_upper_bound is optimistic on decode rows under async
         # spec decode, so the fast sync-free path is only safe without it;
         # under async scheduling the exact (device) positions are used at
@@ -302,9 +303,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         hf_config = vllm_config.model_config.hf_text_config
         assert hf_config.index_topk is not None
         self._index_topk = int(hf_config.index_topk)
-        self._index_kpool = (
-            int(hf_config.index_kpool) if hasattr(hf_config, "index_kpool") else 1
-        )
+        self._index_kpool = int(kv_cache_spec.tokens_per_state)
 
     def _kv_lens_host(self, cam: CommonAttentionMetadata) -> tuple[int, torch.Tensor]:
         """Exact per-row KV lengths, host-side (the flashinfer wrapper bakes
@@ -371,17 +370,18 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> FlashInferMLASparseMetadata:
+    ) -> FlashInferMLASparseSM90Metadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        assert isinstance(metadata, FlashInferMLASparseSM90Metadata)
         # Replan every step outside any CUDA graph capture with this step's
         # exact per-row lengths; captured runs read the refreshed buffers.
-        if _SM90_STATE is not None:
-            num_rows, kv_lens = self._kv_lens_host(common_attn_metadata)
-            _SM90_STATE.plan(num_rows, kv_lens)
+        num_rows, kv_lens = self._kv_lens_host(common_attn_metadata)
+        self.state.plan(num_rows, kv_lens)
+        metadata.state = self.state
         return metadata
 
 
-class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
     def __init__(
         self,
         num_heads: int,
@@ -398,7 +398,6 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
         indexer: Any | None = None,
         **mla_args: Any,
     ) -> None:
-        global _SM90_STATE
         if any([alibi_slopes, sliding_window, logits_soft_cap]):
             raise NotImplementedError(
                 "FlashInferMLASparseSM90Impl does not support alibi, sliding "
@@ -422,29 +421,12 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
         assert self.topk_indices_buffer is not None
         self.supports_quant_query_input = False
         self.use_fp8_kv_cache = self.kv_cache_dtype in _FP8_KV_DTYPES
-        if _SM90_STATE is None:
-            from vllm.config import get_current_vllm_config
-
-            assert topk_indices_buffer is not None
-            max_tokens = (
-                get_current_vllm_config().scheduler_config.max_num_batched_tokens
-            )
-            _SM90_STATE = _SM90State(
-                topk_indices_buffer.device,
-                num_heads,
-                (torch.float8_e4m3fn if self.use_fp8_kv_cache else torch.bfloat16),
-                max_tokens,
-                topk_indices_buffer.shape[1],
-                kv_lora_rank=self.kv_lora_rank,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                sm_scale=self.scale,
-            )
 
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: FlashInferMLASparseMetadata,
+        attn_metadata: FlashInferMLASparseSM90Metadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not isinstance(q, tuple):
@@ -470,7 +452,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
-        state = _SM90_STATE
+        state = attn_metadata.state
         assert state is not None
         # Refresh top-k rows in graph and clamp masked tails to a valid slot;
         # per-row lengths are already baked into the host-side plan.

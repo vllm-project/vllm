@@ -110,6 +110,29 @@ class Glm5NextTextConfig(PretrainedConfig):
             )
             linear_lower_bound = linear_cfg.get("gate_lower_bound", linear_lower_bound)
 
+        if index_topk is not None:
+            if index_dsa_use_layernorm is not True:
+                raise NotImplementedError(
+                    "GLM-5.3 sparse indexer requires index_dsa_use_layernorm=True"
+                )
+            if index_kpool_compress is not True:
+                raise NotImplementedError(
+                    "GLM-5.3 sparse indexer requires index_kpool_compress=True"
+                )
+            if index_kpool_always_select_tail is not True:
+                raise NotImplementedError(
+                    "GLM-5.3 sparse indexer requires "
+                    "index_kpool_always_select_tail=True"
+                )
+
+        if mhc:
+            if hres_vwnstyle is not True:
+                raise NotImplementedError("GLM-5.3 mHC requires hres_vwnstyle=True")
+            if mhc_no_norm_weight not in (False, None):
+                raise NotImplementedError(
+                    "GLM-5.3 mHC requires mhc_no_norm_weight=False"
+                )
+
         self.model_type = model_type
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size

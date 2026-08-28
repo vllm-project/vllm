@@ -305,7 +305,7 @@ class AttentionGroup:
         ]
         if kernel_block_size is not None:
             for builder in self.metadata_builders:
-                builder.kernel_block_size = kernel_block_size  # type: ignore[attr-defined]
+                builder.set_kernel_block_size(kernel_block_size)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id

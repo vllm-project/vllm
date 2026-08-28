@@ -636,7 +636,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.kernel_block_size: int | None = None
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size

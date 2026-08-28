@@ -102,7 +102,6 @@ def make_batch(rows, topk_rows, own_blocks):
 def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     impl, rows = make_impl(qk_rope, kv_dtype)
     state = FakeState(TOPK)
-    monkeypatch.setattr(sm90_mod, "_SM90_STATE", state)
     monkeypatch.setattr(
         sm90_mod, "triton_convert_req_index_to_global_index", ref_convert
     )
@@ -115,6 +114,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         [2] + [-1] * (TOPK - 1),
     ]
     meta = make_batch(rows, topk_rows, [3])
+    meta.state = state
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
     cache = torch.zeros(
@@ -151,8 +151,36 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         assert kwargs == {}
 
 
+def test_builder_attaches_its_state(monkeypatch):
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder._index_topk = 2048
+    builder._index_kpool = 4
+    builder._async_scheduling = False
+    builder.state = FakeState(TOPK)
+    metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.state = None
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "build",
+        lambda *_args, **_kwargs: metadata,
+    )
+    cam = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([1], dtype=torch.int32),
+        positions=None,
+    )
+
+    result = builder.build(0, cam)
+
+    assert result.state is builder.state
+    assert builder.state.plan_calls[0][0] == 1
+    assert builder.state.plan_calls[0][1].tolist() == [1]
+
+
 def test_plan_uses_state_params(monkeypatch):
-    """The NoPE/rope dims and scale live on the shared state, not the layer.
+    """The NoPE/rope dims and scale live on the builder state, not the layer.
 
     plan() takes exact per-row KV lengths; the schedule is rebuilt on every
     call (contexts grow between steps) and the indptrs are always full-size

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import pytest
 from transformers import PretrainedConfig
 
 from vllm.config.model import ModelConfig
@@ -48,6 +49,30 @@ def test_glm5_next_accepts_prebuilt_subconfigs():
 
     assert config.text_config is text_config
     assert config.vision_config is vision_config
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "option"),
+    [
+        (
+            {"index_topk": 2048, "index_dsa_use_layernorm": False},
+            "index_dsa_use_layernorm",
+        ),
+        (
+            {"index_topk": 2048, "index_kpool_compress": False},
+            "index_kpool_compress",
+        ),
+        (
+            {"index_topk": 2048, "index_kpool_always_select_tail": False},
+            "index_kpool_always_select_tail",
+        ),
+        ({"hres_vwnstyle": False}, "hres_vwnstyle"),
+        ({"mhc_no_norm_weight": True}, "mhc_no_norm_weight"),
+    ],
+)
+def test_glm5_next_rejects_unimplemented_config_options(kwargs, option):
+    with pytest.raises(NotImplementedError, match=option):
+        Glm5NextTextConfig(**kwargs)
 
 
 def test_get_llama3_eos_token():

@@ -373,7 +373,6 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.mhc and not is_mtp_layer:
             # mhc config
             self.mhc_num_residual_streams = config.mhc_num_residual_streams
-            self.mhc_no_norm_weight = config.mhc_no_norm_weight
             self.mhc_tau = config.mhc_tau
             self.hc_eps = config.hc_eps
             self.mhc_sinkhorn_iterations = config.mhc_sinkhorn_iterations
@@ -585,16 +584,6 @@ class Glm5NextModel(nn.Module):
         self.vocab_size = config.vocab_size
         self.device = current_platform.device_type
 
-        """
-        if config.index_topk is not None:
-            topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                config.index_topk,
-                dtype=torch.int32,
-                device=self.device,
-            )
-        else:
-        """
         self.is_v32 = config.index_topk is not None
         if self.is_v32:
             topk_tokens = config.index_topk
