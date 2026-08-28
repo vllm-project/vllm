@@ -596,6 +596,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
             extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
 
+        # MuseGlimmer templates read reasoning_strength rather than
+        # reasoning_effort; forward the value under that name as well.
+        if (
+            self.reasoning_effort is not None
+            and "reasoning_strength" not in user_kwargs
+        ):
+            extra_kwargs["reasoning_strength"] = self.reasoning_effort
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
