@@ -77,8 +77,15 @@ def fused_q_kv_rmsnorm(
     q_size = qr.shape[1]
     kv_size = kv.shape[1]
     num_tokens = qr.shape[0]
-    qr_out = torch.empty_like(qr)
-    kv_out = torch.empty_like(kv)
+    # Allocate packed outputs rather than empty_like: qr/kv are typically
+    # column slices of a fused qkv_a projection, and for num_tokens == 1
+    # empty_like preserves the parent's row stride (torch keeps strides of
+    # size-1 dims), e.g. (2112, 1) for a [1, 1536] q slice. Downstream
+    # dispatchers that require packed row-major inputs (e.g. the Kimi-K3
+    # low-latency GEMM's _is_packed_row_major check) then reject the tensor
+    # and silently fall back to cuBLAS on every decode step.
+    qr_out = torch.empty(qr.shape, dtype=qr.dtype, device=qr.device)
+    kv_out = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
     if num_tokens == 0:
         return qr_out, kv_out
 
