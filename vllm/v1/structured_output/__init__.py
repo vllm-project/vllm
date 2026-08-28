@@ -17,7 +17,6 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
-from vllm.v1.structured_output.utils import maybe_wrap_mistral_common_tokenizer
 
 if TYPE_CHECKING:
     import numpy as np
@@ -76,8 +75,8 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = maybe_wrap_mistral_common_tokenizer(
-                cached_tokenizer_from_config(model_config=self.vllm_config.model_config)
+            self.tokenizer = cached_tokenizer_from_config(
+                model_config=self.vllm_config.model_config
             )
             reasoning_parser_plugin = (
                 self.vllm_config.structured_outputs_config.reasoning_parser_plugin
