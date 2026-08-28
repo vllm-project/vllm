@@ -239,7 +239,8 @@ def test_frame_cache_evicts_oldest_beyond_capacity():
 def test_frame_cache_matches_uncached_features():
     num_frames, window = 10, 4
     cached_tower, plain_tower = _CountingTower(8, 4), _CountingTower(8, 4)
-    cache_on, cache_off = OrderedDict(), OrderedDict()
+    cache_on: OrderedDict = OrderedDict()
+    cache_off: OrderedDict = OrderedDict()
     for frame_ids in _rolling_windows(num_frames, window):
         dino, siglip, keys = _make_window(frame_ids)
         c_on, f_on, _ = _encode_frames_cached(
@@ -346,7 +347,8 @@ def test_pixel_cache_matches_uncached_pixels():
     num_frames, window = 10, 4
     cached_processor = _CountingPixelProcessor()
     plain_processor = _CountingPixelProcessor()
-    cache_on, cache_off = OrderedDict(), OrderedDict()
+    cache_on: OrderedDict = OrderedDict()
+    cache_off: OrderedDict = OrderedDict()
     for frame_ids in _rolling_windows(num_frames, window):
         frames, keys = _make_pixel_window(frame_ids)
         dino_on, siglip_on = _pixel_window_cached(
