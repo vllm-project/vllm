@@ -607,8 +607,16 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
 _INKLING_CONTENT_TEXT = "<|content_text|>"
 _INKLING_TOOL_JSON = "<|content_invoke_tool_json|>"
 _INKLING_END_MESSAGE = "<|end_message|>"
+_INKLING_END_SAMPLING = "<|content_model_end_sampling|>"
 _INKLING_TOOL_OPEN = _INKLING_TOOL_JSON
 _INKLING_TEXT_OPEN = _INKLING_CONTENT_TEXT
+# BOTH terminators, because the parser treats them as co-equal: it documents
+# that "sampling may also end a block with the standalone
+# <|content_model_end_sampling|> token", `is_reasoning_end` returns True on it,
+# and `count_reasoning_tokens` closes a reasoning block on either. Permitting
+# only <|end_message|> would mask a valid natural terminator -- and would remove
+# one of the two paths that flip is_reasoning_end.
+_INKLING_ENDS = [_INKLING_END_MESSAGE, _INKLING_END_SAMPLING]
 
 
 def _inkling_call_schema(tool: FunctionToolParam) -> dict[str, Any]:
@@ -632,7 +640,7 @@ def _inkling_call_tag(tool: FunctionToolParam) -> TagFormat:
     return TagFormat(
         begin=_INKLING_TOOL_OPEN,
         content=JSONSchemaFormat(json_schema=_inkling_call_schema(tool)),
-        end=_INKLING_END_MESSAGE,
+        end=_INKLING_ENDS,
     )
 
 
@@ -648,8 +656,8 @@ def _inkling_tool_calls(tools: list[FunctionToolParam]) -> Any:
 def _inkling_text_block() -> TagFormat:
     return TagFormat(
         begin=_INKLING_TEXT_OPEN,
-        content=AnyTextFormat(excludes=[_INKLING_END_MESSAGE]),
-        end=_INKLING_END_MESSAGE,
+        content=AnyTextFormat(excludes=_INKLING_ENDS),
+        end=_INKLING_ENDS,
     )
 
 
