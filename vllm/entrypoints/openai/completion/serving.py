@@ -2,14 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -17,6 +14,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
     build_per_request_timing_metrics,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -30,7 +28,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
@@ -48,6 +46,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
@@ -194,6 +193,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -202,6 +202,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -210,8 +211,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     request_id_item,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                 )
 
             generators.append(generator)
@@ -393,7 +395,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     else:
                         logprobs = None
 
-                    previous_text_lens[i] += len(output.text)
+                    previous_text_lens[i] += len(delta_text)
                     previous_num_tokens[i] += len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
@@ -459,18 +461,22 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
                 # ``--enable-force-include-usage``).
-                stream_per_request_metrics: PerRequestTimingMetrics | None = None
-                if (
-                    self.enable_per_request_metrics
-                    # See note in request_output_to_completion_response: suppress
-                    # when not attributable to one stream (multi-prompt or n>1).
-                    and num_prompts == 1
-                    and (request.n or 1) == 1
-                ):
-                    last_metrics = last_res.metrics if last_res is not None else None
-                    stream_per_request_metrics = build_per_request_timing_metrics(
-                        last_metrics, total_completion_tokens
-                    )
+                stream_per_request_metrics: PerRequestMetrics | None = None
+                # See note in request_output_to_completion_response: suppress when
+                # not attributable to one stream (multi-prompt or n>1).
+                if num_prompts == 1 and (request.n or 1) == 1:
+                    if self.enable_per_request_metrics:
+                        last_metrics = (
+                            last_res.metrics if last_res is not None else None
+                        )
+                        stream_per_request_metrics = build_per_request_timing_metrics(
+                            last_metrics, total_completion_tokens
+                        )
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        if stream_per_request_metrics is None:
+                            stream_per_request_metrics = PerRequestMetrics()
+                        stream_per_request_metrics.speculative_decoding = spec_stats
 
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
@@ -567,17 +573,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 else:
                     logprobs = None
 
-                # Encode routed_experts for transport. JSON can't carry raw
-                # bytes, so we write the ndarray as a ``.npy`` byte stream
-                # and base64-encode it. ``pybase64`` is ~3x faster than the
-                # stdlib ``base64`` on large payloads thanks to SIMD.
-                routed_experts_b64 = None
-                if output.routed_experts is not None:
-                    buf = io.BytesIO()
-                    np.save(buf, output.routed_experts)
-                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                        "ascii"
-                    )
+                routed_experts_b64 = (
+                    numpy2base64(output.routed_experts)
+                    if output.routed_experts is not None
+                    else None
+                )
 
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
@@ -617,21 +617,24 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        per_request_metrics: PerRequestTimingMetrics | None = None
-        if (
-            self.enable_per_request_metrics
-            # Metrics describe a single generation stream, so suppress them when
-            # they cannot be attributed to one: multiple prompts (timestamps
-            # span prompts) or n>1 (stats belong to one of the n sequences).
-            and len(final_res_batch) == 1
-            and (request.n or 1) == 1
-        ):
-            last_metrics = (
-                last_final_res.metrics if last_final_res is not None else None
-            )
-            per_request_metrics = build_per_request_timing_metrics(
-                last_metrics, num_generated_tokens
-            )
+        per_request_metrics: PerRequestMetrics | None = None
+        # Per-request metrics (timing + spec-decode acceptance) describe a single
+        # generation stream, so suppress them when they cannot be attributed to
+        # one: multiple prompts (timestamps span prompts) or n>1 (stats belong to
+        # one of the n sequences).
+        if len(final_res_batch) == 1 and (request.n or 1) == 1:
+            if self.enable_per_request_metrics:
+                last_metrics = (
+                    last_final_res.metrics if last_final_res is not None else None
+                )
+                per_request_metrics = build_per_request_timing_metrics(
+                    last_metrics, num_generated_tokens
+                )
+            spec_stats = build_spec_decoding_metrics(last_final_res)
+            if spec_stats is not None:
+                if per_request_metrics is None:
+                    per_request_metrics = PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
 
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params

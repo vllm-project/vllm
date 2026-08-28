@@ -8,6 +8,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use super::SampleRequest;
+use super::progress::RowDownloadReporter;
 use crate::cli::SpeedBenchConfig;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
@@ -25,7 +26,7 @@ fn cache_dir() -> std::path::PathBuf {
 
 /// Download SPEED-Bench dataset from HuggingFace datasets-server API.
 /// Results are cached as JSON locally for subsequent runs.
-pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
+pub async fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     let config_name = config.as_str();
 
     let dir = cache_dir();
@@ -35,13 +36,13 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     // Return cached file if it exists
     if cache_path.exists() {
         let path_str = cache_path.to_string_lossy().to_string();
-        println!("SPEED-Bench ({config_name}) cached: {path_str}");
+        tracing::info!(config = config_name, path = %path_str, "using cached SPEED-Bench dataset");
         return Ok(path_str);
     }
 
-    println!("Downloading SPEED-Bench ({config_name}) from HuggingFace datasets-server...");
+    tracing::info!(config = config_name, "downloading SPEED-Bench dataset");
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| BenchError::Config(format!("Failed to build HTTP client: {e}")))?;
@@ -49,6 +50,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
     let mut offset = 0usize;
     let page_size = 100usize;
+    let mut progress = RowDownloadReporter::new();
 
     loop {
         let url = format!(
@@ -64,13 +66,14 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
         let max_retries = 3;
         let mut data: Option<serde_json::Value> = None;
         for attempt in 0..=max_retries {
-            let resp = match client.get(&url).send() {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     if attempt < max_retries {
-                        std::thread::sleep(std::time::Duration::from_secs(
+                        tokio::time::sleep(std::time::Duration::from_secs(
                             2 * (attempt as u64 + 1),
-                        ));
+                        ))
+                        .await;
                         continue;
                     }
                     return Err(BenchError::Config(format!(
@@ -80,7 +83,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
             };
 
             if resp.status().is_server_error() && attempt < max_retries {
-                std::thread::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)));
+                tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1))).await;
                 continue;
             }
 
@@ -91,7 +94,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
                 )));
             }
 
-            data = Some(resp.json().map_err(|e| {
+            data = Some(resp.json().await.map_err(|e| {
                 BenchError::Config(format!("Failed to parse SPEED-Bench API response: {e}"))
             })?);
             break;
@@ -116,15 +119,14 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
         let fetched = rows.len();
         offset += fetched;
 
-        // Print progress
         let total = data["num_rows_total"].as_u64().unwrap_or(0);
-        eprint!("\r  Fetched {offset}/{total} rows...");
+        progress.update(offset, total);
 
         if fetched < page_size {
             break;
         }
     }
-    eprintln!(); // newline after progress
+    progress.finish();
 
     if all_rows.is_empty() {
         return Err(BenchError::Config(
@@ -137,9 +139,11 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     std::fs::write(&cache_path, &json_str)?;
 
     let path_str = cache_path.to_string_lossy().to_string();
-    println!(
-        "SPEED-Bench ({config_name}): {} rows saved to {path_str}",
-        all_rows.len()
+    tracing::info!(
+        config = config_name,
+        rows = all_rows.len(),
+        path = %path_str,
+        "saved SPEED-Bench dataset"
     );
     Ok(path_str)
 }
@@ -263,9 +267,11 @@ pub fn load_speed_bench_dataset(
     // Oversample if needed
     if samples.len() < num_requests {
         if no_oversample {
-            println!(
-                "Skipping oversampling. Total samples: {} (requested: {num_requests})",
-                samples.len()
+            tracing::info!(
+                dataset = "speed-bench",
+                samples = samples.len(),
+                requested = num_requests,
+                "skipping dataset oversampling"
             );
         } else if !samples.is_empty() {
             let original_len = samples.len();
@@ -275,9 +281,11 @@ pub fn load_speed_bench_dataset(
                 req.request_id = Some(format!("{request_id_prefix}{}", original_len + i));
                 samples.push(req);
             }
-            println!(
-                "Oversampled SPEED-Bench from {original_len} to {} total samples.",
-                samples.len()
+            tracing::info!(
+                dataset = "speed-bench",
+                original_samples = original_len,
+                samples = samples.len(),
+                "oversampled dataset"
             );
         }
     }
@@ -288,7 +296,6 @@ pub fn load_speed_bench_dataset(
         ));
     }
 
-    // Print category distribution
     let mut cat_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for entry in &filtered[..filtered.len().min(samples.len())] {
         let cat = entry.get("category").and_then(|c| c.as_str()).unwrap_or("unknown");
@@ -297,7 +304,7 @@ pub fn load_speed_bench_dataset(
     let mut cats: Vec<_> = cat_counts.into_iter().collect();
     cats.sort_by_key(|b| std::cmp::Reverse(b.1));
     let cat_str: Vec<String> = cats.iter().map(|(k, v)| format!("{k}:{v}")).collect();
-    println!("SPEED-Bench categories: {}", cat_str.join(", "));
+    tracing::info!(categories = %cat_str.join(", "), "computed SPEED-Bench category distribution");
 
     Ok(samples)
 }

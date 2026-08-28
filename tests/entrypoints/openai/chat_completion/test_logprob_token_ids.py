@@ -14,11 +14,11 @@ digit-token vocab id).
 import math
 
 import pytest
-from pydantic import ValidationError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.exceptions import VLLMValidationError
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
@@ -87,7 +87,7 @@ def test_completion_request_decouples_top_k_from_explicit_token_ids():
 
 
 def test_completion_rejects_explicit_token_ids_without_generated_tokens():
-    with pytest.raises(ValidationError, match="no output tokens are generated"):
+    with pytest.raises(VLLMValidationError, match="no output tokens are generated"):
         CompletionRequest(
             model=MODEL_NAME,
             prompt="Hello",
@@ -99,7 +99,7 @@ def test_completion_rejects_explicit_token_ids_without_generated_tokens():
 
 
 def test_requests_reject_explicit_token_ids_with_beam_search():
-    with pytest.raises(ValidationError, match="not supported with beam search"):
+    with pytest.raises(VLLMValidationError, match="not supported with beam search"):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "Hello"}],
@@ -108,7 +108,7 @@ def test_requests_reject_explicit_token_ids_with_beam_search():
             use_beam_search=True,
         )
 
-    with pytest.raises(ValidationError, match="not supported with beam search"):
+    with pytest.raises(VLLMValidationError, match="not supported with beam search"):
         CompletionRequest(
             model=MODEL_NAME,
             prompt="Hello",

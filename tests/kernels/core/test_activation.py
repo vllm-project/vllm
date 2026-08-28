@@ -22,6 +22,7 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
     swiglustep_and_mul_triton,
 )
+from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -121,6 +122,20 @@ def test_act_and_mul(
 SWIGLU_LIMITS = [3.0, 7.0, 15.0]
 
 
+@torch.inference_mode()
+def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
+    x = torch.randn(7, 1024, dtype=torch.bfloat16, device="cuda")
+    output = torch.empty(7, 512, dtype=x.dtype, device=x.device)
+
+    swiglu_limit_func(output, x, swiglu_limit=7.0)
+    gate, up = x.chunk(2, dim=-1)
+    expected = torch.nn.functional.silu(gate.clamp(max=7.0)) * up.clamp(
+        min=-7.0, max=7.0
+    )
+
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize("swiglu_limit", SWIGLU_LIMITS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
@@ -195,6 +210,46 @@ def test_silu_and_mul_with_clamp(
     # opcheck
     out_buf = torch.empty(x.shape[:-1] + (d,), dtype=dtype, device=device)
     opcheck(torch.ops._C.silu_and_mul_with_clamp, (out_buf, x, swiglu_limit))
+
+
+@pytest.mark.parametrize("linear_beta", [-1.0, 2.0])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@torch.inference_mode()
+def test_masked_situ_and_mul(
+    default_vllm_config,
+    linear_beta: float,
+    dtype: torch.dtype,
+) -> None:
+    """Masked SITU computes valid expert rows and preserves padded zeros."""
+    device = CUDA_DEVICES[0]
+    num_experts, max_num_tokens, d = 4, 7, 512
+    beta = 1.5
+    input = torch.randn(num_experts, max_num_tokens, 2 * d, dtype=dtype, device=device)
+    expert_num_tokens = torch.tensor([0, 1, 4, 7], dtype=torch.int32, device=device)
+    output = torch.zeros(num_experts, max_num_tokens, d, dtype=dtype, device=device)
+
+    torch.ops._C.masked_situ_and_mul(
+        output, input, expert_num_tokens, beta, linear_beta
+    )
+
+    gate, up = input.float().chunk(2, dim=-1)
+    expected = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    if linear_beta > 0:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    expected = (expected * up).to(dtype)
+    for expert, num_tokens in enumerate(expert_num_tokens.cpu().tolist()):
+        torch.testing.assert_close(
+            output[expert, :num_tokens],
+            expected[expert, :num_tokens],
+            atol=get_default_atol(output),
+            rtol=get_default_rtol(output),
+        )
+        assert torch.count_nonzero(output[expert, num_tokens:]) == 0
+
+    opcheck(
+        torch.ops._C.masked_situ_and_mul,
+        (output, input, expert_num_tokens, beta, linear_beta),
+    )
 
 
 @pytest.mark.parametrize(
