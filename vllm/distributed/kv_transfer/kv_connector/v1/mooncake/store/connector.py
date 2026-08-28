@@ -283,8 +283,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        # No-op: loads are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         # No layerwise support - no-op
@@ -301,8 +303,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self):
-        # No-op: stores are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.wait_for_save(metadata)
 
     def get_finished(
         self, finished_req_ids: set[str]
