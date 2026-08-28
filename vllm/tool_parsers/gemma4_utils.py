@@ -115,8 +115,8 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
         return results
 
     # Tier 2: Fallback for known Gemma4 output variations.
-    # Matches: <call>name{args}, call:name{args}, or bare call:name{args}<eos>
-    fallback_pattern = r"(?:<call>|(?:^|\s)call:)(\w+)\{(.*?)\}"
+    # Matches: <call>name{args}, call:name{args}, <channel|>call:name{args}, or bare call:name{args}<eos>
+    fallback_pattern = r"(?:<call>|(?:^|\s|<channel\|>|:)call:)([\w\-\.]+)\{(.*?)\}"
     for match in re.finditer(fallback_pattern, text, re.DOTALL):
         name, args_str = match.group(1), match.group(2)
         results.append(
