@@ -450,6 +450,13 @@ class PromptTokenStats:
         "local_cache_hit",
         "external_kv_transfer",
     )
+    BUILTIN_CACHED_SOURCES: tuple[str, ...] = (
+        "device",
+        "cpu",
+        "disk",
+        "mixed",
+        "external",
+    )
 
     computed: int = 0
     local_cache_hit: int = 0
