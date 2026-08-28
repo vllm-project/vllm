@@ -312,6 +312,21 @@ def test_optional_handling(args, expected, dummy_config_kwargs):
     assert "None" in parser.format_help()
 
 
+def test_small_prefill_chunk_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--min-prefill-chunk-tokens",
+            "1024",
+            "--max-prefill-chunk-delay-steps",
+            "8",
+        ]
+    )
+
+    assert args.min_prefill_chunk_tokens == 1024
+    assert args.max_prefill_chunk_delay_steps == 8
+
+
 def test_jit_monitor_verbose_arg():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(["--jit-monitor-verbose"])
