@@ -808,7 +808,6 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     rm -rf /var/lib/apt/lists/*
 
-<<<<<<< HEAD
 # Apply the CUDA 13.4-only libcurand compatibility link described in the build
 # stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
 # under its configured /usr prefix, while Ubuntu installs it in a multiarch
@@ -837,7 +836,6 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         && ldconfig; \
     fi
 
-=======
 # Install the initialized-snapshot runtime on the architecture supported by
 # `vllm snapshot`. CRIU and its CUDA plugin are built from the same pinned
 # source. The `cuda-checkpoint`-compatible helper is built from NVIDIA Dynamo's
@@ -852,7 +850,6 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
 
 ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 
->>>>>>> 3389a3c474 (feat(snapshot): rebuild initialized snapshot stack)
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
 
