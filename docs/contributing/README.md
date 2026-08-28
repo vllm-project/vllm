@@ -303,9 +303,11 @@ review process:
   clarification or discuss the suggestion.
 - Note that not all CI checks will be executed due to limited computational
   resources. Reviewers with write access and configured trusted contributors
-  can comment `/ci run` when CI signals are needed before a PR is ready. After
-  the PR is approved or has the `ready` label, the PR author can use `/ci run`
-  or `/ci retry`. New commits do not start CI automatically.
+  can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when
+  CI signals are needed before a PR is ready. After the PR is approved or has
+  the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
+  or the corresponding `/amd-ci` variants. New commits do not start upstream
+  CI automatically.
 
 ### Pull Request Limits and Escalation
 

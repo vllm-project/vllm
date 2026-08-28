@@ -82,6 +82,15 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     },
 }
 
+# Per-rank input limit for standalone FlashInfer MNNVL all-reduce.
+# The key is (compute capability, world size, node count).
+FI_MNNVL_ALLREDUCE_MAX_SIZE_MB: dict[tuple[int, int, int], float] = {
+    (103, 4, 1): 80,
+    (103, 8, 1): 64,
+    (103, 8, 2): 64,
+    (103, 16, 4): 8,
+}
+
 # NCCL symmetric memory allreduce configuration based on H100 and GB200 benchmarks.
 # PyNCCL-symm outperforms custom_AR for small and large tensor sizes,
 # while custom_AR wins for mid-range sizes.

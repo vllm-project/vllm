@@ -269,14 +269,6 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
     double eps, int64_t cache_block_size);
 
-void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
-    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& q_out, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size);
-
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
@@ -537,8 +529,16 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
-                  double beta = 1.0, double linear_beta = -1.0);
+void situ_and_mul(
+    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
+    double linear_beta = -1.0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor& scale,
+    torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
+    int64_t group_size = 0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,

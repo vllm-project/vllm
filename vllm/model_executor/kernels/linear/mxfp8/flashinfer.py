@@ -177,3 +177,103 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
         output_shape = (*input_shape[:-1], N)
         return output.view(output_shape)
+
+
+class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
+    """MXFP8 W8A8 GEMM via FlashInfer's TensorRT-LLM wrapper."""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            return False, "requires SM100-family GPU"
+        if not has_flashinfer():
+            return False, "requires FlashInfer"
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+
+        if hasattr(layer, "_mxfp8_trtllm_output_size") and layer.weight_scale.ndim == 1:
+            return
+
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+        if K % 256 != 0:
+            raise ValueError(
+                f"FlashInfer TRTLLM MXFP8 requires K to be divisible by 256, got K={K}."
+            )
+
+        scale_k = K // MXFP8_BLOCK_SIZE
+        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        padded_n = ((N + 127) // 128) * 128
+        if padded_n != N:
+            padded_weight = weight.new_zeros((padded_n, K))
+            padded_weight[:N] = weight
+            weight = padded_weight
+
+            padded_scale = weight_scale.new_zeros((padded_n, scale_k))
+            padded_scale[:N] = weight_scale
+            weight_scale = padded_scale
+        else:
+            weight = weight.contiguous()
+
+        layer.weight = Parameter(
+            shuffle_matrix_a(weight, 128).reshape(padded_n, K),
+            requires_grad=False,
+        )
+        layer.weight_scale = Parameter(
+            shuffle_matrix_sf_a(
+                weight_scale,
+                128,
+                num_elts_per_sf=MXFP8_BLOCK_SIZE,
+            ).reshape(-1),
+            requires_grad=False,
+        )
+        layer._mxfp8_trtllm_output_size = N
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert x.dtype == torch.bfloat16, (
+            f"FlashInfer TRTLLM MXFP8 requires bfloat16 activations, got {x.dtype}."
+        )
+
+        weight = layer.weight  # shuffled [padded N, K]
+        weight_scale = layer.weight_scale
+        _, K = weight.shape
+        output_size = layer._mxfp8_trtllm_output_size
+        input_shape = x.shape
+        input_2d = x.view(-1, K)
+
+        input_mxfp8, input_scale = vllm_flashinfer.flashinfer_mxfp8_quantize_8x4(
+            input_2d
+        )
+        output = vllm_flashinfer.mm_mxfp8(
+            input_mxfp8,
+            weight.t(),
+            input_scale,
+            weight_scale,
+            out_dtype=x.dtype,
+            backend="trtllm",
+            use_8x4_sf_layout=True,
+        )
+        if output.shape[-1] != output_size:
+            output = output[:, :output_size].contiguous()
+
+        if bias is not None:
+            output = output + bias
+
+        output_shape = (*input_shape[:-1], output_size)
+        return output.view(output_shape)
