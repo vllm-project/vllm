@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
-    VLLM_SHM_ATTACH_TIMEOUT_S: float = 5.0
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -723,12 +722,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
-    ),
-    # Max seconds a reader retries attaching to an existing shm ring buffer
-    # before raising. Should be short: on the correct path the writer has
-    # already created the segment, so attach is near-instant.
-    "VLLM_SHM_ATTACH_TIMEOUT_S": lambda: float(
-        os.environ.get("VLLM_SHM_ATTACH_TIMEOUT_S", "5.0")
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
@@ -2251,7 +2244,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
-        "VLLM_SHM_ATTACH_TIMEOUT_S",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",

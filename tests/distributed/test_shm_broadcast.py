@@ -17,6 +17,7 @@ import torch.distributed as dist
 
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.distributed.device_communicators.shm_broadcast import (
+    Handle,
     MessageQueue,
     ShmRingBuffer,
     _rebuild_tensor,
@@ -715,51 +716,36 @@ def test_shm_ring_buffer_creation_checks_free_space():
         ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
 
 
-def test_shm_ring_buffer_attach_retries_then_succeeds():
-    total_bytes = (24 * 1024 * 1024 + 2) * 10
-    attached = mock.Mock(size=total_bytes)
-    with (
-        mock.patch.object(
-            shm_broadcast.shared_memory,
-            "SharedMemory",
-            side_effect=[
-                FileNotFoundError(),
-                FileNotFoundError(),
-                attached,
-            ],
-        ) as mock_shared_memory,
-        mock.patch.object(shm_broadcast.time, "sleep") as mock_sleep,
-        mock.patch.object(shm_broadcast, "VLLM_SHM_ATTACH_TIMEOUT_S", 5.0),
-    ):
-        buffer = ShmRingBuffer(
-            n_reader=1,
-            max_chunk_bytes=24 * 1024 * 1024,
-            max_chunks=10,
-            name="fake-name",
-        )
-    assert buffer.shared_memory is attached
-    assert mock_shared_memory.call_count == 3
-    assert mock_sleep.call_count == 2
+def test_shm_ring_buffer_attach_to_missing_segment_stays_unused():
+    """A ShmRingBuffer attaching to a name that was never created (e.g. a
+    directly pickled object deserialized where a local attach isn't
+    required) must stay silent, per the documented pickling contract in
+    ShmRingBuffer.__reduce__ -- it is a legitimately unused object, not an
+    error by itself. Callers that require a working attach must check for
+    this themselves (see MessageQueue.create_from_handle)."""
+    buffer = ShmRingBuffer(
+        n_reader=1,
+        max_chunk_bytes=24 * 1024 * 1024,
+        max_chunks=10,
+        name="vllm-test-x",
+    )
+    assert not hasattr(buffer, "shared_memory")
 
 
-def test_shm_ring_buffer_attach_raises_after_timeout():
-    with (
-        mock.patch.object(
-            shm_broadcast.shared_memory,
-            "SharedMemory",
-            side_effect=FileNotFoundError(),
-        ),
-        mock.patch.object(shm_broadcast.time, "sleep"),
-        mock.patch.object(shm_broadcast, "VLLM_SHM_ATTACH_TIMEOUT_S", 0.0),
-        pytest.raises(RuntimeError, match="fake-name") as exc_info,
-    ):
-        ShmRingBuffer(
-            n_reader=1,
-            max_chunk_bytes=24 * 1024 * 1024,
-            max_chunks=10,
-            name="fake-name",
-        )
-    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+def test_create_from_handle_raises_when_mandatory_local_attach_fails():
+    """When a rank is confirmed to be a local reader (present in
+    handle.local_reader_ranks) but the writer's shm segment can't be
+    attached, create_from_handle must fail clearly and immediately, not
+    return a half-constructed MessageQueue whose later use raises a
+    confusing AttributeError far from the real cause."""
+    handle = Handle(
+        local_reader_ranks=[0],
+        buffer_handle=(1, 24 * 1024 * 1024, 10, "vllm-test-x"),
+        local_subscribe_addr="ignored-because-we-fail-before-connecting",
+        local_notify_addr="ignored-because-we-fail-before-connecting",
+    )
+    with pytest.raises(RuntimeError, match="vllm-test-x"):
+        MessageQueue.create_from_handle(handle, rank=0)
 
 
 def test_remote_subscribe_addr_unique_concurrent_writers(
