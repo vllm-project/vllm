@@ -844,6 +844,18 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     return hidden_size, intermediate_size
 
 
+def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
+    """Repack [E, 2n, X] from [all gates | all ups] to [g0, u0, g1, u1, ...]."""
+    num_experts, two_n, inner = t.shape
+    assert two_n % 2 == 0, f"expected an even gate/up row count, got {two_n}"
+    return (
+        t.view(num_experts, 2, two_n // 2, inner)
+        .transpose(1, 2)
+        .contiguous()
+        .view(num_experts, two_n, inner)
+    )
+
+
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
@@ -1162,6 +1174,17 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             # Triton moe_gemm_a4w4: uint8 column-major weights.
             w13_data = w13_weight.data.view(torch.uint8)
             w2_data = w2_weight.data.view(torch.uint8)
+            w13_scale_data = w13_weight_scale.data.view(torch.uint8)
+
+            # SILU applies the activation outside the GEMM and keeps the
+            # checkpoint's packed halves; the SWIGLUOAI epilogue needs them
+            # interleaved.
+            if getattr(layer, "activation", None) in (
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            ):
+                w13_data = _interleave_gate_up_rows(w13_data)
+                w13_scale_data = _interleave_gate_up_rows(w13_scale_data)
 
             # Transpose to [E, K, N] — the view has stride(-2)==1 (column-major),
             # which is what moe_gemm_a4w4 asserts.
@@ -1171,7 +1194,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             # Scales are [E, N, K_scale]; both kernels index them as
             # [E, K_scale, N] with K innermost, so transpose(1, 2) 
             # Keep them uint8: Triton moe_gemm_a4w4 takes e8m0 scales
-            w13_scale = w13_weight_scale.data.view(torch.uint8).transpose(1, 2)
+            w13_scale = w13_scale_data.transpose(1, 2)
             w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
 
             # GFX1250_SCALE is a gluon-only layout

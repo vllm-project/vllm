@@ -774,6 +774,27 @@ def aiter_triton_kernel_w4a4_moe_forward(
         if quant_config.gemm1_clamp_limit is not None
         else 7.0
     )
+    # SWIGLUOAI needs the alpha/residual swiglu fused into the GEMM1 epilogue,
+    # which reads gate/up interleaved along N (see the oracle's weight prep).
+    fused_swiglu = activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+    swiglu_kwargs: dict[str, object] = {}
+    if fused_swiglu:
+        assert quant_config.gemm1_beta in (None, 1.0), (
+            "aiter's fused swiglu hardcodes the residual to (up + 1); "
+            f"gemm1_beta={quant_config.gemm1_beta} cannot be expressed"
+        )
+        swiglu_kwargs = {
+            "alpha": (
+                quant_config.gemm1_alpha
+                if quant_config.gemm1_alpha is not None
+                else 1.0
+            ),
+            "limit": swiglu_limit,
+            "swiglu_add_residual": quant_config.gemm1_beta == 1.0,
+        }
     # GFX1250_SCALE is a gluon-only scale layout. The Triton kernel only
     # branches on CDNA4_SCALE / None, so it would read a swizzled buffer with
     # plain [E, K_scale, N] indexing and stride off the end of it. Keep this in
@@ -785,8 +806,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
 
-    # GEMM1: gate+up projection. DeepSeek uses concatenated [gate | up] with
-    # SiLU activation applied externally (not fused), matching ATOM's approach.
+    # GEMM1: gate+up projection.
     raw_intermediate = moe_gemm_a4w4(
         x_q,
         w1_data,
@@ -797,29 +817,38 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gather_indx=gather_idx,
         gammas=gammas if apply_router_weight_on_input else None,
         swizzle_mx_scale=swizzle_mx_scale,
-        apply_swiglu=False,
+        apply_swiglu=fused_swiglu,
         backend=a4w4_backend(),
+        **swiglu_kwargs,
     )
 
-    if unpadded_N_w1 is not None:
-        raw_intermediate = raw_intermediate[:, :unpadded_N_w1]
+    if fused_swiglu:
+        # The swiglu epilogue already halved N.
+        intermediate = (
+            raw_intermediate
+            if unpadded_N_w1 is None
+            else raw_intermediate[:, : unpadded_N_w1 // 2]
+        )
+    else:
+        if unpadded_N_w1 is not None:
+            raw_intermediate = raw_intermediate[:, :unpadded_N_w1]
 
-    # SiLU(gate) * up on the concatenated [gate | up] halves
-    from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
+        # SiLU(gate) * up on the concatenated [gate | up] halves
+        from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
 
-    half_n = raw_intermediate.shape[-1] // 2
-    intermediate = torch.empty(
-        raw_intermediate.shape[0], half_n,
-        dtype=raw_intermediate.dtype,
-        device=raw_intermediate.device,
-    )
-    fused_clamp_act_mul(
-        raw_intermediate,
-        out=intermediate,
-        swiglu_limit=swiglu_limit,
-        activation="silu",
-        dtype_quant=None,
-    )
+        half_n = raw_intermediate.shape[-1] // 2
+        intermediate = torch.empty(
+            raw_intermediate.shape[0], half_n,
+            dtype=raw_intermediate.dtype,
+            device=raw_intermediate.device,
+        )
+        fused_clamp_act_mul(
+            raw_intermediate,
+            out=intermediate,
+            swiglu_limit=swiglu_limit,
+            activation="silu",
+            dtype_quant=None,
+        )
 
     # GEMM2: down projection with scatter-reduce
     mid_q, mid_scale = mxfp4_quant(intermediate.to(torch.bfloat16))
@@ -860,6 +889,7 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
             RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
         )
 
     @staticmethod
@@ -887,7 +917,11 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SILU,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -910,6 +944,7 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
             RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
         ]
 
     @staticmethod
@@ -944,9 +979,12 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routing_method = self.moe_config.routing_method
         if routing_method == RoutingMethodType.DeepseekV4:
             score_mode = "sqrtsoftplus"
-        elif routing_method == RoutingMethodType.DeepSeekV3:
-            # DeepSeek-R1/V3: sigmoid scores + noaux_tc routing bias, grouped
-            # top-k and routed_scaling_factor
+        elif routing_method in (
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
+        ):
+            # Sigmoid scores + routing bias; grouped for DeepSeek-R1/V3,
+            # ungrouped for MiniMax-M3.
             score_mode = "sigmoid"
         else:
             score_mode = None
