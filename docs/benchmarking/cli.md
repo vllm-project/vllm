@@ -111,6 +111,15 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
+!!! warning
+    Repeating `vllm bench serve` against the same server can reuse prompts left
+    in the prefix cache and inflate throughput. This can affect any reproducible
+    dataset; the synthetic random dataset is reproducible for a fixed `--seed`,
+    which defaults to `0`. Prefix cache hits can also come from shared prefixes
+    within the run, so interpret cache metrics in the context of the workload.
+    If cache reuse is not intended, vary `--seed`, reset or restart the server,
+    or use `vllm bench sweep serve`, which resets server caches between runs.
+
 #### Understanding the Latency Metrics
 
 `vllm bench serve` measures latency at the benchmark client:
