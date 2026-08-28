@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
@@ -12,10 +13,14 @@ CHAT_TEMPLATES_DIR = Path(__file__).parent
 
 ChatTemplatePath: TypeAlias = Path | Callable[[str], Path | None]
 
+# Match a "4.5"/"4_5" version token, not a substring of a longer number such as
+# "14.5" or "2.4.5" (which would otherwise pick the wrong template).
+_MINICPMV_45_PATTERN = re.compile(r"(?<![\d.])4[._]5(?!\d)")
+
 
 def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Path | None:
     # MiniCPM-V-4.5 version uses a dedicated template
-    if "4.5" in tokenizer_name_or_path or "4_5" in tokenizer_name_or_path:
+    if _MINICPMV_45_PATTERN.search(tokenizer_name_or_path):
         return CHAT_TEMPLATES_DIR / "template_minicpmv45.jinja"
 
     # Other versions use chatml template
