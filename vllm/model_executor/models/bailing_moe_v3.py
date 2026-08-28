@@ -83,7 +83,13 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
-from .interfaces import HasInnerState, IsHybrid, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    HasInnerState,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     WeightsMapper,
@@ -1285,7 +1291,7 @@ class BailingMoeV3DecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class BailingMoeV3Model(nn.Module):
+class BailingMoeV3Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1346,7 +1352,7 @@ class BailingMoeV3Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             hidden_states = (
                 self.word_embeddings(input_ids)
@@ -1359,8 +1365,16 @@ class BailingMoeV3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for layer_idx, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer], start=self.start_layer
+        ):
             hidden_states, residual = layer(hidden_states, positions, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1370,6 +1384,8 @@ class BailingMoeV3Model(nn.Module):
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
             hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -1382,7 +1398,9 @@ class BailingMoeV3Model(nn.Module):
         )
 
 
-class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
+class BailingMoeV3ForCausalLM(
+    nn.Module, HasInnerState, IsHybrid, SupportsPP, SupportsEagle3
+):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
 
     packed_modules_mapping = {
@@ -1421,7 +1439,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
