@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -10,7 +10,7 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -166,6 +166,13 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    def __init__(self) -> None:
+        config = get_current_vllm_config_or_none()
+        linear_backend = (
+            config.kernel_config.linear_backend if config is not None else "auto"
+        )
+        self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -215,7 +222,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_impl(layer, x, layer.weight, bias)
 
 
 class LinearBase(PluggableLayer):
@@ -1503,6 +1510,95 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         )
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+
+class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
+    """Kimi-K3 QKV-A projection fused with its output-gate projection.
+
+    NOTE: Kimi-K3-specific. This is tailored to its replicated Q/KV latent
+    projections and tensor-parallel output gate; it is not a general-purpose
+    linear layer. It lives here alongside ``MergedColumnParallelLinear``, whose
+    sharding and weight-loading machinery it reuses.
+
+    The per-rank shard layout is ``[q_a | kv_a | gate]``. The latent shards
+    stay replicated across tensor-parallel ranks while the gate shard is
+    tensor-parallel, matching the standalone projections they replace.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        total_num_heads: int,
+        v_head_dim: int,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # MergedColumnParallelLinear divides every logical shard by TP size.
+        # Inflate the replicated latent shards to retain their checkpoint widths.
+        output_sizes = [
+            q_lora_rank * tp_size,
+            (kv_lora_rank + qk_rope_head_dim) * tp_size,
+            total_num_heads * v_head_dim,
+        ]
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=output_sizes,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def _load_with_replicated_latents(
+        self,
+        loader: Callable[..., None],
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None,
+    ) -> None:
+        is_replicated = isinstance(loaded_shard_id, int) and loaded_shard_id < 2
+        if not is_replicated:
+            loader(param, loaded_weight, loaded_shard_id)
+            return
+
+        # The base loader narrows every checkpoint shard using its TP rank.
+        # Replicated latent shards instead load the rank-zero slice on every rank.
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        self.tp_rank = 0
+        if param_tp_rank is not None:
+            param.tp_rank = 0
+        try:
+            loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        self._load_with_replicated_latents(
+            super().weight_loader, param, loaded_weight, loaded_shard_id
+        )
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        self._load_with_replicated_latents(
+            super().weight_loader_v2, param, loaded_weight, loaded_shard_id
+        )
 
 
 # --8<-- [start:row_parallel_linear]
