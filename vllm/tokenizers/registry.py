@@ -164,6 +164,10 @@ def resolve_tokenizer_args(
         tokenizer_mode = "hf"
 
     if tokenizer_mode == "hf":
+        if kwargs.pop("mistral_format", False):
+            raise ValueError(
+                "mistral_format=True is not supported with tokenizer_mode='hf'"
+            )
         kwargs["mistral_format"] = False
 
     return tokenizer_mode, tokenizer_name, args, kwargs
@@ -254,12 +258,11 @@ def get_tokenizer(
         kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
-
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from vllm.tokenizers.hf import get_cached_tokenizer
 
         tokenizer = get_cached_tokenizer(tokenizer)
-    elif not tokenizer.is_fast:
+    if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead."
