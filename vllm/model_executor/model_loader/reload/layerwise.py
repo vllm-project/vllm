@@ -406,6 +406,10 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
+    quant_method = getattr(layer, "quant_method", None)
+    post_weights_reload = getattr(quant_method, "post_weights_reload", None)
+    if post_weights_reload is not None:
+        post_weights_reload(layer)
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
