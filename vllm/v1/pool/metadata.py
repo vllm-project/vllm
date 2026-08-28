@@ -17,6 +17,8 @@ class PoolingCursor:
     prompt_lens_cpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
+    partial_prefill: bool
+    finished_mask: list[bool]
     # CPU mirrors of first/last_token_indices_gpu, computed at build time
     # from the scheduled-token metadata so consumers can obtain per-request
     # offsets without a GPU->CPU synchronization. Absolute values, so they
@@ -25,12 +27,18 @@ class PoolingCursor:
     last_token_indices_cpu: torch.Tensor | None = None
 
     def __getitem__(self, indices: slice) -> "PoolingCursor":
+        prompt_lens_cpu = self.prompt_lens_cpu[indices]
+        seq_lens_cpu = self.seq_lens_cpu[indices]
+        num_scheduled_tokens_cpu = self.num_scheduled_tokens_cpu[indices]
+
         return PoolingCursor(
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
-            prompt_lens_cpu=self.prompt_lens_cpu[indices],
-            seq_lens_cpu=self.seq_lens_cpu[indices],
-            num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
+            prompt_lens_cpu=prompt_lens_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            partial_prefill=not torch.equal(prompt_lens_cpu, num_scheduled_tokens_cpu),
+            finished_mask=torch.eq(prompt_lens_cpu, seq_lens_cpu).tolist(),
             first_token_indices_cpu=(
                 self.first_token_indices_cpu[indices]
                 if self.first_token_indices_cpu is not None
@@ -44,10 +52,13 @@ class PoolingCursor:
         )
 
     def is_partial_prefill(self) -> bool:
-        return not torch.all(self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
+        return self.partial_prefill
 
     def is_finished(self) -> torch.Tensor:
         return self.prompt_lens_cpu == self.seq_lens_cpu
+
+    def get_finished_mask(self) -> list[bool]:
+        return self.finished_mask
 
 
 class PoolingStates:
@@ -146,9 +157,14 @@ class PoolingMetadata:
             )
 
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
+        prompt_lens_np = prompt_lens.numpy()
+        seq_lens_np = seq_lens_cpu.numpy()
         if query_start_loc_gpu is None:
             cumsum = torch.zeros(
-                n_seq + 1, dtype=torch.int64, pin_memory=PIN_MEMORY, device="cpu"
+                n_seq + 1,
+                dtype=torch.int64,
+                pin_memory=PIN_MEMORY,
+                device="cpu",
             )
             torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
             cumsum = cumsum.to(device, non_blocking=True)
@@ -175,6 +191,8 @@ class PoolingMetadata:
             prompt_lens_cpu=prompt_lens,
             seq_lens_cpu=seq_lens_cpu,
             num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            partial_prefill=not np.array_equal(prompt_lens_np, num_scheduled_tokens_np),
+            finished_mask=np.equal(prompt_lens_np, seq_lens_np).tolist(),
             first_token_indices_cpu=ends_cpu - num_scheduled_tokens_cpu,
             last_token_indices_cpu=ends_cpu - 1,
         )
