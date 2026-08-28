@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
-from types import SimpleNamespace
 
 import pytest
 import ray
@@ -40,10 +39,15 @@ def test_cross_node_mnnvl_gate_checks_generation_and_multicast(
     local_multicast,
     expected,
 ):
+    def has_device_capability(capability, device_id):
+        assert capability == 100
+        assert device_id == 3
+        return major >= 10
+
     monkeypatch.setattr(
         car.current_platform,
-        "get_device_capability",
-        lambda: SimpleNamespace(major=major),
+        "has_device_capability",
+        has_device_capability,
     )
     monkeypatch.setattr(
         car,
@@ -52,14 +56,14 @@ def test_cross_node_mnnvl_gate_checks_generation_and_multicast(
     )
     monkeypatch.setattr(car.dist, "all_reduce", lambda *_args, **_kwargs: None)
 
-    assert car._group_can_attempt_mnnvl(object(), torch.device("cuda:0")) is expected
+    assert car._group_can_attempt_mnnvl(object(), torch.device("cuda:3")) is expected
 
 
 def test_cross_node_mnnvl_gate_requires_support_on_every_rank(monkeypatch):
     monkeypatch.setattr(
         car.current_platform,
-        "get_device_capability",
-        lambda: SimpleNamespace(major=10),
+        "has_device_capability",
+        lambda *_args: True,
     )
     monkeypatch.setattr(
         car,

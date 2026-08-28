@@ -65,10 +65,10 @@ def _group_can_attempt_mnnvl(
     check. The CPU all-reduce keeps every rank on the same control-flow path
     when a heterogeneous or partially configured group is encountered.
     """
-    device_capability = current_platform.get_device_capability()
+    device_index = device.index
     local_support = (
-        device_capability is not None
-        and device_capability.major >= 10
+        device_index is not None
+        and current_platform.has_device_capability(100, device_index)
         and _has_local_multicast_support(device)
     )
     group_support = torch.tensor(
