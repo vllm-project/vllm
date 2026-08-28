@@ -717,6 +717,7 @@ def _support_torch_compile(
                     "run together took %.2f s in total",
                     is_encoder=self._is_encoder,
                     tag=self._compile_tag,
+                    discard_peak=False,
                 ):
                     output = TorchCompileWithNoGuardsWrapper.__call__(
                         self,  # type: ignore[arg-type]

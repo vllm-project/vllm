@@ -5,6 +5,8 @@ import contextlib
 import time
 from collections.abc import Generator
 
+import torch
+
 from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 
@@ -12,6 +14,42 @@ logger = init_logger(__name__)
 
 # Shared global so backends.py can read the start time for Dynamo timing.
 torch_compile_start_time: float = 0.0
+
+# Peak torch-allocated bytes recorded before compilation started. Compilation
+# and Inductor autotuning allocate large temporaries inside profile_run(),
+# which runs inside the memory-profiling window. They are freed before the
+# first real forward, so leaving them in the allocator high-water mark charges
+# them as activation headroom and shrinks the KV cache on a cold start.
+# Clearing the counter alone would also drop a peak legitimately recorded
+# earlier in the same window, because a multimodal encoder pass runs before the
+# backbone compiles, so that value is kept here for memory_profiling() to fold
+# back in.
+peak_memory_before_compile: int = 0
+
+
+def _peak_allocated_bytes() -> int:
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda_alike():
+        return 0
+
+    device = torch.device(current_platform.current_device())
+    return torch.accelerator.memory_stats(device).get("allocated_bytes.all.peak", 0)
+
+
+def _discard_compilation_peak(peak_before_compile: int) -> None:
+    """Drop the high-water mark left by compilation, keeping any earlier peak."""
+    global peak_memory_before_compile
+
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda_alike():
+        return
+
+    peak_memory_before_compile = max(peak_memory_before_compile, peak_before_compile)
+    torch.accelerator.reset_peak_memory_stats(
+        torch.device(current_platform.current_device())
+    )
 
 
 @contextlib.contextmanager
@@ -21,6 +59,7 @@ def monitor_torch_compile(
     is_encoder: bool = False,
     tag: str = "",
     announce_start: bool = True,
+    discard_peak: bool = True,
 ) -> Generator[None, None, None]:
     """Context manager that times torch.compile and manages depyf debugging.
 
@@ -29,10 +68,12 @@ def monitor_torch_compile(
 
     `announce_start=False` suppresses the "Starting torch.compile" line;
     used by the AOT-load probe so a failed load attempt doesn't announce a
-    compile it didn't perform.
+    compile it didn't perform. `discard_peak=False` keeps the allocator peak,
+    for blocks that also run a real forward.
     """
     global torch_compile_start_time
     torch_compile_start_time = time.perf_counter()
+    peak_before_compile = _peak_allocated_bytes()
 
     compilation_config = vllm_config.compilation_config
     log_prefix = f"[{tag}] " if tag else ""
@@ -53,6 +94,8 @@ def monitor_torch_compile(
     except Exception:
         raise
     else:
+        if discard_peak:
+            _discard_compilation_peak(peak_before_compile)
         total_compile_time = time.perf_counter() - torch_compile_start_time
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
             if is_encoder:
