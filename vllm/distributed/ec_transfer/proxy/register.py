@@ -18,6 +18,7 @@ import aiohttp
 
 from vllm.distributed.ec_transfer.proxy.registry import InstanceRole
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_ip
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -153,3 +154,65 @@ def _receive_addresses(vllm_config: VllmConfig) -> list[str]:
         )
         return []
     return connector_cls.receive_addresses(vllm_config)
+
+
+def infer_role(vllm_config: VllmConfig) -> InstanceRole:
+    """Which stage this instance serves, from what it was configured to do.
+
+    An encoder is the one role that runs no language model. Otherwise the KV
+    role decides: an instance that hands its KV to someone else is a prefill
+    instance, and anything left -- including a fused prefill+decode -- serves
+    decode requests.
+    """
+    ec_config = getattr(vllm_config, "ec_transfer_config", None)
+    if ec_config is not None and ec_config.is_encode_only:
+        return InstanceRole.ENCODE
+    kv_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_config is not None and kv_config.is_kv_producer:
+        return InstanceRole.PREFILL
+    return InstanceRole.DECODE
+
+
+def maybe_start(state) -> ProxyRegistrar | None:
+    """Start announcing to the proxies named in the EC transfer config.
+
+    Returns None when no proxy was named, which is every deployment that
+    wires its instances up statically.
+    """
+    vllm_config = getattr(state, "vllm_config", None)
+    args = getattr(state, "args", None)
+    if vllm_config is None or args is None:
+        return None
+    ec_config = getattr(vllm_config, "ec_transfer_config", None)
+    if ec_config is None:
+        return None
+    # An instance with no EC role at all still registers: the proxy has to
+    # know where to forward, whether or not this instance moves embeddings.
+    proxy_urls = ec_config.get_from_extra_config("proxy_url", None)
+    if not proxy_urls:
+        return None
+    if isinstance(proxy_urls, str):
+        proxy_urls = [proxy_urls]
+
+    scheme = "https" if getattr(args, "ssl_certfile", None) else "http"
+    host = args.host or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):
+        host = get_ip()
+    registrar = ProxyRegistrar.from_vllm_config(
+        vllm_config=vllm_config,
+        proxy_urls=list(proxy_urls),
+        role=infer_role(vllm_config),
+        url=f"{scheme}://{host}:{args.port}",
+        interval=float(
+            ec_config.get_from_extra_config(
+                "proxy_announce_interval", DEFAULT_ANNOUNCE_INTERVAL
+            )
+        ),
+    )
+    registrar.start()
+    logger.info(
+        "Announcing this %s instance to EPD proxy %s",
+        registrar.payload["role"],
+        ", ".join(registrar.proxy_urls),
+    )
+    return registrar

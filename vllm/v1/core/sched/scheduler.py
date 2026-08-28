@@ -172,7 +172,15 @@ class Scheduler(SchedulerInterface):
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
-        if self.vllm_config.ec_transfer_config is not None:
+        ec_transfer_config = self.vllm_config.ec_transfer_config
+        # An instance can carry an EC config purely to be reachable -- to name
+        # a proxy it registers with, say -- without taking part in a transfer.
+        # The worker already gates on this; the scheduler used to build a
+        # connector for any config at all and raised on the missing name.
+        if (
+            ec_transfer_config is not None
+            and ec_transfer_config.is_ec_transfer_instance
+        ):
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )

@@ -173,3 +173,67 @@ class TestLiveness:
     async def test_probing_an_empty_registry_is_a_no_op(self, registry):
         await _probe_round(registry, healthy=set())
         assert registry.status()["encode"]["live"] == []
+
+
+class TestSelfRegistration:
+    """What an instance reports, and when it reports at all."""
+
+    @staticmethod
+    def _state(ec_extra=None, ec_role=None, kv_role=None, port=8000):
+        from types import SimpleNamespace
+
+        from vllm.config.ec_transfer import ECTransferConfig
+        from vllm.config.kv_transfer import KVTransferConfig
+
+        ec_config = None
+        if ec_extra is not None or ec_role is not None:
+            ec_config = ECTransferConfig(
+                ec_connector="ECExampleConnector" if ec_role else None,
+                ec_role=ec_role,
+                ec_connector_extra_config=ec_extra or {},
+            )
+        kv_config = (
+            KVTransferConfig(kv_connector="NixlConnector", kv_role=kv_role)
+            if kv_role
+            else None
+        )
+        return SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                ec_transfer_config=ec_config,
+                kv_transfer_config=kv_config,
+                parallel_config=SimpleNamespace(data_parallel_size=1),
+            ),
+            args=SimpleNamespace(host="127.0.0.1", port=port, ssl_certfile=None),
+        )
+
+    def test_a_statically_wired_deployment_announces_nothing(self):
+        from vllm.distributed.ec_transfer.proxy import register as mod
+
+        with patch.object(mod.ProxyRegistrar, "start"):
+            assert mod.maybe_start(self._state()) is None
+            assert mod.maybe_start(self._state(ec_role="ec_producer")) is None
+
+    def test_an_instance_with_no_ec_role_still_registers(self):
+        """A decode instance carries an EC config only to name the proxy.
+
+        It moves no embeddings, but the proxy still has to know where to
+        forward, so an absent role must not silence the announcement.
+        """
+        from vllm.distributed.ec_transfer.proxy import register as mod
+
+        state = self._state(ec_extra={"proxy_url": "http://proxy:8000"})
+        with patch.object(mod.ProxyRegistrar, "start"):
+            registrar = mod.maybe_start(state)
+        assert registrar is not None
+        assert registrar.payload["role"] == "decode"
+        assert registrar.payload["url"] == "http://127.0.0.1:8000"
+
+    def test_roles_follow_what_the_instance_was_configured_to_do(self):
+        from vllm.distributed.ec_transfer.proxy.register import infer_role
+
+        encode = self._state(ec_role="ec_producer").vllm_config
+        assert infer_role(encode) is InstanceRole.ENCODE
+        prefill = self._state(ec_role="ec_consumer", kv_role="kv_producer").vllm_config
+        assert infer_role(prefill) is InstanceRole.PREFILL
+        decode = self._state(kv_role="kv_consumer").vllm_config
+        assert infer_role(decode) is InstanceRole.DECODE
