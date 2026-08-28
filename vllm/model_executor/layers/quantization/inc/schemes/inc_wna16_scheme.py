@@ -41,6 +41,9 @@ def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> No
             "which this build of vllm-xpu-kernels does not provide. "
             f"Layer: {prefix}."
         )
+    assert isinstance(layer_config.group_size, int), (
+        "WNA16 only supports integer group_size."
+    )
     if layer_config.group_size <= 0 or layer_config.group_size % 32 != 0:
         raise NotImplementedError(
             "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires a group size that is a "
