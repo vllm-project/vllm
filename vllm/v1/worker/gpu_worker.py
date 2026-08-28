@@ -202,6 +202,9 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
+        # True while level-2 sleep has discarded the weights and neither
+        # reload_weights nor a weight update has restored them.
+        self._weights_discarded = False
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -248,6 +251,7 @@ class Worker(WorkerBase):
                 self._sleep_saved_draft_buffers = {
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
+            self._weights_discarded = True
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -287,6 +291,14 @@ class Worker(WorkerBase):
                     if name in self._sleep_saved_draft_buffers:
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
+
+        if wake_weights and self._weights_discarded:
+            logger.warning(
+                "Weights were discarded by level-2 sleep and have not been "
+                "restored; generation will produce garbage until they are "
+                'reloaded, e.g. via collective_rpc("reload_weights") or a '
+                "weight update."
+            )
 
         self.synchronize_device()
 
@@ -507,6 +519,7 @@ class Worker(WorkerBase):
     def reload_weights(self, *args, **kwargs) -> None:
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
+        self._weights_discarded = False
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -1421,6 +1434,7 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.finish_weight_update()
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
+            self._weights_discarded = False
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

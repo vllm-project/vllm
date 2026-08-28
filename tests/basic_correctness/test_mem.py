@@ -452,3 +452,35 @@ def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
     actual = llm.generate(prompt, sampling_params)
 
     assert expected[0].outputs[0].text == actual[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_level2_wake_without_reload_warns_and_reload_restores(monkeypatch):
+    """Level-2 sleep discards weights; waking them without a reload must warn
+    (they hold garbage), and collective_rpc("reload_weights") must clear the
+    flag and restore correct generation."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    llm = LLM(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.2,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)
+
+    def weights_discarded(worker) -> bool:
+        return worker._weights_discarded
+
+    llm.sleep(level=2)
+    assert all(llm.collective_rpc(weights_discarded))
+
+    llm.wake_up()
+    assert all(llm.collective_rpc(weights_discarded))
+
+    llm.collective_rpc("reload_weights")
+    assert not any(llm.collective_rpc(weights_discarded))
+
+    actual = llm.generate(prompt, sampling_params)
+    assert expected[0].outputs[0].text == actual[0].outputs[0].text
