@@ -32,7 +32,11 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        is_layer_skipped,
+    )
     from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
     if isinstance(quant_config, DeepseekV4FP8Config):
@@ -143,6 +147,46 @@ def is_shared_expert_quant_fse_compatible(
             "Quark uses different quantization configurations for routed and "
             f"shared experts at {shared_expert_prefix}",
         )
+
+    if isinstance(quant_config, Fp8Config):
+        if quant_config.store_dtype is not None:
+            return (
+                False,
+                f"FP8 stores routed experts as {quant_config.store_dtype}, which "
+                f"is not supported for fused shared experts at "
+                f"{shared_expert_prefix}",
+            )
+
+        # Serialized per-tensor checkpoints store 0-D or size-1 scales, which
+        # the shared-expert weight chunker cannot slice into the appended expert
+        # slots; online FP8 is simply untested. Both lack a weight block size.
+        if quant_config.weight_block_size is None:
+            return (
+                False,
+                "FP8 shared-expert FSE is only implemented for block-quantized "
+                "checkpoints",
+            )
+
+        def is_ignored(layer_name: str) -> bool:
+            return is_layer_skipped(
+                prefix=layer_name,
+                ignored_layers=quant_config.ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+
+        expert_ignored = is_ignored(expert_prefix)
+        if any(
+            is_ignored(f"{shared_expert_prefix}.{projection_name}") != expert_ignored
+            for projection_name in projection_names
+        ):
+            return (
+                False,
+                "FP8 ignores routed and shared experts inconsistently at "
+                f"{shared_expert_prefix}",
+            )
+
+        return True, None
 
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
