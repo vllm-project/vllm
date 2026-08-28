@@ -11,11 +11,15 @@ from vllm.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+)
 
 # Generic KDA helpers, shared with Kimi-Linear. They are neither ROCm- nor
 # K3-specific, so they are imported rather than duplicated. (nvidia/kda.py keeps
@@ -46,17 +50,47 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
 )
+from vllm.models.kimi_k3.amd.ops.rmsnorm_gated_fp8_per_token import (
+    per_token_fp8_quant,
+    rmsnorm_gated_fp8_per_token,
+)
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     chunk_kda_with_fused_gate,
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 logger = init_logger(__name__)
+
+
+def _o_proj_is_ptpc_fp8(o_proj: torch.nn.Module) -> bool:
+    """True when o_proj advertised the per-token FP8 consumer ABI.
+
+    Mutually exclusive with MXFP4 fusion (kMxfp4Dynamic) on the same layer.
+    Fusion is a no-op unless Step 1 attached Fp8PtpcOnlineLinearMethod and
+    the chosen FP8 kernel returned an input_quant_key.
+    """
+    return getattr(o_proj, "input_quant_key", None) == kFp8DynamicTokenSym
+
+
+def _wrap_ptpc_activation(
+    data: torch.Tensor,
+    scale: torch.Tensor,
+    orig_dtype: torch.dtype,
+    orig_shape: torch.Size,
+) -> QuantizedActivation:
+    return QuantizedActivation(
+        data=data,
+        scale=scale,
+        orig_dtype=orig_dtype,
+        orig_shape=orig_shape,
+        quant_key=kFp8DynamicTokenSym,
+    )
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
@@ -294,6 +328,44 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             beta=beta,
             core_attn_out=core_attn_out,
         )
+        if _o_proj_is_ptpc_fp8(self.o_proj):
+            fp8_dtype = current_platform.fp8_dtype()
+            fused_already_normed = (
+                self.decode_conv1d_weight is not None
+                and self.decode_norm_weight is not None
+            )
+            # fused_kda_decode already applied gated RMSNorm. Re-running the
+            # fused producer would double-norm. Prefill / MTP skip o_norm in
+            # _forward and fuse norm+quant here.
+            attn_metadata_raw = get_forward_context().attn_metadata
+            m_meta = (
+                attn_metadata_raw.get(self.prefix)
+                if isinstance(attn_metadata_raw, dict)
+                else None
+            )
+            used_fused_decode = bool(
+                fused_already_normed
+                and m_meta is not None
+                and getattr(m_meta, "spec_sequence_masks", None) is None
+                and getattr(m_meta, "num_prefills", 1) == 0
+                and getattr(m_meta, "num_decodes", 0) > 0
+            )
+            if used_fused_decode:
+                x_2d = rearrange(core_attn_out, "1 n h d -> n (h d)")
+                q, scale = per_token_fp8_quant(x_2d, fp8_dtype)
+            else:
+                q, scale = rmsnorm_gated_fp8_per_token(
+                    core_attn_out[0],
+                    self.o_norm.weight,
+                    g2,
+                    self.o_norm.eps,
+                    fp8_dtype,
+                )
+            orig_shape = torch.Size((q.shape[0], q.shape[1]))
+            output[:] = self.o_proj(
+                _wrap_ptpc_activation(q, scale, hidden_states.dtype, orig_shape)
+            )[0]
+            return
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
@@ -616,4 +688,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             ]
         else:
             assert core_attn_out_spec is not None
-        core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        # PTPC fusion runs gated RMSNorm+quant in forward(); skip here so we
+        # do not double-norm. fused_kda_decode already returned above.
+        if not _o_proj_is_ptpc_fp8(self.o_proj):
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))
