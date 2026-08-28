@@ -14,12 +14,14 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::DEEPSEEK_V4));
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
+    assert!(factory.contains(names::HUNYUAN_A13B));
     assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.contains(names::GEMMA4));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
+    assert!(factory.list().contains(&names::HUNYUAN_A13B.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
     assert!(factory.list().contains(&names::GEMMA4.to_string()));
 }
@@ -99,6 +101,53 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
     assert_eq!(
         factory.resolve_name_for_model("mm-m3"),
         Some(names::MINIMAX_M3)
+    );
+}
+
+#[test]
+fn factory_routes_hunyuan_a13b_models() {
+    let factory = ReasoningParserFactory::new();
+    // The pattern is deliberately narrow. `resolve_name_for_model` is a
+    // case-insensitive substring scan, so a bare `hunyuan` would also claim
+    // HunyuanOCR and the dense Hunyuan-7B, neither of which has a thinking mode.
+    assert_eq!(
+        factory.resolve_name_for_model("tencent/Hunyuan-A13B-Instruct"),
+        Some(names::HUNYUAN_A13B)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("hunyuan_a13b"),
+        Some(names::HUNYUAN_A13B)
+    );
+    assert_eq!(factory.resolve_name_for_model("tencent/HunyuanOCR"), None);
+    assert_eq!(
+        factory.resolve_name_for_model("tencent/Hunyuan-7B-Instruct"),
+        None
+    );
+}
+
+#[test]
+fn factory_creates_hunyuan_a13b_without_reasoning_tokens() {
+    // Hunyuan's delimiters are not vocabulary tokens, so an empty vocabulary is
+    // enough to construct this parser: it never resolves a delimiter ID.
+    let tokenizer = Arc::new(TestTokenizer::new());
+    let factory = ReasoningParserFactory::new();
+
+    let mut parser = factory
+        .create(names::HUNYUAN_A13B, tokenizer)
+        .expect("hunyuan parser needs no reasoning delimiter tokens");
+
+    expect_test::expect![[r#"
+        ReasoningDelta {
+            reasoning: Some(
+                "reason",
+            ),
+            content: Some(
+                "answer",
+            ),
+        }
+    "#]]
+    .assert_debug_eq(
+        &parser.push("<think>\nreason\n</think>\n<answer>\nanswer\n</answer>").unwrap(),
     );
 }
 

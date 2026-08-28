@@ -86,6 +86,82 @@ fn delimited_finish_flushes_buffer() {
 }
 
 #[test]
+fn delimited_text_only_needs_no_vocabulary_entries() {
+    // `new` resolves both delimiters against the vocabulary and fails when
+    // either is missing; `new_text_only` matches text and never looks.
+    let tokenizer = Arc::new(TestTokenizer::new());
+    assert!(
+        DelimitedReasoningParser::new(tokenizer.clone(), "<think>", "</think>", false).is_err()
+    );
+
+    let mut parser =
+        DelimitedReasoningParser::new_text_only(tokenizer, "<think>", "</think>", false);
+
+    let delta = parser.push("<think>reason</think>answer");
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn delimited_text_only_ignores_the_prompt_boundary() {
+    // With no delimiter IDs there is nothing to look for in the prompt, so
+    // initialization always lands on `default_in_reasoning`.
+    let mut parser = DelimitedReasoningParser::new_text_only(
+        Arc::new(fake_tokenizer()),
+        "<think>",
+        "</think>",
+        false,
+    );
+    parser.initialize(&[THINK_START_ID]);
+
+    assert!(!parser.in_reasoning());
+    assert_eq!(parser.push("answer").content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn delimited_strips_a_framing_newline_from_every_section() {
+    let mut parser =
+        DelimitedReasoningParser::new(Arc::new(fake_tokenizer()), "<think>", "</think>", false)
+            .unwrap()
+            .strip_framing_newlines();
+
+    // Both sections open with a framing newline, and both lose it even though
+    // one push produces them all: `ReasoningDelta` concatenates the runs, so a
+    // wrapper downstream could no longer tell where the second section began.
+    let delta = parser.push("<think>\na</think>\nb<think>\nc</think>\nd");
+    assert_eq!(delta.reasoning.as_deref(), Some("ac"));
+    assert_eq!(delta.content.as_deref(), Some("bd"));
+}
+
+#[test]
+fn delimited_holds_a_framing_newline_across_pushes() {
+    let mut parser =
+        DelimitedReasoningParser::new(Arc::new(fake_tokenizer()), "<think>", "</think>", false)
+            .unwrap()
+            .strip_framing_newlines();
+
+    // The delimiter ends one push and its framing newline opens the next, so
+    // the pending strip has to survive in between.
+    assert!(parser.push("<think>").is_empty());
+    assert_eq!(parser.push("\nreason").reasoning.as_deref(), Some("reason"));
+
+    // Only the framing newline goes; later ones are ordinary text.
+    assert_eq!(parser.push("\nmore").reasoning.as_deref(), Some("\nmore"));
+}
+
+#[test]
+fn delimited_keeps_section_text_that_does_not_open_with_a_newline() {
+    let mut parser =
+        DelimitedReasoningParser::new(Arc::new(fake_tokenizer()), "<think>", "</think>", false)
+            .unwrap()
+            .strip_framing_newlines();
+
+    let delta = parser.push("<think>reason</think>answer");
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
 fn qwen3_without_prompt_markers_expects_start_token() {
     let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();

@@ -22,9 +22,18 @@ pub(crate) struct DelimitedReasoningParser {
     buffer: String,
     start_token: String,
     end_token: String,
-    start_token_id: u32,
-    end_token_id: u32,
+    /// Vocabulary ID of `start_token`, when the tokenizer has one. Families
+    /// whose delimiters are not single vocabulary tokens leave this `None` and
+    /// match on text alone.
+    start_token_id: Option<u32>,
+    /// Vocabulary ID of `end_token`, when the tokenizer has one.
+    end_token_id: Option<u32>,
     default_in_reasoning: bool,
+    /// Whether each section opens with a framing `\n` that is not part of its
+    /// text. See [`Self::strip_framing_newlines`].
+    strip_framing_newline: bool,
+    /// A delimiter was just consumed, so the next `\n` emitted is framing.
+    pending_framing_newline: bool,
 }
 
 impl DelimitedReasoningParser {
@@ -52,7 +61,48 @@ impl DelimitedReasoningParser {
                 token: end_token.clone(),
             })?;
 
-        Ok(Self {
+        Ok(Self::with_token_ids(
+            tokenizer,
+            start_token,
+            end_token,
+            Some(start_token_id),
+            Some(end_token_id),
+            default_in_reasoning,
+        ))
+    }
+
+    /// Create one delimited parser state machine that matches on text alone.
+    ///
+    /// Some families delimit reasoning with strings that are not vocabulary
+    /// tokens, so [`Self::new`] cannot resolve their IDs at all. Such a parser
+    /// has no prompt token boundary to inspect and therefore always starts from
+    /// `default_in_reasoning`.
+    pub(crate) fn new_text_only(
+        tokenizer: DynTokenizer,
+        start_token: impl Into<String>,
+        end_token: impl Into<String>,
+        default_in_reasoning: bool,
+    ) -> Self {
+        Self::with_token_ids(
+            tokenizer,
+            start_token.into(),
+            end_token.into(),
+            None,
+            None,
+            default_in_reasoning,
+        )
+    }
+
+    /// Build the state machine from already-resolved delimiter IDs.
+    fn with_token_ids(
+        tokenizer: DynTokenizer,
+        start_token: String,
+        end_token: String,
+        start_token_id: Option<u32>,
+        end_token_id: Option<u32>,
+        default_in_reasoning: bool,
+    ) -> Self {
+        Self {
             tokenizer,
             current_in_reasoning: default_in_reasoning,
             buffer: String::new(),
@@ -61,15 +111,40 @@ impl DelimitedReasoningParser {
             start_token_id,
             end_token_id,
             default_in_reasoning,
-        })
+            strip_framing_newline: false,
+            pending_framing_newline: false,
+        }
+    }
+
+    /// Drop the single `\n` that frames the start of every section.
+    ///
+    /// Some families put a newline immediately after each delimiter as protocol
+    /// framing rather than as text. Stripping it here rather than in the wrapper
+    /// keeps it correct when several sections are parsed out of one push: the
+    /// emitted [`ReasoningDelta`] concatenates them, so by the time a wrapper
+    /// sees it the per-section boundaries are gone.
+    pub(crate) fn strip_framing_newlines(mut self) -> Self {
+        self.strip_framing_newline = true;
+        self
     }
 
     /// Initialize the starting state from prompt token IDs.
+    ///
+    /// Text-only parsers have no delimiter IDs to look for, so they keep
+    /// `default_in_reasoning`.
     pub(crate) fn initialize(&mut self, prompt_token_ids: &[u32]) {
+        self.pending_framing_newline = false;
+
+        let Some((start_token_id, end_token_id)) = self.start_token_id.zip(self.end_token_id)
+        else {
+            self.current_in_reasoning = self.default_in_reasoning;
+            return;
+        };
+
         self.current_in_reasoning = last_reasoning_boundary(
             prompt_token_ids,
-            self.start_token_id,
-            self.end_token_id,
+            start_token_id,
+            end_token_id,
             self.tokenizer.as_ref(),
         )
         .unwrap_or(self.default_in_reasoning);
@@ -105,24 +180,41 @@ impl DelimitedReasoningParser {
         while !stable.is_empty() {
             if self.current_in_reasoning {
                 if let Some(end_idx) = stable.find(&self.end_token) {
-                    delta.push_reasoning(&stable[..end_idx]);
+                    let text = self.take_framing_newline(&stable[..end_idx]);
+                    delta.push_reasoning(text);
                     stable = &stable[end_idx + self.end_token.len()..];
                     self.current_in_reasoning = false;
+                    self.pending_framing_newline = self.strip_framing_newline;
                 } else {
-                    delta.push_reasoning(stable);
+                    delta.push_reasoning(self.take_framing_newline(stable));
                     break;
                 }
             } else if let Some(start_idx) = stable.find(&self.start_token) {
-                delta.push_content(&stable[..start_idx]);
+                let text = self.take_framing_newline(&stable[..start_idx]);
+                delta.push_content(text);
                 stable = &stable[start_idx + self.start_token.len()..];
                 self.current_in_reasoning = true;
+                self.pending_framing_newline = self.strip_framing_newline;
             } else {
-                delta.push_content(stable);
+                delta.push_content(self.take_framing_newline(stable));
                 break;
             }
         }
 
         delta
+    }
+
+    /// Drop a pending framing `\n` from the start of one emitted run.
+    ///
+    /// An empty run leaves the flag set: the delimiter landed at the end of a
+    /// push and its framing newline has not arrived yet.
+    fn take_framing_newline<'a>(&mut self, text: &'a str) -> &'a str {
+        if !self.pending_framing_newline || text.is_empty() {
+            return text;
+        }
+
+        self.pending_framing_newline = false;
+        text.strip_prefix('\n').unwrap_or(text)
     }
 
     /// Return the longest trailing suffix that could still complete a
