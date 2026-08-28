@@ -80,43 +80,6 @@ struct RequestMetricHandles {
     request_time_per_output_token_seconds: HistogramMetric,
 }
 
-impl RequestMetricHandles {
-    fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
-        self.prompt_tokens.inc_by(prefill_stats.num_prompt_tokens as u64);
-        self.prompt_tokens_local_compute
-            .inc_by(prefill_stats.num_computed_tokens as u64);
-        self.prompt_tokens_local_cache_hit
-            .inc_by(prefill_stats.num_local_cached_tokens as u64);
-        self.prompt_tokens_external_kv_transfer
-            .inc_by(prefill_stats.num_external_cached_tokens as u64);
-        self.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
-    }
-
-    fn observe_event(&self, event: &EngineCoreEvent, queued_ts: &mut f64, scheduled_ts: &mut f64) {
-        match event.r#type {
-            EngineCoreEventType::Queued => *queued_ts = event.timestamp,
-            EngineCoreEventType::Scheduled => {
-                if *scheduled_ts == 0.0 {
-                    *scheduled_ts = event.timestamp;
-                }
-            }
-            EngineCoreEventType::Preempted => {
-                self.num_preemptions.inc();
-            }
-        }
-    }
-
-    fn record_request_success(&self, finish_reason: FinishReason) {
-        self.request_success
-            .get_or_create(&FinishedReasonLabels {
-                model_name: self.labels.model_name.clone(),
-                engine: self.labels.engine,
-                finished_reason: finish_reason.as_str(),
-            })
-            .inc();
-    }
-}
-
 impl RequestMetricsTracker {
     /// Create the per-request tracker from the normalized `llm`-layer request
     /// context.
@@ -162,17 +125,17 @@ impl RequestMetricsTracker {
         self.handles.generation_tokens.inc_by(output.new_token_ids.len() as u64);
 
         if let Some(events) = &output.events {
-            for event in events {
-                self.handles.observe_event(event, &mut self.queued_ts, &mut self.scheduled_ts);
-            }
+            self.observe_events(events);
         }
 
-        // Generation tokens and pooling tensors are both semantic outputs.
-        // Terminal control-only outputs do not drive output-timing metrics.
+        // Only outputs that carry tokens or a pooling tensor drive output-timing metrics.
+        // A terminal output with neither (e.g. the synthesized abort
+        // output) must not log a stray time-to-first-token or inter-token
+        // sample.
         if !output.new_token_ids.is_empty() || output.pooling_output.is_some() {
             if self.is_prefilling {
                 if let Some(prefill_stats) = &output.prefill_stats {
-                    self.handles.record_prompt_tokens(prefill_stats);
+                    self.record_prompt_tokens(prefill_stats);
                 }
                 self.first_token_latency = received_at - self.arrival_time;
                 self.handles.time_to_first_token_seconds.observe(self.first_token_latency);
@@ -208,7 +171,7 @@ impl RequestMetricsTracker {
             0.0
         };
 
-        self.handles.record_request_success(finish_reason);
+        self.record_request_success(finish_reason);
 
         self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
         self.handles
@@ -232,6 +195,50 @@ impl RequestMetricsTracker {
         self.handles
             .request_time_per_output_token_seconds
             .observe(time_per_output_token_seconds);
+    }
+
+    /// Record prompt token counters through cached metric handles.
+    fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
+        let computed = prefill_stats.num_computed_tokens as u64;
+        let local_cache_hit = prefill_stats.num_local_cached_tokens as u64;
+        let external_kv_transfer = prefill_stats.num_external_cached_tokens as u64;
+
+        self.handles.prompt_tokens.inc_by(prefill_stats.num_prompt_tokens as u64);
+        self.handles.prompt_tokens_local_compute.inc_by(computed);
+        self.handles.prompt_tokens_local_cache_hit.inc_by(local_cache_hit);
+        self.handles.prompt_tokens_external_kv_transfer.inc_by(external_kv_transfer);
+        self.handles.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
+    }
+
+    /// Record request event counters through cached metric handles.
+    fn observe_events(&mut self, events: &[EngineCoreEvent]) {
+        for event in events {
+            match event.r#type {
+                EngineCoreEventType::Queued => {
+                    self.queued_ts = event.timestamp;
+                }
+                EngineCoreEventType::Scheduled => {
+                    if self.scheduled_ts == 0.0 {
+                        self.scheduled_ts = event.timestamp;
+                    }
+                }
+                EngineCoreEventType::Preempted => {
+                    self.handles.num_preemptions.inc();
+                }
+            }
+        }
+    }
+
+    /// Increment the request-success counter for the terminal finish reason.
+    fn record_request_success(&self, finish_reason: FinishReason) {
+        self.handles
+            .request_success
+            .get_or_create(&FinishedReasonLabels {
+                model_name: self.handles.labels.model_name.clone(),
+                engine: self.handles.labels.engine,
+                finished_reason: finish_reason.as_str(),
+            })
+            .inc();
     }
 }
 
