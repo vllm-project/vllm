@@ -133,9 +133,7 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
     allocator = get_mem_allocator_instance()
 
     with allocator.use_memory_pool("weights"):
-        fake_weight = torch.full(
-            (4096,), 0x44, dtype=torch.uint8, device=DEVICE_TYPE
-        )
+        fake_weight = torch.full((4096,), 0x44, dtype=torch.uint8, device=DEVICE_TYPE)
         ordinary_tensor = torch.full(
             (4096,), 0x55, dtype=torch.uint8, device=DEVICE_TYPE
         )

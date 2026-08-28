@@ -61,8 +61,7 @@ SLEEP_MODEL_CASES = (
         name="ernie45_vl",
         architecture="Ernie4_5_VLMoeForConditionalGeneration",
         model="baidu/ERNIE-4.5-VL-28B-A3B-PT",
-        tensor_names=("_visual_token_ids_tensor_cache",),
-        modalities=("image", "video"),
+        tensor_names=("inv_freq", "_visual_token_ids_tensor_cache"),
         revision="refs/pr/17",
         trust_remote_code=True,
     ),
@@ -163,10 +162,12 @@ def _get_sleep_tensor_targets(
         return ((VoxtralEncoderModel, ("mel_filters",)),)
     if model_name == "ernie45_vl":
         from vllm.model_executor.models.ernie45_vl import (
+            Ernie4_5_VisionRotaryEmbedding,
             Ernie4_5_VLMoeForConditionalGeneration,
         )
 
         return (
+            (Ernie4_5_VisionRotaryEmbedding, ("inv_freq",)),
             (
                 Ernie4_5_VLMoeForConditionalGeneration,
                 ("_visual_token_ids_tensor_cache",),
@@ -249,13 +250,11 @@ def _assert_tensor_snapshots_equal(
         torch.testing.assert_close(
             after_value,
             before_value,
-            msg=lambda msg, name=name: (
-                f"{model_name}: {name} was corrupted: {msg}"
-            ),
+            msg=lambda msg, name=name: (f"{model_name}: {name} was corrupted: {msg}"),
         )
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 @pytest.mark.slow_test
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA sleep mode test")
 @pytest.mark.parametrize("case", SLEEP_MODEL_CASES, ids=lambda case: case.name)
@@ -299,7 +298,7 @@ def test_static_model_tensors_survive_level2_restore(
     }
     if case.revision is not None:
         llm_kwargs["revision"] = case.revision
-    if case.name not in ("fireredasr2", "voxtral"):
+    if case.name not in ("fireredasr2", "voxtral", "ernie45_vl"):
         llm_kwargs["skip_tokenizer_init"] = True
     if case.tokenizer_mode is not None:
         llm_kwargs["tokenizer_mode"] = case.tokenizer_mode
