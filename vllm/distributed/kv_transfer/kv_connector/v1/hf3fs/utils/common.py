@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.v1.core.kv_cache_utils import resolve_block_hashes
 from vllm.v1.request import Request
 
 
@@ -23,6 +24,38 @@ class AtomicCounter:
             current = self._value
             self._value = (current + 1) % self._n
             return current
+
+
+def external_block_keys(
+    request: Request,
+    hash_block_size: int,
+    block_size: int,
+    num_blocks: int | None = None,
+) -> list[str]:
+    """External cache keys for a request's leading blocks, at ``block_size``.
+
+    The engine already computes one hash per full block that folds in every
+    dimension required to partition the KV cache keyspace -- multimodal identity,
+    LoRA identity, ``cache_salt`` and prompt-embeds content -- see
+    ``generate_block_hash_extra_keys``. It is built whenever a KV connector is
+    configured, with prefix caching on or off, so it is always available here.
+
+    Deriving the external key from the token ids alone drops those dimensions, and
+    two requests that must not share blocks then collide on the same key.
+
+    Those hashes are computed at ``hash_block_size``, which is not the scheduler
+    block size the connector's block ids are indexed by whenever the model is
+    hybrid or ``decode_context_parallel_size > 1``. ``resolve_block_hashes`` takes
+    the view at ``block_size``; each hash is already chained over its whole prefix,
+    so the last sub-hash of a block fingerprints that block's prefix exactly.
+    """
+    keys = [
+        bytes(block_hash).hex()
+        for block_hash in resolve_block_hashes(
+            request.block_hashes, hash_block_size, block_size
+        )
+    ]
+    return keys if num_blocks is None else keys[:num_blocks]
 
 
 @dataclass
@@ -94,6 +127,10 @@ class HF3FSRequestMetadata:
     request_id: str
     token_ids: list[int]
     block_ids: list[int]
+    # External cache key per full block, indexed from block 0. Taken from the
+    # engine's own block hashes so that every dimension required to partition the
+    # KV keyspace reaches the external store.
+    block_keys: list[str] = field(default_factory=list)
     load_block_op: LoadBlockInfo | None = None
     save_block_op: SaveBlockInfo | None = None
 
@@ -101,10 +138,12 @@ class HF3FSRequestMetadata:
     def from_scheduling_state(
         state: "RequestSchedulingState",
         block_size: int,
+        hash_block_size: int,
         load_op: LoadBlockInfo | None = None,
         skip_leading_blocks: int | None = None,
     ) -> Optional["HF3FSRequestMetadata"]:
         """Create request metadata from scheduling state."""
+        assert state.request is not None
         token_count = len(state.token_ids)
         total_blocks = token_count // block_size
 
@@ -123,6 +162,9 @@ class HF3FSRequestMetadata:
             request_id=state.request_id,
             token_ids=state.token_ids,
             block_ids=state.allocated_block_ids,
+            block_keys=external_block_keys(
+                state.request, hash_block_size, block_size, total_blocks
+            ),
             load_block_op=load_op,
             save_block_op=SaveBlockInfo(skip_leading_blocks=skip_blocks),
         )
