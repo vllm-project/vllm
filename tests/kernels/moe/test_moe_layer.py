@@ -7,10 +7,13 @@ Run `pytest tests/kernels/test_moe_layer.py`.
 
 import functools
 import os
+import sys
+import tempfile
 import traceback
 import types
 from collections.abc import Callable
-from dataclasses import astuple, dataclass, fields
+from contextlib import suppress
+from dataclasses import astuple, dataclass, fields, replace
 from itertools import product
 from typing import get_args
 
@@ -26,6 +29,7 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
 from vllm.config import (
     CompilationConfig,
+    EPLBConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -71,6 +75,15 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
+
+def on_gfx950() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950 as rocm_on_gfx950
+
+        return rocm_on_gfx950()
+    return False
+
+
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
 SHAPE_COMBOS = [
@@ -114,6 +127,7 @@ if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
 DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
+MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency"}
 
 QUANT_METHODS = [
     None,
@@ -371,6 +385,56 @@ class MoETestConfig:
         return MoETestConfig(*values)
 
 
+def _group_deepep_ll_configs(
+    test_configs: list[MoETestConfig],
+) -> list[list[MoETestConfig]]:
+    """Group configs that can share one DeepEP low-latency buffer."""
+    groups: dict[tuple[int, int, int], list[MoETestConfig]] = {}
+    for test_config in test_configs:
+        # max_num_tokens and the remaining buffer arguments are fixed for one
+        # outer pytest item. These are the arguments that can vary here.
+        buffer_key = (
+            test_config.k,
+            test_config.ep_size,
+            test_config.num_experts,
+        )
+        groups.setdefault(buffer_key, []).append(test_config)
+    return list(groups.values())
+
+
+@pytest.mark.cpu_test
+def test_group_deepep_ll_configs_by_buffer_requirements():
+    config_a = MoETestConfig(
+        1,
+        128,
+        2048,
+        8,
+        2,
+        torch.bfloat16,
+        None,
+        False,
+        False,
+        False,
+        backend="deepep_low_latency",
+        ep_size=2,
+        dp_size=2,
+    )
+    config_b = replace(config_a, num_experts=64)
+    config_a_later = replace(config_a, m=32)
+    config_c = replace(config_a, k=4096)
+    config_d = replace(config_a, ep_size=4, dp_size=4)
+
+    assert _group_deepep_ll_configs(
+        [config_a, config_b, config_a_later, config_c, config_d]
+    ) == [
+        [config_a, config_a_later],
+        [config_b],
+        [config_c],
+        [config_d],
+    ]
+    assert _group_deepep_ll_configs([]) == []
+
+
 def generate_valid_test_configs(
     backend: str,
     ep_size: int,
@@ -484,12 +548,12 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             "leads to large differences.",
         )
 
-    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
-    if (
-        config.quantization == "modelopt_fp4"
-        and not current_platform.has_device_capability(100)
+    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+) or gfx950.
+    if config.quantization == "modelopt_fp4" and not (
+        (current_platform.is_rocm() and on_gfx950())
+        or current_platform.has_device_capability(100)
     ):
-        return False, "modelopt_fp4 not supported on H100+ GPUs"
+        return False, "modelopt_fp4 requires native NVFP4 or emulation"
 
     # Skip flashinfer_nvlink if not on H100+ (compute capability 10.0+)
     if (
@@ -507,6 +571,28 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                 False,
                 f"{config.backend} does not support quantization={config.quantization}",
             )
+
+        if (
+            on_gfx950()
+            and config.backend == "deepep_low_latency"
+            and config.quantization == "modelopt_fp4"
+        ):
+            return (
+                False,
+                "DeepEP low latency requires a batched NVFP4 MoE backend, "
+                "which is not available on gfx950.",
+            )
+
+        if config.backend in MORI_BACKENDS:
+            if os.environ.get("VLLM_TEST_ENABLE_MORI_MOE_LAYER") != "1":
+                return False, "mori MoE layer matrix is opt-in"
+
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if not rocm_aiter_ops.is_fused_moe_enabled():
+                return False, "mori requires AITER fused MoE"
+            if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+                return False, "mori does not support AITER shared expert fusion"
 
         if config.backend == "deepep_low_latency":
             from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
@@ -1695,14 +1781,17 @@ def _parallel_worker(
     cpu_group,
     test_configs: list[MoETestConfig],
     verbosity: int,
+    failure_report_path: str | None = None,
+    deep_ep_handle_keepalive: list[object] | None = None,
     **kwargs,
 ) -> None:
     set_random_seed(7)
+    is_logging_rank = pgi.rank == 0
 
     total = 0
     passed = 0
     failed = 0
-    fail_ids = []
+    failure_details = []
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
 
@@ -1717,9 +1806,11 @@ def _parallel_worker(
 
         tp_rank = pgi.rank % test_config.tp_size
 
-        if verbosity > 0:
+        if verbosity > 0 and is_logging_rank:
             print(f"subtest: {test_config.id()}", end="")
 
+        local_failed = False
+        local_error: str | None = None
         try:
             _run_one_config(
                 vllm_config,
@@ -1743,33 +1834,72 @@ def _parallel_worker(
                 use_gate=test_config.use_gate,
                 use_routed_input_transform=test_config.use_routed_input_transform,
             )
-            if verbosity > 0:
-                print(" PASSED")
-            else:
-                print(".", end="")
-            passed = passed + 1
-        except Exception as ex:
-            fail_ids.append(test_config.id())
-            failed = failed + 1
-            if verbosity > 0:
-                traceback.print_exc()
-                print(f"\n{str(ex)}\nFAILED")
-            else:
-                print("F", end="")
+        except Exception:
+            local_failed = True
+            local_error = traceback.format_exc()
         finally:
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
-            # later subtests do not inherit stale communication state.
-            if test_config.backend in {
-                "deepep_low_latency",
-                "deepep_high_throughput",
-            }:
+            # later subtests do not inherit stale communication state. Skip this
+            # on ROCm: rocSHMEM cannot reinitialize the allocator after a DeepEP
+            # buffer is destroyed in the same process.
+            if current_platform.is_cuda() and test_config.backend in DEEPEP_BACKENDS:
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
                     all2all_manager.destroy()
+            elif (
+                deep_ep_handle_keepalive is not None
+                and current_platform.is_rocm()
+                and test_config.backend in DEEPEP_BACKENDS
+            ):
+                # The manager cache is weak. Keep its handle alive until the
+                # launcher hard-exits this ROCm worker, otherwise each subtest
+                # implicitly destroys and recreates the DeepEP buffer.
+                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                if all2all_manager is not None:
+                    handle_cache = getattr(all2all_manager, "handle_cache", None)
+                    if handle_cache is not None and not deep_ep_handle_keepalive:
+                        with handle_cache._lock:
+                            cached_handles = list(handle_cache._cache.values())
+                        if cached_handles:
+                            deep_ep_handle_keepalive.extend(cached_handles)
             total = total + 1
             torch.distributed.barrier()
+
+        any_failed_tensor = torch.tensor(
+            [int(local_failed)], device=pgi.device, dtype=torch.int32
+        )
+        torch.distributed.all_reduce(
+            any_failed_tensor, op=torch.distributed.ReduceOp.MAX
+        )
+        any_failed = bool(any_failed_tensor.item())
+
+        if any_failed:
+            failed = failed + 1
+
+            gathered_errors = [None] * pgi.world_size
+            torch.distributed.all_gather_object(
+                gathered_errors, local_error, group=cpu_group
+            )
+            first_error = next(
+                (error for error in gathered_errors if error is not None),
+                "unknown distributed failure",
+            )
+            assert first_error is not None
+            failure_details.append(f"{test_config.id()}\n{first_error.rstrip()}")
+
+            if verbosity > 0 and is_logging_rank:
+                print(" FAILED")
+                print(first_error.rstrip())
+            elif is_logging_rank:
+                print("F", end="")
+        else:
+            passed = passed + 1
+            if verbosity > 0 and is_logging_rank:
+                print(" PASSED")
+            elif is_logging_rank:
+                print(".", end="")
 
     skipped = total - (passed + failed)
 
@@ -1780,17 +1910,72 @@ def _parallel_worker(
     passes = f"{sep}{passed} passed" if passed > 0 else ""
 
     report = (
-        f"============= {fails}{skips}{passes} of {total} total tests ============="
+        f"============= {fails}{skips}{passes} of {total} total subcases ============="
     )
 
-    sep = "\n" if verbosity == 0 else ""
-    print(f"{sep}{report}")
+    if is_logging_rank:
+        sep = "\n" if verbosity == 0 else ""
+        print(f"{sep}{report}")
 
     if failed > 0:
-        fail_ids_str = "\n".join(fail_ids)
-        raise RuntimeError(
-            f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
+        failure_details_str = "\n\n".join(failure_details)
+        failure_report = (
+            f"\n============= Failed subcases =============\n"
+            f"{failure_details_str}\n{report}"
         )
+        if is_logging_rank and failure_report_path is not None:
+            with open(failure_report_path, "a", encoding="utf-8") as report_file:
+                report_file.write(failure_report)
+        if is_logging_rank:
+            raise RuntimeError(failure_report)
+
+
+def _parallel_worker_rocm_deepep(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    test_configs: list[MoETestConfig],
+    verbosity: int,
+    failure_report_path: str | None = None,
+    deep_ep_handle_keepalive: list[object] | None = None,
+    **kwargs,
+) -> None:
+    """Run a ROCm DeepEP batch without unsafe Python/HIP teardown."""
+    assert current_platform.is_rocm()
+    assert deep_ep_handle_keepalive is not None
+
+    exit_code = 1
+    try:
+        _parallel_worker(
+            pgi,
+            vllm_config,
+            cpu_group,
+            test_configs,
+            verbosity,
+            failure_report_path=failure_report_path,
+            deep_ep_handle_keepalive=deep_ep_handle_keepalive,
+            **kwargs,
+        )
+        exit_code = 0
+    except BaseException as ex:
+        print(ex)
+        traceback.print_exc()
+    finally:
+        try:
+            torch.accelerator.synchronize()
+            # Do not run vLLM cleanup: it explicitly destroys the DeepEP
+            # buffer. Destroy only the default group, matching the accepted
+            # ROCm workaround in tests/kernels/moe/parallel_utils.py.
+            torch.distributed.destroy_process_group()
+        except BaseException:
+            traceback.print_exc()
+            exit_code = 1
+        finally:
+            # Bypass the HIP atexit use-after-free fixed upstream by
+            # https://github.com/ROCm/rocm-systems/pull/6942.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(exit_code)
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1836,10 +2021,27 @@ def test_moe_layer(
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
+    if (
+        backend in MORI_BACKENDS
+        and os.environ.get("VLLM_TEST_ENABLE_MORI_MOE_LAYER") == "1"
+    ):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.refresh_env_variables()
+
     # TODO: cover FlashInfer MoE backends via moe_backend, e.g.
     # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
     # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
 
+    # Repeated NIXL memory registration in this broad layer matrix fails on
+    # gfx950. NIXL EPLB is covered by dedicated tests, so use Gloo here to
+    # preserve the layer/EPLB coverage.
+    eplb_config = EPLBConfig(
+        communicator="torch_gloo" if enable_eplb and on_gfx950() else None
+    )
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
         data_parallel_size=dp_size,
@@ -1847,6 +2049,7 @@ def test_moe_layer(
         enable_expert_parallel=use_ep,
         all2all_backend=backend,
         enable_eplb=enable_eplb,
+        eplb_config=eplb_config,
     )
 
     compilation_config = CompilationConfig()
@@ -1881,15 +2084,49 @@ def test_moe_layer(
     if len(test_configs) == 0:
         pytest.skip("No supported configs found for this testpoint.")
 
+    with tempfile.NamedTemporaryFile(
+        prefix="moe-layer-failures-", delete=False
+    ) as failure_report_file:
+        failure_report_path = failure_report_file.name
+
+    test_config_batches = [test_configs]
+    if current_platform.is_rocm() and backend == "deepep_low_latency":
+        # rocSHMEM cannot destroy one low-latency buffer and initialize a
+        # differently sized one in the same process. Use one worker lifetime
+        # per compatible buffer shape while preserving every matrix case.
+        test_config_batches = _group_deepep_ll_configs(test_configs)
+
+    rocm_deepep = current_platform.is_rocm() and backend in DEEPEP_BACKENDS
+    parallel_worker = _parallel_worker_rocm_deepep if rocm_deepep else _parallel_worker
+    launch_failures: list[str] = []
+
     try:
-        parallel_launch_with_config(
-            world_size,
-            _parallel_worker,
-            vllm_config,
-            None,
-            test_configs,
-            verbosity,
-        )
+        for test_config_batch in test_config_batches:
+            report_size_before = os.path.getsize(failure_report_path)
+            try:
+                parallel_launch_with_config(
+                    world_size,
+                    parallel_worker,
+                    vllm_config,
+                    None,
+                    test_config_batch,
+                    verbosity,
+                    failure_report_path=failure_report_path,
+                    deep_ep_handle_keepalive=[] if rocm_deepep else None,
+                )
+            except Exception as ex:
+                # Normal subtest failures are already in the shared report.
+                # Preserve launcher/setup errors that occur before that write.
+                if os.path.getsize(failure_report_path) == report_size_before:
+                    launch_failures.append(str(ex))
+
+        if os.path.getsize(failure_report_path) > 0:
+            with open(failure_report_path, encoding="utf-8") as report_file:
+                launch_failures.insert(0, report_file.read())
+        if launch_failures:
+            pytest.fail("\n\n".join(launch_failures))
     finally:
+        with suppress(FileNotFoundError):
+            os.remove(failure_report_path)
         torch.accelerator.synchronize()  # TODO: Is this needed?
         torch.accelerator.empty_cache()
