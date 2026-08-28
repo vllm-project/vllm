@@ -184,6 +184,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:num_requests_waiting",
     "vllm:num_requests_waiting_by_reason",
     "vllm:kv_cache_usage_perc",
+    "vllm:kv_cache_capacity_bytes",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
     "vllm:num_preemptions_total",

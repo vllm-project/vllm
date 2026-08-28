@@ -568,6 +568,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        gauge_kv_cache_capacity = self._gauge_cls(
+            name="vllm:kv_cache_capacity_bytes",
+            documentation=(
+                "Physical KV-cache backing capacity in bytes per DP engine."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_cache_capacity = create_metric_per_engine(
+            gauge_kv_cache_capacity, per_engine_labelvalues
+        )
+        capacity_bytes = vllm_config.cache_config.kv_cache_capacity_bytes
+        if capacity_bytes is not None:
+            for gauge in self.gauge_kv_cache_capacity.values():
+                gauge.set(capacity_bytes)
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",

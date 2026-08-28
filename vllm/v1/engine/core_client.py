@@ -770,6 +770,11 @@ class MPClient(EngineCoreClient):
             if getattr(cache_config, "kv_cache_max_concurrency", None) is not None
             else response.kv_cache_max_concurrency
         )
+        cache_config.kv_cache_capacity_bytes = (
+            getattr(cache_config, "kv_cache_capacity_bytes", None)
+            if getattr(cache_config, "kv_cache_capacity_bytes", None) is not None
+            else response.kv_cache_capacity_bytes
+        )
 
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's

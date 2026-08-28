@@ -98,6 +98,7 @@ class EngineCoreReadyResponse:
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
+    kv_cache_capacity_bytes: int | None = None
     kv_events_config: KVEventsConfig | None = None
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False

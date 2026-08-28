@@ -319,6 +319,9 @@ class EngineCore:
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
+        vllm_config.cache_config.kv_cache_capacity_bytes = sum(
+            config.allocated_bytes for config in kv_cache_configs
+        )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
 
@@ -1665,6 +1668,9 @@ class EngineCoreProc(EngineCore):
             kv_cache_size_tokens=self.vllm_config.cache_config.kv_cache_size_tokens,
             kv_cache_max_concurrency=(
                 self.vllm_config.cache_config.kv_cache_max_concurrency
+            ),
+            kv_cache_capacity_bytes=(
+                self.vllm_config.cache_config.kv_cache_capacity_bytes
             ),
             tensor_parallel_size=parallel_config.tensor_parallel_size,
             pipeline_parallel_size=parallel_config.pipeline_parallel_size,

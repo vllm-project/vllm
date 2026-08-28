@@ -22,6 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     MLAAttentionSpec,
@@ -87,6 +88,10 @@ def _bind(config, layout: str):
 
 
 class TestDensePacking:
+    def test_empty_cache_has_zero_allocated_bytes(self):
+        config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+        assert config.allocated_bytes == 0
+
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
         assert _get_kv_cache_bytes_per_block(groups) == _expected_bytes_per_block(
@@ -133,6 +138,7 @@ class TestDensePacking:
         assert tensor.layers == list(specs)
         assert config.num_blocks == MEMORY // (4 * page)
         assert tensor.size == 4 * page * config.num_blocks
+        assert config.allocated_bytes == tensor.size
         if layout == "LBNHC":
             assert (tensor.layer_stride, tensor.block_stride) == (
                 page * config.num_blocks,
