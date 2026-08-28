@@ -945,10 +945,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer from nightly release assets.
+# Install FlashInfer from release assets.
 # https://docs.flashinfer.ai/installation.html
-ARG FLASHINFER_VERSION=0.6.18.dev20260819
-ARG FLASHINFER_RELEASE_TAG=nightly-v0.6.18-20260819
+ARG FLASHINFER_VERSION=0.6.18rc10
+ARG FLASHINFER_RELEASE_TAG=v0.6.18rc10
 ARG TARGETARCH
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
