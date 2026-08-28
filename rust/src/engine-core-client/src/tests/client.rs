@@ -2639,6 +2639,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
+    let multipart_pooling_frames =
+        lines.next().expect("missing multipart pooling output fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
@@ -2824,6 +2826,14 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                 && stats.mooncake.is_some()
                 && stats.other.contains_key("UnsupportedConnector")
     ));
+    let multipart_pooling =
+        decode_engine_core_outputs(&decode_frames(multipart_pooling_frames)).unwrap();
+    let pooling_tensor = multipart_pooling.as_request_batch().unwrap().outputs[0]
+        .pooling_output
+        .as_ref()
+        .expect("multipart pooling output decoded");
+    assert_eq!(pooling_tensor.shape, vec![2]);
+    assert_eq!(pooling_tensor.to_f32_vec().unwrap(), vec![0.25, -0.5]);
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {

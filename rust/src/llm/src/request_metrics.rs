@@ -48,6 +48,21 @@ pub(crate) struct RequestMetricsTracker {
     latest_num_cached_tokens: u32,
 }
 
+/// Request-scoped metrics for final-only pooling requests.
+pub(crate) struct PoolingRequestMetricsTracker {
+    /// Cached request metric handles for this request's model and engine index.
+    handles: RequestMetricHandles,
+
+    arrival_time: f64,
+    prompt_len: u32,
+    queued_ts: f64,
+    scheduled_ts: f64,
+    pooling_output_ts: f64,
+    latest_num_cached_tokens: u32,
+    prompt_tokens_recorded: bool,
+    finished: bool,
+}
+
 /// Cached request metric handles for one model and engine index.
 #[derive(Clone)]
 struct RequestMetricHandles {
@@ -78,6 +93,43 @@ struct RequestMetricHandles {
     request_decode_time_seconds: HistogramMetric,
     request_inference_time_seconds: HistogramMetric,
     request_time_per_output_token_seconds: HistogramMetric,
+}
+
+impl RequestMetricHandles {
+    fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
+        self.prompt_tokens.inc_by(prefill_stats.num_prompt_tokens as u64);
+        self.prompt_tokens_local_compute
+            .inc_by(prefill_stats.num_computed_tokens as u64);
+        self.prompt_tokens_local_cache_hit
+            .inc_by(prefill_stats.num_local_cached_tokens as u64);
+        self.prompt_tokens_external_kv_transfer
+            .inc_by(prefill_stats.num_external_cached_tokens as u64);
+        self.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
+    }
+
+    fn observe_event(&self, event: &EngineCoreEvent, queued_ts: &mut f64, scheduled_ts: &mut f64) {
+        match event.r#type {
+            EngineCoreEventType::Queued => *queued_ts = event.timestamp,
+            EngineCoreEventType::Scheduled => {
+                if *scheduled_ts == 0.0 {
+                    *scheduled_ts = event.timestamp;
+                }
+            }
+            EngineCoreEventType::Preempted => {
+                self.num_preemptions.inc();
+            }
+        }
+    }
+
+    fn record_request_success(&self, finish_reason: FinishReason) {
+        self.request_success
+            .get_or_create(&FinishedReasonLabels {
+                model_name: self.labels.model_name.clone(),
+                engine: self.labels.engine,
+                finished_reason: finish_reason.as_str(),
+            })
+            .inc();
+    }
 }
 
 impl RequestMetricsTracker {
@@ -125,7 +177,9 @@ impl RequestMetricsTracker {
         self.handles.generation_tokens.inc_by(output.new_token_ids.len() as u64);
 
         if let Some(events) = &output.events {
-            self.observe_events(events);
+            for event in events {
+                self.handles.observe_event(event, &mut self.queued_ts, &mut self.scheduled_ts);
+            }
         }
 
         // Only outputs that actually carry tokens drive token-timing metrics.
@@ -135,7 +189,7 @@ impl RequestMetricsTracker {
         if !output.new_token_ids.is_empty() {
             if self.is_prefilling {
                 if let Some(prefill_stats) = &output.prefill_stats {
-                    self.record_prompt_tokens(prefill_stats);
+                    self.handles.record_prompt_tokens(prefill_stats);
                 }
                 self.first_token_latency = received_at - self.arrival_time;
                 self.handles.time_to_first_token_seconds.observe(self.first_token_latency);
@@ -171,7 +225,7 @@ impl RequestMetricsTracker {
             0.0
         };
 
-        self.record_request_success(finish_reason);
+        self.handles.record_request_success(finish_reason);
 
         self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
         self.handles
@@ -196,49 +250,79 @@ impl RequestMetricsTracker {
             .request_time_per_output_token_seconds
             .observe(time_per_output_token_seconds);
     }
+}
 
-    /// Record prompt token counters through cached metric handles.
-    fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
-        let computed = prefill_stats.num_computed_tokens as u64;
-        let local_cache_hit = prefill_stats.num_local_cached_tokens as u64;
-        let external_kv_transfer = prefill_stats.num_external_cached_tokens as u64;
-
-        self.handles.prompt_tokens.inc_by(prefill_stats.num_prompt_tokens as u64);
-        self.handles.prompt_tokens_local_compute.inc_by(computed);
-        self.handles.prompt_tokens_local_cache_hit.inc_by(local_cache_hit);
-        self.handles.prompt_tokens_external_kv_transfer.inc_by(external_kv_transfer);
-        self.handles.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
+impl PoolingRequestMetricsTracker {
+    pub(crate) fn new(
+        model_name: String,
+        engine_index: u32,
+        arrival_time: f64,
+        prompt_len: u32,
+    ) -> Self {
+        Self {
+            handles: resolve_request_metric_handles(&model_name, engine_index),
+            arrival_time,
+            prompt_len,
+            queued_ts: 0.0,
+            scheduled_ts: 0.0,
+            pooling_output_ts: 0.0,
+            latest_num_cached_tokens: 0,
+            prompt_tokens_recorded: false,
+            finished: false,
+        }
     }
 
-    /// Record request event counters through cached metric handles.
-    fn observe_events(&mut self, events: &[EngineCoreEvent]) {
-        for event in events {
-            match event.r#type {
-                EngineCoreEventType::Queued => {
-                    self.queued_ts = event.timestamp;
-                }
-                EngineCoreEventType::Scheduled => {
-                    if self.scheduled_ts == 0.0 {
-                        self.scheduled_ts = event.timestamp;
-                    }
-                }
-                EngineCoreEventType::Preempted => {
-                    self.handles.num_preemptions.inc();
-                }
+    pub(crate) fn observe_output(&mut self, batch_timestamp: f64, output: &EngineCoreOutput) {
+        if let Some(prefill_stats) = &output.prefill_stats {
+            self.latest_num_cached_tokens = prefill_stats.num_cached_tokens;
+            if !self.prompt_tokens_recorded {
+                self.handles.record_prompt_tokens(prefill_stats);
+                self.prompt_tokens_recorded = true;
+            }
+        }
+        if output.pooling_output.is_some() {
+            self.pooling_output_ts = batch_timestamp;
+        }
+        if let Some(events) = &output.events {
+            for event in events {
+                self.handles.observe_event(event, &mut self.queued_ts, &mut self.scheduled_ts);
             }
         }
     }
 
-    /// Increment the request-success counter for the terminal finish reason.
-    fn record_request_success(&self, finish_reason: FinishReason) {
+    pub(crate) fn record_finished(&mut self, received_at: f64, finish_reason: FinishReason) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+
+        let prefill_kv_computed_tokens =
+            self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
+        self.handles.record_request_success(finish_reason);
+        self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
         self.handles
-            .request_success
-            .get_or_create(&FinishedReasonLabels {
-                model_name: self.handles.labels.model_name.clone(),
-                engine: self.handles.labels.engine,
-                finished_reason: finish_reason.as_str(),
-            })
-            .inc();
+            .request_prefill_kv_computed_tokens
+            .observe(prefill_kv_computed_tokens as f64);
+        self.handles
+            .e2e_request_latency_seconds
+            .observe(received_at - self.arrival_time);
+        self.handles
+            .request_queue_time_seconds
+            .observe(diff_or_zero(self.scheduled_ts, self.queued_ts));
+        self.handles
+            .request_prefill_time_seconds
+            .observe(diff_or_zero(self.pooling_output_ts, self.scheduled_ts));
+        self.handles
+            .request_inference_time_seconds
+            .observe(diff_or_zero(self.pooling_output_ts, self.scheduled_ts));
+    }
+}
+
+impl Drop for PoolingRequestMetricsTracker {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.record_finished(current_unix_timestamp_secs(), FinishReason::Abort);
+        }
     }
 }
 

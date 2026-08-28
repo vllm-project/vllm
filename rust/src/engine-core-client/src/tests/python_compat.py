@@ -296,13 +296,14 @@ def engine_output_wire(
     *,
     new_logprobs=None,
     new_prompt_logprobs_tensors=None,
+    pooling_output=None,
 ):
     return [
         request_id,
         [7, 8],
         new_logprobs,
         new_prompt_logprobs_tensors,
-        None,
+        pooling_output,
         int(FinishReason.LENGTH),
     ]
 
@@ -331,6 +332,17 @@ multipart_logprobs = engine_outputs_wire(
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
             np.array([1, 2], dtype=np.int64),
             None,
+        ),
+    )
+)
+
+multipart_pooling_output = engine_outputs_wire(
+    engine_output_wire(
+        "embed-1",
+        pooling_output=(
+            "float32",
+            [2],
+            np.array([0.25, -0.5], dtype=np.float32).tobytes(),
         ),
     )
 )
@@ -504,4 +516,10 @@ print(
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
+print(
+    " ".join(
+        frame.hex()
+        for frame in encode_output_frames(multipart_pooling_output, size_threshold=1)
+    )
+)
 print(msgspec.msgpack.encode(ready_response).hex())
