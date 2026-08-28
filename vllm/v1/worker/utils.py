@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
@@ -51,6 +52,54 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
         if num_nans > 0
     }
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
+
+
+def _iter_checksum_targets(model: nn.Module):
+    """Yield tensors whose bytes represent persistent model weights.
+
+    Parameters and buffers are included because some quantizers and adapters
+    register weight-bearing tensors as buffers. Buffers registered with
+    ``persistent=False`` and known configuration-derived caches are excluded
+    because they are not checkpoint data.
+    """
+    non_persistent_buffer_patterns = (
+        "cos_cached",
+        "sin_cached",
+        "cos_sin_cache",
+        "inv_freq",
+        "freqs_cis",
+    )
+    supported_dtypes = {
+        torch.bool,
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+
+    for name, tensor in model.named_parameters():
+        if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
+            continue
+        yield name, tensor
+
+    seen_buffers: set[int] = set()
+    for module_name, module in model.named_modules():
+        for buffer_name, tensor in module.named_buffers(recurse=False):
+            if id(tensor) in seen_buffers:
+                continue
+            seen_buffers.add(id(tensor))
+            if buffer_name in module._non_persistent_buffers_set:
+                continue
+            name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+            if any(pattern in name for pattern in non_persistent_buffer_patterns):
+                continue
+            if (
+                not tensor.is_floating_point()
+                and tensor.dtype not in supported_dtypes
+            ):
+                continue
+            yield name, tensor
 
 
 @triton.jit

@@ -236,6 +236,14 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
+    async def compute_weight_checksums_all(self) -> list[dict[str, str]]:
+        """Return weight checksums from every engine managed by this client."""
+        raise NotImplementedError
+
+    async def reset_weights(self) -> None:
+        """Randomize checksum-covered model tensors on every managed engine."""
+        raise NotImplementedError
+
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
