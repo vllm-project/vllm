@@ -787,9 +787,9 @@ class SamplingParams(
         tokenizer: TokenizerLike | None,
     ) -> None:
         self._validate_logprobs(model_config)
-        self._validate_stop_token_ids(model_config)
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
+        self._validate_stop_token_ids(model_config)
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
@@ -865,6 +865,11 @@ class SamplingParams(
         if not self.stop_token_ids:
             return
 
+        # stop_token_ids are used as column indices into the logits tensor,
+        # whose width is the model's vocab size (LogitsProcessor is built from
+        # config.vocab_size, InputBatch.vocab_size comes from
+        # model_config.get_vocab_size()), so use the same bound here — like
+        # _validate_logit_bias, which indexes the same tensor.
         vocab_size = model_config.get_vocab_size()
         invalid_token_ids = [
             token_id
