@@ -9,6 +9,8 @@ exercised through its CPU dispatch key.
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +49,7 @@ def _reset_ple_mmap_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "VLLM_PLE_MMAP_WORKERS",
         "VLLM_PLE_MMAP_CHUNK",
         "VLLM_PLE_MMAP_PREWARM",
+        "VLLM_PLE_MMAP_READAHEAD",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -502,6 +505,220 @@ def test_mmap_table_gather_empty_input_returns_empty(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Readahead pre-pass (VLLM_PLE_MMAP_READAHEAD)
+# --------------------------------------------------------------------------- #
+
+
+def _readahead_table(directory: Path, readahead: int) -> ple_mmap.MmapPleTable:
+    """A 40-row / 4-shard table over the fixture written by
+    _write_ple_layer(vocab=40, parts=4, cols=8): shard_size 10, so ids
+    0/5/12/13/14/20/31/39 land in four segments and coalesce to six runs.
+    """
+    layer_shards = ple_mmap.discover_shards(str(directory))[0]
+    return ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=2,
+        model_path=str(directory),
+        readahead=readahead,
+    )
+
+
+def _record_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, tuple[object, ...]]]:
+    """Capture logger.warning_once calls, keeping the (msg, args) dedup key
+    the real logger caches on.
+    """
+    recorded: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        ple_mmap.logger,
+        "warning_once",
+        lambda msg, *args: recorded.append((msg, args)),
+    )
+    return recorded
+
+
+def test_coalesce_runs_merges_only_abutting_spans() -> None:
+    # Rows 10/11/12 abut and become one run; row 40 stays its own.
+    offsets = np.array([1280, 1408, 1536, 5120], dtype=np.int64)
+
+    assert ple_mmap._coalesce_runs(offsets, 128) == [(1280, 384), (5120, 128)]
+
+
+def test_coalesce_runs_keeps_a_gapped_pair_as_two_runs() -> None:
+    """gap == 0 is the only merge rule. On a hash-scattered table, bridging
+    even a one-row gap fetches pages no row in the gather needs, which is the
+    exact I/O amplification the pre-pass exists to avoid.
+    """
+    offsets = np.array([0, 256], dtype=np.int64)
+
+    assert ple_mmap._coalesce_runs(offsets, 128) == [(0, 128), (256, 128)]
+
+
+def test_coalesce_runs_returns_no_runs_for_no_rows() -> None:
+    assert ple_mmap._coalesce_runs(np.empty(0, dtype=np.int64), 128) == []
+
+
+def test_gather_returns_identical_rows_with_readahead_on_and_off(
+    tmp_path: Path,
+) -> None:
+    """The pre-pass only hints the page cache, so it must not perturb a
+    single gathered byte — and the run count must reach _record either way,
+    since an on/off A/B reads it straight off the log line.
+    """
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    ids = np.array([0, 39, 12, 13, 14, 5, 5, 20, 31], dtype=np.int64)
+
+    gathered = []
+    for readahead in (0, 64):
+        table = _readahead_table(tmp_path, readahead)
+        gathered.append(torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn))
+        runs = table._latencies_ms[-1][3]
+        assert runs > 0 if readahead else runs == 0
+        table.close()
+
+    assert torch.equal(gathered[0], full[ids])
+    assert torch.equal(gathered[1], gathered[0])
+
+
+def test_readahead_bound_skips_the_pre_pass_but_still_reports_the_run_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A silent skip is indistinguishable from the feature being off, which
+    would void a tester's on/off comparison: the observed run count still
+    reaches _record, and the skip names both it and the knob.
+    """
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    table = _readahead_table(tmp_path, readahead=2)
+    advised: list[tuple[object, ...]] = []
+    monkeypatch.setattr(os, "posix_fadvise", lambda *args: advised.append(args))
+    warnings = _record_warnings(monkeypatch)
+
+    ids = np.array([0, 5, 12, 20, 31, 39], dtype=np.int64)
+    got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
+
+    assert torch.equal(got, full[ids])
+    assert advised == []
+    assert table._latencies_ms[-1][3] == 6
+    assert len(warnings) == 1
+    assert warnings[0][1] == (6, 2)
+
+
+def test_readahead_survives_an_oserror_from_every_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """posix_fadvise failing costs the readahead and nothing else: every run
+    is still attempted, the rows are still correct, and the failures share one
+    warning_once key so the real logger emits a single line.
+    """
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    table = _readahead_table(tmp_path, readahead=64)
+
+    def _raise(fd: int, offset: int, length: int, advice: int) -> None:
+        raise OSError(errno.EBADF, "Bad file descriptor")
+
+    monkeypatch.setattr(os, "posix_fadvise", _raise)
+    warnings = _record_warnings(monkeypatch)
+
+    ids = np.array([0, 5, 12, 20, 31, 39], dtype=np.int64)
+    got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
+
+    assert torch.equal(got, full[ids])
+    assert len(warnings) == 6
+    assert len(set(warnings)) == 1
+
+
+def test_gather_survives_a_pre_pass_that_raises_valueerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-pass never touches gathered data, so it is never the
+    correctness path: a bug anywhere inside it must cost the readahead rather
+    than fail the request.
+    """
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    table = _readahead_table(tmp_path, readahead=64)
+
+    def _raise(offsets: np.ndarray, row_bytes: int) -> list[tuple[int, int]]:
+        raise ValueError("synthetic pre-pass bug")
+
+    monkeypatch.setattr(ple_mmap, "_coalesce_runs", _raise)
+    warnings = _record_warnings(monkeypatch)
+
+    ids = np.array([0, 5, 12, 20, 31, 39], dtype=np.int64)
+    got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
+
+    assert torch.equal(got, full[ids])
+    assert warnings[0][1] == ("ValueError",)
+
+
+def test_readahead_holds_one_fd_per_distinct_shard_file(tmp_path: Path) -> None:
+    """Shards routinely share a safetensors file, so keying descriptors on
+    the path — not the shard slot — is what keeps a 128-shard layer from
+    holding 128 of them. close() must hand every one back.
+    """
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    full = _synthetic_weight(9, 2)
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.shard_0.weight": full[0:3],
+            f"{prefix}.shard_1.weight": full[3:6],
+            f"{prefix}.shard_2.weight": full[6:9],
+            f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16),
+        },
+        str(tmp_path / "model-ple-0-00000.safetensors"),
+    )
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        3,
+        2,
+        torch.float8_e4m3fn,
+        workers=1,
+        chunk=8,
+        model_path=str(tmp_path),
+        readahead=64,
+    )
+
+    assert len(table._fds) == 1
+    assert len(set(table._shard_fds)) == 1
+    ids = np.array([0, 4, 8], dtype=np.int64)
+    got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
+    assert torch.equal(got, full[ids])
+
+    (fd,) = table._fds.values()
+    table.close()
+
+    assert not table._fds
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
+def test_readahead_defaults_to_off_and_opens_no_fds(tmp_path: Path) -> None:
+    """Default-off is the whole shape of this knob: while decode perf is
+    under dispute the pre-pass is an opt-in instrument, not a new cost every
+    gather pays.
+    """
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    table = ple_mmap.MmapPleTable(
+        ple_mmap.discover_shards(str(tmp_path))[0].shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=2,
+        model_path=str(tmp_path),
+    )
+
+    assert envs.VLLM_PLE_MMAP_READAHEAD == 0
+    assert table.readahead == 0
+    assert table._fds == {}
+
+
+# --------------------------------------------------------------------------- #
 # Bounded prewarm
 # --------------------------------------------------------------------------- #
 
@@ -943,6 +1160,9 @@ def test_ple_mmap_tuning_knobs_are_not_compile_factors() -> None:
     assert "VLLM_PLE_MMAP_WORKERS" not in factors
     assert "VLLM_PLE_MMAP_CHUNK" not in factors
     assert "VLLM_PLE_MMAP_PREWARM" not in factors
+    # An unlisted var becomes a torch.compile cache key, so toggling the
+    # readahead knob would force a recompile and poison its own A/B.
+    assert "VLLM_PLE_MMAP_READAHEAD" not in factors
 
 
 # --------------------------------------------------------------------------- #
@@ -1111,12 +1331,13 @@ def _model_config(directory: Path) -> SimpleNamespace:
 def test_build_tables_wires_the_tuning_knobs_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """VLLM_PLE_MMAP_WORKERS/_CHUNK must reach the attached
-    MmapPleTable's workers/chunk in the right order — a swapped-args
-    regression would still construct a table, just with the wrong
-    concurrency knobs, and nothing else would notice."""
+    """VLLM_PLE_MMAP_WORKERS/_CHUNK/_READAHEAD must reach the attached
+    MmapPleTable's workers/chunk/readahead in the right order — a
+    swapped-args regression would still construct a table, just with the
+    wrong concurrency knobs, and nothing else would notice."""
     monkeypatch.setenv("VLLM_PLE_MMAP_WORKERS", "3")
     monkeypatch.setenv("VLLM_PLE_MMAP_CHUNK", "7")
+    monkeypatch.setenv("VLLM_PLE_MMAP_READAHEAD", "11")
     _write_ple_layer(tmp_path, layer_idx=0, vocab=10, parts=3, cols=2, scale=0.25)
     emb = _loaded_placeholder(10, 2, 0.25)
     cc = SimpleNamespace(static_forward_context={"a.ple": _fake_ple_layer(0, emb, 3)})
@@ -1126,6 +1347,7 @@ def test_build_tables_wires_the_tuning_knobs_from_the_environment(
     assert emb.table is not None
     assert emb.table.workers == 3
     assert emb.table.chunk == 7
+    assert emb.table.readahead == 11
 
 
 def test_build_tables_attaches_a_table_per_ple_layer_without_cross_contamination(
