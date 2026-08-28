@@ -147,6 +147,11 @@ class ParserEngine(Parser):
             self._reasoning_start_token_id = vocab.get(start_text)
         if end_text:
             self._reasoning_end_token_id = vocab.get(end_text)
+        self._turn_boundary_token_ids: frozenset[int] = frozenset(
+            token_id
+            for token in parser_engine_config.turn_boundary_tokens
+            if (token_id := vocab.get(token)) is not None
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -396,6 +401,9 @@ class ParserEngine(Parser):
             return True
         return find_tool_name(self._tools, name)
 
+    def _accept_tool_name(self, name: str) -> bool:
+        return bool(name) and self._is_valid_tool_name(name)
+
     # ── Private helpers ─────────────────────────────────────────────
 
     def _check_skip_tool_parsing(
@@ -598,11 +606,17 @@ class ParserEngine(Parser):
         if end_id is not None:
             if not input_ids:
                 return self.parser_engine_config.initial_state != ParserState.REASONING
+            boundary_ids = self._turn_boundary_token_ids
             for i in range(len(input_ids) - 1, -1, -1):
-                if input_ids[i] == end_id:
+                token_id = input_ids[i]
+                if token_id == end_id:
                     return True
-                if start_id is not None and input_ids[i] == start_id:
+                if start_id is not None and token_id == start_id:
                     return False
+                if token_id in boundary_ids:
+                    return (
+                        self.parser_engine_config.initial_state != ParserState.REASONING
+                    )
             return False
         return self._reasoning_ended
 
@@ -622,23 +636,8 @@ class ParserEngine(Parser):
         return None
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        start_id = self._reasoning_start_token_id
-        end_id = self._reasoning_end_token_id
-        if start_id is None or end_id is None:
-            return 0
-        count = 0
-        depth = 0
-        for token_id in token_ids:
-            if token_id == start_id:
-                depth += 1
-                continue
-            if token_id == end_id:
-                if depth > 0:
-                    depth -= 1
-                continue
-            if depth > 0:
-                count += 1
-        return count
+        """Return reasoning tokens observed by the parser engine so far."""
+        return self._engine.reasoning_token_count
 
     # ── Single-pass parse helper ────────────────────────────────────────
 
@@ -807,7 +806,7 @@ class ParserEngine(Parser):
         deltas: list[DeltaToolCall],
         name: str | None,
     ) -> None:
-        if not name or not self._is_valid_tool_name(name):
+        if name is None or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
         slot.name = name
@@ -866,8 +865,8 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
-            name = slot.name or self._try_extract_name(idx)
-            if name and self._is_valid_tool_name(name):
+            name = slot.name or self._try_extract_name(idx) or ""
+            if self._accept_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
@@ -1042,7 +1041,7 @@ class ParserEngine(Parser):
             else:
                 args_json = "{}"
 
-            if name and self._is_valid_tool_name(name):
+            if self._accept_tool_name(name):
                 self._ensure_tool_id(slot, name)
                 args_json = self._fix_arg_types(args_json, name)
                 tool_calls.append(

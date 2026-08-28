@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from cutlass import Constexpr, Float32, Uint32, cute
+from cutlass import BFloat16, Constexpr, Float32, Uint16, Uint32, cute
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -38,6 +38,11 @@ def bf16x2_to_fp32x2(data, *, loc=None, ip=None) -> tuple[Float32, Float32]:
         )
 
     elif isinstance(data, (cute.Tensor, cute.TensorSSA)):
+        # recast to 32-bit registers if needed
+        if data.element_type == BFloat16:
+            data = cute.recast_tensor(data, Uint32)
+        assert data.element_type == Uint32
+
         # NOTE: the output is always 1D
         size = cute.size(data.shape)
         out = cute.make_rmem_tensor(size * 2, Float32)
@@ -82,6 +87,22 @@ def fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
         ip=ip,
     )
     return cute.TensorSSA(vec, 2, Uint32)
+
+
+@dsl_user_op
+def fp32x2_to_fp8x2(a0: Float32, a1: Float32, *, loc=None, ip=None) -> Uint16:
+    out = llvm.inline_asm(
+        T.i16(),
+        [
+            a0.ir_value(loc=loc, ip=ip),
+            a1.ir_value(loc=loc, ip=ip),
+        ],
+        "cvt.rn.satfinite.e4m3x2.f32 $0, $2, $1;",
+        "=h,f,f",
+        has_side_effects=False,
+        is_align_stack=False,
+    )
+    return Uint16(out)
 
 
 @dsl_user_op

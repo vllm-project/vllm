@@ -73,6 +73,20 @@ class MLAPrefillBackend(ABC):
         pass. Overridden by backends that support it."""
         return False
 
+    def supports_out(self) -> bool:
+        """Whether `run_prefill_new_tokens` and `run_prefill_context_chunk` honor
+        a caller-provided `out` tensor of shape
+        `[num_tokens, num_heads, v_head_dim]`, writing the result into it in place
+        and returning it.
+
+        When True, callers may pass `out` and skip the post-hoc
+        slice/flatten/copy -- and, for context chunks, size the accumulating
+        partial before running any chunk. False for backends that ignore `out` or
+        emit a padded (`qk_head_dim`) output. Overridden by backends that support
+        it.
+        """
+        return False
+
     @classmethod
     def validate_configuration(
         cls,
@@ -164,9 +178,10 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

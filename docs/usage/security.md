@@ -85,16 +85,19 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
-### 5. **Restrict Media Decode Sizes:**
+### 5. **Restrict Media Download and Decode Sizes:**
 
-Compressed media files can expand into gigabytes of memory during decoding. vLLM
-enforces decode-size limits to prevent out-of-memory denial of service:
+Remote media responses and compressed media files can expand into gigabytes of
+memory. vLLM enforces download and decode-size limits to prevent out-of-memory
+denial of service:
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
+| `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | Maximum size in MB for a single remote media response. Oversized responses are rejected while streaming before the full body is materialized in memory. |
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
-| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
+| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
+| `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
@@ -344,7 +347,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -353,8 +356,9 @@ vLLM provides an optional gRPC Generate service on a separate TCP port, enabled 
 An attacker who can reach the gRPC port can:
 
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
-2. **Consume GPU and compute resources** by submitting unbounded generation requests
-3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
+3. **Consume GPU and compute resources** by submitting unbounded generation requests
+4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
 
 ### Recommendations
 
@@ -396,7 +400,7 @@ FIPS compliance depends on many factors, so a vLLM deployment is not automatical
 
 Operators running vLLM on FIPS-enabled hosts should select FIPS-approved algorithms via the following knobs:
 
-- **Multimodal input hashing** — `VLLM_MM_HASHER_ALGORITHM` defaults to `blake3`, which is not FIPS-approved. Set it to `sha256` or `sha512` in FIPS-enabled environments.
+- **Multimodal input hashing** — `--mm-hasher-algorithm` (config field `mm_hasher_algorithm`) defaults to `blake3`, which is not FIPS-approved. Set it to `sha256` or `sha512` in FIPS-enabled environments.
 - **Prefix-cache hashing** — set `--prefix-caching-hash-algo` (config field `prefix_caching_hash_algo`) to `sha256` or `sha256_cbor`. The `xxhash` and `xxhash_cbor` options are not FIPS-approved.
 - **TLS ciphers** — use `--ssl-ciphers` to restrict the API server's TLS handshake to FIPS-approved cipher suites that match your environment's policy.
 
@@ -408,7 +412,13 @@ vLLM uses MD5 in a few places to derive non-security cache keys (for example, co
 
 Some dependencies expose hash implementations that are not FIPS-approved. vLLM only invokes them when the corresponding algorithm is selected, but operators with strict cryptographic controls may want to ensure the code paths are not exercised — and, where policy requires, that the packages themselves are absent:
 
-- `blake3` — currently listed in `requirements/common.txt`, so a standard install pulls it in. It is imported lazily and only used when `VLLM_MM_HASHER_ALGORITHM=blake3` (the default). Setting `VLLM_MM_HASHER_ALGORITHM` to `sha256` or `sha512` is sufficient to keep the non-FIPS code path dormant. If your policy additionally forbids the package being present, uninstall it after `pip install` (`pip uninstall blake3`); vLLM will continue to function as long as `VLLM_MM_HASHER_ALGORITHM` is set to a non-blake3 value.
+- `blake3` — currently listed in `requirements/common.txt`, so a standard
+  install pulls it in. It is imported lazily and only used when
+  `mm_hasher_algorithm=blake3` (the default). Setting
+  `--mm-hasher-algorithm sha256` or `--mm-hasher-algorithm sha512` is sufficient
+  to keep the non-FIPS code path dormant. If your policy additionally forbids
+  the package being present, uninstall it after installation; vLLM will
+  continue to function as long as a non-blake3 algorithm is selected.
 - `xxhash` — a true optional dependency (not in `requirements/common.txt`). It is only imported when an `xxhash`-based prefix-cache algorithm is selected. Leave it uninstalled and select a `sha256`-based prefix-cache algorithm.
 
 ### Beyond hashing: other FIPS considerations
@@ -424,6 +434,189 @@ Hashing is the area where vLLM has explicit FIPS-aware code, but a FIPS-complian
 - **What is *not* a FIPS concern in vLLM.** Random number generation used for token sampling (Python/NumPy/PyTorch RNGs) is not a cryptographic use and is out of scope for FIPS. Pickled cache artifacts are a separate security concern covered under [Cache Directory Security](#cache-directory-security).
 
 In short: the configuration knobs above let vLLM avoid non-approved algorithms, and the automatic fallbacks let it run without crashing on FIPS-enabled hosts. End-to-end FIPS compliance, however, is a property of the full deployment — host OS, crypto provider, transitive dependencies, and network architecture — not of vLLM alone.
+
+## Ray Cluster Trust Model and Environment Variable Propagation
+
+### Trust Assumption
+
+vLLM treats the entire Ray cluster as a single trust domain. Any principal
+with the ability to execute code within the Ray cluster (e.g. submit actors
+or tasks) is considered to have the same level of trust as the driver/API
+server process. This means that vLLM does **not** attempt to isolate
+driver-side credentials from worker-side processes within the same Ray
+cluster.
+
+This assumption is consistent with
+[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+which states that any user who can connect to a Ray cluster can run arbitrary
+code on any node in that cluster. In other words, Ray cluster access already
+implies full code execution on worker nodes, so restricting environment
+variable propagation alone would not constitute a meaningful security
+boundary.
+
+### Driver-to-Worker Environment Variable Propagation
+
+When using `RayExecutorV2` in multi-node deployments, vLLM propagates
+environment variables from the driver process to remote Ray workers so that
+workers have the configuration they need to function correctly (e.g. vLLM
+settings, NCCL tuning, Hugging Face tokens for gated model downloads).
+
+The propagation uses a **copy-all-except-denylist** policy via
+`get_driver_env_vars()` in `vllm/v1/executor/ray_env_utils.py`: every
+environment variable present in the driver's `os.environ` is sent to
+workers, except for a small set of worker-specific variables and any
+names the operator has explicitly excluded.
+
+On the worker side, propagated variables are applied with `setdefault`
+semantics — they fill in missing variables but never overwrite values
+already present in the worker's environment.
+
+### When This Matters
+
+In deployments where operators intentionally scope credentials (such as
+`HF_TOKEN`, cloud storage keys, registry tokens, or internal service
+tokens) to the driver/API server alone — for example, when GPU workers
+run in a different node, pod, or trust domain — the default propagation
+behavior will copy those credentials into worker environments. A process
+running on a worker node under the same OS user may then be able to read
+those credentials (e.g. via `/proc/<pid>/environ` on Linux).
+
+If your deployment treats Ray workers as less trusted than the driver, be
+aware that environment-variable isolation is **not** enforced by default.
+
+### Hardening Recommendations
+
+Operators who want to limit which environment variables are propagated to
+Ray workers can use the following mechanisms:
+
+#### 1. Denylist via Configuration File
+
+Create a JSON file at `$VLLM_CONFIG_ROOT/ray_non_carry_over_env_vars.json`
+(default: `~/.config/vllm/ray_non_carry_over_env_vars.json`) containing an
+array of environment variable names to exclude from propagation:
+
+```json
+[
+  "HF_TOKEN",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AZURE_CLIENT_SECRET",
+  "REGISTRY_TOKEN",
+  "MY_INTERNAL_SERVICE_KEY"
+]
+```
+
+Any variable listed here will **not** be copied from the driver to workers.
+
+#### 2. Minimize Driver Environment
+
+Rather than setting credentials in the driver's shell environment, inject
+them through a secrets manager, a mounted file, or a short-lived
+subprocess so that they are not present in `os.environ` when vLLM starts.
+
+#### 3. Network and Process Isolation
+
+- Restrict `procfs` visibility on worker nodes (e.g. mount `/proc` with
+  `hidepid=2` or use a container runtime that isolates `/proc` between
+  pods) so that same-UID processes cannot read each other's
+  `/proc/<pid>/environ`.
+- Run the driver and workers under different OS users or in separate
+  containers with non-overlapping UIDs.
+
+#### 4. Limit Ray Cluster Access
+
+Because Ray cluster access is equivalent to arbitrary code execution,
+ensure that only trusted principals can submit work to the cluster:
+
+- Use Ray's TLS authentication to restrict cluster membership.
+- Place the Ray cluster on an isolated network segment.
+- Do not expose the Ray client port or dashboard to untrusted networks.
+
+## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
+
+### Background
+
+Prefix caching reuses KV cache blocks across requests that share a common prompt prefix. In multi-tenant deployments, that reuse is a timing side channel ([CVE-2025-46570](https://github.com/vllm-project/vllm/security/advisories/GHSA-4qjh-9fv9-r85r)).
+
+An attacker sharing the same backend can measure differences in Time to First Token (TTFT) to infer whether a guessed prompt prefix matches another user's cached prompt: when the prefix is already cached, prefill is faster. Research has shown this signal is nearly perfectly distinguishable (ROC AUC of 0.99) at prefix lengths of just 8 tokens. See [Leaking Secrets from Prefix Caches](https://arxiv.org/html/2411.18191v1) for details.
+
+### Cache Salting
+
+vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
+
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+
+#### Usage with the OpenAI Python client
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={
+        "cache_salt": "per-user-or-per-tenant-secret",
+    },
+)
+```
+
+#### Usage with a raw request
+
+```json
+{
+  "model": "meta-llama/Llama-3-8b",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "cache_salt": "per-user-or-per-tenant-secret"
+}
+```
+
+### How to choose a salt value
+
+Treat the salt as a secret. An attacker who can guess or obtain the salt used by another tenant can still mount the timing attack against that tenant, so use random values that are long enough to be unpredictable (e.g. 43 base64 characters, 256 bits) rather than predictable identifiers such as a user name or account ID.
+
+Scope the salt to the isolation boundary you need:
+
+- **Per-user isolation**: A unique random salt per user prevents any cross-user cache inference.
+- **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
+- **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
+- **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
+- Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
+
+## Multimodal Media UUID Security
+
+### Background
+
+Multimodal content parts (`image_url`, `input_audio`, `video`, `image_embeds`, `audio_embeds`, `vision_chunk`) accept an optional `uuid` field. When provided, vLLM uses this value as the cache identity for the media item instead of hashing the raw media bytes. This avoids re-hashing large media payloads on repeated requests and is the primary mechanism for client-side cache control of multimodal inputs.
+
+### Client Responsibility
+
+**It is the client's responsibility to generate UUIDs that cannot be guessed by others.** Use cryptographically random values — for example, UUIDv4 via Python's `uuid.uuid4()` — rather than sequential counters, short strings, or predictable identifiers such as filenames or user IDs.
+
+### Multi-Tenant Risk
+
+In multi-tenant deployments where multiple callers share the same vLLM server, two callers who present the same `uuid` for different media will share a single cache entry. The media from whichever request arrives first is served to both, which means:
+
+- **Integrity**: A later caller's media is silently discarded and replaced by the earlier caller's cached output.
+- **Confidentiality**: A caller who deliberately reuses another caller's UUID receives output derived from that caller's media.
+
+This applies to the multimodal processor cache, the encoder output cache, and the prefix cache block hashes. Clients must ensure UUID uniqueness across all callers on the same server.
+
+### Extra Protection with `cache_salt`
+
+For additional cross-tenant isolation, set `cache_salt` on each request (see [Prefix Cache Timing Side-Channel Mitigation](#prefix-cache-timing-side-channel-mitigation-cache-salting) above). The salt is mixed into the prefix cache block hashes, so requests with different salts cannot share cached prefix blocks even if UUIDs collide.
+
+`cache_salt` is opt-in and not passed by default.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
+- **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
+- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
 
 ## Reporting Security Vulnerabilities
 

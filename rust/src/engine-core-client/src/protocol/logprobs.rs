@@ -209,19 +209,20 @@ impl WireLogprobs {
             logprob_token_ids: WireNdArray {
                 dtype: "<i8".to_string(),
                 shape: vec![rows, cols],
-                data: WireArrayData::RawView(token_ids),
+                data: WireArrayData::RawView(token_ids.into()),
             },
             logprobs: WireNdArray {
                 dtype: "<f4".to_string(),
                 shape: vec![rows, cols],
-                data: WireArrayData::RawView(logprobs),
+                data: WireArrayData::RawView(logprobs.into()),
             },
             token_ranks: WireNdArray {
                 dtype: "<i8".to_string(),
                 shape: vec![rows],
-                data: WireArrayData::RawView(token_ranks),
+                data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
+            cu_num_generated_tokens_tensor: None,
         })
     }
 
@@ -236,6 +237,15 @@ impl WireLogprobs {
             bail_ext_value_decode!(
                 "{field_prefix}.cu_num_generated_tokens: \
                  expected None for per-request engine-core logprobs payload, got {indices:?}"
+            );
+        }
+
+        // Unlike the sibling check above, don't Debug-print the payload:
+        // an opaque non-None value here may embed a full tensor blob.
+        if self.cu_num_generated_tokens_tensor.is_some() {
+            bail_ext_value_decode!(
+                "{field_prefix}.cu_num_generated_tokens_tensor: \
+                 expected None for per-request engine-core logprobs payload"
             );
         }
 
@@ -265,6 +275,19 @@ impl WireLogprobs {
             bail_ext_value_decode!(
                 "{field_prefix}: token_ranks length {} does not match row count {}",
                 token_ranks.len(),
+                token_ids.rows
+            );
+        }
+
+        // Empty position lists may be encoded as either [0, 0] or [0, k + 1].
+        if token_ids.rows == 0 {
+            return Ok(Logprobs {
+                positions: Vec::new(),
+            });
+        }
+        if token_ids.cols == 0 {
+            bail_ext_value_decode!(
+                "{field_prefix}: zero-column logprobs payload with {} rows",
                 token_ids.rows
             );
         }

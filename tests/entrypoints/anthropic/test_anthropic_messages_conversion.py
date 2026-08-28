@@ -3,7 +3,7 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
@@ -13,10 +13,18 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
+from argparse import Namespace
+from http import HTTPStatus
+from typing import Annotated
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field, ValidationError
 
+from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
@@ -38,8 +46,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
+    validation_exception_handler,
+)
+from vllm.exceptions import VLLMValidationError
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
@@ -167,6 +179,56 @@ class TestImageContentBlocks:
         assert parts[1] == {
             "type": "image_url",
             "image_url": {"url": "https://example.com/cat.png"},
+        }
+
+
+# ======================================================================
+# vllm_xargs pass-through
+# ======================================================================
+
+
+class TestVllmXargs:
+    def test_vllm_xargs_passed_through(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": 7,
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.vllm_xargs == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": 7,
+        }
+
+    def test_vllm_xargs_reaches_sampling_params_with_kv_transfer(self):
+        kv_transfer_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": "kept",
+            },
+            kv_transfer_params=kv_transfer_params,
+        )
+
+        converted = _convert(request)
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert converted.kv_transfer_params == kv_transfer_params
+        assert sampling_params.extra_args == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": "kept",
+            "kv_transfer_params": kv_transfer_params,
         }
 
 
@@ -963,6 +1025,7 @@ def _make_stream_chunk(
     *,
     delta: DeltaMessage | None = None,
     finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
     choices: list[ChatCompletionResponseStreamChoice] | None = None,
     usage: UsageInfo | None = None,
 ) -> str:
@@ -972,6 +1035,7 @@ def _make_stream_chunk(
                 index=0,
                 delta=delta or DeltaMessage(),
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
             )
         ]
     chunk = ChatCompletionStreamResponse(
@@ -1385,3 +1449,256 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+# ======================================================================
+# cache_salt pass-through (Issue #46688)
+# ======================================================================
+
+
+class TestCacheSalt:
+    def test_cache_salt_passed_through(self):
+        """cache_salt on the Anthropic request reaches the converted
+        ChatCompletionRequest so prefix-cache isolation works via /v1/messages."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            cache_salt="tenant-abc-secret-salt",
+        )
+        result = _convert(request)
+        assert result.cache_salt == "tenant-abc-secret-salt"
+
+    def test_cache_salt_defaults_to_none(self):
+        """Omitting cache_salt leaves it unset (unchanged default behavior)."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+        result = _convert(request)
+        assert result.cache_salt is None
+
+    @staticmethod
+    def _make_api_app():
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = AssertionError(
+            "invalid requests must not reach the serving handler"
+        )
+        app.state.anthropic_serving_messages = handler
+        return app, handler
+
+    def test_cache_salt_openapi_requires_non_empty_string(self):
+        app, _ = self._make_api_app()
+        field_schema = app.openapi()["components"]["schemas"][
+            "AnthropicMessagesRequest"
+        ]["properties"]["cache_salt"]
+        string_schema = next(
+            option for option in field_schema["anyOf"] if option.get("type") == "string"
+        )
+
+        assert string_schema["minLength"] == 1
+
+    def test_empty_cache_salt_returns_bad_request(self):
+        app, handler = self._make_api_app()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "cache_salt": "",
+                },
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        handler.create_messages.assert_not_awaited()
+
+
+class TestStopSequenceReason:
+    """When generation stops because a configured stop string matched, the
+    Anthropic Messages API must report ``stop_reason="stop_sequence"`` and echo
+    the matched string in ``stop_sequence``. vLLM surfaces the matched string in
+    the OpenAI choice's ``stop_reason`` field (a str) while ``finish_reason``
+    stays ``"stop"``. A natural EOS (stop_reason None) or a stop token id (int)
+    must still map to ``end_turn``.
+    """
+
+    def test_non_streaming_stop_string_maps_to_stop_sequence(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason="</tool>",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "stop_sequence"
+        assert result.stop_sequence == "</tool>"
+
+    def test_non_streaming_natural_eos_maps_to_end_turn(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "end_turn"
+        assert result.stop_sequence is None
+
+    def test_non_streaming_stop_token_id_maps_to_end_turn(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason=128009,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "end_turn"
+        assert result.stop_sequence is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_stop_string_maps_to_stop_sequence(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="hi"),
+                usage=UsageInfo(prompt_tokens=5, total_tokens=5, completion_tokens=0),
+            )
+            yield _make_stream_chunk(finish_reason="stop", stop_reason="</tool>")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
+        assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
+
+
+# ======================================================================
+# Client-caused errors are 4xx, not 500 (Issue #52088)
+# ======================================================================
+
+
+class TestClientErrorResponses:
+    @staticmethod
+    def _make_api_app(handler: MagicMock):
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+        app.state.anthropic_serving_messages = handler
+        return app
+
+    @staticmethod
+    def _request_body() -> dict:
+        return {
+            "model": "test-model",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+    @staticmethod
+    def _conversion_error() -> ValidationError:
+        """A real pydantic ValidationError like the one ChatCompletionRequest
+        construction raises when Anthropic input violates the OpenAI schema."""
+
+        class _StubRequest(BaseModel):
+            stop: Annotated[list[str], Field(max_length=4)] | None = None
+
+        with pytest.raises(ValidationError) as exc_info:
+            _StubRequest(stop=["a"] * 6)
+        return exc_info.value
+
+    def test_validation_error_returns_bad_request(self):
+        """A pydantic ValidationError during Anthropic->OpenAI conversion is
+        surfaced as a 400 BadRequestError, not a 500."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = self._conversion_error()
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "BadRequestError"
+        assert "at most 4 items" in body["error"]["message"]
+
+    def test_vllm_client_error_returns_bad_request(self):
+        """VLLMClientError raised by the serving layer maps to 400."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = VLLMValidationError(
+            "Invalid value for stop", parameter="stop"
+        )
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert response.json()["error"]["type"] == "BadRequestError"
+
+    def test_generic_error_still_returns_internal_server_error(self):
+        """Non-client errors keep the existing 500 behaviour."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = RuntimeError("boom")
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json()["error"]["type"] == "InternalServerError"
+
+    def test_count_tokens_validation_error_returns_bad_request(self):
+        """The count_tokens route maps conversion errors to 400 as well."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.count_tokens.side_effect = self._conversion_error()
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages/count_tokens", json=self._request_body()
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert response.json()["error"]["type"] == "BadRequestError"
