@@ -548,9 +548,7 @@ class DINOv3ViTAttention(nn.Module):
         num_prefix_tokens: int,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split(
-            (self.num_heads_per_partition * self.head_dim,) * 3, dim=-1
-        )
+        q, k, v = qkv.split((self.num_heads_per_partition * self.head_dim,) * 3, dim=-1)
         batch, seq = q.shape[:2]
         q = q.view(batch, seq, self.num_heads_per_partition, self.head_dim)
         k = k.view(batch, seq, self.num_heads_per_partition, self.head_dim)

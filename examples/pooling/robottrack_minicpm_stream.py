@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniCPM-RobotTrack stateful single-frame sliding window.
 
 The client sends a 32-frame window once to establish a stream, then sends one
@@ -7,12 +8,11 @@ rolling window (``stream_id``) so the per-request payload drops from 32 frames
 to 1 frame.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 .venv/bin/python \
-        examples/pooling/robottrack_minicpm_stream.py \
-        --model /cache/zhanghao/model/MiniCPM-RobotTrack \
-        --dino /cache/zhanghao/model/dinov3-vits16-pretrain-lvd1689m \
-        --siglip /cache/zhanghao/model/siglip-so400m-patch14-384 \
-        --images track-image/0
+    python examples/pooling/robottrack_minicpm_stream.py \
+        --model openbmb/MiniCPM-RobotTrack \
+        --dino facebook/dinov3-vits16-pretrain-lvd1689m \
+        --siglip google/siglip-so400m-patch14-384 \
+        --images <directory of jpg frames>
 """
 
 import argparse
@@ -73,10 +73,10 @@ def main() -> None:
     # Establish: send the full 32-frame window once (this is the handshake).
     for path in paths[: HISTORY_FRAMES + 1]:
         window.append(Image.open(path).convert("RGB"))
-    torch_cuda_sync()
+    sync_accelerator()
     t0 = time.perf_counter()
     traj = embed(list(window), frame_index=HISTORY_FRAMES)
-    torch_cuda_sync()
+    sync_accelerator()
     print(
         f"establish(32 frames): {(time.perf_counter() - t0) * 1e3:.1f}ms  "
         f"traj[:4]={np.round(traj[:4], 3)}"
@@ -87,10 +87,10 @@ def main() -> None:
     for frame_index in range(HISTORY_FRAMES + 1, len(paths)):
         window.append(Image.open(paths[frame_index]).convert("RGB"))
         frames = [np.asarray(window[-1])]  # only the new frame crosses the wire
-        torch_cuda_sync()
+        sync_accelerator()
         t0 = time.perf_counter()
         traj = embed(frames, frame_index=frame_index)
-        torch_cuda_sync()
+        sync_accelerator()
         times.append((time.perf_counter() - t0) * 1e3)
 
     warm = times[10:]
@@ -100,10 +100,10 @@ def main() -> None:
     )
 
 
-def torch_cuda_sync():
+def sync_accelerator():
     import torch
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 if __name__ == "__main__":

@@ -58,9 +58,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MedusaConfig": "vllm.transformers_utils.configs.medusa",
     "MellumConfig": "vllm.transformers_utils.configs.mellum",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
-    "MiniCPMRobotTrackConfig": (
-        "vllm.transformers_utils.configs.minicpm_robottrack"
-    ),
+    "MiniCPMRobotTrackConfig": ("vllm.transformers_utils.configs.minicpm_robottrack"),
     "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3TextConfig": "vllm.transformers_utils.configs.minimax_m3",
