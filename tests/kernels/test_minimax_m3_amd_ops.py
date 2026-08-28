@@ -525,3 +525,200 @@ def test_routed_experts_expert_map_delegates_to_kernel():
     assert torch.equal(resolve(True), mask)  # AITER kernel -> 0/1 mask
     assert torch.equal(resolve(False), canonical)  # non-AITER -> canonical map
     assert torch.equal(resolve(False, has_moe_kernel=False), canonical)  # non-modular
+
+
+# --------------------------------------------------------------------------- #
+# Block-sparse GQA prefill attend (union path + locality-guard fallback)
+# --------------------------------------------------------------------------- #
+def _sparse_attn_case(q_lens, prefix_lens, topk, union_target, fp8, seed=0):
+    """Paged inputs for the prefill attend, with tunable top-k locality.
+
+    ``union_target`` bounds the pool neighbouring query tokens draw from, so it
+    sets how many distinct blocks a group of consecutive tokens selects and hence
+    which side of the locality guard the group lands on. It must be at least
+    ``topk``: the generic kernel derives its per-token block count from the query
+    position rather than the -1 sentinel, so every row has to stay filled to
+    ``min(topk, causally available)`` for it to be a valid reference.
+    """
+    from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
+
+    assert union_target >= topk
+    torch.manual_seed(seed)
+    num_kv_heads, gqa, head_dim = 1, 16, 128
+    batch = len(q_lens)
+    seq_lens = [p + q for p, q in zip(prefix_lens, q_lens)]
+    pages = [(s + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE for s in seq_lens]
+    num_pages = sum(pages)
+    # Non-identity page order, so a kernel that confuses logical block ids with
+    # physical pages cannot pass.
+    physical = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32)
+    block_table = torch.zeros(batch, max(pages), device=DEVICE, dtype=torch.int32)
+    base = 0
+    for r, n in enumerate(pages):
+        block_table[r, :n] = physical[base : base + n]
+        base += n
+
+    total_q = sum(q_lens)
+    q = torch.randn(
+        total_q, num_kv_heads * gqa, head_dim, device=DEVICE, dtype=torch.bfloat16
+    )
+    kv = torch.randn(
+        num_pages,
+        num_kv_heads,
+        SPARSE_BLOCK_SIZE,
+        2 * head_dim,
+        device=DEVICE,
+        dtype=torch.bfloat16,
+    )
+    if fp8:
+        kv = kv.to(current_platform.fp8_dtype())
+
+    cu_seqlens_q = torch.zeros(batch + 1, device=DEVICE, dtype=torch.int32)
+    cu_seqlens_q[1:] = torch.tensor(q_lens, device=DEVICE, dtype=torch.int32).cumsum(0)
+
+    topk_idx = torch.full(
+        (num_kv_heads, total_q, topk), -1, device=DEVICE, dtype=torch.int32
+    )
+    qs = 0
+    for q_len, prefix_len in zip(q_lens, prefix_lens):
+        for g0 in range(0, q_len, 4):
+            # Pool drawn strictly below the group's earliest current block, so
+            # adding each token's own current block stays causal for all of them.
+            pool_hi = (prefix_len + g0) // SPARSE_BLOCK_SIZE
+            pool = torch.randperm(pool_hi, device=DEVICE, dtype=torch.int32)
+            pool = pool[: max(union_target - 1, 1)]
+            for tok in range(g0, min(g0 + 4, q_len)):
+                cur = (prefix_len + tok) // SPARSE_BLOCK_SIZE
+                sel = torch.tensor([cur], device=DEVICE, dtype=torch.int32)
+                if pool_hi:
+                    perm = torch.randperm(pool.numel(), device=DEVICE)
+                    sel = torch.cat([sel, pool[perm][: topk - 1]])
+                topk_idx[:, qs + tok, : sel.numel()] = sel
+        qs += q_len
+
+    return (
+        q,
+        kv,
+        topk_idx,
+        block_table,
+        cu_seqlens_q,
+        torch.tensor(seq_lens, device=DEVICE, dtype=torch.int32),
+        torch.tensor(prefix_lens, device=DEVICE, dtype=torch.int32),
+        max(q_lens),
+        num_kv_heads,
+        head_dim**-0.5,
+    )
+
+
+def _run_sparse_attn(fn, args):
+    q = args[0]
+    # NaN-filled, so any query row the kernel fails to write is caught rather
+    # than silently reading as a plausible value.
+    out = torch.full_like(q, float("nan"))
+    kv = args[1]
+    scales = {}
+    if kv.dtype not in (torch.bfloat16, torch.float16):
+        one = torch.ones((), device=DEVICE, dtype=torch.float32)
+        scales = {"k_scale": one, "v_scale": one}
+    fn(*args, out, **scales)
+    return out
+
+
+def _union_sizes(topk_idx, cu_seqlens_q, group_q):
+    """Distinct blocks per group of `group_q` consecutive tokens, host side."""
+    cu = cu_seqlens_q.tolist()
+    sizes = []
+    for b in range(len(cu) - 1):
+        req = topk_idx[0, cu[b] : cu[b + 1]]
+        for g in range(0, req.shape[0], group_q):
+            grp = req[g : g + group_q]
+            sizes.append(int(torch.unique(grp[grp >= 0]).numel()))
+    return sizes
+
+
+# Geometries: one single-request, one ragged batch whose requests have unaligned
+# q_start and tails that are not a multiple of the group size. The ragged one is
+# what exercises the two kernels agreeing on a union-buffer row.
+SPARSE_GEOMETRIES = [
+    ((512,), (8192,), 16),
+    ((131, 17, 4), (1024, 0, 4096), 16),
+]
+
+
+@requires_gfx950
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("route", ["union", "fallback", "mixed"])
+@pytest.mark.parametrize(("q_lens", "prefix_lens", "topk"), SPARSE_GEOMETRIES)
+@torch.inference_mode()
+def test_sparse_prefill_attend_matches_generic(
+    monkeypatch, q_lens, prefix_lens, topk, route, fp8
+):
+    """The gfx950 grouped attend agrees with the generic per-token kernel.
+
+    The guard threshold is forced rather than inferred from the top-k locality,
+    because which side a group lands on otherwise depends on the random pool and
+    is easy to lose silently. ``mixed`` additionally asserts that both kernels
+    really did write into the same output tensor.
+    """
+    from vllm.models.minimax_m3.amd.ops import sparse_attn as amd
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn as generic_sparse_attn,
+    )
+
+    args = _sparse_attn_case(q_lens, prefix_lens, topk, union_target=26, fp8=fp8)
+    sizes = _union_sizes(args[2], args[4], amd._SPARSE_ATTN_BLOCK_Q)
+    candidates = amd._SPARSE_ATTN_BLOCK_Q * topk
+    if route == "union":
+        frac = 1.0
+    elif route == "fallback":
+        frac = 0.0
+    else:
+        # Halfway through the observed spread, so neither side can be empty.
+        frac = ((min(sizes) + max(sizes)) // 2) / candidates
+    for name in (
+        "_SPARSE_ATTN_UNION_MAX_FRAC_FP8",
+        "_SPARSE_ATTN_UNION_MAX_FRAC_DEFAULT",
+    ):
+        monkeypatch.setattr(amd, name, frac)
+
+    union_max = int(candidates * frac)
+    on_union = sum(1 for s in sizes if s <= union_max)
+    if route == "union":
+        assert on_union == len(sizes)
+    elif route == "fallback":
+        assert on_union == 0
+    else:
+        assert 0 < on_union < len(sizes), f"routing not mixed: {on_union}/{len(sizes)}"
+
+    got = _run_sparse_attn(amd.minimax_m3_sparse_attn, args)
+    expected = _run_sparse_attn(generic_sparse_attn, args)
+
+    assert not got.isnan().any(), "query rows left unwritten by the attend"
+    # 2e-2 covers bf16 rounding: the union path accumulates the softmax
+    # normalizer linearly where the per-token path uses a log-space LSE.
+    torch.testing.assert_close(got, expected, rtol=2e-2, atol=2e-2)
+    rel = (got.float() - expected.float()).norm() / expected.float().norm()
+    assert rel < 5e-3, f"relative Frobenius error {rel:.2e} too large"
+
+
+@pytest.mark.parametrize("topk", [16, 64])
+@torch.inference_mode()
+def test_sparse_prefill_attend_group_size_one(monkeypatch, topk):
+    """Group size 1 is the off-switch and the non-gfx950 configuration.
+
+    Not gfx950-gated: every other ROCm arch runs this path. It must attend every
+    query whatever topk is, since the guard threshold scales with the candidate
+    count and no group may be dropped by both kernels.
+    """
+    from vllm.models.minimax_m3.amd.ops import sparse_attn as amd
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn as generic_sparse_attn,
+    )
+
+    monkeypatch.setattr(amd, "_SPARSE_ATTN_BLOCK_Q", 1)
+    args = _sparse_attn_case((256,), (16384,), topk, union_target=topk, fp8=False)
+    got = _run_sparse_attn(amd.minimax_m3_sparse_attn, args)
+    expected = _run_sparse_attn(generic_sparse_attn, args)
+
+    assert not got.isnan().any(), "query rows left unwritten by the attend"
+    torch.testing.assert_close(got, expected, rtol=2e-2, atol=2e-2)
