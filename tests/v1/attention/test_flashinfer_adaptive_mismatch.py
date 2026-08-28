@@ -17,8 +17,11 @@ from typing import Any
 import pytest
 import torch
 
-import vllm.v1.attention.backends.flashinfer as fi
+pytest.importorskip("flashinfer")
+
+import vllm.v1.attention.backends.flashinfer as fi  # noqa: E402
 from vllm.config import CUDAGraphMode, set_current_vllm_config
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferBackend,
     FlashInferDecodeKernel,
@@ -28,7 +31,6 @@ from vllm.v1.attention.backends.flashinfer import (
     _make_xqa_ragged_draft_block_mask,
     _trtllm_gen_varlen_decode_args,
 )
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 DEV = torch.device("cuda:0")
@@ -110,9 +112,7 @@ def test_classification_passes_device_truth():
     cpu = torch.tensor([0, 2, 4, 6, 6], dtype=torch.int32)
     saved_item, saved_tolist = torch.Tensor.item, torch.Tensor.tolist
     torch.Tensor.item = lambda self: (_ for _ in ()).throw(RuntimeError)
-    torch.Tensor.tolist = lambda self, *a, **k: (_ for _ in ()).throw(
-        RuntimeError
-    )
+    torch.Tensor.tolist = lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError)
     try:
         bound, q_cu = b._compute_decode_query_lens_mismatch(dev, cpu, 4, 6, 6)
     finally:
@@ -122,16 +122,114 @@ def test_classification_passes_device_truth():
     assert q_cu.data_ptr() == dev.data_ptr()
     # single-token fast path only when provable per request
     ones = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
-    assert b._compute_decode_query_lens_mismatch(
-        ones.to(DEV), ones, 3, 3, 3
-    ) == (1, None)
+    assert b._compute_decode_query_lens_mismatch(ones.to(DEV), ones, 3, 3, 3) == (
+        1,
+        None,
+    )
+
+
+def test_cudagraph_support_gates():
+    vc = _full_cfg()
+    with set_current_vllm_config(vc):
+        r = FlashInferMetadataBuilder.get_cudagraph_support(vc, _spec())
+        assert r.name == "VARLEN_DECODE" or r.name.startswith("UNIFORM")
+    vc = _full_cfg(adaptive=False)
+    with set_current_vllm_config(vc):
+        r = FlashInferMetadataBuilder.get_cudagraph_support(vc, _spec())
+        assert r.name != "VARLEN_DECODE"
+    vc = _full_cfg()
+    vc.attention_config.use_trtllm_attention = False
+    with set_current_vllm_config(vc):
+        r = FlashInferMetadataBuilder.get_cudagraph_support(vc, _spec())
+        assert r.name != "VARLEN_DECODE"
+
+
+def _full_cfg(adaptive: bool = True):
+    vc = _cfg(adaptive)
+    vc.model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        max_model_len=8192,
+        get_num_attention_heads=lambda pc: 32,
+        get_num_kv_heads=lambda pc: 8,
+    )
+    vc.compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.FULL,
+        max_cudagraph_capture_size=16,
+        static_forward_context={LAYER: _FakeLayer()},
+    )
+    vc.scheduler_config = SimpleNamespace(max_num_batched_tokens=512, max_num_seqs=4)
+    vc.cache_config = SimpleNamespace(cache_dtype="auto")
+    vc.kv_transfer_config = None
+    return vc
+
+
+def _spec():
+    return FullAttentionSpec(
+        block_size=16, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    )
+
+
+def test_build_ragged_metadata():
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
+    with _ctx(_cfg()):
+        b = _make_builder()
+    cam = CommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 3, 5, 6, 6], dtype=torch.int32, device=DEV),
+        query_start_loc_cpu=torch.tensor([0, 2, 4, 6, 6], dtype=torch.int32),
+        seq_lens=torch.tensor([20, 31, 44, 17], dtype=torch.int32, device=DEV),
+        num_reqs=4,
+        num_actual_tokens=6,
+        max_query_len=2,
+        max_seq_len=64,
+        block_table_tensor=torch.arange(8, dtype=torch.int32, device=DEV).reshape(4, 2),
+        slot_mapping=torch.arange(6, dtype=torch.int64, device=DEV),
+        causal=True,
+    )
+    with _ctx(_cfg()):
+        m = b.build(0, cam)
+    assert m.decode.q_len_per_req == 8
+    assert m.decode.q_cu_seq_lens.tolist() == [0, 3, 5, 6, 6]
+    assert m.decode.q_cu_seq_lens.data_ptr() == (cam.query_start_loc.data_ptr())
+    assert m.decode.mask is not None
+    oracle = _make_xqa_ragged_draft_block_mask([3, 2, 1, 0], 8, True, DEV)
+    assert torch.equal(m.decode.mask[:6], oracle)
+
+
+def test_mask_width40_and_noncausal():
+    b = None
+    with _ctx(_cfg()):
+        b = _make_builder()
+    b.adaptive_max_decode_width = 40
+    b._adaptive_mask_buffer = None  # force reallocation at width 40
+    # reallocate like finalize does
+    b._adaptive_mask_buffer = torch.zeros(
+        b.max_num_reqs * 40,
+        2 * ((40 + 31) // 32),
+        dtype=torch.uint16,
+        device=DEV,
+    )
+    for causal in (True, False):
+        lens = [40, 33, 5]
+        cum = [0]
+        for L in lens:
+            cum.append(cum[-1] + L)
+        q_cu = torch.tensor(cum, dtype=torch.int32, device=DEV)
+        buf = b._fill_adaptive_decode_mask(q_cu, 3, sum(lens), causal)
+        oracle = _make_xqa_ragged_draft_block_mask(lens, 40, causal, DEV)
+        assert torch.equal(buf[: sum(lens)], oracle)
 
 
 def test_trtllm_gen_varlen_never_inferred():
     def meta(q_cu, authorized, kernel=FlashInferDecodeKernel.TRTLLM_GEN):
         return FlashInferTrtllmAPIDecode(
-            kernel=kernel, block_tables=None, seq_lens=None, max_seq_len=1,
-            q_len_per_req=8, q_cu_seq_lens=q_cu, mask=None,
+            kernel=kernel,
+            block_tables=None,
+            seq_lens=None,
+            max_seq_len=1,
+            q_len_per_req=8,
+            q_cu_seq_lens=q_cu,
+            mask=None,
             trtllm_gen_varlen=authorized,
         )
 
@@ -146,37 +244,30 @@ def test_trtllm_gen_varlen_never_inferred():
 
 
 def _make_builder():
-    vc = _cfg()
-    vc.model_config = SimpleNamespace(
-        dtype=torch.bfloat16,
-        max_model_len=8192,
-        get_num_attention_heads=lambda pc: 32,
-        get_num_kv_heads=lambda pc: 8,
-    )
-    vc.compilation_config = SimpleNamespace(
-        cudagraph_mode=CUDAGraphMode.FULL,
-        max_cudagraph_capture_size=16,
-        static_forward_context={LAYER: _FakeLayer()},
-    )
-    vc.scheduler_config = SimpleNamespace(max_num_batched_tokens=512,
-                                          max_num_seqs=4)
-    vc.cache_config = SimpleNamespace(cache_dtype="auto")
-    vc.kv_transfer_config = None
+    vc = _full_cfg()
     spec = SimpleNamespace(get_per_layer_parameters=lambda *a, **k: {})
     real_gplp = fi.get_per_layer_parameters
     real_igh = fi.infer_global_hyperparameters
     fi.get_per_layer_parameters = spec.get_per_layer_parameters
     fi.infer_global_hyperparameters = lambda *a, **k: SimpleNamespace(
-        sm_scale=0.088, window_left=-1, logits_soft_cap=None, has_sinks=False,
-        has_same_window_lefts=True, has_same_all_params=True,
+        sm_scale=0.088,
+        window_left=-1,
+        logits_soft_cap=None,
+        has_sinks=False,
+        has_same_window_lefts=True,
+        has_same_all_params=True,
     )
     try:
         b = FlashInferMetadataBuilder(
             FullAttentionSpec(
-                block_size=16, num_kv_heads=8, head_size=128,
+                block_size=16,
+                num_kv_heads=8,
+                head_size=128,
                 dtype=torch.bfloat16,
             ),
-            [LAYER], vc, DEV,
+            [LAYER],
+            vc,
+            DEV,
         )
         b._finalize_adaptive_decode(8)
         return b

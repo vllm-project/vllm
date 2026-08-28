@@ -1,9 +1,8 @@
 # FlashInfer conditional device/CPU query-lens mismatch support (SM120 XQA)
 
 Design notes for the `feat/flashinfer-adaptive-mismatch` branch.
-Evidence and validation record:
-`docs/active/flashinfer-adaptive-mismatch/validation-20260827.md` in the
-author's workspace (summarized below).
+Validation evidence summarized below (full record retained by the
+submitter; happy to share details on request).
 
 ## Problem
 
@@ -20,9 +19,10 @@ Triton adaptive 40.7/32.4, vs FlashInfer-static 141 t/s at 32K).
 
 FlashInfer 0.6.17's dedicated XQA API takes a CUDA `q_cu_seq_lens` the
 kernel dereferences on device, with a scalar max-draft-length bound.
-The W0 probe captured a CUDA graph with uniform geometry and replayed it
-across in-place-updated ragged layouts — bitwise-identical to eager XQA
-and within one bf16 ulp of an SDPA oracle, no host synchronization, on
+A library probe captured a CUDA graph with uniform geometry and replayed it
+across in-place-updated ragged layouts — bitwise-identical to eager XQA and within one bf16 ulp of an SDPA
+oracle (validated on SM120 / RTX 5090; SM121 expected via the same
+dedicated XQA API but not yet run), no host synchronization, on
 the production-flags module (fp8 KV + SWA + spec width 8).
 
 ## Design
