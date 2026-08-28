@@ -20,6 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -524,7 +525,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -656,6 +660,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.kernel_block_sizes,
             self.vllm_config,
+            kv_cache_allocation_context=kv_cache_allocation_context,
         )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
@@ -863,9 +868,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_encoder_cache()
         gc.collect()
 
-    def post_kv_cache_wake_up(self) -> None:
-        self.block_tables.init_block_table_layout_tensors()
-
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
@@ -920,6 +922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.block_tables,
                     self.attn_groups,
                     self.kv_cache_config,
+                    pcp_manager=self.pcp_manager,
                     has_lora=self.lora_config is not None,
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
