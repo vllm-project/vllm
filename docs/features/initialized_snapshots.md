@@ -28,6 +28,9 @@ Snapshots currently require:
   as root, including the `docker exec` flow below, bypasses `=1`, so use `=2`
   host-wide.
 - No established TCP connection to a peer outside the captured process tree.
+  Current Hugging Face hub clients hold their connections for the process
+  lifetime, so download the model in a separate step and run create with
+  `HF_HUB_OFFLINE=1`, as the quickstart below does.
 - A remote model ID and an immutable 40-character `--revision`. Local model
   directories and mutable revisions are not supported.
 - Enough disk for the artifact, with the same installed vLLM package, model
@@ -50,8 +53,10 @@ stop that server when its PID 1 exits. Snapshot preflight requires every
 component of the artifact path to be owned by the invoking user or root, with
 the directory itself at mode 0700, and the commands below run as root inside
 the official image, so the bind-mounted host directory is created with `sudo`
-and root ownership. This example also keeps the container filesystem and
-`/dev/shm` namespace stable for the lifetime of the artifact:
+and root ownership. The model downloads in its own step so the captured tree
+holds no hub connection, and create runs offline. This example also keeps the
+container filesystem and `/dev/shm` namespace stable for the lifetime of the
+artifact:
 
 ```bash
 sudo sysctl kernel.io_uring_disabled=2
@@ -69,7 +74,10 @@ docker run --detach --name vllm-snapshot \
   --entrypoint sleep \
   vllm/vllm-openai:latest infinity
 
-docker exec vllm-snapshot vllm snapshot create Qwen/Qwen3-0.6B \
+docker exec vllm-snapshot hf download Qwen/Qwen3-0.6B \
+  --revision c1899de289a04d12100db370d81485cdf75e47ca
+
+docker exec -e HF_HUB_OFFLINE=1 vllm-snapshot vllm snapshot create Qwen/Qwen3-0.6B \
   --snapshot-dir /snapshots/qwen3-0.6b \
   --revision c1899de289a04d12100db370d81485cdf75e47ca \
   --dtype float16 \
