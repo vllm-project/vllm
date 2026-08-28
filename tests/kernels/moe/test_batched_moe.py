@@ -595,12 +595,37 @@ def test_batched_triton_backend_mapping():
     assert map_unquantized_backend("triton") == UnquantizedMoeBackend.TRITON
 
 
-def test_batched_default_config_keeps_blockwise_quant_k_tile():
+def test_batched_resize_keeps_blockwise_quant_k_tile():
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
-        get_default_batched_config,
+        resize_batched_config_tiles,
     )
+    from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
 
     block_shape = [128, 128]
-    cfg = get_default_batched_config(512, 64, 1408, 2048, 6, "fp8_w8a8", block_shape)
+    cfg = get_default_config(512, 64, 1408, 2048, 6, "fp8_w8a8", block_shape)
     # moe_mmk derives scale-group offsets from BLOCK_SIZE_K.
-    assert cfg["BLOCK_SIZE_K"] == block_shape[1]
+    assert resize_batched_config_tiles(cfg, block_shape)["BLOCK_SIZE_K"] == 128
+
+
+def test_batched_config_override_is_not_resized():
+    """An override or tuned config reaches the batched kernel with its own tiles."""
+    from vllm.model_executor.layers.fused_moe import override_config
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        has_configured_moe_config,
+        try_get_optimal_moe_config,
+    )
+
+    w1_shape, w2_shape = (64, 2816, 2048), (64, 2048, 1408)
+    tuned = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+    with override_config(tuned):
+        # BatchedTritonExperts.apply resizes tiles only when this is False.
+        assert has_configured_moe_config(w2_shape, None, 256)
+        assert try_get_optimal_moe_config(w1_shape, w2_shape, 6, None, 256) == tuned

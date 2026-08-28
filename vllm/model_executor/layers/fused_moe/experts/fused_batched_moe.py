@@ -11,7 +11,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    has_configured_moe_config,
+    try_get_optimal_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -552,28 +555,22 @@ def batched_triton_kernel_swapped(
     )
 
 
-def get_default_batched_config(
-    max_num_tokens: int,
-    E: int,
-    N: int,
-    K: int,
-    top_k: int,
-    dtype: str | None,
-    block_shape: list[int] | None = None,
+def resize_batched_config_tiles(
+    config: dict[str, int], block_shape: list[int] | None
 ) -> dict[str, int]:
-    """Tile sizes for the per-expert GEMMs of the expert-batched layout."""
-    from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+    """Narrow a default config's N/K tiles for the expert-batched layout.
 
-    config = get_default_config(max_num_tokens, E, N, K, top_k, dtype, block_shape)
-
+    The shared heuristic sizes tiles for one large [M, K] x [K, N] GEMM, but this
+    layout runs E small GEMMs of at most max_num_tokens rows, where wide N/K tiles
+    are mostly masked-off work.
+    """
     # Configs without num_warps come from paths that pin their own tiles.
     if "num_warps" not in config:
         return config
 
     # Narrower N/K is faster on XPU; quantized N/K must match the scale groups.
     if block_shape is None and current_platform.is_xpu():
-        config["BLOCK_SIZE_N"] = 32
-        config["BLOCK_SIZE_K"] = 32
+        config = config | {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32}
     return config
 
 
@@ -1107,8 +1104,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             config_dtype,
             max_num_tokens,
             block_shape=self.block_shape,
-            default_config_func=get_default_batched_config,
         )
+        if not has_configured_moe_config(
+            w2.size(), config_dtype, max_num_tokens, self.block_shape
+        ):
+            config = resize_batched_config_tiles(config, self.block_shape)
 
         if hidden_states.dtype == torch.bfloat16:
             compute_type = tl.bfloat16
