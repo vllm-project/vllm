@@ -82,6 +82,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hermes_tool_parser",
         "Hermes2ProToolParser",
     ),
+    "plamo3": (
+        "plamo3_tool_parser",
+        "Plamo3ToolParser",
+    ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
         "PoolsideV1ToolParser",
