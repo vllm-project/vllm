@@ -316,9 +316,8 @@ async def maybe_prefill(
     if p_url:
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
 
-        prefill_response = await process_prefill_stage(req_data, p_url, req_id)
+        prefill_response_json = await process_prefill_stage(req_data, p_url, req_id)
         # for nixl connector to facilitate kv transfer...
-        prefill_response_json = await prefill_response.json()
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
@@ -354,24 +353,25 @@ async def process_prefill_stage(
 
     headers = {"x-request-id": req_id}
     try:
-        prefill_response = await prefill_session.post(
+        async with prefill_session.post(
             f"{p_url}/v1/chat/completions", json=prefill_request, headers=headers
-        )
-        if prefill_response.status != 200:
-            error_text = await prefill_response.text()
-            logger.error(
-                "[%s] Prefill request failed with status %d: %s",
-                req_id,
-                prefill_response.status,
-                error_text,
-            )
-            raise HTTPException(
-                status_code=prefill_response.status,
-                detail={"error": "Prefill request failed", "message": error_text},
-            )
-        logger.info("[%s] Prefill request completed successfully", req_id)
+        ) as prefill_response:
+            if prefill_response.status != 200:
+                error_text = await prefill_response.text()
+                logger.error(
+                    "[%s] Prefill request failed with status %d: %s",
+                    req_id,
+                    prefill_response.status,
+                    error_text,
+                )
+                raise HTTPException(
+                    status_code=prefill_response.status,
+                    detail={"error": "Prefill request failed", "message": error_text},
+                )
+            prefill_response_json = await prefill_response.json()
+            logger.info("[%s] Prefill request completed successfully", req_id)
 
-        return prefill_response
+            return prefill_response_json
 
     except HTTPException:
         raise
@@ -484,7 +484,10 @@ async def forward_non_stream(
             f"{d_url}/v1/chat/completions", json=req_data, headers=headers
         ) as resp:
             if resp.status != 200:
-                error_text = await resp.text()
+                try:
+                    error_text = await resp.text()
+                except Exception:
+                    error_text = "<unable to read body>"
                 logger.error(
                     "[%s] Decode request failed with status %d: %s",
                     req_id,
