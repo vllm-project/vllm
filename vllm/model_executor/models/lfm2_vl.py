@@ -229,6 +229,13 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "max_image_tokens", image_processor.max_image_tokens
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(max_pixels_tolerance, int | float)
+        assert isinstance(min_tiles, int)
+        assert isinstance(max_tiles, int)
+        assert isinstance(max_image_tokens, int)
+        assert isinstance(tile_size, int)
 
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
@@ -337,6 +344,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "encoder_patch_size", image_processor.encoder_patch_size
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(tile_size, int)
 
         thumbnail_height_patches = int(spatial_shapes[-1][0].item())
         thumbnail_width_patches = int(spatial_shapes[-1][1].item())
@@ -672,6 +682,7 @@ class Lfm2VLForConditionalGeneration(
         super().__init__()
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         vision_config = config.vision_config
         quant_config = vllm_config.quant_config
 
@@ -915,7 +926,8 @@ class Lfm2VLForConditionalGeneration(
             "min_image_tokens",
             getattr(self.config, "min_image_tokens", None) or 64,
         )
-        return max(1, int(value))
+        assert isinstance(value, int)
+        return max(1, value)
 
     def _get_lfm2vl_item_tile_slices(
         self,

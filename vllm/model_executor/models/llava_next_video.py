@@ -10,7 +10,7 @@ import torch.nn as nn
 from transformers import BatchFeature, LlavaNextVideoConfig, LlavaNextVideoProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
@@ -181,6 +181,7 @@ class LlavaNextVideoDummyInputsBuilder(
         )
 
         video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "video": self._get_dummy_videos(
@@ -213,19 +214,19 @@ class LlavaNextVideoMultiModalProcessor(
         video_token_id = hf_config.video_token_index
 
         def get_replacement(item_idx: int):
-            videos = mm_items.get_items(
-                "video", (VideoEmbeddingItems, VideoProcessorItems)
-            )
+            videos = mm_items["video"]
 
             if isinstance(videos, VideoEmbeddingItems):
                 num_video_tokens = videos.get_feature_size(item_idx)
-            else:
+            elif isinstance(videos, VideoProcessorItems):
                 image_size = videos.get_frame_size(item_idx)
                 num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
                 )
+            else:
+                raise TypeError(f"Unsupported video items: {type(videos)}")
 
             return [video_token_id] * num_video_tokens
 

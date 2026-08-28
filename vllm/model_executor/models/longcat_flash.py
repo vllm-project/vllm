@@ -185,8 +185,9 @@ class FlashConfig(PretrainedConfig):
             if hasattr(self, "ffn_hidden_size")
             else intermediate_size
         )
-        if hasattr(self, "moe_intermediate_size"):
-            self.moe_intermediate_size = self.moe_intermediate_size
+        moe_intermediate_size = getattr(self, "moe_intermediate_size", None)
+        if moe_intermediate_size is not None:
+            self.moe_intermediate_size = moe_intermediate_size
         elif hasattr(self, "expert_ffn_hidden_size"):
             self.moe_intermediate_size = self.expert_ffn_hidden_size
         else:
@@ -604,7 +605,7 @@ class FlashModel(nn.Module):
             else:
                 is_expert_weight = False
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
+                    param_name, weight_name, expert_id, expert_shard_id = mapping
                     if weight_name not in name:
                         continue
                     is_expert_weight = True
@@ -627,7 +628,7 @@ class FlashModel(nn.Module):
                         param,
                         loaded_weight,
                         name_mapped,
-                        shard_id=shard_id,
+                        shard_id=expert_shard_id,
                         expert_id=expert_id,
                         return_success=True,
                     )
@@ -664,11 +665,14 @@ class FlashModel(nn.Module):
                 if isinstance(self.layers[layer_id], PPMissingLayer):
                     continue
                 self_attn = self.layers[layer_id].self_attn[i]
-                if hasattr(
-                    self.quant_config, "weight_block_size"
-                ) and self_attn.kv_b_proj.weight.dtype in (
-                    torch.float8_e4m3fn,
-                    torch.float8_e4m3fnuz,
+                if (
+                    self.quant_config is not None
+                    and hasattr(self.quant_config, "weight_block_size")
+                    and self_attn.kv_b_proj.weight.dtype
+                    in (
+                        torch.float8_e4m3fn,
+                        torch.float8_e4m3fnuz,
+                    )
                 ):
                     weight_block_size = self.quant_config.weight_block_size
                     if weight_block_size is not None:

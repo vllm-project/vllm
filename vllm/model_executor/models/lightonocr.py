@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TypeVar
 
 import torch
 import torch.nn as nn
@@ -35,8 +34,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 
-_I = TypeVar("_I", bound=Mistral3ProcessingInfo)
-
 
 class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
     def get_vision_encoder_info(
@@ -49,7 +46,7 @@ class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
         return PixtralHFEncoderInfo(self.get_hf_config())
 
 
-class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
+class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
     def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 

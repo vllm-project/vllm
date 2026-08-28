@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeAlias
+from typing import Annotated, Literal, Protocol, TypeAlias, TypedDict
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -123,7 +123,12 @@ LlavaOnevisionMultiInputs: TypeAlias = (
 
 
 class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):
-    video_token_index: Final[int]
+    video_token_index: int
+
+
+class LlavaOnevisionInputsByModality(TypedDict, total=False):
+    image: LlavaOnevisionImageInputs | None
+    video: LlavaOnevisionVideoPixelInputs | None
 
 
 class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
@@ -288,6 +293,7 @@ class LlavaOnevisionDummyInputsBuilder(
 
         image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -410,19 +416,19 @@ class LlavaOnevisionMultiModalProcessor(
         video_token_id = hf_config.video_token_index
 
         def get_video_replacement(item_idx: int):
-            videos = mm_items.get_items(
-                "video", (VideoEmbeddingItems, VideoProcessorItems)
-            )
+            videos = mm_items["video"]
 
             if isinstance(videos, VideoEmbeddingItems):
                 num_video_tokens = videos.get_feature_size(item_idx)
-            else:
+            elif isinstance(videos, VideoProcessorItems):
                 image_size = videos.get_frame_size(item_idx)
                 num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
                 )
+            else:
+                raise TypeError(f"Unsupported video items: {type(videos)}")
 
             return [video_token_id] * num_video_tokens
 
@@ -570,8 +576,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             },
         )
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> LlavaOnevisionInputsByModality:
+        mm_input_by_modality = LlavaOnevisionInputsByModality()
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -749,7 +757,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self,
         image_input: LlavaOnevisionImageInputs,
     ) -> torch.Tensor | list[torch.Tensor]:
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaOnevisionImageEmbeddingInputs):
             return image_input["data"]
 
         patch_embeddings = self._process_image_pixels(image_input)
@@ -859,14 +867,20 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
-        for modality in mm_input_by_modality:
-            multimodal_input = mm_input_by_modality[modality]
-            if modality == "image":
+        for multimodal_input in mm_input_by_modality.values():
+            if isinstance(
+                multimodal_input,
+                (LlavaOnevisionImagePixelInputs, LlavaOnevisionImageEmbeddingInputs),
+            ):
                 image_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += tuple(image_embeddings)
-            if modality == "video":
+            elif isinstance(multimodal_input, LlavaOnevisionVideoPixelInputs):
                 video_embeddings = self._process_video_pixels(multimodal_input)
                 multimodal_embeddings += tuple(video_embeddings)
+            else:
+                raise TypeError(
+                    f"Unsupported multimodal input: {type(multimodal_input)}"
+                )
 
         return multimodal_embeddings
 

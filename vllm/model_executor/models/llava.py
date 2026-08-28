@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
+from typing import Annotated, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -159,14 +159,14 @@ class LlavaMultiModalProjector(nn.Module):
 
 
 class LlavaLikeConfig(Protocol):
-    vision_config: Final[PretrainedConfig]
-    image_token_index: Final[int]
-    vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[int | list[int]]
+    vision_config: PretrainedConfig
+    image_token_index: int
+    vision_feature_select_strategy: str
+    vision_feature_layer: int | list[int]
 
 
 class LlavaLikeProcessor(Protocol):
-    image_token: Final[str]
+    image_token: str
 
 
 class BaseLlavaProcessingInfo(BaseProcessingInfo):
@@ -279,18 +279,18 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         image_token_id = hf_config.image_token_index
 
         def get_replacement(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems)
-            )
+            images = mm_items["image"]
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
-            else:
+            elif isinstance(images, ImageProcessorItems):
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
+            else:
+                raise TypeError(f"Unsupported image items: {type(images)}")
 
             return [image_token_id] * num_image_tokens
 
@@ -372,6 +372,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        assert isinstance(hf_config, LlavaConfig)
         encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
@@ -642,7 +643,7 @@ class LlavaForConditionalGeneration(
         self,
         image_input: LlavaImageInputs,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaImageEmbeddingInputs):
             return image_input["data"]
 
         image_features = self._process_image_pixels(image_input)
