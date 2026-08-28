@@ -59,7 +59,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_pp,
+)
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
@@ -285,7 +290,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
     def get_image_pad_token(self) -> str:
         hf_text_config = self.get_hf_config().get_text_config()
         text_model_type = hf_text_config.model_type
-        return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
+        return IMAGE_PAD_TOKEN_MAP[text_model_type]
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -441,8 +446,10 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
 
+        language_model = self.get_language_model()
+        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
-            self.get_language_model().make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
