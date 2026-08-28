@@ -67,9 +67,13 @@ def decode_nccl_unique_id(
     return decoded
 
 
-@dataclass
+@dataclass(kw_only=True)
 class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     """Worker-side initialization info for NCCL-based weight transfer backends.
+
+    Keyword-only (`kw_only`): adding the optional `nccl_unique_id_b64` field
+    means the rendezvous fields can no longer keep a fixed positional slot, so a
+    stale positional call fails loudly instead of silently swapping arguments.
 
     Provide exactly one rendezvous mode:
 
@@ -88,10 +92,10 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     other collective or all ranks deadlock.
     """
 
-    rank_offset: int
-    world_size: int
     master_address: str | None = None
     master_port: int | None = None
+    rank_offset: int
+    world_size: int
     nccl_unique_id_b64: str | None = field(default=None, repr=False)
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES

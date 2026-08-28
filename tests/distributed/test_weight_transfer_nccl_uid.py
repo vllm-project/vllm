@@ -41,18 +41,15 @@ VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
 class TestNCCLRendezvousValidation:
     """Test the xor-of-rendezvous-modes validation on the NCCL init infos."""
 
-    def test_init_infos_accept_positional_fields(self):
-        # Backend init infos keep the base-class contract that subclass fields
-        # are positional; only `rank` (from TrainerInitInfo) stays keyword-only.
-        positional = NCCLWeightTransferInitInfo(1, 3, "127.0.0.1", 12345)
-        keyword = NCCLWeightTransferInitInfo(
-            rank_offset=1,
-            world_size=3,
-            master_address="127.0.0.1",
-            master_port=12345,
-        )
-        assert positional == keyword
+    def test_worker_init_info_is_keyword_only(self):
+        # kw_only so a stale positional call fails loudly rather than silently
+        # swapping fields once the rendezvous fields became optional.
+        with pytest.raises(TypeError):
+            NCCLWeightTransferInitInfo(1, 3, "127.0.0.1", 12345)  # type: ignore[call-arg]
 
+    def test_trainer_init_info_accepts_positional_fields(self):
+        # NCCLTrainerInitInfo keeps positional subclass fields; only `rank`
+        # (from TrainerInitInfo) is keyword-only.
         trainer_positional = NCCLTrainerInitInfo("127.0.0.1", 12345, 3, rank=0)
         trainer_keyword = NCCLTrainerInitInfo(
             master_address="127.0.0.1",

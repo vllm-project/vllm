@@ -129,6 +129,14 @@ class PyNcclCommunicator:
                 self.unique_id.internal[i] = byte
         else:
             self.unique_id = group.broadcast_obj(self.unique_id, src=0)
+        self._init_comm(device)
+
+    def _init_comm(self, device: int | str | torch.device) -> None:
+        """Create the communicator on `device` from the already-resolved
+        `self.unique_id` / `self.rank` / `self.world_size`, then run the
+        one-element warm-up all_reduce. Shared by `__init__` and
+        `from_unique_id_bytes` so the init handshake stays identical on both.
+        """
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
@@ -202,22 +210,7 @@ class PyNcclCommunicator:
         self.disabled = False
         self.nccl_version = self.nccl.ncclGetRawVersion()
         self.unique_id = self.nccl.unique_id_from_bytes(unique_id_bytes)
-
-        if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
-        elif isinstance(device, str):
-            device = torch.device(device)
-        assert isinstance(device, torch.device)
-        self.device = device
-        with torch.accelerator.device_index(device.index):
-            self.comm = self.nccl.ncclCommInitRank(
-                self.world_size, self.unique_id, self.rank
-            )
-            stream = current_stream()
-            data = torch.zeros(1, device=device)
-            self.all_reduce(data)
-            stream.synchronize()
-            del data
+        self._init_comm(device)
         return self
 
     def destroy(self):
