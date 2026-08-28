@@ -39,9 +39,9 @@ pub enum Error {
         "truncate_prompt_tokens={value} cannot be greater than max_model_len - \
          max_tokens = {budget}. Please request a smaller truncation size."
     )]
-    TruncatePromptTokensExceedsBudget { value: i64, budget: u32 },
-    #[error("invalid truncate_prompt_tokens={value} in request `{request_id}`; must be >= -1")]
-    InvalidTruncatePromptTokens { request_id: String, value: i64 },
+    TruncatePromptTokensExceedsBudget { value: u64, budget: u32 },
+    #[error("invalid truncate_prompt_tokens={value}; must be >= -1")]
+    InvalidTruncatePromptTokens { value: i64 },
     #[error("truncate_prompt_tokens is not supported for multimodal requests")]
     TruncateUnsupportedWithMultimodal,
     #[error("invalid repetition detection params: {message}")]

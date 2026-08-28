@@ -21,7 +21,7 @@ pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
     DecodedTextEvent, DecodedTokenLogprob, Finished, TextDecodeOptions, TextOutputStreamExt,
 };
-pub use request::{Prompt, SamplingParams, TextRequest, TruncationSide, normalize_top_k};
+pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
@@ -33,6 +33,8 @@ mod error;
 mod lower;
 pub mod output;
 mod request;
+mod truncation;
+pub use truncation::{PromptTruncation, PromptTruncationLimit, TruncationSide};
 pub use vllm_tokenizer as tokenizer;
 
 trait_set! {
@@ -80,26 +82,35 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
-    fn tokenize_prompt(
-        tokenizer: &DynTokenizer,
+    fn prepare_prompt_tokens(
+        &self,
         prompt: Prompt,
         add_special_tokens: bool,
+        prompt_truncation: Option<PromptTruncation>,
+        max_output_tokens: Option<u32>,
     ) -> Result<Vec<u32>> {
-        match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens).map_err(Into::into),
+        let tokenizer = self.backend.tokenizer();
+        let mut prompt_token_ids = match prompt {
+            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => Ok(token_ids),
+            Prompt::TokenIds(token_ids) => token_ids,
+        };
+        if let Some(prompt_truncation) = prompt_truncation {
+            let input_budget = self.max_model_len.saturating_sub(max_output_tokens.unwrap_or(0));
+            prompt_truncation.apply(&mut prompt_token_ids, input_budget)?;
         }
+        Ok(prompt_token_ids)
     }
 
-    /// Tokenize one request without generation-specific lowering.
+    /// Prepare one request's prompt tokens without generation-specific lowering.
     pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
-        Self::tokenize_prompt(
-            &self.backend.tokenizer(),
+        self.prepare_prompt_tokens(
             request.prompt,
             request.add_special_tokens,
+            request.prompt_truncation,
+            request.sampling_params.max_tokens,
         )
     }
 
@@ -111,20 +122,13 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let tokenizer = self.backend.tokenizer();
-        let mut prompt_token_ids = Self::tokenize_prompt(
-            &tokenizer,
+        let prompt_token_ids = self.prepare_prompt_tokens(
             take(&mut request.prompt),
             request.add_special_tokens,
+            request.prompt_truncation,
+            request.sampling_params.max_tokens,
         )?;
-
-        apply_truncate_prompt_tokens(
-            &mut prompt_token_ids,
-            request.truncate_prompt_tokens,
-            request.truncation_side,
-            request.sampling_params.max_tokens.unwrap_or(0),
-            self.max_model_len,
-        )?;
+        let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
@@ -141,50 +145,6 @@ impl TextRequestProcessor {
             tokenizer.as_ref(),
         )
     }
-}
-
-pub(crate) fn apply_truncate_prompt_tokens(
-    prompt_token_ids: &mut Vec<u32>,
-    truncate_prompt_tokens: Option<i64>,
-    truncation_side: Option<request::TruncationSide>,
-    max_output_tokens: u32,
-    max_model_len: u32,
-) -> Result<()> {
-    let Some(truncate_prompt_tokens) = truncate_prompt_tokens else {
-        return Ok(());
-    };
-
-    // Defensive guard: request.validate() should catch this first, but
-    // apply_truncate_prompt_tokens is pub(crate) and may be called independently.
-    if truncate_prompt_tokens < -1 {
-        return Ok(()); // validated upstream; silently skip if somehow missed
-    }
-
-    let budget = max_model_len.saturating_sub(max_output_tokens);
-    let max_input_tokens = if truncate_prompt_tokens == -1 {
-        budget as usize
-    } else {
-        let max_input_tokens = truncate_prompt_tokens as usize;
-        if max_input_tokens > budget as usize {
-            return Err(Error::TruncatePromptTokensExceedsBudget {
-                value: truncate_prompt_tokens,
-                budget,
-            });
-        }
-        max_input_tokens
-    };
-
-    if prompt_token_ids.len() > max_input_tokens {
-        let side = truncation_side.unwrap_or(request::TruncationSide::Left);
-        if side == request::TruncationSide::Left {
-            let start = prompt_token_ids.len() - max_input_tokens;
-            prompt_token_ids.drain(0..start);
-        } else {
-            prompt_token_ids.truncate(max_input_tokens);
-        }
-    }
-
-    Ok(())
 }
 
 /// Raw text facade above [`Llm`].
@@ -302,119 +262,41 @@ impl TextLlm {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use vllm_tokenizer::test_utils::TestTokenizer;
+
     use super::*;
-    use crate::request::TruncationSide;
 
-    fn apply(
-        prompt: &mut Vec<u32>,
-        truncate: Option<i64>,
-        side: Option<TruncationSide>,
-        max_output: u32,
-        model_len: u32,
-    ) -> Result<()> {
-        apply_truncate_prompt_tokens(prompt, truncate, side, max_output, model_len)
-    }
+    #[derive(Debug)]
+    struct TestTextBackend;
 
-    #[test]
-    fn test_truncate_none() {
-        let mut p = vec![1, 2, 3];
-        apply(&mut p, None, None, 10, 100).unwrap();
-        assert_eq!(p, vec![1, 2, 3]);
-    }
+    impl TextBackend for TestTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(TestTokenizer::new())
+        }
 
-    #[test]
-    fn test_truncate_right() {
-        let mut p = vec![1, 2, 3, 4, 5];
-        apply(&mut p, Some(3), Some(TruncationSide::Right), 10, 100).unwrap();
-        assert_eq!(p, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_truncate_left() {
-        let mut p = vec![1, 2, 3, 4, 5];
-        apply(&mut p, Some(3), Some(TruncationSide::Left), 10, 100).unwrap();
-        assert_eq!(p, vec![3, 4, 5]);
-    }
-
-    #[test]
-    fn test_truncate_default_side_is_left() {
-        let mut p = vec![1, 2, 3, 4, 5];
-        apply(&mut p, Some(3), None, 10, 100).unwrap();
-        assert_eq!(p, vec![3, 4, 5]);
-    }
-
-    #[test]
-    fn test_truncate_zero() {
-        let mut p = vec![1, 2, 3];
-        apply(&mut p, Some(0), None, 10, 100).unwrap();
-        assert!(p.is_empty());
-    }
-
-    #[test]
-    fn test_truncate_noop_when_value_ge_prompt() {
-        let mut p = vec![1, 2, 3];
-        apply(&mut p, Some(10), None, 10, 100).unwrap();
-        assert_eq!(p, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_truncate_sentinel_uses_budget() {
-        let mut p = vec![0; 100];
-        apply(&mut p, Some(-1), None, 30, 100).unwrap();
-        assert_eq!(p.len(), 70); // 100 - 30
-    }
-
-    #[test]
-    fn test_truncate_exceeds_budget() {
-        let mut p = vec![1, 2, 3];
-        let err = apply(&mut p, Some(80), None, 30, 100).unwrap_err();
-        match err {
-            Error::TruncatePromptTokensExceedsBudget { value, budget } => {
-                assert_eq!(value, 80);
-                assert_eq!(budget, 70);
-            }
-            _ => panic!("unexpected error"),
+        fn model_id(&self) -> &str {
+            "test-model"
         }
     }
 
     #[test]
-    fn test_truncate_less_than_minus_one_is_noop_in_apply() {
-        // apply_truncate_prompt_tokens skips < -1 values since request.validate()
-        // is the authoritative gate. Verify no mutation occurs.
-        let mut p = vec![1, 2, 3];
-        apply(&mut p, Some(-2), None, 30, 100).unwrap();
+    fn tokenize_and_prepare_apply_the_same_prompt_truncation() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
+        let request = TextRequest {
+            prompt: Prompt::TokenIds(vec![1, 2, 3, 4, 5]),
+            prompt_truncation: Some(PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(3),
+                side: TruncationSide::Left,
+            }),
+            ..TextRequest::for_test()
+        };
+
+        assert_eq!(processor.tokenize(request.clone()).unwrap(), vec![3, 4, 5]);
         assert_eq!(
-            p,
-            vec![1, 2, 3],
-            "prompt must not be mutated for invalid sentinel"
+            processor.prepare(request).unwrap().generate_request.prompt_token_ids,
+            vec![3, 4, 5]
         );
-    }
-
-    #[test]
-    fn test_truncate_sentinel_with_saturating_budget_zero() {
-        // If max_output_tokens >= max_model_len, budget saturates to 0.
-        // Sentinel -1 then resolves to 0, draining the entire prompt.
-        let mut p = vec![1, 2, 3];
-        apply(&mut p, Some(-1), None, 200, 100).unwrap();
-        assert!(p.is_empty(), "saturating budget should drain all tokens");
-    }
-
-    #[test]
-    fn test_truncate_exact_boundary_noop() {
-        // Value equals prompt length exactly: no truncation needed.
-        let mut p = vec![1, 2, 3];
-        apply(&mut p, Some(3), None, 10, 100).unwrap();
-        assert_eq!(p, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_truncate_i64_max_hits_budget_check() {
-        // i64::MAX as usize is valid on 64-bit; must not panic, must return budget error.
-        let mut p = vec![1, 2, 3];
-        let err = apply(&mut p, Some(i64::MAX), None, 30, 100).unwrap_err();
-        assert!(matches!(
-            err,
-            Error::TruncatePromptTokensExceedsBudget { .. }
-        ));
     }
 }
