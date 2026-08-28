@@ -485,7 +485,9 @@ def _make_video_mm_kwargs(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 class TestEncoderCudaGraphCaptureReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")
@@ -772,7 +774,9 @@ _VIDEO_MAX_BATCH = 4
 _VIDEO_MAX_FRAMES = 8  # 2 frames per item at max_batch_size=4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 class TestEncoderCudaGraphVideoReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")

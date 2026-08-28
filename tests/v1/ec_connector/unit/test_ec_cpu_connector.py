@@ -7,7 +7,7 @@ Verifies:
 - Accuracy: outputs from EC CPU cache match fresh encoder computation.
 - Latency: loading from EC CPU cache is faster than a cold encoder run.
 
-Requires a CUDA GPU and the Qwen2-VL-2B-Instruct model.
+Requires a CUDA or XPU GPU and the Qwen2-VL-2B-Instruct model.
 """
 
 import time
@@ -57,8 +57,8 @@ def _wait_for_ec_ready(llm: LLM) -> None:
 
 def _latency_test(llm: LLM) -> None:
     """Verify EC CPU cache hit is faster than cold encoder computation."""
-    if not current_platform.is_cuda():
-        pytest.skip("Latency test requires CUDA")
+    if not (current_platform.is_cuda() or current_platform.is_xpu()):
+        pytest.skip("Latency test requires an accelerator (CUDA or XPU)")
 
     sampling_params = SamplingParams(max_tokens=1, temperature=0)
     base_image = ImageAsset("stop_sign").pil_image
@@ -134,7 +134,10 @@ def _accuracy_test(llm: LLM) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Requires an accelerator (CUDA or XPU)",
+)
 def test_ec_cpu_offloading() -> None:
     """Tests ECCPUConnector accuracy and latency with a VLM model."""
     ec_transfer_config = ECTransferConfig(

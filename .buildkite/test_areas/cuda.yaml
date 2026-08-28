@@ -2,7 +2,7 @@ group: CUDA
 depends_on: 
   - image-build
 steps:
-- label: Platform Tests
+- label: ":nvidia: (H200) CUDA Platform"
   key: platform-tests
   timeout_in_minutes: 20
   device: h200_18gb
@@ -18,7 +18,7 @@ steps:
     - pytest -v -s cuda/test_platform_no_cuda_init.py
     - pytest -v -s cuda/test_cuda_compatibility_path.py
 
-- label: Cudagraph
+- label: ":nvidia: (H200) CUDAGraph"
   device: h200_35gb
   key: cudagraph
   timeout_in_minutes: 30

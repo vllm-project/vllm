@@ -2,10 +2,11 @@ group: Quantization
 depends_on:
   - image-build
 steps:
-- label: Quantization
+- label: ":nvidia: (H200) Quantization Shard %N"
   device: h200_35gb
   key: quantization
-  timeout_in_minutes: 75
+  timeout_in_minutes: 40
+  parallelism: 4
   env:
     VLLM_USE_V2_MODEL_RUNNER: "0"
   source_file_dependencies:
@@ -18,9 +19,9 @@ steps:
   - uv pip install --system conch-triton-kernels
   # The SM90-only checkpoint currently contains a removed weight_chan_scale
   # parameter. It was not exercised by the previous L4 job.
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: Quantized Fusions
+- label: ":nvidia: (H200) Quantized Fusions"
   device: h200_35gb
   key: quantized-fusions
   timeout_in_minutes: 20
@@ -33,7 +34,7 @@ steps:
   commands:
     - pytest -v -s fusion/
 
-- label: Quantized MoE Test (B200)
+- label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
   timeout_in_minutes: 120
   working_dir: "/vllm-workspace/"
@@ -51,7 +52,7 @@ steps:
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
-- label: Quantized Models Test
+- label: ":nvidia: (H200) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
   timeout_in_minutes: 65
