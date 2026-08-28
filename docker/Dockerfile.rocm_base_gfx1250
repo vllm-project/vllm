@@ -1,11 +1,11 @@
 ARG BASE_IMAGE=ubuntu:24.04
-ARG ROCM_WHEEL_INDEX=https://rocm.devreleases.amd.com/whl-multi-arch/
-ARG ROCM_SDK_VERSION=7.15.0a20260712
-ARG TORCH_VERSION=2.12.0+rocm7.15.0a20260712
-ARG TORCHVISION_VERSION=0.27.0+rocm7.15.0a20260712
-ARG TORCHAUDIO_VERSION=2.11.0+rocm7.15.0a20260712
-ARG TRITON_VERSION=3.7.1+git110cd8e2.rocm7.15.0a20260712
-ARG APEX_VERSION=1.11.0+rocm7.15.0a20260712
+ARG ROCM_WHEEL_INDEX=https://rocm.nightlies.amd.com/whl-multi-arch/
+ARG ROCM_SDK_VERSION=10.1.0a20260811+bkc.20260820
+ARG TORCH_VERSION=2.11.0+rocm10.1.0a20260811.bkc.20260820
+ARG TORCHVISION_VERSION=0.26.0+rocm10.1.0a20260811.bkc.20260820
+ARG TORCHAUDIO_VERSION=2.11.0+rocm10.1.0a20260811.bkc.20260820
+ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.1.0a20260811.bkc.20260820
+ARG APEX_VERSION=1.11.0+rocm10.1.0a20260811.bkc.20260820
 
 
 ARG FA_BRANCH="jpvillam/gfx1250_wip"
@@ -68,6 +68,9 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python${PYTHON_VERSION} -m venv "${VIRTUAL_ENV}" && \
     "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip setuptools PyYAML
 ENV PATH=${VIRTUAL_ENV}/bin:$PATH
+
+# point to amdsmi python module
+ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
