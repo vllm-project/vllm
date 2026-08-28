@@ -626,6 +626,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_pcp=self.use_pcp,
             )
 
+        # TODO(ROCm): both BMM kernels re-quantize kv_b_proj online, ignoring
+        # the precision the checkpoint asked for, so they now default to off.
+        # Turning them back on needs long-context accuracy validation, and the
+        # per-layer decision belongs in --quantization-config.targets rather
+        # than in this layer.
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
