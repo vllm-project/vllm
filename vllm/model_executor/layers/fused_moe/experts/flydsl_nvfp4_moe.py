@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NVFP4-BF16 MoE experts through AITER's FlyDSL fused MoE."""
+"""NVFP4-BF16 MoE experts through vLLM's FlyDSL kernels."""
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -19,17 +18,38 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
 )
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.kernels.flydsl.nvfp4_moe_2stages import (
+    nvfp4_moe_stage1,
+    nvfp4_moe_stage2,
+)
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_gfx942
 
 
-class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
-    """NVFP4-BF16 MoE experts using AITER's fused_moe implementation."""
+class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
+    """NVFP4-BF16 MoE experts using vLLM's FlyDSL implementation."""
+
+    @staticmethod
+    def shuffle_nvfp4_weight_for_flydsl(weight: torch.Tensor) -> torch.Tensor:
+        """Preshuffle packed NVFP4 MoE weights for FlyDSL's kpack-bytes-8 layout."""
+        experts, n_out, packed_k = weight.shape
+        if n_out % 16 or packed_k % 32:
+            raise ValueError(
+                "FlyDSL NVFP4 MoE requires N to be divisible by 16 and "
+                "packed K to be divisible by 32, "
+                f"got shape={tuple(weight.shape)}"
+            )
+        flattened = weight.contiguous().view(experts * n_out, packed_k)
+        shuffled = flattened.view(
+            experts * n_out // 16, 16, packed_k // 32, 4, 8
+        )
+        return shuffled.permute(0, 2, 3, 1, 4).contiguous().view_as(weight)
 
     def __init__(
         self,
@@ -48,7 +68,7 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # AITER NVFP4-BF16 consumes BF16 activations and NVFP4 weights.
+        # FlyDSL NVFP4-BF16 consumes BF16 activations and NVFP4 weights.
         return True
 
     @staticmethod
@@ -104,14 +124,8 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
         if moe_config.in_dtype != torch.bfloat16:
             return False, "kernel only supports bfloat16 activations"
 
-        if not current_platform.is_rocm() or not on_gfx950():
+        if not current_platform.is_rocm() or not (on_gfx950() or on_gfx942()):
             return False, "kernel available only on AMD gfx950 devices for now"
-
-        if not rocm_aiter_ops.is_enabled():
-            return (
-                False,
-                "kernel requires aiter library (enable with VLLM_ROCM_USE_AITER=1)",
-            )
 
         if not is_aiter_found_and_supported():
             return (
@@ -156,17 +170,7 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        from aiter import ActivationType, QuantType
-        from aiter.fused_moe import (
-            get_2stage_cfgs,
-            get_padded_M,
-            moe_sorting,
-        )
-        from aiter.ops.flydsl.moe_kernels import (
-            flydsl_moe_stage1,
-            flydsl_moe_stage2,
-            get_flydsl_kernel_params,
-        )
+        from aiter.fused_moe import moe_sorting
 
         assert activation == MoEActivation.SILU
         assert hidden_states.dtype == torch.bfloat16
@@ -194,28 +198,10 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
         else:
             expert_mask = None
 
-        metadata = get_2stage_cfgs(
-            get_padded_M(num_tokens),
-            K,
-            inter_dim,
-            E,
-            topk,
-            output.dtype,
-            torch.bfloat16,
-            "nvfp4_bf16",
-            QuantType.No,
-            is_g1u1,
-            ActivationType.Silu,
-            apply_router_weight_on_input,
-            0,
-            0,
-            True,
-            is_ep=expert_mask is not None,
-        )
-        if metadata.run_1stage:
-            raise NotImplementedError("AiterNvfp4Experts only supports 2-stage MoE")
+        if not is_g1u1:
+            raise NotImplementedError("FlyDSL NVFP4 experts require gated MoE weights")
 
-        block_m = int(metadata.block_m)
+        block_m = 32
         global_num_experts_for_sort = (
             expert_mask.numel() if expert_mask is not None else E
         )
@@ -238,39 +224,21 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
             quantization_emulation=True,
         )
 
-        stage1_func = metadata.stage1
-        stage2_func = metadata.stage2
-        stage1_kernel_name = getattr(stage1_func, "keywords", {}).get("kernelName", "")
-        stage2_kernel_name = getattr(stage2_func, "keywords", {}).get("kernelName", "")
-        stage1_params = get_flydsl_kernel_params(stage1_kernel_name)
-        stage2_params = get_flydsl_kernel_params(stage2_kernel_name)
-
         intermediate = _resize_cache(workspace13, (num_tokens, topk, inter_dim))
-        flydsl_moe_stage1(
-            a=hidden_states_qdq,
-            w1=w1,
-            sorted_token_ids=sorted_ids,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            out=intermediate,
+        nvfp4_moe_stage1(
+            hidden_states_qdq,
+            w1,
+            self.w1_scale_val,
+            self.w1_global_scale,
+            sorted_ids,
+            sorted_expert_ids,
+            num_valid_ids,
             topk=topk,
-            tile_m=stage1_params["tile_m"],
-            tile_n=stage1_params["tile_n"],
-            tile_k=stage1_params["tile_k"],
-            a_dtype=stage1_params["a_dtype"],
-            b_dtype=stage1_params["b_dtype"],
-            out_dtype=stage1_params["out_dtype"],
-            act="silu",
-            w1_scale=self.w1_scale_val,
-            global_scale=self.w1_global_scale,
-            sorted_weights=None,
-            use_async_copy=True,
-            k_batch=stage1_params.get("k_batch", 1),
-            waves_per_eu=stage1_params.get("waves_per_eu", 3),
-            b_nt=stage1_params.get("b_nt", 2),
-            gate_mode=stage1_params.get("gate_mode", "separated"),
-            a_scale_one=stage1_params.get("a_scale_one", False),
-            xcd_swizzle=stage1_params.get("xcd_swizzle", 0),
+            inter_dim=inter_dim,
+            tile_m=block_m,
+            tile_n=64,
+            tile_k=64,
+            output=intermediate,
         )
 
         intermediate_qdq, _ = moe_kernel_quantize_input(
@@ -282,35 +250,20 @@ class AiterNvfp4Experts(mk.FusedMoEExpertsModular):
         )
         intermediate_qdq = intermediate_qdq.view(num_tokens, topk, inter_dim)
 
-        if stage2_params.get("mode", "atomic") == "atomic":
-            output.zero_()
-        flydsl_moe_stage2(
-            inter_states=intermediate_qdq,
-            w2=w2,
-            sorted_token_ids=sorted_ids,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            out=output,
+        output.zero_()
+        nvfp4_moe_stage2(
+            intermediate_qdq,
+            w2,
+            self.w2_scale_val,
+            self.w2_global_scale,
+            sorted_ids,
+            sorted_expert_ids,
+            num_valid_ids,
             topk=topk,
-            tile_m=stage2_params["tile_m"],
-            tile_n=stage2_params["tile_n"],
-            tile_k=stage2_params["tile_k"],
-            a_dtype=stage2_params["a_dtype"],
-            b_dtype=stage2_params["b_dtype"],
-            out_dtype=stage2_params["out_dtype"],
-            mode=stage2_params.get("mode", "atomic"),
-            w2_scale=self.w2_scale_val,
-            global_scale=self.w2_global_scale,
-            sorted_weights=(
-                sorted_weights if not apply_router_weight_on_input else None
-            ),
-            sort_block_m=stage2_params.get("sort_block_m", 0),
-            waves_per_eu=stage2_params.get("waves_per_eu", None),
-            use_async_copy=stage2_params.get("use_async_copy", False),
-            cu_num_mul=stage2_params.get("cu_num_mul", 1),
-            b_nt=stage2_params.get("b_nt", 0),
-            persist=stage2_params.get("persist", None),
-            xcd_swizzle=stage2_params.get("xcd_swizzle", 0),
-            expert_mask=expert_mask,
-            topk_ids=topk_ids,
+            model_dim=K,
+            tile_m=block_m,
+            tile_n=64,
+            tile_k=64,
+            output=output,
+            sorted_weights=sorted_weights if not apply_router_weight_on_input else None,
         )

@@ -166,19 +166,6 @@ def quant_nvfp4_tensor(
     return a_quant, a_block_scale, a_global_scale
 
 
-def shuffle_nvfp4_weight_for_flydsl(weight: torch.Tensor) -> torch.Tensor:
-    """Preshuffle packed NVFP4 MoE weights for FlyDSL's kpack-bytes-8 layout."""
-    experts, n_out, packed_k = weight.shape
-    if n_out % 16 or packed_k % 32:
-        raise ValueError(
-            "NVFP4 FlyDSL weight requires N%16==0 and packed_K%32==0, "
-            f"got shape={tuple(weight.shape)}"
-        )
-    flattened = weight.view(experts * n_out, packed_k)
-    shuffled = flattened.view(experts * n_out // 16, 16, packed_k // 32, 4, 8)
-    return shuffled.permute(0, 2, 3, 1, 4).contiguous().view_as(weight)
-
-
 def quantize_nvfp4_weight_for_moe(
     weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

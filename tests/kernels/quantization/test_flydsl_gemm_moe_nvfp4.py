@@ -16,11 +16,13 @@ from aiter.ops.enum import ActivationType, QuantType
 
 from tests.kernels.quantization.nvfp4_utils import (
     quantize_nvfp4_weight_for_moe,
-    shuffle_nvfp4_weight_for_flydsl,
 )
 from vllm.kernels.flydsl.nvfp4_moe_2stages import (
     nvfp4_moe_stage1,
     nvfp4_moe_stage2,
+)
+from vllm.model_executor.layers.fused_moe.experts.flydsl_nvfp4_moe import (
+    FlydslNvfp4Experts,
 )
 
 DTYPE = torch.bfloat16
@@ -97,8 +99,8 @@ def _make_case(
         w2
     )
 
-    w1_packed_flydsl = shuffle_nvfp4_weight_for_flydsl(w1_packed).contiguous()
-    w2_packed_flydsl = shuffle_nvfp4_weight_for_flydsl(w2_packed).contiguous()
+    w1_packed_flydsl = FlydslNvfp4Experts.shuffle_nvfp4_weight_for_flydsl(w1_packed)
+    w2_packed_flydsl = FlydslNvfp4Experts.shuffle_nvfp4_weight_for_flydsl(w2_packed)
     w1_packed_flydsl.is_shuffled = True
     w2_packed_flydsl.is_shuffled = True
 

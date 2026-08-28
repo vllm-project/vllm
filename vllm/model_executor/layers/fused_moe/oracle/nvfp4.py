@@ -150,11 +150,11 @@ def backend_to_kernel_cls(
 
         return [Nvfp4QuantizationEmulationTritonExperts]
     elif backend == NvFp4MoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_nvfp4_moe import (
-            AiterNvfp4Experts,
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_nvfp4_moe import (
+            FlydslNvfp4Experts,
         )
 
-        return [AiterNvfp4Experts]
+        return [FlydslNvfp4Experts]
 
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
@@ -517,30 +517,18 @@ def convert_to_nvfp4_moe_kernel_format(
                 " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
             )
 
-        # AITER's FlyDSL NVFP4-BF16 kernels consume weights in the
-        # kpack_bytes=8 preshuffled layout.
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_nvfp4_moe import (
+            FlydslNvfp4Experts,
+        )
+
+        # FlyDSL NVFP4-BF16 kernels consume weights in the kpack-bytes-8
+        # preshuffled layout.
         for weight_name, weight in (("w13", w13), ("w2", w2)):
-            if weight.ndim != 3:
-                raise ValueError(
-                    f"Expected 3D NVFP4 MoE {weight_name} weight, "
-                    f"got shape {weight.shape}."
-                )
-
-            experts, n_out, packed_k = weight.shape
-            if n_out % 16 != 0 or packed_k % 32 != 0:
-                raise ValueError(
-                    "AITER NVFP4 MoE requires N to be divisible by 16 and "
-                    f"packed K to be divisible by 32, got {weight_name} "
-                    f"shape {(experts, n_out, packed_k)}."
-                )
-
-            shuffled = weight.contiguous().view(experts * n_out, packed_k)
-            shuffled = shuffled.view(experts * n_out // 16, 16, packed_k // 32, 4, 8)
-            shuffled = shuffled.permute(0, 2, 3, 1, 4).contiguous()
+            shuffled = FlydslNvfp4Experts.shuffle_nvfp4_weight_for_flydsl(weight)
             if weight_name == "w13":
-                w13 = shuffled.view_as(weight)
+                w13 = shuffled
             else:
-                w2 = shuffled.view_as(weight)
+                w2 = shuffled
 
         w13_scale = w13_scale.permute(0, 2, 1).contiguous()
         w2_scale = w2_scale.permute(0, 2, 1).contiguous()
