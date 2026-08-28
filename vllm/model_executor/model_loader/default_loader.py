@@ -280,12 +280,27 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            if self.load_config.load_format == "fastsafetensors":
+            # fastsafetensors/instanttensor iterators cannot filter tensors
+            # inside a reused shard, so indexed-subset checkpoints must take
+            # the standard filtered iterator to honor the index assignments.
+            use_special_format = self.load_config.load_format in (
+                "fastsafetensors",
+                "instanttensor",
+            )
+            if use_special_format and indexed_weights_by_file is not None:
+                logger.warning(
+                    "Checkpoint index assigns a subset of stored tensors; "
+                    "falling back from %s to the filtered safetensors "
+                    "iterator.",
+                    self.load_config.load_format,
+                )
+                use_special_format = False
+            if use_special_format and self.load_config.load_format == "fastsafetensors":
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
-            elif self.load_config.load_format == "instanttensor":
+            elif use_special_format and self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
@@ -298,6 +313,7 @@ class DefaultModelLoader(BaseModelLoader):
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
                         ),
+                        indexed_weights_by_file=indexed_weights_by_file,
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(

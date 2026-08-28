@@ -1008,11 +1008,22 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    indexed_weights_by_file: Mapping[str, set[str]] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
     def _load_file(st_file: str):
         result = load_file(st_file, device="cpu")
+        if indexed_weights_by_file is not None:
+            indexed_weights = indexed_weights_by_file.get(os.path.normpath(st_file))
+            if indexed_weights is None:
+                raise ValueError(
+                    f"Safetensors shard {st_file!r} is not present in the "
+                    "checkpoint index"
+                )
+            for name in list(result):
+                if name not in indexed_weights:
+                    del result[name]
         return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
