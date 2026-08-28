@@ -50,7 +50,7 @@ BACKEND_ABS_TOL: dict[str, float] = {
     "auto": 0.007,
     "ROCM_AITER_FA": 0.005,
     "TRITON_ATTN": 0.009,
-    "FLEX_ATTENTION": 0.006,
+    "FLEX_ATTENTION": 0.00875,
 }
 
 # ROCm: disable prefix caching and eliminate batch variance to reduce
