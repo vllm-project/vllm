@@ -1902,8 +1902,7 @@ class MoRIIOConnectorWorker:
                 self.block_size,
             )
             self.block_size = first_geometry.block_size
-        # block size in bytes. under hma, all layers have the same block size in bytes,
-        # (also verified at runtime) so it's safe to advertise this scalar to the peer.
+        # block size in bytes
         self.block_len = first_geometry.block_len
         self.kv_cache_shape = first_kv_cache.shape
         self.block_shape = block_shape
@@ -1915,13 +1914,29 @@ class MoRIIOConnectorWorker:
         self.layer_base_addr_index = {}
         base_addr_idx = 0
 
+        hma_enabled = (
+            not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+        )
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if geometry.block_len != self.block_len:
+            if hma_enabled:
+                if geometry.block_len != self.block_len:
+                    raise ValueError(
+                        "MoRIIO KV cache block length mismatch for layer "
+                        f"{layer_name}: {geometry.block_len} != {self.block_len}"
+                    )
+            elif geometry.block_size != self.block_size:
                 raise ValueError(
-                    "MoRIIO KV cache block length mismatch for layer "
-                    f"{layer_name}: {geometry.block_len} != {self.block_len}"
+                    "MoRIIO KV cache block size mismatch for layer "
+                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                )
+            # num_blocks is advertised as a single scalar to the peer, so must it
+            # be uniform
+            if geometry.num_blocks != self.num_blocks:
+                raise ValueError(
+                    "MoRIIO KV cache num_blocks mismatch for layer "
+                    f"{layer_name}: {geometry.num_blocks} != {self.num_blocks}"
                 )
             self.block_lens[layer_name] = geometry.block_len
             for cache, region_len in self._iter_layer_registration_regions(layer_name):
