@@ -1082,8 +1082,7 @@ COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-# Source-built wheels in this cache must match the Ubuntu 22.04 ABI.
-RUN --mount=type=cache,id=uv-v027-ubuntu2204,target=/opt/uv/cache \
+RUN --mount=type=cache,target=/opt/uv/cache \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -1105,57 +1104,7 @@ RUN --mount=type=cache,id=uv-v027-ubuntu2204,target=/opt/uv/cache \
             && uv pip install --system -r requirements/dev.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         fi \
-        && if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-            python3 -c "from arctic_inference.suffix_decoding import _C"; \
-        fi; \
     fi
-
-# image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM test-deps AS test
-
-ARG PYTHON_VERSION
-
-ARG PIP_INDEX_URL UV_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
-ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
-
-# We can specify the standard or nightly build of PyTorch
-ARG PYTORCH_NIGHTLY
-
-# Install vLLM and EP kernel wheels after the stable test dependencies so
-# source-only changes do not invalidate the dependency layers above.
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        echo "Installing torch nightly..." \
-        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        && echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    else \
-        echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
-
-# Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-
-COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
-RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
-    --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-
-# See the matching comment in the vllm-base stage.
-ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
-
-ADD . /vllm-workspace/
 
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
