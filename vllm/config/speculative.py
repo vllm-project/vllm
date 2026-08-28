@@ -1744,7 +1744,8 @@ class SpeculativeConfig:
         ==================== ============= ======== ================
         EAGLE3               eagle3        No       0
         P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      K
+        DFlash (bonus)       dflash        Yes      K
+        DFlash (anchor)      dflash        Yes      K - 1
         DSpark               dspark        Yes      K - 1
         MTP                  mtp           No       0
         N-gram               ngram         No       0
@@ -1755,8 +1756,8 @@ class SpeculativeConfig:
         num_draft_tokens = self.num_speculative_tokens
 
         if self.use_dflash():
-            # DFlash uses one bonus query followed by K mask queries.
-            return num_draft_tokens
+            # The scheduler already budgets one query slot per request.
+            return self.num_dflash_query_tokens - 1
 
         if self.parallel_drafting:
             if self.uses_draft_model():
@@ -1797,6 +1798,20 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def dflash_samples_from_anchor(self) -> bool:
+        if not self.use_dflash() or self.draft_model_config is None:
+            return False
+        hf_config = self.draft_model_config.hf_config
+        dflash_config = getattr(hf_config, "dflash_config", None) or {}
+        if isinstance(dflash_config, Mapping):
+            return bool(dflash_config.get("sample_from_anchor", False))
+        return bool(getattr(dflash_config, "sample_from_anchor", False))
+
+    @property
+    def num_dflash_query_tokens(self) -> int:
+        """Number of DFlash query positions that produce one draft block."""
+        return self.num_speculative_tokens + int(not self.dflash_samples_from_anchor())
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"

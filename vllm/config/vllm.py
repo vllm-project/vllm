@@ -604,10 +604,7 @@ class VllmConfig:
         if speculative_config is None:
             return 0
         if speculative_config.use_dflash():
-            # DFlash requires an extra lookahead slot since it uses in-fill-style
-            # decoding instead of standard next-token sampling, so it has a query
-            # for the last sampled token plus queries for each draft token.
-            return self.num_speculative_tokens + 1
+            return speculative_config.num_dflash_query_tokens
         if speculative_config.use_eagle() or speculative_config.uses_draft_model():
             # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
@@ -2479,6 +2476,13 @@ class VllmConfig:
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            # The V1 runner hardcodes the 1 + K DFlash query layout, so an
+            # anchor-sampling checkpoint would silently draft one token too many.
+            if (
+                self.speculative_config.use_dflash()
+                and self.speculative_config.dflash_samples_from_anchor()
+            ):
+                unsupported.append("dflash sample_from_anchor")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
 

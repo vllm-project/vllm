@@ -119,7 +119,16 @@ def test_selector_asks_for_fp32_proposal_logits():
 
 
 @pytest.mark.skip_global_cleanup
-def test_dflash2_model_decoder_layer_cls(monkeypatch):
+@pytest.mark.parametrize(
+    ("num_dflash_query_tokens", "expected_conv_block_size"),
+    [
+        pytest.param(5, 5, id="bonus-anchor"),
+        pytest.param(4, 4, id="sample-anchor"),
+    ],
+)
+def test_dflash2_model_decoder_layer_cls(
+    monkeypatch, num_dflash_query_tokens, expected_conv_block_size
+):
     from types import SimpleNamespace
 
     from vllm.config import set_current_vllm_config
@@ -207,6 +216,7 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
                 quantization=None,
             ),
             num_speculative_tokens=4,
+            num_dflash_query_tokens=num_dflash_query_tokens,
             enable_adaptive_verification=False,
         ),
         model_config=SimpleNamespace(
@@ -228,3 +238,9 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+
+    # 5. The convolutions span one draft block, whose width is the query layout
+    # the checkpoint asks for, not a fixed 1 + num_speculative_tokens.
+    for layer in model.layers:
+        assert layer.attention_conv.block_size == expected_conv_block_size
+        assert layer.mlp_conv.block_size == expected_conv_block_size

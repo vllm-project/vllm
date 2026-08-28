@@ -44,8 +44,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
 
-        # Each request emits exactly (bonus + N mask) query tokens per step.
-        self.num_query_per_req = 1 + self.num_speculative_steps
+        self.num_query_per_req = self.speculative_config.num_dflash_query_tokens
+        self.sample_from_anchor = self.speculative_config.dflash_samples_from_anchor()
 
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
@@ -56,20 +56,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.requires_non_causal = dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
-
-        # Whether the anchor query position is itself a prediction. DFlash default uses
-        # the anchor as the bonus token (only mask tokens predict); DSpark samples from
-        # the anchor and the N-1 mask token positions. See _prepare_dflash_inputs_kernel
-        dflash_config = (
-            getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
-        )
-        if dflash_config.get("sample_from_anchor", False):
-            raise ValueError(
-                "sample_from_anchor=True is not supported for DFlash. "
-                "DFlash uses a fixed 1+N query layout where the anchor "
-                "is the bonus token."
-            )
-        self.sample_from_anchor = False
 
         # Context positions for the K/V precompute. Populated by
         # prepare_dflash_inputs, and processed by the model's
@@ -631,8 +617,9 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping ---
-    # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
-    # and each position k predicts the NEXT token (sampled position = query_pos + 1).
+    # When SAMPLE_FROM_ANCHOR (DSpark, or DFlash with sample_from_anchor=True),
+    # we sample at EVERY query position and each position k predicts the NEXT
+    # token (sampled position = query_pos + 1).
     # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
     # at offsets > 0 are sampled from, each AT its own position.
     sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
