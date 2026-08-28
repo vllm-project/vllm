@@ -26,7 +26,7 @@ pub use vllm_engine_core_client::protocol::pooling::PoolingTask;
 
 use crate::inflight::{InflightRequests, RequestGuard};
 use crate::log_stats::StatsLogger;
-use crate::request_metrics::{PoolingRequestMetricsTracker, RequestMetricsTracker};
+use crate::request_metrics::RequestMetricsTracker;
 
 /// Token-level generation, pooling, and abort facade over [`EngineCoreClient`].
 ///
@@ -133,11 +133,13 @@ impl Llm {
         let prompt_len = prepared.prompt_token_ids().len() as u32;
 
         let (stream, _guard) = self.submit(prepared.engine_request).await?;
-        let request_metrics = PoolingRequestMetricsTracker::new(
+        let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),
             stream.engine_index(),
             arrival_time,
             prompt_len,
+            None,
+            1,
         );
         encode::collect_encode_output(prompt_token_ids, stream, request_metrics).await
     }
