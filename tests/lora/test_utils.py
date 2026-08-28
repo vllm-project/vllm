@@ -11,9 +11,11 @@ from torch import nn
 
 from vllm.lora.utils import (
     get_adapter_absolute_path,
+    get_supported_lora_modules,
     parse_fine_tuned_lora_name,
     replace_submodule,
 )
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.utils import WeightsMapper
 
 
@@ -199,3 +201,23 @@ def test_get_adapter_absolute_path_huggingface_error(
         response=MagicMock(),
     )
     assert get_adapter_absolute_path(path) == path
+
+
+def test_get_supported_lora_modules_no_embedding_shadowing():
+    """A linear layer that also carries ``embedding_modules`` must still be
+    reported by its own suffix; the inner embedding loop must not clobber the
+    module name used for the linear/MoE suffix lookup."""
+
+    class _FakeLinear(LinearBase):
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.embedding_modules = {"lm_head": "lm_head"}
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = _FakeLinear()
+
+    supported = get_supported_lora_modules(_Model())
+    assert "q_proj" in supported
+    assert "lm_head" in supported
