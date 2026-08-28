@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -120,20 +121,55 @@ class _TcpSocketRecord:
     inode: int
 
 
+def _process_comm(pid: int) -> str:
+    try:
+        return (Path("/proc") / str(pid) / "comm").read_text().strip()
+    except OSError:
+        return "unknown"
+
+
+def _decode_endpoint(family: str, raw: str) -> str:
+    """Render a ``/proc/net/tcp`` ``HEXADDR:HEXPORT`` field as ``ip:port``.
+
+    The kernel prints the address as little-endian 32-bit words: one for IPv4,
+    four in order for IPv6.
+    """
+    hex_address, _, hex_port = raw.partition(":")
+    port = int(hex_port, 16)
+    if family == "AF_INET":
+        packed = struct.pack("<I", int(hex_address, 16))
+        return f"{socket.inet_ntop(socket.AF_INET, packed)}:{port}"
+    packed = struct.pack(
+        "<4I", *(int(hex_address[index : index + 8], 16) for index in (0, 8, 16, 24))
+    )
+    return f"[{socket.inet_ntop(socket.AF_INET6, packed)}]:{port}"
+
+
 def _validate_tcp_connections(
-    records: tuple[_TcpSocketRecord, ...], owned_inodes: set[int]
+    records: tuple[_TcpSocketRecord, ...], socket_owners: dict[int, int]
 ) -> None:
-    owned = tuple(record for record in records if record.inode in owned_inodes)
+    owned = tuple(record for record in records if record.inode in socket_owners)
     endpoints = {
         (record.family, record.local_raw, record.remote_raw) for record in owned
     }
-    if any(
-        (record.family, record.remote_raw, record.local_raw) not in endpoints
+    offenders = tuple(
+        record
         for record in owned
-    ):
-        raise SnapshotCreateError(
-            "snapshot tree has an external established TCP connection"
-        )
+        if (record.family, record.remote_raw, record.local_raw) not in endpoints
+    )
+    if not offenders:
+        return
+    named = "; ".join(
+        f"pid {socket_owners[record.inode]} "
+        f"({_process_comm(socket_owners[record.inode])}) "
+        f"{_decode_endpoint(record.family, record.local_raw)} -> "
+        f"{_decode_endpoint(record.family, record.remote_raw)}"
+        for record in offenders[:5]
+    )
+    remaining = f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else ""
+    raise SnapshotCreateError(
+        f"snapshot tree has an external established TCP connection: {named}{remaining}"
+    )
 
 
 class LocalSnapshotTools:
@@ -300,17 +336,20 @@ class LocalSnapshotTools:
 
     def _descriptor_inventory(
         self, process_tree: tuple[int, ...]
-    ) -> tuple[tuple[int, ...], set[int]]:
+    ) -> tuple[tuple[int, ...], dict[int, int]]:
+        """Collect io_uring holders and each socket inode's owning pid."""
         io_uring_pids: list[int] = []
-        socket_inodes: set[int] = set()
+        socket_owners: dict[int, int] = {}
         for pid in process_tree:
             targets = self._descriptor_targets(pid)
             if "anon_inode:[io_uring]" in targets:
                 io_uring_pids.append(pid)
             for target in targets:
                 if target.startswith("socket:[") and target.endswith("]"):
-                    socket_inodes.add(int(target[len("socket:[") : -1]))
-        return tuple(io_uring_pids), socket_inodes
+                    # Shared descriptors name one holder; any of them locates
+                    # the connection for the operator.
+                    socket_owners.setdefault(int(target[len("socket:[") : -1]), pid)
+        return tuple(io_uring_pids), socket_owners
 
     def _tcp_records(self) -> tuple[_TcpSocketRecord, ...]:
         records: list[_TcpSocketRecord] = []
@@ -385,7 +424,7 @@ class LocalSnapshotTools:
         )
         if not cuda_holders:
             raise SnapshotCreateError("snapshot tree has no CUDA-holding process")
-        io_uring_pids, socket_inodes = self._descriptor_inventory(process_tree)
+        io_uring_pids, socket_owners = self._descriptor_inventory(process_tree)
         if io_uring_pids:
             raise SnapshotCreateError(
                 "snapshot tree owns io_uring state that CRIU cannot dump; set "
@@ -393,7 +432,7 @@ class LocalSnapshotTools:
                 "vLLM process, or use =2 to disable it host-wide "
                 f"(pids: {', '.join(map(str, io_uring_pids))})"
             )
-        _validate_tcp_connections(self._tcp_records(), socket_inodes)
+        _validate_tcp_connections(self._tcp_records(), socket_owners)
         gpu_uuid = self._gpu_uuid_for_pids(cuda_holders, cuda_rows)
         return ProcessInventory(
             root_pid=root_pid,

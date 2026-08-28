@@ -40,7 +40,7 @@ from vllm.snapshot.manifest import (
     validate_artifact_root,
     write_manifest_atomic,
 )
-from vllm.snapshot.runtime import ProcessInventory, _TcpSocketRecord
+from vllm.snapshot.runtime import ProcessInventory, _decode_endpoint, _TcpSocketRecord
 from vllm.snapshot.server import SnapshotCanaryError
 from vllm.snapshot.types import Oracle, oracles_match
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -681,7 +681,7 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
         "_descriptor_inventory",
         lambda _tree: (
             (101,) if blocked_state == "io_uring" else (),
-            {41},
+            {41: 101},
         ),
     )
     tcp_record = _TcpSocketRecord(
@@ -691,8 +691,19 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
         inode=41,
     )
     monkeypatch.setattr(tools, "_tcp_records", lambda: (tcp_record,))
-    with pytest.raises(SnapshotCreateError, match=message):
+    with pytest.raises(SnapshotCreateError, match=message) as excinfo:
         tools.inventory(100, tmp_path)
+    if blocked_state == "tcp":
+        assert "pid 101" in str(excinfo.value)
+        assert "1.1.1.1:443" in str(excinfo.value)
+
+
+def test_decode_endpoint_families():
+    assert _decode_endpoint("AF_INET", "3C00000A:D6F6") == "10.0.0.60:55030"
+    assert (
+        _decode_endpoint("AF_INET6", "00000000000000000000000001000000:01BB")
+        == "[::1]:443"
+    )
 
 
 def test_snapshot_manifest_records_external_cache_files(tmp_path: Path):
