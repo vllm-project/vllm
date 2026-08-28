@@ -240,6 +240,26 @@ def test_ngram_gpu_offload_accepts_unquantized_embedding(monkeypatch) -> None:
     assert module.get_offload_output_dim(160) == 160
 
 
+@pytest.mark.parametrize(
+    "quant_method",
+    [Qwen4ExpPLEFp8EmbeddingMethod(), Qwen4ExpPLENVFp4EmbeddingMethod()],
+)
+def test_ngram_gpu_offload_initializes_dummy_quant_metadata(
+    quant_method: Qwen4ExpPLEFp8EmbeddingMethod | Qwen4ExpPLENVFp4EmbeddingMethod,
+) -> None:
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    module._offload_quant_method = quant_method
+
+    module.initialize_dummy_offload_metadata(torch.device("cpu"))
+
+    if isinstance(quant_method, Qwen4ExpPLEFp8EmbeddingMethod):
+        assert module._offload_weight_scale.item() == 1.0
+    else:
+        assert module._offload_weight_scale_2.item() == 1.0
+        assert tuple(module._offload_nvfp4_lut.tolist()) == ple_layer_module._FP4_VALUES
+
+
 def test_ngram_embedding_loads_nvfp4_shards_and_scales() -> None:
     module = _make_nvfp4_ngram_embedding_for_load_test()
     codes_0 = torch.arange(32, dtype=torch.uint8).reshape(4, 8)

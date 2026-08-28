@@ -637,6 +637,27 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
             return default_dim // 2 + default_dim // _NVFP4_BLOCK_SIZE
         return default_dim
 
+    def initialize_dummy_offload_metadata(self, device: torch.device) -> None:
+        """Initialize quantization metadata skipped by the dummy loader."""
+        quant_method = self._offload_quant_method
+        if isinstance(quant_method, Qwen4ExpPLEFp8EmbeddingMethod):
+            self.register_buffer(
+                "_offload_weight_scale",
+                torch.ones((), dtype=torch.float32, device=device),
+                persistent=False,
+            )
+        elif isinstance(quant_method, Qwen4ExpPLENVFp4EmbeddingMethod):
+            self.register_buffer(
+                "_offload_weight_scale_2",
+                torch.ones((), dtype=torch.float32, device=device),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_offload_nvfp4_lut",
+                torch.tensor(_FP4_VALUES, dtype=torch.float32, device=device),
+                persistent=False,
+            )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
 

@@ -144,6 +144,8 @@ class PleOffloadConnector:
         config = vllm_config.model_config.hf_text_config
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         for layer in layers.values():
+            if vllm_config.load_config.load_format == "dummy":
+                layer.initialize_dummy_offload_metadata(self.device)
             # The CPU worker writes results here through CUDA IPC. The GPU
             # placeholder waits on the paired cross-process semaphore.
             output_buffer = torch.empty(

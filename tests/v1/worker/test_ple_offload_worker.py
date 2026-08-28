@@ -15,6 +15,7 @@ from vllm.model_executor.layers import ple_offload_layer
 from vllm.model_executor.layers.ple_offload_layer import PleOffloadLayer
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.v1.ple_offload import worker as ple_offload_worker
+from vllm.v1.ple_offload.connector import PleOffloadConnector
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -35,6 +36,15 @@ class _WeightLoadingPleLayer(_TestPleOffloadLayer):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(2))
         self.bias = torch.nn.Parameter(torch.zeros(2))
+
+
+class _DummyMetadataPleLayer(_TestPleOffloadLayer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy_metadata_device: torch.device | None = None
+
+    def initialize_dummy_offload_metadata(self, device: torch.device) -> None:
+        self.dummy_metadata_device = device
 
 
 class _WeightLoadingModel(torch.nn.Module):
@@ -145,6 +155,30 @@ def test_ple_offload_rejects_missing_materialized_parameters(
             monkeypatch,
             ["checkpoint.ple.weight"],
         )
+
+
+@pytest.mark.parametrize("load_format", ["dummy", "auto"])
+def test_ple_connector_initializes_metadata_only_for_dummy_load(
+    load_format: str,
+) -> None:
+    connector = PleOffloadConnector.__new__(PleOffloadConnector)
+    connector.device = torch.device("cpu")
+    model = torch.nn.Module()
+    model.ple = _DummyMetadataPleLayer()
+    vllm_config = SimpleNamespace(
+        load_config=SimpleNamespace(load_format=load_format),
+        model_config=SimpleNamespace(
+            dtype=torch.float32,
+            hf_text_config=SimpleNamespace(ple_embed_dim=2),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+    )
+
+    layers = connector._setup_layers(vllm_config, model)
+
+    expected_device = connector.device if load_format == "dummy" else None
+    assert model.ple.dummy_metadata_device == expected_device
+    assert list(layers) == ["ple"]
 
 
 def test_ple_offload_wait_only_waits_for_done(
