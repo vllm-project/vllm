@@ -146,9 +146,6 @@ def nvfp4_moe_stage1(
         raise ValueError("stage-one output must have shape [M, topk, inter_dim]")
     if k_batch < 1:
         raise ValueError("k_batch must be positive")
-    if k_batch > 1:
-        raise NotImplementedError("NVFP4 stage one split-K is not yet exposed by vLLM")
-
     weights = (
         sorted_weights
         if sorted_weights is not None
@@ -166,7 +163,7 @@ def nvfp4_moe_stage1(
         in_dtype="nvfp4_bf16",
         group_size=16,
         out_dtype="bf16",
-        use_cshuffle_epilog=False,
+        use_cshuffle_epilog=None if k_batch > 1 else False,
         k_batch=k_batch,
     )
     _run_compiled(

@@ -2,9 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVFP4-BF16 MoE experts through vLLM's FlyDSL kernels."""
 
+import functools
+import json
+from pathlib import Path
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.kernels.flydsl.nvfp4_moe_2stages import (
+    nvfp4_moe_stage1,
+    nvfp4_moe_stage2,
+)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -18,18 +28,16 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
 )
-from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.kernels.flydsl.nvfp4_moe_2stages import (
-    nvfp4_moe_stage1,
-    nvfp4_moe_stage2,
-)
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950, on_gfx942
+from vllm.platforms.rocm import on_gfx942, on_gfx950
+from vllm.utils.platform_utils import get_device_name_as_file_name
+
+logger = init_logger(__name__)
 
 
 class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
@@ -46,10 +54,93 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
                 f"got shape={tuple(weight.shape)}"
             )
         flattened = weight.contiguous().view(experts * n_out, packed_k)
-        shuffled = flattened.view(
-            experts * n_out // 16, 16, packed_k // 32, 4, 8
-        )
+        shuffled = flattened.view(experts * n_out // 16, 16, packed_k // 32, 4, 8)
         return shuffled.permute(0, 2, 3, 1, 4).contiguous().view_as(weight)
+
+    @staticmethod
+    def _get_default_bf16_nvfp4_fused_moe_params(
+        token: int,
+        topk: int,
+        expert: int,
+        model_dim: int,
+        inter_dim: int,
+        block_m: int | None = None,
+    ) -> dict[str, int]:
+        """Port AITER's BF16-by-NVFP4 FlyDSL fallback tile selection."""
+        if block_m is None:
+            cu_num = torch.cuda.get_device_properties("cuda").multi_processor_count
+            tile_n = 128
+            work = []
+            for candidate in (32, 64, 128):
+                groups_n = (inter_dim + tile_n - 1) // tile_n
+                max_tokens = token * topk + expert * candidate - topk
+                groups = groups_n * (max_tokens + candidate - 1) // candidate
+                work.append(
+                    (
+                        (groups + cu_num - 1) // cu_num,
+                        cu_num - groups % cu_num,
+                        candidate,
+                    )
+                )
+            block_m = sorted(work)[0][-1]
+
+        def select_k(dim: int) -> int:
+            return next(
+                k for k in (256, 128, 64) if dim % k == 0 and 4 * block_m * k <= 65536
+            )
+
+        return {
+            "tile_m": block_m,
+            "tile_n": next(n for n in (128, 64) if inter_dim % n == 0),
+            "tile_k": select_k(model_dim),
+            "k_batch": 1,
+            "tile_n2": next(n for n in (128, 64) if model_dim % n == 0),
+            "tile_k2": select_k(inter_dim),
+        }
+
+    @staticmethod
+    @functools.lru_cache(maxsize=64)
+    def _load_tuned_configs(experts: int, inter_dim: int) -> dict[int, dict[str, int]]:
+        name = (
+            f"E={experts},N={inter_dim},"
+            f"device_name={get_device_name_as_file_name()},"
+            "dtype=nvfp4_bf16,backend=flydsl.json"
+        )
+        path = Path(__file__).parent.parent / "configs" / name
+        if not path.exists():
+            return {}
+        with path.open() as handle:
+            raw = json.load(handle)
+        return {int(key): value for key, value in raw.items()}
+
+    @classmethod
+    def _select_params(
+        cls, token: int, topk: int, expert: int, model_dim: int, inter_dim: int
+    ) -> dict[str, int]:
+        configs = cls._load_tuned_configs(expert, inter_dim)
+        padded = 1 << max(0, token - 1).bit_length()
+        config = configs.get(padded)
+        required = {"tile_m", "tile_n", "tile_k", "k_batch", "tile_n2", "tile_k2"}
+        if config is not None and required.issubset(config):
+            return config
+        command = (
+            "python benchmarks/kernels/benchmark_flydsl_moe_nvfp4.py "
+            f"--experts {expert} --hidden-size {model_dim} "
+            f"--inter-dim {inter_dim} --topk {topk}"
+        )
+        logger.warning_once(
+            "No tuned FlyDSL NVFP4 MoE config is available for token bucket %d "
+            "(E=%d, N=%d, device=%s). Run:\n%s\n"
+            "The generated config will be picked up automatically on the next run.",
+            padded,
+            expert,
+            inter_dim,
+            get_device_name_as_file_name(),
+            command,
+        )
+        return cls._get_default_bf16_nvfp4_fused_moe_params(
+            token, topk, expert, model_dim, inter_dim
+        )
 
     def __init__(
         self,
@@ -201,7 +292,8 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
         if not is_g1u1:
             raise NotImplementedError("FlyDSL NVFP4 experts require gated MoE weights")
 
-        block_m = 32
+        params = self._select_params(num_tokens, topk, E, K, inter_dim)
+        block_m = params["tile_m"]
         global_num_experts_for_sort = (
             expert_mask.numel() if expert_mask is not None else E
         )
@@ -235,9 +327,10 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
             num_valid_ids,
             topk=topk,
             inter_dim=inter_dim,
-            tile_m=block_m,
-            tile_n=64,
-            tile_k=64,
+            tile_m=params["tile_m"],
+            tile_n=params["tile_n"],
+            tile_k=params["tile_k"],
+            k_batch=params["k_batch"],
             output=intermediate,
         )
 
@@ -261,9 +354,9 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
             num_valid_ids,
             topk=topk,
             model_dim=K,
-            tile_m=block_m,
-            tile_n=64,
-            tile_k=64,
+            tile_m=params["tile_m"],
+            tile_n=params["tile_n2"],
+            tile_k=params["tile_k2"],
             output=output,
             sorted_weights=sorted_weights if not apply_router_weight_on_input else None,
         )
