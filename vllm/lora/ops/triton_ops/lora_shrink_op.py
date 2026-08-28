@@ -179,8 +179,8 @@ def _lora_shrink(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(1) == lora_a_weights[0].size(-1)
-    assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
+    inputs = inputs.contiguous()
 
     # metadata sanity check
     M = inputs.size(0)
