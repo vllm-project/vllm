@@ -133,6 +133,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 "please check and use the latest version"
             )
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        engine = self._lmcache_engine
+        if hasattr(engine, "bind_connector_metadata"):
+            engine.bind_connector_metadata(connector_metadata)
+        else:
+            # Compat for engines predating the bind hook: start_load_kv may
+            # run after the forward (SchedulerOutput.has_sync_kv_loads), so
+            # the per-step layerwise state it used to reset must be reset
+            # here. Remove once LMCache ships bind_connector_metadata.
+            if hasattr(engine, "current_layer"):
+                engine.current_layer = 0
+            if hasattr(engine, "layerwise_retrievers"):
+                engine.layerwise_retrievers = []
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged

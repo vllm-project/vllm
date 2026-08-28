@@ -783,6 +783,17 @@ class LMCacheConnectorV1Impl:
     ####################
     # Worker side APIs
     ####################
+    def bind_connector_metadata(self, metadata: "KVConnectorMetadata") -> None:
+        """Per-step init, called when the runner binds this step's metadata.
+
+        The layerwise hooks fire during every forward once metadata is
+        bound, while start_load_kv may run after the forward launch on
+        steps without sync loads (SchedulerOutput.has_sync_kv_loads), so
+        the per-step state they consume must be reset here.
+        """
+        self.current_layer = 0
+        self.layerwise_retrievers = []
+
     @_lmcache_nvtx_annotate
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         logger.info("Registering KV caches")
@@ -806,8 +817,6 @@ class LMCacheConnectorV1Impl:
             The number of elements in kv_caches and layer_names should be
             the same.
         """
-        self.current_layer = 0
-
         if len(self.kv_caches) == 0:
             self._init_kv_caches_from_forward_context(forward_context)
 
@@ -825,8 +834,6 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
-
-        self.layerwise_retrievers = []
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:

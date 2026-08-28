@@ -289,8 +289,8 @@ class KVConnectorBase_V1(ABC):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
-        KV buffer. This is called from the forward context before the
-        forward pass to enable async loading during model execution.
+        KV buffer. Loads required by the current forward start before it;
+        independent asynchronous loads may start after it is submitted.
 
         Args:
             forward_context (ForwardContext): the forward context.

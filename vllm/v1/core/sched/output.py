@@ -262,6 +262,10 @@ class SchedulerOutput:
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
+    # Whether any scheduled request consumes KV that the connector loads
+    # synchronously during this step (load_async=False).
+    has_sync_kv_loads: bool = False
+
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
     # EC Cache Manager metadata
