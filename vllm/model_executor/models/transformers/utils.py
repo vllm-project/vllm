@@ -22,7 +22,7 @@ from functools import lru_cache
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import torch
 from torch import nn
@@ -304,6 +304,14 @@ def recursive_replace_linear(
                 setattr(module, child_name, new_module)
 
     _recursive_replace(model, prefix=prefix)
+
+
+T = TypeVar("T")
+
+
+def maybe_per_layer(value: T | list[T], layer_idx: int) -> T:
+    """Pick `layer_idx`'s entry from a config field that may be sized per layer."""
+    return value[layer_idx] if isinstance(value, list) else value
 
 
 def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
