@@ -60,6 +60,31 @@ def to_cute_dynamic_m(
 
 
 @dsl_user_op
+def fma_f32_bf16(
+    a: BFloat16,
+    b: BFloat16,
+    acc: Float32,
+    *,
+    loc=None,
+    ip=None,
+) -> Float32:
+    a_bits = llvm.bitcast(T.i16(), a.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    b_bits = llvm.bitcast(T.i16(), b.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    result = llvm.inline_asm(
+        T.f32(),
+        [a_bits, b_bits, acc.ir_value(loc=loc, ip=ip)],
+        "fma.rn.f32.bf16 $0, $1, $2, $3;",
+        "=f,h,h,f",
+        has_side_effects=False,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return Float32(result)
+
+
+@dsl_user_op
 def load_global_u32x4(
     pointer: cute.Pointer,
     *,

@@ -429,6 +429,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 latent_multicast_ptr + multicast_offset,
                 local_packed,
             )
+            cute.arch.griddepcontrol_launch_dependents()
 
             if cutlass.const_expr(not self.single_token_geometry):
                 cute.arch.cluster_arrive()
@@ -495,9 +496,6 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 ).to(Float32)
                 for element in cutlass.range_constexpr(VEC_BF16):
                     accum[element] = accum[element] + values[element]
-
-            # Preserve the original early PDL point before RMSNorm.
-            cute.arch.griddepcontrol_launch_dependents()
 
             if cutlass.const_expr(self.fp32_internal):
                 # High-precision fused mode: retain the rank reduction in
@@ -671,6 +669,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                         )
                         vector = vector + self.threads
 
+            cute.arch.griddepcontrol_launch_dependents()
+
             # One arrival per shared cluster and token.
             cute.arch.cluster_arrive()
             if cluster_rank == 0 and tidx < 32:
@@ -761,9 +761,6 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                         vector = vector + self.threads
 
                     cute.arch.barrier()
-
-            cute.arch.griddepcontrol_launch_dependents()
-
             if (
                 token_cta == 0
                 and token + self.token_ctas >= m
