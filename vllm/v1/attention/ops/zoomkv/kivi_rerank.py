@@ -92,9 +92,9 @@ def partial_chunk_kivi_qk_ref(
         torch.full((), int(dense_topk), device=chunk_ids.device, dtype=torch.int64),
         torch.full((), int(sparse_topk), device=chunk_ids.device, dtype=torch.int64),
     )
-    rank = torch.arange(output_slots, device=chunk_ids.device, dtype=torch.int64).view(
-        1, 1, 1, output_slots
-    )
+    rank = torch.arange(
+        output_slots, device=chunk_ids.device, dtype=torch.int64
+    ).view(1, 1, 1, output_slots)
     keep = rank < k_eff.unsqueeze(-1)
     masked_scores = sorted_scores.masked_fill(~keep, neg_inf).to(
         out_scores.dtype if out_scores is not None else torch.float32,

@@ -35,12 +35,12 @@ __device__ __forceinline__ uint8_t extract_byte(uint32_t x, int byte_offset) {
 }
 
 // Naive topk for length <= k
-__device__ __forceinline__ int64_t
-map_topk_index(const int64_t* __restrict__ values, int64_t values_stride,
-               int bid, int idx) {
-  return values == nullptr
-             ? static_cast<int64_t>(idx)
-             : values[static_cast<int64_t>(bid) * values_stride + idx];
+__device__ __forceinline__ int64_t map_topk_index(
+    const int64_t* __restrict__ values, int64_t values_stride, int bid,
+    int idx) {
+  return values == nullptr ? static_cast<int64_t>(idx)
+                           : values[static_cast<int64_t>(bid) * values_stride +
+                                    idx];
 }
 
 __device__ void naive_topk(int64_t* __restrict__ indices,
@@ -67,9 +67,10 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
                                   const int64_t* __restrict__ values,
                                   const int32_t* __restrict__ lengths,
                                   const int32_t* __restrict__ ks,
-                                  int64_t* __restrict__ indices,  // [B, k]
-                                  int64_t input_stride, int64_t values_stride,
-                                  int32_t length, int32_t max_k) {
+                                  int64_t* __restrict__ indices,    // [B, k]
+                                  int64_t input_stride,
+                                  int64_t values_stride, int32_t length,
+                                  int32_t max_k) {
   const int bid = blockIdx.x;
   const int tid = threadIdx.x;
   const int row_length =
@@ -273,14 +274,15 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 
       if (bin > threshold_bin) {
         int pos = atomicAdd(&s_counter, 1);
-        if (pos < row_k)
-          out[pos] = map_topk_index(values, values_stride, bid, idx);
+          if (pos < row_k)
+            out[pos] = map_topk_index(values, values_stride, bid, idx);
       } else if (bin == threshold_bin) {
         if (round == 3) {
           // Last round: fill remaining slots
           int pos = atomicAdd(&s_last_remain, -1);
           if (pos > 0) {
-            out[row_k - pos] = map_topk_index(values, values_stride, bid, idx);
+            out[row_k - pos] =
+                map_topk_index(values, values_stride, bid, idx);
           }
         } else {
           int pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
@@ -327,7 +329,8 @@ torch::Tensor float_topk_cuda_impl(torch::Tensor input,
   if (output != nullptr) {
     TORCH_CHECK(output->is_cuda() && output->device() == input.device(),
                 "output must be CUDA on the same device as input");
-    TORCH_CHECK(output->scalar_type() == torch::kInt64, "output must be int64");
+    TORCH_CHECK(output->scalar_type() == torch::kInt64,
+                "output must be int64");
     TORCH_CHECK(output->dim() == 2 && output->size(0) == B &&
                     output->size(1) == k && output->is_contiguous(),
                 "output must be contiguous [B,k]");
@@ -346,7 +349,8 @@ torch::Tensor float_topk_cuda_impl(torch::Tensor input,
   if (values != nullptr) {
     TORCH_CHECK(values->is_cuda() && values->device() == input.device(),
                 "values must be CUDA on the same device as input");
-    TORCH_CHECK(values->scalar_type() == torch::kInt64, "values must be int64");
+    TORCH_CHECK(values->scalar_type() == torch::kInt64,
+                "values must be int64");
     TORCH_CHECK(values->dim() == 2 && values->sizes() == input.sizes(),
                 "values shape must match input");
     values_contiguous = values->contiguous();
@@ -411,8 +415,8 @@ torch::Tensor float_topk_3d_cuda(torch::Tensor input, int64_t k) {
 }
 
 torch::Tensor float_topk_values_3d_cuda(torch::Tensor input,
-                                        torch::Tensor values, int64_t k,
-                                        std::optional<torch::Tensor> output) {
+                                       torch::Tensor values, int64_t k,
+                                       std::optional<torch::Tensor> output) {
   TORCH_CHECK(input.dim() == 3 && values.dim() == 3,
               "input and values must be 3D [bs, kv_heads, kv_len]");
   TORCH_CHECK(input.sizes() == values.sizes(),
@@ -432,13 +436,14 @@ torch::Tensor float_topk_values_3d_cuda(torch::Tensor input,
     output_2d = output->reshape({bs * kv_heads, k});
     output_ptr = &output_2d;
   }
-  auto selected_2d = float_topk_cuda_impl(input_2d, &values_2d, k, output_ptr);
+  auto selected_2d =
+      float_topk_cuda_impl(input_2d, &values_2d, k, output_ptr);
   return selected_2d.reshape({bs, kv_heads, k});
 }
 
 torch::Tensor float_topk_3d_varlen_cuda(torch::Tensor input,
-                                        torch::Tensor lengths, torch::Tensor ks,
-                                        int64_t max_k) {
+                                       torch::Tensor lengths,
+                                       torch::Tensor ks, int64_t max_k) {
   TORCH_CHECK(input.dim() == 3, "input must be 3D [bs,kv_heads,length]");
   TORCH_CHECK(lengths.dim() == 2 && ks.dim() == 2,
               "lengths and ks must be 2D [bs,kv_heads]");
@@ -480,8 +485,9 @@ torch::Tensor float_topk_values_3d_varlen_cuda(
     output_2d = output->reshape({rows, max_k});
     output_ptr = &output_2d;
   }
-  auto selected = float_topk_cuda_impl(input_2d, &values_2d, max_k, output_ptr,
-                                       &lengths_1d, &ks_1d);
+  auto selected =
+      float_topk_cuda_impl(input_2d, &values_2d, max_k, output_ptr,
+                           &lengths_1d, &ks_1d);
   return selected.reshape({input.size(0), input.size(1), max_k});
 }
 
@@ -496,10 +502,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("float_topk_values_3d", &float_topk_values_3d_cuda,
         "Float Top-K returning associated int64 values", py::arg("input"),
         py::arg("values"), py::arg("k"), py::arg("output") = std::nullopt);
-  m.def("float_topk_3d_varlen", &float_topk_3d_varlen_cuda, py::arg("input"),
-        py::arg("lengths"), py::arg("ks"), py::arg("max_k"));
-  m.def("float_topk_values_3d_varlen", &float_topk_values_3d_varlen_cuda,
-        py::arg("input"), py::arg("values"), py::arg("lengths"), py::arg("ks"),
+  m.def("float_topk_3d_varlen", &float_topk_3d_varlen_cuda,
+        py::arg("input"), py::arg("lengths"), py::arg("ks"),
+        py::arg("max_k"));
+  m.def("float_topk_values_3d_varlen",
+        &float_topk_values_3d_varlen_cuda, py::arg("input"),
+        py::arg("values"), py::arg("lengths"), py::arg("ks"),
         py::arg("max_k"), py::arg("output") = std::nullopt);
 }
 #endif

@@ -195,13 +195,19 @@ def aggregate(log_dir: str, prompt_tokens: int) -> dict:
     for step in sorted(by_step):
         recs = by_step[step]
         recalls = [r for rec in recs for r in rec["recall"]]
-        attention = [r for rec in recs for r in rec.get("attention_recall", [])]
+        attention = [
+            r for rec in recs for r in rec.get("attention_recall", [])
+        ]
         cov = [c for rec in recs for c in rec["mass_coverage"]]
         oracle = [c for rec in recs for c in rec["oracle_mass_coverage"]]
         zone = [z for rec in recs for z in rec["zone_mass_frac"]]
-        retrieved = [count for rec in recs for count in rec.get("retrieved_count", [])]
+        retrieved = [
+            count for rec in recs for count in rec.get("retrieved_count", [])
+        ]
         unique = [
-            count for rec in recs for count in rec.get("retrieved_unique_count", [])
+            count
+            for rec in recs
+            for count in rec.get("retrieved_unique_count", [])
         ]
         layer_means = [_mean(rec["recall"]) for rec in recs]
         steps.append(
@@ -226,7 +232,9 @@ def aggregate(log_dir: str, prompt_tokens: int) -> dict:
         for layer, vals in sorted(by_layer.items(), key=lambda kv: _mean(kv[1]))
     }
     all_recalls = [r for rec in records for r in rec["recall"]]
-    all_attention = [r for rec in records for r in rec.get("attention_recall", [])]
+    all_attention = [
+        r for rec in records for r in rec.get("attention_recall", [])
+    ]
     return {
         "num_records": len(records),
         "overall_recall_mean": _mean(all_recalls),

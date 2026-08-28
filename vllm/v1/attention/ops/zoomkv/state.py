@@ -3,6 +3,7 @@
 # QYL： zoomkv meta data
 
 
+
 """Physical-block ZoomKV block-summary state (min/max/centroid/KIVI packed)."""
 
 from __future__ import annotations
@@ -359,7 +360,9 @@ class ZoomKVBlockSummary:
         valid = self.valid[ids]
         if chunk_valid is not None:
             valid = valid & chunk_valid.to(device=self.device, dtype=torch.bool)
-        valid = valid.unsqueeze(1).expand(batch, self.num_kv_heads, n).contiguous()
+        valid = (
+            valid.unsqueeze(1).expand(batch, self.num_kv_heads, n).contiguous()
+        )
         return packed, chunk_min, chunk_max, centroid, valid
 
     def build_parent_minmax(
@@ -378,12 +381,8 @@ class ZoomKVBlockSummary:
             empty = chunk_min[:, :, :0, :]
             return empty, empty.clone(), valid[:, :, :0]
         usable = n_parent * factor
-        cmin = chunk_min[:, :, :usable, :].reshape(
-            batch, kv_heads, n_parent, factor, head_dim
-        )
-        cmax = chunk_max[:, :, :usable, :].reshape(
-            batch, kv_heads, n_parent, factor, head_dim
-        )
+        cmin = chunk_min[:, :, :usable, :].reshape(batch, kv_heads, n_parent, factor, head_dim)
+        cmax = chunk_max[:, :, :usable, :].reshape(batch, kv_heads, n_parent, factor, head_dim)
         v = valid[:, :, :usable].reshape(batch, kv_heads, n_parent, factor)
         neg = torch.full_like(cmin, float("-inf"))
         pos = torch.full_like(cmax, float("inf"))
@@ -392,12 +391,8 @@ class ZoomKVBlockSummary:
         parent_min = cmin_m.amin(dim=3)
         parent_max = cmax_m.amax(dim=3)
         parent_valid = v.any(dim=3)
-        parent_min = torch.where(
-            parent_valid.unsqueeze(-1), parent_min, torch.zeros_like(parent_min)
-        )
-        parent_max = torch.where(
-            parent_valid.unsqueeze(-1), parent_max, torch.zeros_like(parent_max)
-        )
+        parent_min = torch.where(parent_valid.unsqueeze(-1), parent_min, torch.zeros_like(parent_min))
+        parent_max = torch.where(parent_valid.unsqueeze(-1), parent_max, torch.zeros_like(parent_max))
         return parent_min, parent_max, parent_valid
 
 
@@ -418,7 +413,7 @@ def get_or_create_block_summary(
     # Normalize so ``cuda`` and ``cuda:0`` (current device) compare equal.
     device = torch.device(device)
     if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.accelerator.current_device_index())
+        device = torch.device("cuda", torch.cuda.current_device())
     sc = _LAYER_BLOCK_SUMMARIES.get(layer_name)
     if (
         sc is None

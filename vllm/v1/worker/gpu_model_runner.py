@@ -883,6 +883,8 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
+
+
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
         """
@@ -927,6 +929,7 @@ class GPUModelRunner(
                         if isinstance(param, torch.Tensor):
                             param.fill_(v_scale_val)
 
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
@@ -940,6 +943,8 @@ class GPUModelRunner(
             if self.uses_xdrope_dim > 0:
                 return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
+
+
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
@@ -3625,7 +3630,9 @@ class GPUModelRunner(
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded,
             disable_full=(
-                use_cascade_attn or has_encoder_output or disable_full_attention_graph
+                use_cascade_attn
+                or has_encoder_output
+                or disable_full_attention_graph
             ),
         )
         num_tokens_padded = batch_descriptor.num_tokens
@@ -4082,7 +4089,7 @@ class GPUModelRunner(
         # and block-summary updates) is complete before decode starts.
         num_computed_tokens_np = self.input_batch.num_computed_tokens_cpu[:num_reqs]
         num_prompt_tokens_np = self.input_batch.num_prompt_tokens[:num_reqs]
-
+       
         if np.any(num_computed_tokens_np == num_prompt_tokens_np):
             torch.accelerator.synchronize()
 

@@ -23,7 +23,9 @@ def _aligned_local_start(
 ) -> torch.Tensor:
     """Round the local-window boundary down to include every partial chunk."""
     raw_start = torch.maximum(sink_len, seq - local_size)
-    aligned_start = torch.div(raw_start, block_size, rounding_mode="floor") * block_size
+    aligned_start = torch.div(
+        raw_start, block_size, rounding_mode="floor"
+    ) * block_size
     return torch.maximum(sink_len, aligned_start)
 
 
@@ -189,7 +191,9 @@ def _validate_topk_gather_mapping(
     in_local = (t >= sink_len) & (t < sink_len + local_len)
     topk_pos = t - sink_len - local_len
     in_topk = (topk_pos >= 0) & (topk_pos < topk_len)
-    topk_safe = topk_pos.clamp(0, max(0, topk_len - 1)).expand(batch, heads, n_ctx)
+    topk_safe = topk_pos.clamp(0, max(0, topk_len - 1)).expand(
+        batch, heads, n_ctx
+    )
     selected = torch.gather(topk_logical, 2, topk_safe)
     logical = torch.where(
         in_sink,
@@ -197,7 +201,9 @@ def _validate_topk_gather_mapping(
         torch.where(in_local, local_start + t - sink_len, selected),
     ).expand(batch, heads, n_ctx)
     region_valid = (in_sink | in_local | in_topk).expand(batch, heads, n_ctx)
-    logical_valid = region_valid & (logical >= 0) & (logical < seq.view(batch, 1, 1))
+    logical_valid = region_valid & (logical >= 0) & (
+        logical < seq.view(batch, 1, 1)
+    )
     logical_block = torch.div(logical.clamp(min=0), block_size, rounding_mode="floor")
     block_valid = logical_valid & (logical_block < bt.shape[1])
     safe_block = logical_block.clamp(0, max(0, bt.shape[1] - 1))
@@ -274,7 +280,9 @@ def _gather_kv_from_topk_batch_reference(
     in_local = (t >= sink_len) & (t < sink_len + local_len)
     topk_pos = t - sink_len - local_len
     in_topk = (topk_pos >= 0) & (topk_pos < topk_len)
-    topk_safe = topk_pos.clamp(0, max(0, topk_len - 1)).expand(batch, heads, n_ctx)
+    topk_safe = topk_pos.clamp(0, max(0, topk_len - 1)).expand(
+        batch, heads, n_ctx
+    )
     selected = torch.gather(topk_logical, 2, topk_safe)
     logical = torch.where(
         in_sink,
@@ -295,7 +303,9 @@ def _gather_kv_from_topk_batch_reference(
         2,
         safe_block,
     )
-    valid = valid & (physical_block >= 0) & (physical_block < key_cache.shape[0])
+    valid = valid & (physical_block >= 0) & (
+        physical_block < key_cache.shape[0]
+    )
     physical_safe = physical_block.clamp(0, max(0, key_cache.shape[0] - 1))
 
     head_ids = torch.arange(heads, device=device).view(1, heads, 1)
@@ -375,16 +385,24 @@ def _maybe_dump_gather_snapshot(
             selected,
         ),
     ).expand(batch, heads, n_ctx)
-    logical_block = torch.div(logical.clamp(min=0), block_size, rounding_mode="floor")
+    logical_block = torch.div(
+        logical.clamp(min=0), block_size, rounding_mode="floor"
+    )
     bt = block_table[:batch].to(device=topk_logical.device)
     safe_block = logical_block.clamp(0, max(0, bt.shape[1] - 1))
     physical = torch.gather(
         bt[:, None, :].expand(batch, heads, bt.shape[1]), 2, safe_block
     )
-    used = torch.unique(physical[(physical >= 0) & (physical < key_cache.shape[0])])
+    used = torch.unique(
+        physical[(physical >= 0) & (physical < key_cache.shape[0])]
+    )
     used_long = used.to(torch.int64)
-    remap = torch.full((key_cache.shape[0],), -1, dtype=bt.dtype, device=bt.device)
-    remap[used_long] = torch.arange(used.numel(), dtype=bt.dtype, device=bt.device)
+    remap = torch.full(
+        (key_cache.shape[0],), -1, dtype=bt.dtype, device=bt.device
+    )
+    remap[used_long] = torch.arange(
+        used.numel(), dtype=bt.dtype, device=bt.device
+    )
     bt_valid = (bt >= 0) & (bt < key_cache.shape[0])
     compact_bt = torch.full_like(bt, -1)
     compact_bt[bt_valid] = remap[bt[bt_valid]]
@@ -466,7 +484,10 @@ def gather_kv_from_topk_batch(
             local_size,
             output_bthd,
         )
-    if validate_mapping and os.environ.get("VLLM_ZOOMKV_REFERENCE_GATHER", "0") == "1":
+    if (
+        validate_mapping
+        and os.environ.get("VLLM_ZOOMKV_REFERENCE_GATHER", "0") == "1"
+    ):
         global _REFERENCE_GATHER_LOGGED
         if not _REFERENCE_GATHER_LOGGED:
             print(
@@ -541,7 +562,9 @@ def build_sink_local_indices(
     """Absolute token indices for sink plus a chunk-aligned local window."""
     sink_len = min(sink_size, seq_len)
     sink = torch.arange(sink_len, device=device, dtype=torch.int64)
-    local_start = _aligned_local_start_scalar(seq_len, sink_len, local_size, block_size)
+    local_start = _aligned_local_start_scalar(
+        seq_len, sink_len, local_size, block_size
+    )
     local = torch.arange(local_start, seq_len, device=device, dtype=torch.int64)
     # Drop local tokens already covered by sink.
     if local.numel() and sink.numel():
@@ -747,7 +770,9 @@ def sparse_decode_attention_batch(
                 v_flat = value.reshape(batch * n_ctx, hkv, d)
             else:
                 k_flat = (
-                    key.permute(0, 2, 1, 3).reshape(batch * n_ctx, hkv, d).contiguous()
+                    key.permute(0, 2, 1, 3)
+                    .reshape(batch * n_ctx, hkv, d)
+                    .contiguous()
                 )
                 v_flat = (
                     value.permute(0, 2, 1, 3)
@@ -916,7 +941,9 @@ def assemble_sparse_context_indices_batch(
     device = topk_logical.device
     n_ctx = int(sink_size) + int(local_size) + tk
     if out is None or out.shape != (batch, kv, n_ctx):
-        indices = torch.full((batch, kv, n_ctx), -1, dtype=torch.int64, device=device)
+        indices = torch.full(
+            (batch, kv, n_ctx), -1, dtype=torch.int64, device=device
+        )
     else:
         indices = out
         indices.fill_(-1)
@@ -932,5 +959,7 @@ def assemble_sparse_context_indices_batch(
             valid[i, :, :sl] = True
         topk_slots = min(tk, max(0, n_ctx - sl))
         indices[i, :, sl : sl + topk_slots] = topk_logical[i, :, :topk_slots]
-        valid[i, :, sl : sl + topk_slots] = topk_logical[i, :, :topk_slots] >= 0
+        valid[i, :, sl : sl + topk_slots] = (
+            topk_logical[i, :, :topk_slots] >= 0
+        )
     return indices, valid

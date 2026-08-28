@@ -49,7 +49,9 @@ class CudagraphDispatcher:
             max_chunks = max(1, (max_model_len + 15) // 16)
             max_bucket = max(1024, 1 << (max_chunks - 1).bit_length())
             self.zoomkv_chunk_buckets = tuple(
-                bucket for bucket in (1024, 2048, 4096, 8192) if bucket <= max_bucket
+                bucket
+                for bucket in (1024, 2048, 4096, 8192)
+                if bucket <= max_bucket
             )
             if max_bucket > 8192:
                 self.zoomkv_chunk_buckets += (max_bucket,)
@@ -246,7 +248,9 @@ class CudagraphDispatcher:
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
             chunk_buckets: tuple[int | None, ...] = (
-                self.zoomkv_chunk_buckets if self.zoomkv_chunk_buckets else (None,)
+                self.zoomkv_chunk_buckets
+                if self.zoomkv_chunk_buckets
+                else (None,)
             )
             for bs, num_active_loras, chunk_bucket in product(
                 cudagraph_capture_sizes_for_decode,

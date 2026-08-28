@@ -28,7 +28,9 @@ from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
-    p.add_argument("--mode", choices=("native", "dense", "sparse"), default="sparse")
+    p.add_argument(
+        "--mode", choices=("native", "dense", "sparse"), default="sparse"
+    )
     p.add_argument("--batch-sizes", type=str, default="1,2,4,8")
     p.add_argument("--prompt-tokens", type=int, default=16384)
     p.add_argument("--output-tokens", type=int, default=64)
@@ -120,13 +122,13 @@ def main() -> None:
             ignore_eos=True,
         )
         if args.cuda_profiler_range:
-            torch.accelerator.synchronize()
+            torch.cuda.synchronize()
             torch.cuda.cudart().cudaProfilerStart()
         t0 = time.perf_counter()
         outs = llm.generate(prompts, sampling)
         wall_s = time.perf_counter() - t0
         if args.cuda_profiler_range:
-            torch.accelerator.synchronize()
+            torch.cuda.synchronize()
             torch.cuda.cudart().cudaProfilerStop()
         decode_tokens = sum(len(o.outputs[0].token_ids) for o in outs)
         tpots_ms = []
@@ -151,7 +153,9 @@ def main() -> None:
             "wall_s": wall_s,
             "decode_tokens_total": decode_tokens,
             "tok_s_output": decode_tokens / wall_s if wall_s > 0 else 0.0,
-            "mean_tpot_ms": (sum(tpots_ms) / len(tpots_ms) if tpots_ms else None),
+            "mean_tpot_ms": (
+                sum(tpots_ms) / len(tpots_ms) if tpots_ms else None
+            ),
             "stage_report": report,
         }
         results.append(row)

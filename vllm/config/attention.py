@@ -132,9 +132,7 @@ class AttentionConfig:
         if not (1 <= self.zoomkv_sparse_topk <= self.zoomkv_quest_chunk):
             raise ValueError("zoomkv_sparse_topk must be in [1, zoomkv_quest_chunk]")
         if self.zoomkv_enable_offload and self.zoomkv_dense_fallback:
-            raise ValueError(
-                "zoomkv_enable_offload cannot be combined with zoomkv_dense_fallback"
-            )
+            raise ValueError("zoomkv_enable_offload cannot be combined with zoomkv_dense_fallback")
         if self.zoomkv_cpu_bytes_per_rank <= 0:
             raise ValueError("zoomkv_cpu_bytes_per_rank must be positive")
 

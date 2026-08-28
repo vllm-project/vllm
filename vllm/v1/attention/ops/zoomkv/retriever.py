@@ -3,20 +3,18 @@
 """ZoomKV hierarchical Quest + KIVI retrieval pipeline."""
 
 from __future__ import annotations
-
 import math
 import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
-
 import torch
 
 from vllm.logger import init_logger
 from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 from vllm.v1.attention.ops.zoomkv.kernels import (
     chunk_density_scores,
-    dense_mask_from_topk,
     density_score_physical,
+    dense_mask_from_topk,
     direct_physical_retrieval_available,
     float_topk_3d_varlen,
     float_topk_values_3d,
@@ -26,6 +24,7 @@ from vllm.v1.attention.ops.zoomkv.kernels import (
     quest_parent_score_physical,
     quest_sub_score_physical,
 )
+
 from vllm.v1.attention.ops.zoomkv.kivi_rerank import partial_chunk_kivi_qk
 from vllm.v1.attention.ops.zoomkv.retrieval_metadata_triton import (
     build_actual_num_chunks,
@@ -33,7 +32,7 @@ from vllm.v1.attention.ops.zoomkv.retrieval_metadata_triton import (
 )
 from vllm.v1.attention.ops.zoomkv.state import ZoomKVBlockSummary
 
-_RETRIEVE_DETAIL_TIMER = os.environ.get("VLLM_ZOOMKV_RETRIEVE_STAGE_TIMER", "0") == "1"
+_RETRIEVE_DETAIL_TIMER = (os.environ.get("VLLM_ZOOMKV_RETRIEVE_STAGE_TIMER", "0") == "1")
 logger = init_logger(__name__)
 
 
@@ -124,7 +123,6 @@ class _RetrievalCudaGraph:
 
 def _topk_3d(scores: torch.Tensor, k: int, strict: bool = False) -> torch.Tensor:
     from vllm.v1.attention.ops.zoomkv.kernels import float_topk_3d
-
     return float_topk_3d(scores, k, strict=strict)
 
 
@@ -146,6 +144,7 @@ def prepare_retrieval_query(
     return query.reshape(bs, num_kv_heads, -1, d).mean(dim=2).contiguous()
 
 
+
 class ZoomKVRetriever:
     # Shared across per-layer retriever instances: metadata depends only on
     # seq_lens / block-table capacity, not on layer weights or Q.
@@ -155,9 +154,8 @@ class ZoomKVRetriever:
         self.cfg = cfg
         self.quest = get_quest_ops(prefer_triton=True, strict=cfg.strict_kernels)
         # Scratch-buffer cache to align with the reference implementation:
-        # Score/index tensors depend only on (n_chunks, n_large, kv_heads).
-        # These stay constant across layers in a decode step and change only
-        # when a new block completes, so reuse avoids hot-path allocations.
+        # score/index tensors depend only on (n_chunks, n_large, kv_heads), which stay constant across all layers of a decode step (and only change when a new block completes ~every block_size tokens).  Reusing
+        # them removes per-layer/per-step allocations in the retrieve hot path.
         self._scratch: dict[tuple[Any, ...], torch.Tensor] = {}
         self._mixed_cudagraphs: dict[tuple[Any, ...], _RetrievalCudaGraph] = {}
         self._mixed_cudagraph_disabled = False
@@ -226,7 +224,9 @@ class ZoomKVRetriever:
         local_blocks = (
             cfg.local_size + block_summary.block_size - 1
         ) // block_summary.block_size
-        available_chunks = max(0, block_table.shape[1] - start_b - local_blocks)
+        available_chunks = max(
+            0, block_table.shape[1] - start_b - local_blocks
+        )
         max_chunks = min(chunk_bucket, available_chunks)
 
         static_q = torch.zeros(
@@ -240,7 +240,9 @@ class ZoomKVRetriever:
             dtype=block_table.dtype,
             device=device,
         )
-        static_seq = torch.zeros((batch,), dtype=seq_lens.dtype, device=device)
+        static_seq = torch.zeros(
+            (batch,), dtype=seq_lens.dtype, device=device
+        )
         static_topk = torch.full(
             (batch, raw_q.shape[1], cfg.final_topk),
             -1,
@@ -359,12 +361,16 @@ class ZoomKVRetriever:
         self._last_topk_fully_filled = True
         return state.topk[:batch]
 
+
+
+
     @staticmethod
     def _chunk_bucket(n_chunks: int) -> int:
         """Round a retrieval width to a stable power-of-two bucket."""
         if n_chunks <= 0:
             return 0
         return max(16, 1 << (int(n_chunks) - 1).bit_length())
+
 
     def _topk_out(
         self,
@@ -376,18 +382,14 @@ class ZoomKVRetriever:
         if out is None:
             return None
         expected = (batch, kv_heads, self.cfg.final_topk)
-        if (
-            tuple(out.shape) != expected
-            or out.dtype != torch.int64
-            or out.device != device
-            or not out.is_contiguous()
-        ):
+        if (tuple(out.shape) != expected or out.dtype != torch.int64 or out.device != device or not out.is_contiguous()):
             raise ValueError(
                 "topk_out must be contiguous int64 "
                 f"{expected} on {device}, got {tuple(out.shape)} "
                 f"{out.dtype} on {out.device}"
             )
         return out
+
 
     def _empty_batch_topk_result(
         self,
@@ -398,13 +400,10 @@ class ZoomKVRetriever:
     ) -> ZoomKVRetrievalResult:
         topk = topk_out
         if topk is None:
-            topk = torch.empty(
-                (batch, kv_heads, self.cfg.final_topk), dtype=torch.int64, device=device
-            )
+            topk = torch.empty((batch, kv_heads, self.cfg.final_topk),dtype=torch.int64,device=device)
         topk.fill_(-1)
-        return ZoomKVRetrievalResult(
-            topk=topk, context_fully_valid=False, used_direct_physical=False
-        )
+        return ZoomKVRetrievalResult(topk=topk,context_fully_valid=False,used_direct_physical=False        )
+
 
     @staticmethod
     def _require_direct_physical(
@@ -420,10 +419,14 @@ class ZoomKVRetriever:
                 "path (BF16, D=128/256, int32 physical_ids, vllm._zoomkv_C)."
             )
 
+
     def should_use_dense(self, seq_len: int) -> bool:
         return bool(
-            self.cfg.dense_fallback or seq_len < self.cfg.full_attention_threshold
+            self.cfg.dense_fallback
+            or seq_len < self.cfg.full_attention_threshold
         )
+
+
 
     def retrieve_topk_from_block_summaries(
         self,
@@ -442,28 +445,17 @@ class ZoomKVRetriever:
         batch = raw_q.shape[0]
         n_chunks = packed.shape[2]
         if n_chunks <= 0:
-            return torch.full(
-                (batch, raw_q.shape[1], cfg.final_topk),
-                -1,
-                dtype=torch.int64,
-                device=raw_q.device,
-            )
+            return torch.full((batch, raw_q.shape[1], cfg.final_topk),-1,dtype=torch.int64,device=raw_q.device)
         factor = cfg.hq_factor
-        parent_min, parent_max, parent_valid = self._parent_minmax_from_children(
-            cmin, cmax, valid, factor
-        )
-        chunk_idx = self._hierarchical_quest(
-            raw_q, cmin, cmax, parent_min, parent_max, parent_valid, n_chunks, factor
-        )
-        topk_local = self._cds_select(
-            chunk_idx, packed, cmin, cmax, centroid, raw_q, block_size
-        )
+        parent_min, parent_max, parent_valid = self._parent_minmax_from_children(cmin, cmax, valid, factor)
+        chunk_idx = self._hierarchical_quest(raw_q, cmin, cmax, parent_min, parent_max, parent_valid, n_chunks, factor)
+        topk_local = self._cds_select(chunk_idx, packed, cmin, cmax, centroid, raw_q, block_size)
         ret_token_offset = start_b * block_size
-        return torch.where(
-            topk_local >= 0,
-            topk_local + ret_token_offset,
-            torch.full_like(topk_local, -1),
-        )
+        return torch.where(topk_local >= 0,topk_local + ret_token_offset,torch.full_like(topk_local, -1))
+
+
+
+
 
     def retrieval_block_range(self, seq_len: int, block_size: int) -> tuple[int, int]:
         """Return [start_block, end_block) of retrieval-zone child chunks."""
@@ -478,6 +470,8 @@ class ZoomKVRetriever:
         start_b = ret_start // block_size
         end_b = ret_end // block_size
         return start_b, end_b
+
+
 
     def retrieve_topk_tokens(
         self,
@@ -498,37 +492,19 @@ class ZoomKVRetriever:
         start_b, end_b = self.retrieval_block_range(seq_len, block_size)
         n_ret = end_b - start_b
         if n_ret <= 0 or physical_block_ids.numel() == 0:
-            return torch.full(
-                (raw_q.shape[0], raw_q.shape[1], cfg.final_topk),
-                -1,
-                dtype=torch.int64,
-                device=raw_q.device,
-            )
+            return torch.full((raw_q.shape[0], raw_q.shape[1], cfg.final_topk),-1,dtype=torch.int64,device=raw_q.device)
 
         ids = physical_block_ids[:n_ret]
         bucket = self._chunk_bucket(n_ret)
         if bucket <= 0:
-            return torch.full(
-                (raw_q.shape[0], raw_q.shape[1], cfg.final_topk),
-                -1,
-                dtype=torch.int64,
-                device=raw_q.device,
-            )
-        direct_ids = self._scratch_buf(
-            "physical_ids", (raw_q.shape[0], bucket), torch.int32, raw_q.device, fill=-1
-        )
+            return torch.full((raw_q.shape[0], raw_q.shape[1], cfg.final_topk),-1,dtype=torch.int64,device=raw_q.device)
+        direct_ids = self._scratch_buf("physical_ids",(raw_q.shape[0], bucket),torch.int32,raw_q.device,fill=-1)
         direct_ids[:, :n_ret].copy_(ids.reshape(raw_q.shape[0], n_ret).to(torch.int32))
         self._require_direct_physical(raw_q, block_summary, direct_ids)
-        return self._retrieve_topk_physical(
-            raw_q,
-            block_summary,
-            direct_ids,
-            bucket,
-            start_b * block_size,
-            actual_num_chunks=torch.full(
-                (raw_q.shape[0],), n_ret, dtype=torch.int32, device=raw_q.device
-            ),
-        )
+        return self._retrieve_topk_physical(raw_q,block_summary,direct_ids,bucket,start_b * block_size,actual_num_chunks=torch.full((raw_q.shape[0],),n_ret,dtype=torch.int32,device=raw_q.device))
+
+
+
 
     def retrieve_topk_tokens_batch(
         self,
@@ -540,14 +516,11 @@ class ZoomKVRetriever:
         topk_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compatibility wrapper returning only Top-K logical token ids."""
-        return self.retrieve_topk_tokens_batch_result(
-            raw_q,
-            block_summary,
-            block_table,
-            seq_lens,
-            summaries_guaranteed_valid=False,
-            topk_out=topk_out,
-        ).topk
+        return self.retrieve_topk_tokens_batch_result(raw_q,block_summary,block_table,seq_lens,summaries_guaranteed_valid=False,topk_out=topk_out).topk
+
+
+
+
 
     def retrieve_topk_tokens_batch_result(
         self,
@@ -648,7 +621,8 @@ class ZoomKVRetriever:
                     max(
                         0,
                         min(
-                            max(cfg.sink_size, int(sl) - cfg.local_size) // block_size
+                            max(cfg.sink_size, int(sl) - cfg.local_size)
+                            // block_size
                             - start_b,
                             clamp_chunks,
                         ),
@@ -656,7 +630,8 @@ class ZoomKVRetriever:
                     for sl in host_lens_list
                 ]
                 sink_local_full = assume_context_fully_valid or all(
-                    int(sl) >= cfg.sink_size + cfg.local_size for sl in host_lens_list
+                    int(sl) >= cfg.sink_size + cfg.local_size
+                    for sl in host_lens_list
                 )
                 meta_key = (
                     device.type,
@@ -725,26 +700,13 @@ class ZoomKVRetriever:
             physical_ids = bt[:batch, start_b:]
 
         self._require_direct_physical(raw_q, block_summary, physical_ids)
-        topk = self._retrieve_topk_physical(
-            raw_q,
-            block_summary,
-            physical_ids,
-            bucket,
-            start_b * block_size,
-            actual_num_chunks=actual_num_chunks,
-            topk_out=topk_out,
-        )
-        self.last_context_fully_valid = (
-            summaries_guaranteed_valid
-            and sink_local_full
-            and self._last_topk_fully_filled
-        )
+        topk = self._retrieve_topk_physical(raw_q,block_summary,physical_ids,bucket,start_b * block_size,actual_num_chunks=actual_num_chunks,topk_out=topk_out)
+        self.last_context_fully_valid = summaries_guaranteed_valid and sink_local_full and self._last_topk_fully_filled
+       
+        return ZoomKVRetrievalResult(topk=topk,context_fully_valid=self.last_context_fully_valid,used_direct_physical=True)
 
-        return ZoomKVRetrievalResult(
-            topk=topk,
-            context_fully_valid=self.last_context_fully_valid,
-            used_direct_physical=True,
-        )
+
+
 
     @staticmethod
     def _can_use_direct_physical(
@@ -767,6 +729,9 @@ class ZoomKVRetriever:
             and block_summary.dtype == torch.bfloat16
             and block_summary.chunk_min.device == raw_q.device
         )
+
+
+
 
     def _build_stage_budgets(
         self,
@@ -819,17 +784,8 @@ class ZoomKVRetriever:
             sparse_topk=sparse_topk,
             final_topk=cfg.final_topk,
         )
-        return _StageBudgets(
-            parent_lengths=outputs[0],
-            large_ks=outputs[1],
-            sub_lengths=outputs[2],
-            small_ks=outputs[3],
-            dense_ks=outputs[4],
-            final_ks=outputs[5],
-            max_large=max_large,
-            max_small=max_small,
-            max_dense=max_dense,
-        )
+        return _StageBudgets(*outputs, max_large, max_small, max_dense)
+
 
     def _retrieve_topk_physical(
         self,
@@ -845,9 +801,7 @@ class ZoomKVRetriever:
         """Quest+CDS+KIVI directly over global physical summary pools."""
         cfg = self.cfg
         if actual_num_chunks is None:
-            actual_num_chunks = torch.full(
-                (raw_q.shape[0],), n_chunks, dtype=torch.int32, device=raw_q.device
-            )
+            actual_num_chunks = torch.full((raw_q.shape[0],),n_chunks,dtype=torch.int32,device=raw_q.device)
         factor = cfg.hq_factor
         budgets = self._build_stage_budgets(
             actual_num_chunks,
@@ -876,6 +830,9 @@ class ZoomKVRetriever:
             topk_out,
         )
 
+
+
+
     @staticmethod
     def _parent_minmax_from_children(
         cmin: torch.Tensor,
@@ -888,9 +845,10 @@ class ZoomKVRetriever:
         tmp.num_kv_heads = cmin.shape[1]
         tmp.head_dim = cmin.shape[-1]
         tmp.blocks_per_parent = factor
-        return ZoomKVBlockSummary.build_parent_minmax(
-            tmp, torch.empty(0), cmin, cmax, valid
-        )
+        return ZoomKVBlockSummary.build_parent_minmax(tmp, torch.empty(0), cmin, cmax, valid)
+
+
+
 
     def _hierarchical_quest_physical(
         self,
@@ -905,27 +863,11 @@ class ZoomKVRetriever:
         batch, kv_heads = raw_q.shape[:2]
         n_large = n_chunks // factor
         nk_large = budgets.max_large
-        large_scores = self._scratch_buf(
-            "large_scores", (batch, kv_heads, n_large), torch.float32, raw_q.device
-        )
-
+        large_scores = self._scratch_buf("large_scores",(batch, kv_heads, n_large),torch.float32,raw_q.device)
+        
         with _retrieve_stage("quest_parent_score_direct"):
-            quest_parent_score_physical(
-                raw_q,
-                physical_ids,
-                block_summary.chunk_min,
-                block_summary.chunk_max,
-                block_summary.valid,
-                large_scores,
-                n_chunks,
-                factor,
-                actual_num_chunks,
-                block_summary.parent_min,
-                block_summary.parent_max,
-                block_summary.parent_valid,
-                block_summary.parent_first_child,
-            )
-
+            quest_parent_score_physical(raw_q,physical_ids,block_summary.chunk_min,block_summary.chunk_max,block_summary.valid,large_scores,n_chunks,factor,actual_num_chunks,block_summary.parent_min,block_summary.parent_max,block_summary.parent_valid,block_summary.parent_first_child)
+        
         with _retrieve_stage("quest_large_topk"):
             large_idx = float_topk_3d_varlen(
                 large_scores,
@@ -934,29 +876,12 @@ class ZoomKVRetriever:
                 nk_large,
                 strict=self.cfg.strict_kernels,
             )
-        sub_scores = self._scratch_buf(
-            "sub_scores",
-            (batch, kv_heads, nk_large * factor),
-            torch.float32,
-            raw_q.device,
-        )
-
+        sub_scores = self._scratch_buf("sub_scores",(batch, kv_heads, nk_large * factor),torch.float32,raw_q.device)
+        
         with _retrieve_stage("quest_sub_score_direct"):
-            quest_sub_score_physical(
-                raw_q,
-                physical_ids,
-                block_summary.chunk_min,
-                block_summary.chunk_max,
-                block_summary.valid,
-                large_idx,
-                sub_scores,
-                nk_large,
-                factor,
-                n_chunks,
-                actual_num_chunks,
-            )
+            quest_sub_score_physical(raw_q,physical_ids,block_summary.chunk_min,block_summary.chunk_max,block_summary.valid,large_idx,sub_scores,nk_large,factor,n_chunks,actual_num_chunks)
         nk_small = budgets.max_small
-
+       
         with _retrieve_stage("quest_sub_topk"):
             sub_pos = float_topk_3d_varlen(
                 sub_scores,
@@ -965,13 +890,14 @@ class ZoomKVRetriever:
                 nk_small,
                 strict=self.cfg.strict_kernels,
             )
-        chunk_idx = self._scratch_buf(
-            "chunk_idx", (batch, kv_heads, nk_small), torch.int64, raw_q.device
-        )
-
+        chunk_idx = self._scratch_buf("chunk_idx",(batch, kv_heads, nk_small),torch.int64,raw_q.device)
+        
         with _retrieve_stage("quest_map_back"):
             self.quest.quest_map_back(large_idx, sub_pos, chunk_idx, factor, n_chunks)
         return chunk_idx
+
+
+
 
     def _cds_select_physical(
         self,
@@ -988,21 +914,10 @@ class ZoomKVRetriever:
         cfg = self.cfg
         batch, kv_heads = raw_q.shape[:2]
         nk = budgets.max_small
-        density = self._scratch_buf(
-            "density_scores", (batch, kv_heads, nk), torch.float32, raw_q.device
-        )
-
+        density = self._scratch_buf("density_scores", (batch, kv_heads, nk), torch.float32, raw_q.device)
+        
         with _retrieve_stage("cds_density_direct"):
-            density_score_physical(
-                chunk_idx,
-                physical_ids,
-                block_summary.centroid,
-                block_summary.valid,
-                raw_q,
-                density,
-                n_chunks,
-                actual_num_chunks,
-            )
+            density_score_physical(chunk_idx,physical_ids,block_summary.centroid,block_summary.valid,raw_q,density,n_chunks,actual_num_chunks)
         n_dense = budgets.max_dense
         with _retrieve_stage("cds_density_topk"):
             dense_pos = float_topk_3d_varlen(
@@ -1012,41 +927,20 @@ class ZoomKVRetriever:
                 n_dense,
                 strict=cfg.strict_kernels,
             )
-
-        dense_mask = self._scratch_buf(
-            "dense_mask", (batch, kv_heads, nk), torch.bool, raw_q.device
-        )
-        dense_mask_from_topk(dense_pos, nk, out=dense_mask, strict=cfg.strict_kernels)
+        
+        dense_mask = self._scratch_buf("dense_mask",(batch, kv_heads, nk),torch.bool,raw_q.device)
+        dense_mask_from_topk(dense_pos,nk,out=dense_mask,strict=cfg.strict_kernels)
 
         dense_topk = max(1, min(cfg.dense_topk, block_summary.block_size))
         sparse_topk = max(1, min(cfg.sparse_topk, block_summary.block_size))
         output_slots = max(dense_topk, sparse_topk)
         out_width = nk * output_slots
 
-        out_scores = self._scratch_buf(
-            "kivi_scores", (batch, kv_heads, out_width), torch.float32, raw_q.device
-        )
-        out_indices = self._scratch_buf(
-            "kivi_indices", (batch, kv_heads, out_width), torch.int64, raw_q.device
-        )
-
+        out_scores = self._scratch_buf("kivi_scores",(batch, kv_heads, out_width),torch.float32,raw_q.device)
+        out_indices = self._scratch_buf("kivi_indices",(batch, kv_heads, out_width),torch.int64,raw_q.device)
+        
         with _retrieve_stage("kivi_qk_direct"):
-            kivi_physical(
-                chunk_idx,
-                dense_mask,
-                physical_ids,
-                block_summary.packed,
-                block_summary.chunk_min,
-                block_summary.chunk_max,
-                block_summary.valid,
-                raw_q,
-                dense_topk,
-                sparse_topk,
-                token_offset,
-                out_scores,
-                out_indices,
-                actual_num_chunks,
-            )
+            kivi_physical(chunk_idx,dense_mask,physical_ids,block_summary.packed,block_summary.chunk_min,block_summary.chunk_max,block_summary.valid,raw_q,dense_topk,sparse_topk,token_offset,out_scores,out_indices,actual_num_chunks)
         actual_topk = min(cfg.final_topk, out_width)
         final_lengths = self._scratch_buf(
             "final_lengths",
@@ -1055,7 +949,7 @@ class ZoomKVRetriever:
             raw_q.device,
             fill=out_width,
         )
-
+        
         with _retrieve_stage("final_topk_direct"):
             selected = float_topk_values_3d_varlen(
                 out_scores,
@@ -1066,22 +960,19 @@ class ZoomKVRetriever:
                 strict=cfg.strict_kernels,
                 out=topk_out if actual_topk == cfg.final_topk else None,
             )
-
+        
         if actual_topk == cfg.final_topk:
             # Sparse routing's minimum-context gate guarantees enough runtime
             # candidates without introducing a device-to-host sync here.
             self._last_topk_fully_filled = True
             return selected
         self._last_topk_fully_filled = False
-        padded = self._scratch_buf(
-            "selected_direct",
-            (batch, kv_heads, cfg.final_topk),
-            torch.int64,
-            raw_q.device,
-            fill=-1,
-        )
+        padded = self._scratch_buf("selected_direct",(batch, kv_heads, cfg.final_topk),torch.int64,raw_q.device,fill=-1)
         padded[..., :actual_topk].copy_(selected)
         return padded
+
+
+
 
     def _hierarchical_quest(
         self,
@@ -1099,44 +990,33 @@ class ZoomKVRetriever:
         n_large = parent_min.shape[2]
         nk_large = max(1, int(math.ceil(n_large * cfg.quest_large_ratio)))
         nk_large = min(nk_large, n_large)
-        large_scores = self._scratch_buf(
-            "large_scores",
-            (batch, raw_q.shape[1], n_large),
-            torch.float32,
-            raw_q.device,
-        )
-
+        large_scores = self._scratch_buf("large_scores",(batch, raw_q.shape[1], n_large),torch.float32,raw_q.device)
+        
         with _retrieve_stage("quest_large_score"):
-            self.quest.quest_chunk_score(
-                raw_q, parent_min, parent_max, large_scores, n_large, parent_valid
-            )
-
+            self.quest.quest_chunk_score(raw_q, parent_min, parent_max, large_scores, n_large, parent_valid)
+        
         with _retrieve_stage("quest_large_topk"):
             large_idx = _topk_3d(large_scores, nk_large, strict=cfg.strict_kernels)
 
-        sub_scores = self._scratch_buf(
-            "sub_scores",
-            (batch, raw_q.shape[1], nk_large * factor),
-            torch.float32,
-            raw_q.device,
-        )
-
+        sub_scores = self._scratch_buf("sub_scores",(batch, raw_q.shape[1], nk_large * factor),torch.float32,raw_q.device)
+        
         with _retrieve_stage("quest_sub_score"):
-            self.quest.quest_sub_chunk_score(
-                raw_q, cmin, cmax, large_idx, sub_scores, nk_large, factor
-            )
+            self.quest.quest_sub_chunk_score(raw_q, cmin, cmax, large_idx, sub_scores, nk_large, factor)
         nk_small = max(1, int(math.ceil(nk_large * factor * cfg.quest_small_ratio)))
         nk_small = min(nk_small, nk_large * factor, cfg.max_small_candidates)
-
+        
         with _retrieve_stage("quest_sub_topk"):
             sub_pos = _topk_3d(sub_scores, nk_small, strict=cfg.strict_kernels)
-        chunk_idx = self._scratch_buf(
-            "chunk_idx", (batch, raw_q.shape[1], nk_small), torch.int64, raw_q.device
-        )
+        chunk_idx = self._scratch_buf("chunk_idx",(batch, raw_q.shape[1], nk_small),torch.int64,raw_q.device)
 
         with _retrieve_stage("quest_map_back"):
             self.quest.quest_map_back(large_idx, sub_pos, chunk_idx, factor, n_chunks)
         return chunk_idx
+
+
+
+
+
 
     def _cds_select(
         self,
@@ -1153,50 +1033,26 @@ class ZoomKVRetriever:
         kv_heads = raw_q.shape[1]
         nk = chunk_idx.shape[2]
         # Density via centroid @ q
-        density = self._scratch_buf(
-            "density_scores", (batch, kv_heads, nk), torch.float32, raw_q.device
-        )
-        density = chunk_density_scores(
-            chunk_idx, centroid, raw_q, out=density, strict=cfg.strict_kernels
-        )
+        density = self._scratch_buf("density_scores",(batch, kv_heads, nk),torch.float32,raw_q.device)
+        density = chunk_density_scores(chunk_idx,centroid,raw_q,out=density,strict=cfg.strict_kernels)
         n_dense = max(1, int(nk * cfg.dense_ratio))
         n_dense = min(n_dense, nk)
         with _retrieve_stage("cds_density_topk"):
             dense_pos = _topk_3d(density, n_dense, strict=cfg.strict_kernels)
 
-        dense_mask = self._scratch_buf(
-            "dense_mask", (batch, kv_heads, nk), torch.bool, raw_q.device
-        )
-        dense_mask = dense_mask_from_topk(
-            dense_pos, nk, out=dense_mask, strict=cfg.strict_kernels
-        )
+        dense_mask = self._scratch_buf("dense_mask",(batch, kv_heads, nk),torch.bool,raw_q.device)
+        dense_mask = dense_mask_from_topk(dense_pos,nk,out=dense_mask,strict=cfg.strict_kernels)
         dense_topk = max(1, min(cfg.dense_topk, block_size))
         sparse_topk = max(1, min(cfg.sparse_topk, block_size))
         output_slots = max(dense_topk, sparse_topk)
         out_width = nk * output_slots
 
-        out_scores = self._scratch_buf(
-            "kivi_scores", (batch, kv_heads, out_width), torch.float32, raw_q.device
-        )
-        out_indices = self._scratch_buf(
-            "kivi_indices", (batch, kv_heads, out_width), torch.int64, raw_q.device
-        )
+
+        out_scores = self._scratch_buf("kivi_scores",(batch, kv_heads, out_width),torch.float32,raw_q.device)
+        out_indices = self._scratch_buf("kivi_indices",(batch, kv_heads, out_width),torch.int64,raw_q.device)
 
         with _retrieve_stage("kivi_qk"):
-            out_scores, out_indices = partial_chunk_kivi_qk(
-                chunk_idx,
-                dense_mask,
-                packed,
-                cmin,
-                cmax,
-                raw_q.to(cmin.dtype),
-                group_size=block_size,
-                dense_topk=dense_topk,
-                sparse_topk=sparse_topk,
-                out_scores=out_scores,
-                out_indices=out_indices,
-                strict=cfg.strict_kernels,
-            )
+            out_scores, out_indices = partial_chunk_kivi_qk(chunk_idx,dense_mask,packed,cmin,cmax,raw_q.to(cmin.dtype),group_size=block_size,dense_topk=dense_topk,sparse_topk=sparse_topk,out_scores=out_scores,out_indices=out_indices,strict=cfg.strict_kernels)
         actual_topk = min(cfg.final_topk, out_scores.shape[-1])
         with _retrieve_stage("final_topk"):
             selected = float_topk_values_3d(
@@ -1206,15 +1062,10 @@ class ZoomKVRetriever:
                 strict=cfg.strict_kernels,
             )
 
+
         if actual_topk == cfg.final_topk:
             return selected
 
-        padded = self._scratch_buf(
-            "selected",
-            (batch, kv_heads, cfg.final_topk),
-            torch.int64,
-            raw_q.device,
-            fill=-1,
-        )
+        padded = self._scratch_buf("selected",(batch, kv_heads, cfg.final_topk),torch.int64,raw_q.device,fill=-1)
         padded[..., :actual_topk].copy_(selected)
         return padded

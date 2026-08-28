@@ -74,7 +74,9 @@ class Stage:
             t1 = time.perf_counter()
             if self.start_evt is not None and self.end_evt is not None:
                 self.end_evt.record()
-                _pending.append((self.name, self.start_evt, self.end_evt, self.t0, t1))
+                _pending.append(
+                    (self.name, self.start_evt, self.end_evt, self.t0, t1)
+                )
             else:
                 _cpu_ms[self.name] += (t1 - self.t0) * 1e3
                 _counts[self.name] += 1

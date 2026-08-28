@@ -66,8 +66,8 @@ struct KiviChunkDenseSparseParams {
   const void* __restrict__ chunk_min_ptr;  // [bs, kv, n_chunks_max, D] bf16
   const void* __restrict__ chunk_max_ptr;  // [bs, kv, n_chunks_max, D] bf16
   const void* __restrict__ raw_q_ptr;      // [bs, kv, D] bf16
-  void* __restrict__ out_scores_ptr;       // [bs, kv, nk*output_slots] fp32
-  void* __restrict__ out_indices_ptr;      // [bs, kv, nk*output_slots] int64
+  void* __restrict__ out_scores_ptr;   // [bs, kv, nk*output_slots] fp32
+  void* __restrict__ out_indices_ptr;  // [bs, kv, nk*output_slots] int64
 
   int num_chunks;       // == nk
   int n_chunks_packed;  // packed_K chunk-axis size (chunk capacity)
@@ -395,7 +395,8 @@ void partial_chunk_kivi_qk_dense_sparse_interface(
               "); got ", packed_K.stride(-2));
   TORCH_CHECK(dense_topk >= 1 && dense_topk <= group_size);
   TORCH_CHECK(sparse_topk >= 1 && sparse_topk <= group_size);
-  const int output_slots = dense_topk > sparse_topk ? dense_topk : sparse_topk;
+  const int output_slots =
+      dense_topk > sparse_topk ? dense_topk : sparse_topk;
   TORCH_CHECK(out_scores.size(0) == bs && out_scores.size(1) == kv_heads);
   TORCH_CHECK(out_indices.size(0) == bs && out_indices.size(1) == kv_heads);
   TORCH_CHECK(out_scores.size(2) >= nk * output_slots,

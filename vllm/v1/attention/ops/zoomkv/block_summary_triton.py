@@ -220,7 +220,9 @@ def _finalize_block_summary_small_kernel(
 
                 for pack_group in tl.static_range(0, 4):
                     pack_dims = (
-                        dim_block * 32 + pack_group * 8 + tl.arange(0, 8)[None, :]
+                        dim_block * 32
+                        + pack_group * 8
+                        + tl.arange(0, 8)[None, :]
                     )
                     pack_x = tl.load(
                         key_ptr
@@ -235,12 +237,12 @@ def _finalize_block_summary_small_kernel(
                     pack_max = tl.max(pack_x, axis=0).to(tl.bfloat16)
                     scale = ((pack_max - pack_min) / 15.0).to(tl.bfloat16)
                     scale = tl.maximum(scale, 1.0e-8).to(tl.bfloat16)
-                    ratio = ((pack_x - pack_min[None, :]) / scale[None, :]).to(
-                        tl.bfloat16
-                    )
-                    codes = tldevice.rint(tl.maximum(0.0, tl.minimum(15.0, ratio))).to(
-                        tl.int32
-                    )
+                    ratio = (
+                        (pack_x - pack_min[None, :]) / scale[None, :]
+                    ).to(tl.bfloat16)
+                    codes = tldevice.rint(
+                        tl.maximum(0.0, tl.minimum(15.0, ratio))
+                    ).to(tl.int32)
                     packed = tl.sum(codes << shifts, axis=1)
                     packed_offset = (
                         physical_safe * stride_p_b
@@ -398,9 +400,13 @@ def _finalize_parent_summary_kernel(
             all_valid = False
         else:
             phys = tl.load(
-                block_table_ptr + b * bt_stride_b + (start_block + child) * bt_stride_n
+                block_table_ptr
+                + b * bt_stride_b
+                + (start_block + child) * bt_stride_n
             ).to(tl.int32)
-            valid = (phys >= 0) & (phys < num_blocks) & tl.load(child_valid_ptr + phys)
+            valid = (phys >= 0) & (phys < num_blocks) & tl.load(
+                child_valid_ptr + phys
+            )
             all_valid = all_valid & valid
             if child_off == 0:
                 first_phys = phys
@@ -420,7 +426,9 @@ def _finalize_parent_summary_kernel(
         for child_off in tl.static_range(0, 16):
             child = child_begin + child_off
             phys = tl.load(
-                block_table_ptr + b * bt_stride_b + (start_block + child) * bt_stride_n
+                block_table_ptr
+                + b * bt_stride_b
+                + (start_block + child) * bt_stride_n
             ).to(tl.int32)
             base = phys * meta_stride_p + h * meta_stride_h
             cmin = tl.load(

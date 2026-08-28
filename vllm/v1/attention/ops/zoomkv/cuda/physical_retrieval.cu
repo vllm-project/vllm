@@ -68,9 +68,10 @@ __global__ void quest_parent_score_physical_bf16_d128_kernel(
     const __nv_bfloat16* __restrict__ global_parent_max,
     const bool* __restrict__ global_parent_valid,
     const int32_t* __restrict__ global_parent_first_child,
-    float* __restrict__ scores, int batch, int kv_heads, int num_blocks,
-    int n_chunks, int factor, int n_parent, int64_t pid_stride_b,
-    int64_t pid_stride_n, int64_t summary_stride_p, int64_t summary_stride_h,
+    float* __restrict__ scores,
+    int batch, int kv_heads, int num_blocks, int n_chunks, int factor,
+    int n_parent, int64_t pid_stride_b, int64_t pid_stride_n,
+    int64_t summary_stride_p, int64_t summary_stride_h,
     int64_t score_stride_b, int64_t score_stride_h) {
   constexpr int D = HEAD_DIM_128;
   constexpr int ELEMS = D / WARP_SIZE;  // 4
@@ -108,13 +109,15 @@ __global__ void quest_parent_score_physical_bf16_d128_kernel(
   }
   const bool use_precomputed =
       global_parent_min != nullptr && global_parent_max != nullptr &&
-      global_parent_valid != nullptr && global_parent_first_child != nullptr &&
-      child_begin + factor - 1 < actual_chunks && anchor_phys >= 0 &&
-      anchor_phys < num_blocks && global_parent_valid[anchor_phys] &&
+      global_parent_valid != nullptr &&
+      global_parent_first_child != nullptr && child_begin + factor - 1 < actual_chunks &&
+      anchor_phys >= 0 && anchor_phys < num_blocks &&
+      global_parent_valid[anchor_phys] &&
       global_parent_first_child[anchor_phys] == first_phys &&
       all_children_valid;
 
-  const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * D;
+  const int64_t q_base =
+      (static_cast<int64_t>(b) * kv_heads + h) * D;
   float acc = 0.0f;
   bool any_valid = false;
   const int d_base = lane * ELEMS;
@@ -125,9 +128,8 @@ __global__ void quest_parent_score_physical_bf16_d128_kernel(
     float parent_max = -INFINITY;
     bool dim_valid = false;
     if (use_precomputed) {
-      const int64_t base =
-          static_cast<int64_t>(anchor_phys) * summary_stride_p +
-          static_cast<int64_t>(h) * summary_stride_h;
+      const int64_t base = static_cast<int64_t>(anchor_phys) * summary_stride_p +
+                           static_cast<int64_t>(h) * summary_stride_h;
       parent_min = __bfloat162float(global_parent_min[base + d]);
       parent_max = __bfloat162float(global_parent_max[base + d]);
       dim_valid = true;
@@ -203,7 +205,8 @@ __global__ void quest_sub_score_physical_bf16_d128_kernel(
     const int64_t summary_base =
         static_cast<int64_t>(physical) * summary_stride_p +
         static_cast<int64_t>(h) * summary_stride_h;
-    const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * D;
+    const int64_t q_base =
+        (static_cast<int64_t>(b) * kv_heads + h) * D;
     const int d_base = lane * ELEMS;
 #pragma unroll
     for (int i = 0; i < ELEMS; ++i) {
@@ -256,7 +259,8 @@ __global__ void density_score_physical_bf16_d128_kernel(
     const int64_t cent_base =
         static_cast<int64_t>(physical) * centroid_stride_p +
         static_cast<int64_t>(h) * centroid_stride_h;
-    const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * D;
+    const int64_t q_base =
+        (static_cast<int64_t>(b) * kv_heads + h) * D;
     const int d_base = lane * ELEMS;
 #pragma unroll
     for (int i = 0; i < ELEMS; ++i) {
@@ -281,7 +285,8 @@ __global__ void quest_chunk_score_physical_kernel(
     const bool* __restrict__ global_valid, float* __restrict__ scores,
     int batch, int kv_heads, int head_dim, int num_blocks, int n_chunks,
     int64_t pid_stride_b, int64_t pid_stride_n, int64_t summary_stride_p,
-    int64_t summary_stride_h, int64_t score_stride_b, int64_t score_stride_h) {
+    int64_t summary_stride_h, int64_t score_stride_b,
+    int64_t score_stride_h) {
   const int chunk = blockIdx.x;
   const int bh = blockIdx.y;
   const int b = bh / kv_heads;
@@ -308,7 +313,8 @@ __global__ void quest_chunk_score_physical_kernel(
     const int64_t summary_base =
         static_cast<int64_t>(physical) * summary_stride_p +
         static_cast<int64_t>(h) * summary_stride_h;
-    const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
+    const int64_t q_base =
+        (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
     for (int d = tid; d < head_dim; d += SCORE_THREADS) {
       const float qv = static_cast<float>(q[q_base + d]);
       const float mn = static_cast<float>(global_min[summary_base + d]);
@@ -335,10 +341,11 @@ __global__ void quest_parent_score_physical_kernel(
     const scalar_t* __restrict__ global_parent_max,
     const bool* __restrict__ global_parent_valid,
     const int32_t* __restrict__ global_parent_first_child,
-    float* __restrict__ scores, int batch, int kv_heads, int head_dim,
-    int num_blocks, int n_chunks, int factor, int n_parent,
-    int64_t pid_stride_b, int64_t pid_stride_n, int64_t summary_stride_p,
-    int64_t summary_stride_h, int64_t score_stride_b, int64_t score_stride_h) {
+    float* __restrict__ scores,
+    int batch, int kv_heads, int head_dim, int num_blocks, int n_chunks,
+    int factor, int n_parent, int64_t pid_stride_b, int64_t pid_stride_n,
+    int64_t summary_stride_p, int64_t summary_stride_h,
+    int64_t score_stride_b, int64_t score_stride_h) {
   const int parent = blockIdx.x;
   const int bh = blockIdx.y;
   const int b = bh / kv_heads;
@@ -370,23 +377,24 @@ __global__ void quest_parent_score_physical_kernel(
   }
   const bool use_precomputed =
       global_parent_min != nullptr && global_parent_max != nullptr &&
-      global_parent_valid != nullptr && global_parent_first_child != nullptr &&
-      child_begin + factor - 1 < actual_chunks && anchor_phys >= 0 &&
-      anchor_phys < num_blocks && global_parent_valid[anchor_phys] &&
+      global_parent_valid != nullptr &&
+      global_parent_first_child != nullptr && child_begin + factor - 1 < actual_chunks &&
+      anchor_phys >= 0 && anchor_phys < num_blocks &&
+      global_parent_valid[anchor_phys] &&
       global_parent_first_child[anchor_phys] == first_phys &&
       all_children_valid;
 
   bool any_valid = false;
   float acc = 0.0f;
-  const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
+  const int64_t q_base =
+      (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
   for (int d = tid; d < head_dim; d += SCORE_THREADS) {
     float parent_min = INFINITY;
     float parent_max = -INFINITY;
     bool dim_valid = false;
     if (use_precomputed) {
-      const int64_t base =
-          static_cast<int64_t>(anchor_phys) * summary_stride_p +
-          static_cast<int64_t>(h) * summary_stride_h;
+      const int64_t base = static_cast<int64_t>(anchor_phys) * summary_stride_p +
+                           static_cast<int64_t>(h) * summary_stride_h;
       parent_min = static_cast<float>(global_parent_min[base + d]);
       parent_max = static_cast<float>(global_parent_max[base + d]);
       dim_valid = true;
@@ -400,12 +408,11 @@ __global__ void quest_parent_score_physical_kernel(
         const bool valid =
             physical >= 0 && physical < num_blocks && global_valid[physical];
         if (!valid) continue;
-        const int64_t base = static_cast<int64_t>(physical) * summary_stride_p +
-                             static_cast<int64_t>(h) * summary_stride_h;
-        parent_min =
-            fminf(parent_min, static_cast<float>(global_min[base + d]));
-        parent_max =
-            fmaxf(parent_max, static_cast<float>(global_max[base + d]));
+        const int64_t base =
+            static_cast<int64_t>(physical) * summary_stride_p +
+            static_cast<int64_t>(h) * summary_stride_h;
+        parent_min = fminf(parent_min, static_cast<float>(global_min[base + d]));
+        parent_max = fmaxf(parent_max, static_cast<float>(global_max[base + d]));
         dim_valid = true;
       }
     }
@@ -434,7 +441,8 @@ __global__ void quest_sub_score_physical_kernel(
     const int64_t* __restrict__ large_ids, float* __restrict__ scores,
     int batch, int kv_heads, int head_dim, int num_blocks, int n_chunks,
     int n_selected, int factor, int scores_n, int64_t pid_stride_b,
-    int64_t pid_stride_n, int64_t summary_stride_p, int64_t summary_stride_h) {
+    int64_t pid_stride_n, int64_t summary_stride_p,
+    int64_t summary_stride_h) {
   const int pos = blockIdx.x;
   const int bh = blockIdx.y;
   const int b = bh / kv_heads;
@@ -453,8 +461,9 @@ __global__ void quest_sub_score_physical_kernel(
   bool valid = child64 >= 0 && child64 < actual_chunks;
   int32_t physical = -1;
   if (valid) {
-    physical = physical_ids[static_cast<int64_t>(b) * pid_stride_b +
-                            child64 * pid_stride_n];
+    physical =
+        physical_ids[static_cast<int64_t>(b) * pid_stride_b +
+                     child64 * pid_stride_n];
     valid = physical >= 0 && physical < num_blocks && global_valid[physical];
   }
 
@@ -463,7 +472,8 @@ __global__ void quest_sub_score_physical_kernel(
     const int64_t summary_base =
         static_cast<int64_t>(physical) * summary_stride_p +
         static_cast<int64_t>(h) * summary_stride_h;
-    const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
+    const int64_t q_base =
+        (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
     for (int d = tid; d < head_dim; d += SCORE_THREADS) {
       const float qv = static_cast<float>(q[q_base + d]);
       const float mn = static_cast<float>(global_min[summary_base + d]);
@@ -513,7 +523,8 @@ __global__ void density_score_physical_kernel(
     const int64_t cent_base =
         static_cast<int64_t>(physical) * centroid_stride_p +
         static_cast<int64_t>(h) * centroid_stride_h;
-    const int64_t q_base = (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
+    const int64_t q_base =
+        (static_cast<int64_t>(b) * kv_heads + h) * head_dim;
     for (int d = tid; d < head_dim; d += SCORE_THREADS) {
       acc += static_cast<float>(global_centroid[cent_base + d]) *
              static_cast<float>(q[q_base + d]);
@@ -581,28 +592,33 @@ __global__ void kivi_physical_kernel(PhysicalKiviParams p) {
         (static_cast<int64_t>(b) * p.kv_heads + h) * p.nk + slot;
     logical_chunk = p.chunk_ids[bh_slot];
     dense = p.dense_mask[bh_slot];
-    const int actual_chunks = p.actual_num_chunks
-                                  ? min(p.actual_num_chunks[b], p.n_chunks)
-                                  : p.n_chunks;
+    const int actual_chunks =
+        p.actual_num_chunks
+            ? min(p.actual_num_chunks[b], p.n_chunks)
+            : p.n_chunks;
     if (logical_chunk >= 0 && logical_chunk < actual_chunks) {
-      physical = p.physical_ids[static_cast<int64_t>(b) * p.pid_stride_b +
-                                logical_chunk * p.pid_stride_n];
-      valid =
-          physical >= 0 && physical < p.num_blocks && p.global_valid[physical];
+      physical =
+          p.physical_ids[static_cast<int64_t>(b) * p.pid_stride_b +
+                         logical_chunk * p.pid_stride_n];
+      valid = physical >= 0 && physical < p.num_blocks &&
+              p.global_valid[physical];
     }
   }
 
-  int token_idx = p.token_offset +
-                  static_cast<int>(logical_chunk) * CHUNK_SIZE + lane_in_chunk;
+  int token_idx =
+      p.token_offset + static_cast<int>(logical_chunk) * CHUNK_SIZE +
+      lane_in_chunk;
   extern __shared__ __align__(16) unsigned char smem_raw[];
   __nv_bfloat16* smem = reinterpret_cast<__nv_bfloat16*>(smem_raw);
   const int local_chunk = warp * CHUNKS_PER_WARP + sub;
   __nv_bfloat16* sm_q = smem + local_chunk * 3 * HEAD_DIM;
   __nv_bfloat16* sm_min = sm_q + HEAD_DIM;
   __nv_bfloat16* sm_scale = sm_min + HEAD_DIM;
-  const int64_t mm_base = static_cast<int64_t>(physical) * p.minmax_stride_p +
-                          static_cast<int64_t>(h) * p.minmax_stride_h;
-  const int64_t q_base = (static_cast<int64_t>(b) * p.kv_heads + h) * HEAD_DIM;
+  const int64_t mm_base =
+      static_cast<int64_t>(physical) * p.minmax_stride_p +
+      static_cast<int64_t>(h) * p.minmax_stride_h;
+  const int64_t q_base =
+      (static_cast<int64_t>(b) * p.kv_heads + h) * HEAD_DIM;
   if (valid) {
     for (int pack_idx = lane_in_chunk; pack_idx < HEAD_DIM / 8;
          pack_idx += CHUNK_SIZE) {
@@ -617,7 +633,8 @@ __global__ void kivi_physical_kernel(PhysicalKiviParams p) {
       *reinterpret_cast<uint4*>(mx) = mxv;
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
-        scale[j] = __hdiv(__hsub(mx[j], mn[j]), __float2bfloat16(15.0f));
+        scale[j] =
+            __hdiv(__hsub(mx[j], mn[j]), __float2bfloat16(15.0f));
       }
       *reinterpret_cast<uint4*>(sm_q + d_base) = qv;
       *reinterpret_cast<uint4*>(sm_min + d_base) = mnv;
@@ -659,7 +676,8 @@ __global__ void kivi_physical_kernel(PhysicalKiviParams p) {
       const bool desc = ((lane_in_chunk & k) == 0);
       const bool lower = ((lane_in_chunk & j) == 0);
       const bool want_larger = desc == lower;
-      const bool swap = want_larger ? other_score > score : other_score < score;
+      const bool swap =
+          want_larger ? other_score > score : other_score < score;
       if (swap) {
         score = other_score;
         token_idx = other_idx;
@@ -669,7 +687,8 @@ __global__ void kivi_physical_kernel(PhysicalKiviParams p) {
 
   if (valid_slot) {
     const int out_base =
-        (static_cast<int64_t>(b) * p.kv_heads + h) * p.nk * p.output_slots +
+        (static_cast<int64_t>(b) * p.kv_heads + h) * p.nk *
+            p.output_slots +
         static_cast<int64_t>(slot) * p.output_slots + lane_in_chunk;
     const int keep = dense ? p.dense_topk : p.sparse_topk;
     if (lane_in_chunk < p.output_slots) {
@@ -702,15 +721,16 @@ void check_direct_common(const at::Tensor& q, const at::Tensor& physical_ids,
   TORCH_CHECK(q.scalar_type() == global_min.scalar_type() &&
                   q.scalar_type() == global_max.scalar_type(),
               "q and global summaries must share dtype");
-  TORCH_CHECK(
-      q.size(1) == global_min.size(1) && q.size(2) == global_min.size(2),
-      "q and global summary head geometry mismatch");
+  TORCH_CHECK(q.size(1) == global_min.size(1) &&
+                  q.size(2) == global_min.size(2),
+              "q and global summary head geometry mismatch");
   TORCH_CHECK(global_max.sizes() == global_min.sizes(),
               "global min/max shape mismatch");
 }
 
 const int32_t* check_actual_num_chunks(
-    const std::optional<at::Tensor>& actual_num_chunks, const at::Tensor& q) {
+    const std::optional<at::Tensor>& actual_num_chunks,
+    const at::Tensor& q) {
   if (!actual_num_chunks.has_value()) return nullptr;
   const auto& actual = *actual_num_chunks;
   TORCH_CHECK(actual.is_cuda() && actual.device() == q.device(),
@@ -724,8 +744,8 @@ const int32_t* check_actual_num_chunks(
 
 void check_launch(const char* name) {
   const auto error = cudaGetLastError();
-  TORCH_CHECK(error == cudaSuccess, name,
-              " kernel failed: ", cudaGetErrorString(error));
+  TORCH_CHECK(error == cudaSuccess, name, " kernel failed: ",
+              cudaGetErrorString(error));
 }
 
 }  // namespace
@@ -735,11 +755,12 @@ void quest_chunk_score_physical_cuda(
     at::Tensor global_max, at::Tensor global_valid, at::Tensor scores,
     int64_t n_chunks, std::optional<at::Tensor> actual_num_chunks) {
   check_direct_common(q, physical_ids, global_min, global_max, global_valid);
-  TORCH_CHECK(
-      scores.scalar_type() == at::ScalarType::Float && scores.dim() == 3,
-      "scores must be float32 [B,H,N]");
+  TORCH_CHECK(scores.scalar_type() == at::ScalarType::Float &&
+                  scores.dim() == 3,
+              "scores must be float32 [B,H,N]");
   const int batch = q.size(0), heads = q.size(1), dim = q.size(2);
-  const int32_t* actual_ptr = check_actual_num_chunks(actual_num_chunks, q);
+  const int32_t* actual_ptr =
+      check_actual_num_chunks(actual_num_chunks, q);
   c10::cuda::CUDAGuard guard(q.device());
   const dim3 grid(n_chunks, batch * heads);
   const auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -749,10 +770,11 @@ void quest_chunk_score_physical_cuda(
         quest_chunk_score_physical_kernel<scalar_t>
             <<<grid, SCORE_THREADS, 0, stream>>>(
                 q.data_ptr<scalar_t>(), physical_ids.data_ptr<int32_t>(),
-                actual_ptr, global_min.data_ptr<scalar_t>(),
-                global_max.data_ptr<scalar_t>(), global_valid.data_ptr<bool>(),
-                scores.data_ptr<float>(), batch, heads, dim, global_min.size(0),
-                n_chunks, physical_ids.stride(0), physical_ids.stride(1),
+                actual_ptr,
+                global_min.data_ptr<scalar_t>(), global_max.data_ptr<scalar_t>(),
+                global_valid.data_ptr<bool>(), scores.data_ptr<float>(), batch,
+                heads, dim, global_min.size(0), n_chunks,
+                physical_ids.stride(0), physical_ids.stride(1),
                 global_min.stride(0), global_min.stride(1), scores.stride(0),
                 scores.stride(1));
       });
@@ -771,10 +793,12 @@ void quest_parent_score_physical_cuda(
   check_direct_common(q, physical_ids, global_min, global_max, global_valid);
   const int batch = q.size(0), heads = q.size(1), dim = q.size(2);
   const int n_parent = n_chunks / factor;
-  const int32_t* actual_ptr = check_actual_num_chunks(actual_num_chunks, q);
+  const int32_t* actual_ptr =
+      check_actual_num_chunks(actual_num_chunks, q);
   const bool have_parent_pools =
       global_parent_min.has_value() && global_parent_max.has_value() &&
-      global_parent_valid.has_value() && global_parent_first_child.has_value();
+      global_parent_valid.has_value() &&
+      global_parent_first_child.has_value();
   if (have_parent_pools) {
     TORCH_CHECK(global_parent_min->sizes() == global_min.sizes() &&
                     global_parent_max->sizes() == global_max.sizes(),
@@ -783,11 +807,11 @@ void quest_parent_score_physical_cuda(
                     global_parent_valid->dim() == 1 &&
                     global_parent_valid->size(0) == global_min.size(0),
                 "global_parent_valid must be bool [num_blocks]");
-    TORCH_CHECK(
-        global_parent_first_child->scalar_type() == at::ScalarType::Int &&
-            global_parent_first_child->dim() == 1 &&
-            global_parent_first_child->size(0) == global_min.size(0),
-        "global_parent_first_child must be int32 [num_blocks]");
+    TORCH_CHECK(global_parent_first_child->scalar_type() ==
+                        at::ScalarType::Int &&
+                    global_parent_first_child->dim() == 1 &&
+                    global_parent_first_child->size(0) == global_min.size(0),
+                "global_parent_first_child must be int32 [num_blocks]");
   }
   c10::cuda::CUDAGuard guard(q.device());
   const auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -798,23 +822,24 @@ void quest_parent_score_physical_cuda(
     const int threads = WARPS_PER_BLOCK * WARP_SIZE;
     quest_parent_score_physical_bf16_d128_kernel<<<grid, threads, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()),
-        physical_ids.data_ptr<int32_t>(), actual_ptr,
+        physical_ids.data_ptr<int32_t>(),
+        actual_ptr,
         reinterpret_cast<const __nv_bfloat16*>(global_min.data_ptr()),
         reinterpret_cast<const __nv_bfloat16*>(global_max.data_ptr()),
         global_valid.data_ptr<bool>(),
-        have_parent_pools ? reinterpret_cast<const __nv_bfloat16*>(
-                                global_parent_min->data_ptr())
-                          : nullptr,
-        have_parent_pools ? reinterpret_cast<const __nv_bfloat16*>(
-                                global_parent_max->data_ptr())
-                          : nullptr,
+        have_parent_pools
+            ? reinterpret_cast<const __nv_bfloat16*>(global_parent_min->data_ptr())
+            : nullptr,
+        have_parent_pools
+            ? reinterpret_cast<const __nv_bfloat16*>(global_parent_max->data_ptr())
+            : nullptr,
         have_parent_pools ? global_parent_valid->data_ptr<bool>() : nullptr,
         have_parent_pools ? global_parent_first_child->data_ptr<int32_t>()
                           : nullptr,
-        scores.data_ptr<float>(), batch, heads, global_min.size(0), n_chunks,
-        factor, n_parent, physical_ids.stride(0), physical_ids.stride(1),
-        global_min.stride(0), global_min.stride(1), scores.stride(0),
-        scores.stride(1));
+        scores.data_ptr<float>(), batch, heads,
+        global_min.size(0), n_chunks, factor, n_parent, physical_ids.stride(0),
+        physical_ids.stride(1), global_min.stride(0), global_min.stride(1),
+        scores.stride(0), scores.stride(1));
   } else {
     const dim3 grid(n_parent, batch * heads);
     AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -823,7 +848,8 @@ void quest_parent_score_physical_cuda(
           quest_parent_score_physical_kernel<scalar_t>
               <<<grid, SCORE_THREADS, 0, stream>>>(
                   q.data_ptr<scalar_t>(), physical_ids.data_ptr<int32_t>(),
-                  actual_ptr, global_min.data_ptr<scalar_t>(),
+                  actual_ptr,
+                  global_min.data_ptr<scalar_t>(),
                   global_max.data_ptr<scalar_t>(),
                   global_valid.data_ptr<bool>(),
                   have_parent_pools ? global_parent_min->data_ptr<scalar_t>()
@@ -848,11 +874,12 @@ void quest_parent_score_physical_cuda(
 void quest_sub_score_physical_cuda(
     at::Tensor q, at::Tensor physical_ids, at::Tensor global_min,
     at::Tensor global_max, at::Tensor global_valid, at::Tensor large_ids,
-    at::Tensor scores, int64_t n_selected, int64_t factor, int64_t n_chunks,
-    std::optional<at::Tensor> actual_num_chunks) {
+    at::Tensor scores, int64_t n_selected, int64_t factor,
+    int64_t n_chunks, std::optional<at::Tensor> actual_num_chunks) {
   check_direct_common(q, physical_ids, global_min, global_max, global_valid);
   const int batch = q.size(0), heads = q.size(1), dim = q.size(2);
-  const int32_t* actual_ptr = check_actual_num_chunks(actual_num_chunks, q);
+  const int32_t* actual_ptr =
+      check_actual_num_chunks(actual_num_chunks, q);
   c10::cuda::CUDAGuard guard(q.device());
   const auto stream = at::cuda::getCurrentCUDAStream().stream();
   const int n_pos = static_cast<int>(n_selected * factor);
@@ -862,7 +889,8 @@ void quest_sub_score_physical_cuda(
     const int threads = WARPS_PER_BLOCK * WARP_SIZE;
     quest_sub_score_physical_bf16_d128_kernel<<<grid, threads, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()),
-        physical_ids.data_ptr<int32_t>(), actual_ptr,
+        physical_ids.data_ptr<int32_t>(),
+        actual_ptr,
         reinterpret_cast<const __nv_bfloat16*>(global_min.data_ptr()),
         reinterpret_cast<const __nv_bfloat16*>(global_max.data_ptr()),
         global_valid.data_ptr<bool>(), large_ids.data_ptr<int64_t>(),
@@ -877,7 +905,8 @@ void quest_sub_score_physical_cuda(
           quest_sub_score_physical_kernel<scalar_t>
               <<<grid, SCORE_THREADS, 0, stream>>>(
                   q.data_ptr<scalar_t>(), physical_ids.data_ptr<int32_t>(),
-                  actual_ptr, global_min.data_ptr<scalar_t>(),
+                  actual_ptr,
+                  global_min.data_ptr<scalar_t>(),
                   global_max.data_ptr<scalar_t>(),
                   global_valid.data_ptr<bool>(), large_ids.data_ptr<int64_t>(),
                   scores.data_ptr<float>(), batch, heads, dim,
@@ -890,18 +919,18 @@ void quest_sub_score_physical_cuda(
   check_launch("quest_sub_score_physical");
 }
 
-void density_score_physical_cuda(at::Tensor chunk_ids, at::Tensor physical_ids,
-                                 at::Tensor global_centroid,
-                                 at::Tensor global_valid, at::Tensor q,
-                                 at::Tensor scores, int64_t n_chunks,
-                                 std::optional<at::Tensor> actual_num_chunks) {
+void density_score_physical_cuda(
+    at::Tensor chunk_ids, at::Tensor physical_ids, at::Tensor global_centroid,
+    at::Tensor global_valid, at::Tensor q, at::Tensor scores,
+    int64_t n_chunks, std::optional<at::Tensor> actual_num_chunks) {
   TORCH_CHECK(chunk_ids.scalar_type() == at::ScalarType::Long &&
                   physical_ids.scalar_type() == at::ScalarType::Int,
               "chunk_ids/physical_ids must be int64/int32");
   TORCH_CHECK(q.scalar_type() == global_centroid.scalar_type(),
               "q/centroid dtype mismatch");
   const int batch = q.size(0), heads = q.size(1), dim = q.size(2);
-  const int32_t* actual_ptr = check_actual_num_chunks(actual_num_chunks, q);
+  const int32_t* actual_ptr =
+      check_actual_num_chunks(actual_num_chunks, q);
   const int nk = chunk_ids.size(2);
   c10::cuda::CUDAGuard guard(q.device());
   const auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -926,37 +955,37 @@ void density_score_physical_cuda(at::Tensor chunk_ids, at::Tensor physical_ids,
           density_score_physical_kernel<scalar_t>
               <<<grid, SCORE_THREADS, 0, stream>>>(
                   chunk_ids.data_ptr<int64_t>(),
-                  physical_ids.data_ptr<int32_t>(), actual_ptr,
+                  physical_ids.data_ptr<int32_t>(),
+                  actual_ptr,
                   global_centroid.data_ptr<scalar_t>(),
                   global_valid.data_ptr<bool>(), q.data_ptr<scalar_t>(),
                   scores.data_ptr<float>(), batch, heads, dim,
-                  global_centroid.size(0), n_chunks, nk, physical_ids.stride(0),
-                  physical_ids.stride(1), global_centroid.stride(0),
-                  global_centroid.stride(1));
+                  global_centroid.size(0), n_chunks, nk,
+                  physical_ids.stride(0), physical_ids.stride(1),
+                  global_centroid.stride(0), global_centroid.stride(1));
         });
   }
   check_launch("density_score_physical");
 }
 
-void kivi_physical_cuda(at::Tensor chunk_ids, at::Tensor dense_mask,
-                        at::Tensor physical_ids, at::Tensor global_packed,
-                        at::Tensor global_min, at::Tensor global_max,
-                        at::Tensor global_valid, at::Tensor q,
-                        int64_t dense_topk, int64_t sparse_topk,
-                        int64_t token_offset, at::Tensor out_scores,
-                        at::Tensor out_indices,
-                        std::optional<at::Tensor> actual_num_chunks) {
+void kivi_physical_cuda(
+    at::Tensor chunk_ids, at::Tensor dense_mask, at::Tensor physical_ids,
+    at::Tensor global_packed, at::Tensor global_min, at::Tensor global_max,
+    at::Tensor global_valid, at::Tensor q, int64_t dense_topk,
+    int64_t sparse_topk, int64_t token_offset, at::Tensor out_scores,
+    at::Tensor out_indices, std::optional<at::Tensor> actual_num_chunks) {
   TORCH_CHECK(q.scalar_type() == at::ScalarType::BFloat16,
               "direct KIVI currently requires bfloat16");
   TORCH_CHECK(global_packed.scalar_type() == at::ScalarType::Int,
               "global packed summary must be int32");
   const int batch = q.size(0), heads = q.size(1), dim = q.size(2);
-  const int32_t* actual_ptr = check_actual_num_chunks(actual_num_chunks, q);
+  const int32_t* actual_ptr =
+      check_actual_num_chunks(actual_num_chunks, q);
   const int nk = chunk_ids.size(2);
   const int output_slots =
       static_cast<int>(dense_topk > sparse_topk ? dense_topk : sparse_topk);
-  TORCH_CHECK(dense_topk >= 1 && dense_topk <= CHUNK_SIZE && sparse_topk >= 1 &&
-                  sparse_topk <= CHUNK_SIZE,
+  TORCH_CHECK(dense_topk >= 1 && dense_topk <= CHUNK_SIZE &&
+                  sparse_topk >= 1 && sparse_topk <= CHUNK_SIZE,
               "direct KIVI top-k values must be in [1, ", CHUNK_SIZE, "]");
   TORCH_CHECK(out_scores.size(2) >= nk * output_slots &&
                   out_indices.size(2) >= nk * output_slots,
@@ -995,7 +1024,8 @@ void kivi_physical_cuda(at::Tensor chunk_ids, at::Tensor dense_mask,
   constexpr int threads = 128;
   const int chunks_per_block = (threads / WARP_SIZE) * (WARP_SIZE / CHUNK_SIZE);
   const dim3 grid(batch, heads, (nk + chunks_per_block - 1) / chunks_per_block);
-  const int smem_bytes = chunks_per_block * 3 * dim * sizeof(__nv_bfloat16);
+  const int smem_bytes =
+      chunks_per_block * 3 * dim * sizeof(__nv_bfloat16);
   c10::cuda::CUDAGuard guard(q.device());
   const auto stream = at::cuda::getCurrentCUDAStream().stream();
   if (dim == 128) {

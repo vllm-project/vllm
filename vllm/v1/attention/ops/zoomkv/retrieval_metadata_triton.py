@@ -24,9 +24,9 @@ def _actual_num_chunks_kernel(
 ):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offsets < batch
-    seq_len = tl.load(seq_lens_ptr + offsets * seq_lens_stride, mask=mask, other=0).to(
-        tl.int32
-    )
+    seq_len = tl.load(
+        seq_lens_ptr + offsets * seq_lens_stride, mask=mask, other=0
+    ).to(tl.int32)
     # clamp(seq_len - sink, 0, local_size) followed by
     # max(seq_len - local_tokens, sink) simplifies to this expression.
     local_start = tl.maximum(sink_size, seq_len - local_size)
@@ -119,7 +119,9 @@ def _stage_budget_kernel(
     dense_k = (small_k.to(tl.float32) * dense_ratio).to(tl.int32)
     dense_k = tl.where(small_k > 0, tl.maximum(1, dense_k), 0)
     dense_k = tl.minimum(dense_k, small_k)
-    final_candidates = dense_k * dense_topk + (small_k - dense_k) * sparse_topk
+    final_candidates = (
+        dense_k * dense_topk + (small_k - dense_k) * sparse_topk
+    )
     final_k = tl.minimum(final_candidates, final_topk)
 
     tl.store(parent_lengths_ptr + offsets, parent_len, mask=mask)

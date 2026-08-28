@@ -573,14 +573,18 @@ def float_topk_values_3d_varlen(
         return out if out is not None else result
     if scores.is_cuda:
         topk_mod = _try_load_float_topk_cuda()
-        if topk_mod is not None and hasattr(topk_mod, "float_topk_values_3d_varlen"):
+        if topk_mod is not None and hasattr(
+            topk_mod, "float_topk_values_3d_varlen"
+        ):
             result = topk_mod.float_topk_values_3d_varlen(
                 scores, values, lengths, ks, max_k, out
             )
             return out if out is not None else result
     if strict:
         raise RuntimeError("ZoomKV strict mode: ragged value Top-K required")
-    positions = float_topk_3d_varlen(scores, lengths, ks, max_k, strict=False)
+    positions = float_topk_3d_varlen(
+        scores, lengths, ks, max_k, strict=False
+    )
     selected = torch.gather(values, -1, positions.clamp_min(0))
     selected.masked_fill_(positions < 0, -1)
     if out is not None:
@@ -614,7 +618,9 @@ def chunk_density_scores(
         raise RuntimeError("ZoomKV strict mode: CDS density CUDA required")
     idx = chunk_ids.clamp(min=0).unsqueeze(-1).expand(-1, -1, -1, centroids.shape[-1])
     selected = torch.gather(centroids, 2, idx)
-    scores = (selected.to(torch.float32) * raw_q.unsqueeze(2).to(torch.float32)).sum(-1)
+    scores = (
+        selected.to(torch.float32) * raw_q.unsqueeze(2).to(torch.float32)
+    ).sum(-1)
     if out is not None:
         out.copy_(scores)
         return out

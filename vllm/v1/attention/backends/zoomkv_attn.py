@@ -28,19 +28,23 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_varlen_func,
 )
+
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionImpl,
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
 )
+
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
+
 from vllm.v1.attention.ops.zoomkv import recall_probe as _zoomkv_recall
 from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 from vllm.v1.attention.ops.zoomkv.paged import (
@@ -53,11 +57,13 @@ from vllm.v1.attention.ops.zoomkv.paged import (
     sparse_decode_attention,
     sparse_decode_attention_batch,
 )
+
 from vllm.v1.attention.ops.zoomkv.retriever import (
     ZoomKVRetriever,
     ZoomKVRuntimeConfig,
     prepare_retrieval_query,
 )
+
 from vllm.v1.attention.ops.zoomkv.state import get_or_create_block_summary
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -308,6 +314,8 @@ class ZoomKVMetadataBuilder(FlashAttentionMetadataBuilder):
             device=device,
         )
 
+
+
     def build_for_cudagraph_capture(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -326,6 +334,8 @@ class ZoomKVMetadataBuilder(FlashAttentionMetadataBuilder):
         metadata.graph_chunk_bucket = self.graph_chunk_bucket
         ZoomKVAttentionImpl._step_need_summary_update = True
         return metadata
+
+
 
     def build(
         self,
@@ -1261,7 +1271,9 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         dense FA. CUDA Graph capture remains pure one-token decode only.
         """
         with _zt.Stage("sparse.setup"):
-            logger.info_once("ZoomKV GPU-only batched sparse decode path is active")
+            logger.info_once(
+                "ZoomKV GPU-only batched sparse decode path is active"
+            )
             layer_name = self._layer_name or getattr(
                 layer, "layer_name", f"zoomkv_{id(layer)}"
             )
@@ -1289,8 +1301,14 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             )
             if num_reqs <= 0:
                 return output
-            tok_end = num_reqs if num_decode_tokens is None else int(num_decode_tokens)
-            graph_capture = bool(getattr(attn_metadata, "is_cudagraph_capture", False))
+            tok_end = (
+                num_reqs
+                if num_decode_tokens is None
+                else int(num_decode_tokens)
+            )
+            graph_capture = bool(
+                getattr(attn_metadata, "is_cudagraph_capture", False)
+            )
             if graph_capture and (
                 num_decode_reqs is not None or num_decode_tokens is not None
             ):
@@ -1414,7 +1432,10 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                     output_bthd=True,
                     validate_mapping=(
                         num_decode_reqs is not None
-                        and os.environ.get("VLLM_ZOOMKV_VALIDATE_GATHER", "0") == "1"
+                        and os.environ.get(
+                            "VLLM_ZOOMKV_VALIDATE_GATHER", "0"
+                        )
+                        == "1"
                     ),
                 )
             valid_mask = None

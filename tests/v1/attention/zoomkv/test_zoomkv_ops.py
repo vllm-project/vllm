@@ -87,7 +87,9 @@ def test_fused_actual_num_chunks_metadata(input_dtype):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_stage_budgets_follow_actual_request_widths():
     actual = torch.tensor([0, 23, 100, 8192], device="cuda", dtype=torch.int32)
-    outputs = [torch.empty((4, 2), device="cuda", dtype=torch.int32) for _ in range(6)]
+    outputs = [
+        torch.empty((4, 2), device="cuda", dtype=torch.int32) for _ in range(6)
+    ]
     build_stage_budgets(
         actual,
         *outputs,
@@ -154,9 +156,7 @@ def test_batch_meta_cache_reused_across_layers():
         device=device,
         dtype=torch.bfloat16,
     )
-    key = torch.randn(
-        num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16
-    )
+    key = torch.randn(num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16)
     physical_ids = torch.arange(n_chunks, device=device, dtype=torch.int32)
     summary.update_blocks_from_key_cache(key, physical_ids)
     block_table = torch.full((batch, 128), -1, device=device, dtype=torch.int32)
@@ -356,9 +356,9 @@ def test_retriever_dense_gate_and_range():
     r = ZoomKVRetriever(cfg)
     assert r.should_use_dense(100)
     assert not r.should_use_dense(5000)
-    assert ZoomKVRetriever(ZoomKVRuntimeConfig(dense_fallback=True)).should_use_dense(
-        5000
-    )
+    assert ZoomKVRetriever(
+        ZoomKVRuntimeConfig(dense_fallback=True)
+    ).should_use_dense(5000)
     assert (
         r.retrieval_block_range(64 + 256, 16)[0]
         == r.retrieval_block_range(64 + 256, 16)[1]
@@ -600,12 +600,8 @@ def test_prepare_retrieval_query_gqa_mean():
     out = prepare_retrieval_query(q, num_kv_heads=2)
     assert out.shape == (1, 2, 8)
     assert out.is_contiguous()
-    assert torch.allclose(
-        out[0, 0], torch.tensor(3.0, device=device, dtype=torch.bfloat16)
-    )
-    assert torch.allclose(
-        out[0, 1], torch.tensor(7.0, device=device, dtype=torch.bfloat16)
-    )
+    assert torch.allclose(out[0, 0], torch.tensor(3.0, device=device, dtype=torch.bfloat16))
+    assert torch.allclose(out[0, 1], torch.tensor(7.0, device=device, dtype=torch.bfloat16))
 
 
 def test_sparse_decode_gate():
@@ -766,18 +762,17 @@ def test_gather_and_assemble_batch_matches_serial():
     device = torch.device("cuda")
     block_size, hkv, d = 16, 2, 64
     num_blocks, batch = 32, 4
-    key = torch.randn(
-        num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16
-    )
+    key = torch.randn(num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16)
     value = torch.randn_like(key)
     # Distinct physical pages per request.
-    block_table = torch.arange(batch * 8, device=device, dtype=torch.int32).view(
-        batch, 8
-    )
+    block_table = torch.arange(
+        batch * 8, device=device, dtype=torch.int32
+    ).view(batch, 8)
     seq_lens = torch.tensor([96, 112, 128, 144], device=device, dtype=torch.int32)
     topk = torch.stack(
         [
-            torch.arange(16, 16 + 8, device=device).view(1, -1).expand(hkv, -1) + i * 8
+            torch.arange(16, 16 + 8, device=device).view(1, -1).expand(hkv, -1)
+            + i * 8
             for i in range(batch)
         ],
         dim=0,
@@ -815,7 +810,9 @@ def test_gather_and_assemble_batch_matches_serial():
         q, gk_b, gv_b, 0.1, valid_mask=None, out=out_buf
     )
     assert out_reused is out_buf
-    assert torch.allclose(out_reused.float(), out_b.float(), atol=2e-2, rtol=2e-2)
+    assert torch.allclose(
+        out_reused.float(), out_b.float(), atol=2e-2, rtol=2e-2
+    )
     for i in range(batch):
         out_i = sparse_decode_attention(q[i : i + 1], gk_b[i], gv_b[i], 0.1, None)
         assert torch.allclose(out_b[i].float(), out_i[0].float(), atol=2e-2, rtol=2e-2)
@@ -828,9 +825,7 @@ def test_retrieve_topk_batch_matches_serial():
     clear_block_summaries()
     block_size, hkv, d = 16, 2, 128
     num_blocks = 512
-    key = torch.randn(
-        num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16
-    )
+    key = torch.randn(num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16)
 
     cfg = ZoomKVRuntimeConfig(
         sink_size=64,
@@ -848,7 +843,9 @@ def test_retrieve_topk_batch_matches_serial():
     max_blocks = max((s + block_size - 1) // block_size for s in seq_lens)
     needed = sum((s + block_size - 1) // block_size for s in seq_lens)
     assert needed <= num_blocks
-    block_table = torch.full((batch, max_blocks), -1, dtype=torch.int32, device=device)
+    block_table = torch.full(
+        (batch, max_blocks), -1, dtype=torch.int32, device=device
+    )
     cursor = 0
     for i, seq_len in enumerate(seq_lens):
         n_b = (seq_len + block_size - 1) // block_size
@@ -893,7 +890,9 @@ def test_retrieve_topk_batch_matches_serial():
             phys,
             uniform_bucket,
             start_b * block_size,
-            actual_num_chunks=torch.tensor([actual], dtype=torch.int32, device=device),
+            actual_num_chunks=torch.tensor(
+                [actual], dtype=torch.int32, device=device
+            ),
         )
         a = set(batch_topk[i].reshape(-1).tolist()) - {-1}
         b = set(serial[0].reshape(-1).tolist()) - {-1}
@@ -903,7 +902,9 @@ def test_retrieve_topk_batch_matches_serial():
     # direct physical retrieval rather than materializing summaries.
     mixed_lens = [1024, 1280, 1536, 1152]
     mixed_max = max((s + block_size - 1) // block_size for s in mixed_lens)
-    mixed_bt = torch.full((batch, mixed_max), -1, dtype=torch.int32, device=device)
+    mixed_bt = torch.full(
+        (batch, mixed_max), -1, dtype=torch.int32, device=device
+    )
     cursor = 0
     for i, seq_len in enumerate(mixed_lens):
         n_b = (seq_len + block_size - 1) // block_size
@@ -953,7 +954,9 @@ def test_retrieve_topk_batch_matches_serial():
         assert graphed == eager
     start_b = cfg.sink_size // block_size
     bucket = retriever._chunk_bucket(mixed_bt.shape[1] - start_b)
-    padded_ids = torch.full((1, bucket), -1, dtype=torch.int32, device=device)
+    padded_ids = torch.full(
+        (1, bucket), -1, dtype=torch.int32, device=device
+    )
     for i, seq_len in enumerate(mixed_lens):
         start_b, end_b = retriever.retrieval_block_range(seq_len, block_size)
         actual = end_b - start_b
@@ -965,12 +968,17 @@ def test_retrieve_topk_batch_matches_serial():
             padded_ids,
             bucket,
             start_b * block_size,
-            actual_num_chunks=torch.tensor([actual], dtype=torch.int32, device=device),
+            actual_num_chunks=torch.tensor(
+                [actual], dtype=torch.int32, device=device
+            ),
         )
         a = set(mixed_topk[i].reshape(-1).tolist()) - {-1}
         b = set(serial[0].reshape(-1).tolist()) - {-1}
         assert a == b, f"mixed req {i} topk set mismatch"
-        assert all(start_b * block_size <= token < end_b * block_size for token in a)
+        assert all(
+            start_b * block_size <= token < end_b * block_size
+            for token in a
+        )
 
     # Reuse the same bucket with shorter actual widths. Padding must be
     # overwritten rather than leaking scores/indices from the previous call.
@@ -1027,17 +1035,23 @@ def test_direct_physical_retrieval_matches_materialized():
             torch.randperm(num_blocks, device=device)[:n_chunks],
         )
     ).to(torch.int32)
-    summary.update_blocks_from_key_cache(key, physical_ids.reshape(-1).unique())
-    raw_q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
+    summary.update_blocks_from_key_cache(
+        key, physical_ids.reshape(-1).unique()
+    )
+    raw_q = torch.randn(
+        batch, hkv, d, device=device, dtype=torch.bfloat16
+    )
     token_offset = cfg.sink_size
 
     direct = retriever._retrieve_topk_physical(
         raw_q, summary, physical_ids, n_chunks, token_offset
     )
-    packed, cmin, cmax, centroid, valid = summary.gather_batch_block_summaries(
-        physical_ids.to(torch.int64),
-        chunk_valid=None,
-        assume_valid_ids=True,
+    packed, cmin, cmax, centroid, valid = (
+        summary.gather_batch_block_summaries(
+            physical_ids.to(torch.int64),
+            chunk_valid=None,
+            assume_valid_ids=True,
+        )
     )
     materialized = retriever.retrieve_topk_from_block_summaries(
         raw_q,
@@ -1053,7 +1067,9 @@ def test_direct_physical_retrieval_matches_materialized():
     assert direct.shape == materialized.shape
     for b in range(batch):
         for h in range(hkv):
-            assert set(direct[b, h].tolist()) == set(materialized[b, h].tolist())
+            assert set(direct[b, h].tolist()) == set(
+                materialized[b, h].tolist()
+            )
     assert ((direct == -1) | (direct >= token_offset)).all()
 
 
@@ -1167,7 +1183,9 @@ def test_batched_sparse_backend_matches_serial_path():
         layer, query, kv_cache, metadata, out_batched, cfg
     )
     impl._sparse_decode_forward(layer, query, kv_cache, metadata, out_serial, cfg)
-    assert torch.allclose(out_batched.float(), out_serial.float(), atol=5e-2, rtol=5e-2)
+    assert torch.allclose(
+        out_batched.float(), out_serial.float(), atol=5e-2, rtol=5e-2
+    )
 
 
 def test_gather_kv_from_topk_batch_matches_assemble_gather():
@@ -1196,7 +1214,8 @@ def test_gather_kv_from_topk_batch_matches_assemble_gather():
     # Long enough that sink+local are fully filled (fully-valid width).
     topk = torch.stack(
         [
-            torch.arange(64, 64 + tk, device=device).view(1, -1).expand(hkv, -1) + i * 8
+            torch.arange(64, 64 + tk, device=device).view(1, -1).expand(hkv, -1)
+            + i * 8
             for i in range(batch)
         ],
         dim=0,
@@ -1246,9 +1265,9 @@ def test_gather_kv_from_topk_batch_handles_short_seq_padding():
         num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16
     )
     value = torch.randn_like(key)
-    block_table = torch.arange(batch * 8, device=device, dtype=torch.int32).view(
-        batch, 8
-    )
+    block_table = torch.arange(
+        batch * 8, device=device, dtype=torch.int32
+    ).view(batch, 8)
     # Variable / short lengths exercise invalid padding slots.
     seq_lens = torch.tensor([40, 96], device=device, dtype=torch.int32)
     topk = torch.full((batch, hkv, tk), -1, dtype=torch.int64, device=device)
@@ -1287,18 +1306,13 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
     num_blocks = 128
     torch.manual_seed(0)
     q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
-    physical_ids = (
-        torch.arange(n_chunks, device=device, dtype=torch.int32)
-        .view(1, -1)
-        .expand(batch, -1)
-        .contiguous()
-    )
+    physical_ids = torch.arange(n_chunks, device=device, dtype=torch.int32).view(
+        1, -1
+    ).expand(batch, -1).contiguous()
     # Offset second request's physical ids.
-    physical_ids = (
-        physical_ids
-        + torch.arange(batch, device=device, dtype=torch.int32).view(batch, 1)
-        * n_chunks
-    )
+    physical_ids = physical_ids + torch.arange(
+        batch, device=device, dtype=torch.int32
+    ).view(batch, 1) * n_chunks
     physical_ids = physical_ids.clamp(max=num_blocks - 1).contiguous()
 
     gmin = torch.randn(num_blocks, hkv, d, device=device, dtype=torch.bfloat16)
@@ -1308,9 +1322,7 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
     gvalid[::7] = False
 
     n_parent = n_chunks // factor
-    parent_scores = torch.empty(
-        batch, hkv, n_parent, device=device, dtype=torch.float32
-    )
+    parent_scores = torch.empty(batch, hkv, n_parent, device=device, dtype=torch.float32)
     quest_parent_score_physical(
         q, physical_ids, gmin, gmax, gvalid, parent_scores, n_chunks, factor
     )
@@ -1377,7 +1389,9 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
         0, n_chunks, (batch, hkv, 24), device=device, dtype=torch.int64
     )
     density = torch.empty(batch, hkv, 24, device=device, dtype=torch.float32)
-    density_score_physical(chunk_ids, physical_ids, gcent, gvalid, q, density, n_chunks)
+    density_score_physical(
+        chunk_ids, physical_ids, gcent, gvalid, q, density, n_chunks
+    )
     ref_den = torch.full_like(density, float("-inf"))
     for b in range(batch):
         for h in range(hkv):
@@ -1388,7 +1402,9 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
                 pid = int(physical_ids[b, chunk])
                 if pid < 0 or not bool(gvalid[pid]):
                     continue
-                ref_den[b, h, s] = (gcent[pid, h].float() * q[b, h].float()).sum()
+                ref_den[b, h, s] = (
+                    gcent[pid, h].float() * q[b, h].float()
+                ).sum()
     assert torch.allclose(density, ref_den, atol=2e-2, rtol=2e-2)
 
     # Bucket launches must overwrite every padded slot. Seed scratch with
@@ -1426,7 +1442,9 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
     # contiguous tail untouched instead of spending work writing sentinels.
     assert bool((parent_scores[1, :, 2:] == 123.0).all())
 
-    chunk_ids[1, :, :] = torch.arange(24, device=device, dtype=torch.int64)
+    chunk_ids[1, :, :] = torch.arange(
+        24, device=device, dtype=torch.int64
+    )
     density.fill_(123.0)
     density_score_physical(
         chunk_ids,
@@ -1470,7 +1488,9 @@ def test_retrieve_marks_fully_valid_direct_path():
     seq_lens = [1280, 1280]
     batch = len(seq_lens)
     max_blocks = max((s + block_size - 1) // block_size for s in seq_lens)
-    block_table = torch.full((batch, max_blocks), -1, dtype=torch.int32, device=device)
+    block_table = torch.full(
+        (batch, max_blocks), -1, dtype=torch.int32, device=device
+    )
     cursor = 0
     for i, seq_len in enumerate(seq_lens):
         n_b = (seq_len + block_size - 1) // block_size
@@ -1692,18 +1712,14 @@ def test_dense_prefill_slice_rebases_query_start_loc(monkeypatch):
         scheduler_metadata=object(),
         max_num_splits=2,
     )
-    layer = SimpleNamespace(
-        _q_scale=torch.ones(1), _k_scale=torch.ones(1), _v_scale=torch.ones(1)
-    )
+    layer = SimpleNamespace(_q_scale=torch.ones(1), _k_scale=torch.ones(1), _v_scale=torch.ones(1))
     impl._dense_flash_forward(
         layer, query, kv_cache, metadata, output, req_start=2, tok_start=2
     )
     assert captured["max_seqlen_q"] == 4
     assert captured["max_seqlen_k"] == 128
     assert captured["scheduler_metadata"] is None
-    assert torch.equal(
-        captured["cu_seqlens_q"], torch.tensor([0, 4], dtype=torch.int32)
-    )
+    assert torch.equal(captured["cu_seqlens_q"], torch.tensor([0, 4], dtype=torch.int32))
     assert captured["q"].shape[0] == 4
     assert captured["out"].shape[0] == 4
 
@@ -1810,7 +1826,7 @@ def test_parent_finalize_matches_build_parent_minmax():
         seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int32),
         scan_all=True,
     )
-    torch.accelerator.synchronize()
+    torch.cuda.synchronize()
 
     packed, cmin, cmax, centroid, valid = sc.gather_request_block_summaries(phys)
     ref_min, ref_max, ref_valid = sc.build_parent_minmax(phys, cmin, cmax, valid)
@@ -1862,7 +1878,7 @@ def test_parent_precomputed_scoring_matches_inline():
         seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int32),
         scan_all_parents=True,
     )
-    torch.accelerator.synchronize()
+    torch.cuda.synchronize()
 
     n_parent = n_chunks // factor
     scores_pre = torch.empty(batch, hkv, n_parent, device=device, dtype=torch.float32)

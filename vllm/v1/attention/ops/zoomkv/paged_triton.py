@@ -69,7 +69,9 @@ def _assemble_context_batch_kernel(
     seq_len = tl.load(seq_lens_ptr + b)
     sink_len = tl.minimum(sink_size, seq_len)
     raw_local_start = tl.maximum(sink_len, seq_len - local_size)
-    local_start = tl.maximum(sink_len, (raw_local_start // block_size) * block_size)
+    local_start = tl.maximum(
+        sink_len, (raw_local_start // block_size) * block_size
+    )
     local_len = seq_len - local_start
     offs = tl.arange(0, BLOCK)
     mask = offs < n_ctx
@@ -90,7 +92,9 @@ def _assemble_context_batch_kernel(
     # Past the true n_ctx for this request (variable local length): mark invalid.
     in_range = offs < (sink_len + local_len + topk_len)
     logical = tl.where(in_range, logical, -1)
-    tl.store(out_ptr + b * stride_out_b + h * stride_out_h + offs, logical, mask=mask)
+    tl.store(
+        out_ptr + b * stride_out_b + h * stride_out_h + offs, logical, mask=mask
+    )
     tl.store(
         valid_ptr + b * stride_valid_b + h * stride_valid_h + offs,
         logical >= 0,
@@ -201,7 +205,9 @@ def _paged_gather_kv_batch_kernel(
     b = tl.program_id(0)
     h = tl.program_id(1)
     t = tl.program_id(2)
-    logical = tl.load(logical_ptr + b * stride_l_b + h * stride_l_h + t * stride_l_t)
+    logical = tl.load(
+        logical_ptr + b * stride_l_b + h * stride_l_h + t * stride_l_t
+    )
     valid_token = logical >= 0
     logical_safe = tl.maximum(logical, 0)
     logical_block = logical_safe // block_size
@@ -264,7 +270,9 @@ def assemble_context(
     heads, topk_len = topk.shape
     sink_len = min(int(sink_size), int(seq_len))
     raw_local_start = max(sink_len, int(seq_len) - int(local_size))
-    local_start = max(sink_len, (raw_local_start // int(block_size)) * int(block_size))
+    local_start = max(
+        sink_len, (raw_local_start // int(block_size)) * int(block_size)
+    )
     local_len = int(seq_len) - local_start
     base_local_len = int(seq_len) - raw_local_start
     n_ctx = sink_len + base_local_len + topk_len
@@ -321,7 +329,9 @@ def assemble_context_batch(
     ):
         out = out[:, :, :n_ctx]
     else:
-        out = torch.empty(batch, heads, n_ctx, dtype=torch.int64, device=topk.device)
+        out = torch.empty(
+            batch, heads, n_ctx, dtype=torch.int64, device=topk.device
+        )
     if (
         valid_out is not None
         and valid_out.shape[0] == batch
@@ -330,7 +340,9 @@ def assemble_context_batch(
     ):
         valid = valid_out[:, :, :n_ctx]
     else:
-        valid = torch.empty(batch, heads, n_ctx, dtype=torch.bool, device=topk.device)
+        valid = torch.empty(
+            batch, heads, n_ctx, dtype=torch.bool, device=topk.device
+        )
     # Preserve the scheduler's native integer dtype.  Casting the one-element
     # decode tensor from int32 to int64 launched an elementwise copy for every
     # layer; Triton integer arithmetic supports either dtype directly.
@@ -403,7 +415,9 @@ def _paged_gather_from_topk_batch_kernel(
     seq_len = tl.load(seq_lens_ptr + b)
     sink_len = tl.minimum(sink_size, seq_len)
     raw_local_start = tl.maximum(sink_len, seq_len - local_size)
-    local_start = tl.maximum(sink_len, (raw_local_start // block_size) * block_size)
+    local_start = tl.maximum(
+        sink_len, (raw_local_start // block_size) * block_size
+    )
     local_len = seq_len - local_start
     in_sink = t < sink_len
     in_local = (t >= sink_len) & (t < sink_len + local_len)
@@ -420,7 +434,11 @@ def _paged_gather_from_topk_batch_kernel(
         t,
         tl.where(in_local, local_start + t - sink_len, selected),
     )
-    valid_token = (in_sink | in_local | in_topk) & (logical >= 0) & (logical < seq_len)
+    valid_token = (
+        (in_sink | in_local | in_topk)
+        & (logical >= 0)
+        & (logical < seq_len)
+    )
     logical_safe = tl.maximum(logical, 0)
     logical_block = logical_safe // block_size
     token_offset = logical_safe - logical_block * block_size
@@ -436,7 +454,9 @@ def _paged_gather_from_topk_batch_kernel(
         & (physical_block >= 0)
         & (physical_block < num_physical_blocks)
     )
-    physical_safe = tl.maximum(0, tl.minimum(physical_block, num_physical_blocks - 1))
+    physical_safe = tl.maximum(
+        0, tl.minimum(physical_block, num_physical_blocks - 1)
+    )
     offs_d = tl.arange(0, BLOCK_D)
     mask = offs_d < head_dim
     # ``physical_block`` is int32. Large KV pools can exceed 262,144 blocks,
@@ -536,7 +556,7 @@ def paged_gather_kv_from_topk_batch(
     seq_lens_dev = seq_lens.to(device=topk.device).contiguous()
     out_h_dim = 2 if output_bthd else 1
     out_t_dim = 1 if output_bthd else 2
-
+    
     _paged_gather_from_topk_batch_kernel[(batch, heads, n_ctx)](
         key_cache,
         value_cache,
