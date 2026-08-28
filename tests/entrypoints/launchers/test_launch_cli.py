@@ -494,6 +494,7 @@ def test_snapshot_release_marker_ignores_unknown_keys(tmp_path: Path):
         ["release"],
         {"port": 8000},
         {"release": "true", "port": 8000},
+        {"release": 1, "port": 8000},
         {"release": True, "port": 0},
         {"release": True, "port": 70000},
         {"release": True, "port": True},
