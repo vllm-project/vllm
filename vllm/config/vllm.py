@@ -26,6 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from .attention import AttentionConfig
 from .cache import CacheConfig
@@ -1038,6 +1039,46 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_unquantized_kv_cache_dtype(self) -> None:
+        """An explicit unquantized KV cache dtype must match the model dtype.
+
+        `get_fp8_kv_cache_data_type` in csrc/attention/dtype_fp8.cuh maps "auto",
+        "float16" and "bfloat16" alike to `Fp8KVCacheDataType::kAuto`, and the kAuto
+        branch of `DISPATCH_BY_KV_CACHE_DTYPE` only ever instantiates the cache type
+        equal to the *source* type -- `FN(uint16_t, uint16_t, kAuto)`,
+        `FN(__nv_bfloat16, __nv_bfloat16, kAuto)`. There is no instantiation in which the
+        two differ, so `CopyWithScaleOp`'s `static_cast<OutT>(src)` is a no-op and the
+        cache receives the model dtype's *bits*, while the tensor was allocated with the
+        requested dtype and is read back as such.
+
+        The result is a bit reinterpretation with no error and no non-finite value: on a
+        bfloat16 model a float16 cache holds `0.1621 -> 1.537`, `436 -> 3.926`, and the
+        model produces fluent nonsense. Until the dispatch can express a cross-dtype
+        unquantized copy, refusing the combination is the only way to keep the failure
+        visible.
+
+        The quantized dtypes are unaffected -- their branches do instantiate
+        `OutT != InT` and convert through `fp8::scaled_convert`.
+        """
+        if self.model_config is None:
+            return
+        cache_dtype = self.cache_config.cache_dtype
+        # The unquantized set, mirroring get_fp8_kv_cache_data_type's kAuto arm.
+        if cache_dtype not in ("float16", "bfloat16"):
+            return
+        requested = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        model_dtype = self.model_config.dtype
+        if requested is model_dtype:
+            return
+        raise ValueError(
+            f"--kv-cache-dtype {cache_dtype} cannot be used with a "
+            f"{model_dtype} model: the unquantized cache write has no conversion "
+            f"between the two, so the cache would hold {model_dtype} bits read back as "
+            f"{requested}, silently. Use --kv-cache-dtype auto to store the cache in the "
+            f"model dtype, pass --dtype {cache_dtype} to run the model in that dtype "
+            f"instead, or use a quantized cache dtype such as fp8, which does convert."
+        )
+
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
@@ -1167,6 +1208,8 @@ class VllmConfig:
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
+
+        self._verify_unquantized_kv_cache_dtype()
 
         if (
             self.mamba_config.enable_stochastic_rounding
