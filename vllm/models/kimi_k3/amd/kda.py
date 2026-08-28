@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from dataclasses import replace
 from einops import rearrange
 from torch import nn
 
@@ -57,6 +58,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -83,7 +85,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
-            num_spec=self.num_spec if not self._use_kda_replayssm() else 0,
+            # ReplaySSM removes the per-draft *recurrent* states (via
+            # num_speculative_blocks=0 in the cache spec), but the conv state
+            # must still span the verify window so causal_conv1d_update can roll
+            # back to the accepted position.
+            num_spec=self.num_spec,
         )
         if self._use_kda_replayssm():
             assert self.cache_config is not None
@@ -95,6 +101,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 base, cache_len
             )
         return base
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if spec is None or not self._use_kda_replayssm():
+            return spec
+        # Only the per-draft states are dropped. page_size_padded must be left
+        # alone: the platform pads the mamba page to exactly the attention page
+        # so block ids map 1:1 across the two groups, and it already grows the
+        # attention block size to cover the larger ReplaySSM page. Clearing it
+        # desynchronizes that mapping and the state slot drifts every step.
+        return replace(spec, num_speculative_blocks=0)
 
     def _use_kda_replayssm(self) -> bool:
         return (
@@ -152,7 +169,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 use_qk_l2norm_in_kernel=True,
                 lower_bound=self.gate_lower_bound,
             )
-            return result.squeeze(0)
+            if out is not None:
+                return out
+            if result.dim() == 3:
+                result = result.unsqueeze(0)
+            return result
 
         core_out, _ = fused_sigmoid_gating_delta_rule_update(
             A_log=self.A_log,
@@ -526,7 +547,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
-            spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
+            # Under ReplaySSM the kernel grid follows the row count, so keep the
+            # padded rows: their cu_seqlens entries are zero-length and skipped.
+            spec_cu_seqlens = (
+                spec_query_start_loc
+                if m.replayssm
+                else spec_query_start_loc[: m.num_spec_decodes + 1]
+            )
             # Spec-only batches write directly into core_attn_out.
             spec_out = (
                 core_attn_out[:, : q_spec.shape[1]]
@@ -548,9 +575,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     None if m.replayssm else num_accepted_tokens
                 ),
                 replayssm_slot_idx=(
-                    m.slot_idx[m.num_decodes : m.num_decodes + m.num_spec_decodes]
-                    if m.replayssm and m.slot_idx is not None
-                    else None
+                    m.replayssm_spec_slot_idx if m.replayssm else None
                 ),
                 out=spec_out,
             )
@@ -642,6 +667,22 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     prefill_state_indices = non_spec_state_indices_tensor
                     prefill_has_initial_state = has_initial_state
 
+                if m.replayssm and m.replayssm_fold_len is not None:
+                    # The chunk kernel consumes the checkpoint directly, so any
+                    # ring records these rows still carry have to be absorbed
+                    # into it first.
+                    from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
+                        replayssm_fold,
+                    )
+
+                    assert m.replayssm_fold_slots is not None
+                    replayssm_fold(
+                        recurrent_state,
+                        *self.kv_cache[2:5],
+                        m.replayssm_fold_len,
+                        m.replayssm_fold_slots,
+                    )
+
                 initial_state = gather_initial_states(
                     recurrent_state,
                     prefill_state_indices,
@@ -709,16 +750,20 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     gate=g1_ns,
                     beta=beta_ns,
                     metadata=m,
-                    cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
+                    # Decode-only batch, so every non-spec row is a decode and
+                    # the padded tail is safe to hand to the ReplaySSM kernel.
+                    cu_seqlens=(
+                        non_spec_query_start_loc
+                        if m.replayssm
+                        else non_spec_query_start_loc[: m.num_decodes + 1]
+                    ),
                     ssm_state_indices=(
                         None
                         if m.replayssm
                         else decode_conv_indices
                     ),
                     replayssm_slot_idx=(
-                        m.slot_idx[: m.num_decodes]
-                        if m.replayssm and m.slot_idx is not None
-                        else None
+                        m.replayssm_decode_slot_idx if m.replayssm else None
                     ),
                     out=core_attn_out[:, : mixed_qkv_ns.size(0)],
                 )

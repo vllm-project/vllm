@@ -84,6 +84,15 @@ class GDNAttentionMetadata:
     write_pos: torch.Tensor | None = None
     replayssm_cache_len: int = 0
     replayssm_max_query_len: int = 1
+    # Rows entering the chunk/prefill path whose ring records must be folded
+    # into their checkpoint first, and how many records each one carries.
+    replayssm_fold_slots: torch.Tensor | None = None
+    replayssm_fold_len: torch.Tensor | None = None
+    # Slot ids spanning the padded cudagraph batch. The ReplaySSM kernel grid is
+    # derived from the row count, so it must not shrink as requests finish; the
+    # padded rows carry a zero-length cu_seqlens and exit the kernel early.
+    replayssm_spec_slot_idx: torch.Tensor | None = None
+    replayssm_decode_slot_idx: torch.Tensor | None = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):

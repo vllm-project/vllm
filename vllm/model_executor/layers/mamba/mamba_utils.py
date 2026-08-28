@@ -93,7 +93,7 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
-    def append_kda_replayssm_dtypes((
+    def append_kda_replayssm_dtypes(
         cls,
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
@@ -102,7 +102,7 @@ class MambaStateDtypeCalculator:
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         return (*base_dtypes, activation_dtype, activation_dtype, activation_dtype)
 
-        @classmethod
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -335,7 +335,7 @@ class MambaStateShapeCalculator:
         )
 
     @classmethod
-    def append_kda_replayssm_buffers((
+    def append_kda_replayssm_buffers(
         cls,
         base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
         replayssm_cache_len: int,
