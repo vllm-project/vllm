@@ -72,6 +72,21 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
+        # Triton fp8e4nv requires FP8 Tensor Cores (SM89+ Ada/Hopper).
+        # Pre-SM89 GPUs (e.g. A100 / SM80) do not support native FP8 MMA in Triton.
+        if current_platform.is_cuda() and not current_platform.has_device_capability(
+            (8, 9)
+        ):
+            is_fp8 = any(
+                k is not None and k.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+                for k in (weight_key, activation_key)
+            )
+            if is_fp8:
+                return False, (
+                    "Triton FP8 MoE kernel requires "
+                    "compute capability >= 8.9 (Ada/Hopper+)"
+                )
+
         supported, reason = mk.FusedMoEExperts.is_supported_config(
             cls,
             moe_config,

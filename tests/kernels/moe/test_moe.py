@@ -42,6 +42,12 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEActivationFormat,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
@@ -59,8 +65,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTensorSym,
+    kFp8StaticTensorSym,
+    quantize_weights,
+)
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.triton_utils import tl
 from vllm.utils.math_utils import next_power_of_2
@@ -1986,3 +1997,37 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.parametrize(
+    ("capability", "expected_supported"),
+    [
+        ((8, 0), False),  # A100 (Ampere)
+        ((7, 5), False),  # T4 (Turing)
+        ((8, 9), True),  # L40 (Ada)
+        ((9, 0), True),  # H100 (Hopper)
+    ],
+)
+def test_triton_fp8_moe_capability_gating(monkeypatch, capability, expected_supported):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "supports_fp8", lambda: True)
+
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(*capability)),
+    )
+
+    moe_config = make_dummy_moe_config()
+    supported, reason = TritonExperts.is_supported_config(
+        TritonExperts,
+        moe_config,
+        weight_key=kFp8StaticTensorSym,
+        activation_key=kFp8DynamicTensorSym,
+        activation_format=FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported == expected_supported
+    if not expected_supported:
+        assert reason is not None and "compute capability >= 8.9" in reason
