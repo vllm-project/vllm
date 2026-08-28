@@ -7,6 +7,7 @@ from concurrent.futures.process import ProcessPoolExecutor
 from functools import cache
 from typing import Any
 
+import regex as re
 import torch
 
 
@@ -62,3 +63,12 @@ def num_compute_units(device_id: int = 0) -> int:
     from vllm.platforms import current_platform
 
     return current_platform.num_compute_units(device_id)
+
+
+@cache
+def get_device_name_as_file_name(device_id: int = 0) -> str:
+    from vllm.platforms import current_platform
+
+    name = current_platform.get_device_name(device_id)
+    name = re.sub(r"[\s/]+", "_", name)
+    return name

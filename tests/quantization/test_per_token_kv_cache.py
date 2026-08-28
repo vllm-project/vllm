@@ -497,7 +497,6 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 
     layer = MagicMock()
     layer.kv_cache_dtype = kv_cache_dtype
-    layer.calculate_kv_scales = False
     layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
@@ -717,7 +716,10 @@ def test_triton_unified_attention_per_token_head_scale(
 
     # Coarser quantization → wider tolerance.
     if is_int4:
-        atol, rtol = 0.5, 0.5
+        # Hopper's attention reduction order can move a few BF16 elements by
+        # just over 1.0 after INT4 quantization.
+        atol = 1.1 if current_platform.is_device_capability_family(90) else 0.5
+        rtol = 0.5
     else:
         atol, rtol = 5e-2, 5e-2
     torch.testing.assert_close(output_q, output_ref, atol=atol, rtol=rtol)

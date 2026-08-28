@@ -1026,7 +1026,7 @@ def unified_attention(
         assert q.stride(1) == head_size, (
             f"USE_TD_QO requires contiguous query heads "
             f"(q.stride(1) = {q.stride(1)} != head_size = {head_size}); "
-            f"set VLLM_TRITON_ATTN_USE_TD=0 or pad the query layout."
+            f"set VLLM_TRITON_USE_TD=0 or pad the query layout."
         )
         assert out.stride(1) == head_size, (
             f"USE_TD_QO requires contiguous output heads "

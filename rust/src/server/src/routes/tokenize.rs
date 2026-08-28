@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! `POST /tokenize` and `POST /detokenize` (root paths, matching Python).
 //!
 //! Encode/decode runs entirely in-process via [`DynTokenizer`]; the inference
@@ -57,9 +60,7 @@ pub async fn tokenize(
     let max_model_len = state.chat.engine_core_client().max_model_len();
 
     let result = match body {
-        // Completion form: encode the raw `prompt` string (no chat template).
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &tokenizer, req),
-        // Chat form: render `messages` through the template, then encode (see `tokenize_chat`).
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
         TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
     };
 
@@ -80,20 +81,24 @@ pub async fn tokenize(
 
 fn tokenize_completion(
     state: &AppState,
-    tokenizer: &vllm_text::tokenizer::DynTokenizer,
+    request_id: &str,
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
     check_model(state, req.model.as_deref())?;
-    let tokens = tokenizer
-        .encode(&req.prompt, req.add_special_tokens)
+    let return_token_strs = req.return_token_strs;
+    let tokens = state
+        .chat
+        .text()
+        .request_processor()
+        .tokenize(req.into_text_request(request_id.to_string()))
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
-    Ok((tokens, req.return_token_strs))
+    Ok((tokens, return_token_strs))
 }
 
 /// HTTP adapter for the chat-shaped `/tokenize` body.
 ///
-/// Not [`vllm_chat::ChatLlm::tokenize_chat`]: this checks the model name and maps
-/// errors to [`ApiError`]; the chat-crate method does render → finalize → encode.
+/// Checks the model name, prepares without engine submission, and maps errors
+/// to [`ApiError`].
 async fn tokenize_chat(
     state: &AppState,
     request_id: &str,
@@ -103,10 +108,17 @@ async fn tokenize_chat(
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
+    let text_request = state
+        .chat
+        .request_processor()
+        .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
+        .await
+        .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
     let tokens = state
         .chat
-        .tokenize_chat(req.into_chat_request(request_id.to_string())?)
-        .await
+        .text()
+        .request_processor()
+        .tokenize(text_request)
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
     Ok((tokens, return_token_strs))
 }

@@ -57,6 +57,12 @@ void mla_decode_block_head(
   std::fill(max_val, max_val + HEAD_UNROLL, -FLT_MAX);
 
   f32_vec_type acc_vec[BLOCK_SIZE][HEAD_UNROLL];
+  // Explicitly zero-initialize the accumulator. On x86 the default
+  // ctor of FP32Vec16 already sets zero, but on ARM (and any backend
+  // whose Vectorized<float> default ctor is trivial) the array holds
+  // undefined values and the fma below accumulates garbage.
+  for (int b = 0; b < BLOCK_SIZE; ++b)
+    for (int u = 0; u < HEAD_UNROLL; ++u) acc_vec[b][u] = f32_vec_type{0.0f};
   for (int i = 0; i < HEAD_DIM; i += QK_NUM_ELEM) {
     // load to registers
     qk_vec_type q_vec[HEAD_UNROLL];
@@ -96,6 +102,9 @@ void mla_decode_block_head(
   }
 
   f32_vec_type this_out[V_HEAD_DIM / V_NUM_ELEM][HEAD_UNROLL];
+  // Same zero-initialization concern as acc_vec above.
+  for (int i = 0; i < V_HEAD_DIM / V_NUM_ELEM; ++i)
+    for (int u = 0; u < HEAD_UNROLL; ++u) this_out[i][u] = f32_vec_type{0.0f};
 
   for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
     // load to registers

@@ -1,36 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+from vllm.v1.attention.backends.mla.indexer import (
+    BuildPrefillChunkMetadataKernel,
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.worker.block_table import get_block_table_width
+
+
+def test_indexer_warmup_normalizes_zero_compress_ratios():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0])
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+
+    keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
+
+    assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size():
+def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
     """
     device = torch.device("cuda")
 
-    # storage_block_size = block_size // compress_ratio = 256 // 4 = 64
+    # num_states = block_size // tokens_per_state = 256 // 4 = 64
     kv_cache_spec = MLAAttentionSpec(
         block_size=256,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=4,
+        tokens_per_state=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["dummy"],
         vllm_config=vllm_config,
         device=device,
+        block_table_width=block_table_width,
     )
 
     # Construct a single request where:
@@ -69,7 +95,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
     valid_slots = md.slot_mapping[md.slot_mapping >= 0]
     assert valid_slots.numel() == 10  # 40 tokens / compress_ratio 4
 
-    storage_bs = kv_cache_spec.storage_block_size  # 64
+    storage_bs = kv_cache_spec.num_states  # 64
     # Compressed positions 60..63 land in block 5, positions 64..69 in block 7.
     expected = torch.tensor(
         [

@@ -63,9 +63,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         this `moe_config`."""
 
     @abstractmethod
-    def backend_to_kernel_cls(self, backend: BackendT) -> type[mk.FusedMoEExperts]:
+    def backend_to_kernel_cls(
+        self, backend: BackendT
+    ) -> list[type[mk.FusedMoEExperts]]:
         """Map a backend enum value to its concrete `FusedMoEExperts`
-        subclass."""
+        subclasses, in selection priority order."""
 
     @abstractmethod
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:

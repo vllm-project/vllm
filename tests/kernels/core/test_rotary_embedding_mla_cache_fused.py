@@ -181,10 +181,14 @@ def test_concat_and_cache_mla_rope_fused(
         kv_cache_scale,
     )
 
-    # ROCm neox-style Triton FMA diverges slightly from the fused kernel, so
-    # relax the affected tolerance: rtol for fp8 (one e4m3 ULP ~12.5%) and atol
-    # otherwise (bounded ~6e-4). Other paths use the CUDA defaults.
+    # On ROCm the AITER Triton rope diverges by ~1 ULP from the fused kernel,
+    # which the tight CUDA tolerances don't cover for the low-precision paths:
+    #  - bf16: up to ~1 bf16 ULP (0.0156-0.03125 at values ~2-3), so relax the
+    #    kv-cache atol (bounded ~0.02) and the query atol (~0.04).
+    #  - neox-style fp8: one e4m3 ULP (~12.5%), so relax rtol.
+    # Other paths use the CUDA defaults.
     rocm_neox = current_platform.is_rocm() and is_neox_style
+    rocm_bf16 = current_platform.is_rocm() and dtype == torch.bfloat16
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
         ops.convert_fp8(
@@ -198,13 +202,21 @@ def test_concat_and_cache_mla_rope_fused(
             expected_temp, ref_kv_cache, kv_cache_scale.item(), kv_dtype=kv_cache_dtype
         )
         torch.testing.assert_close(
-            result_temp, expected_temp, atol=0.001, rtol=0.15 if rocm_neox else 0.1
+            result_temp,
+            expected_temp,
+            atol=0.004 if rocm_bf16 else 0.001,
+            rtol=0.15 if rocm_neox or rocm_bf16 else 0.1,
         )
+    elif rocm_bf16:
+        torch.testing.assert_close(kv_cache, ref_kv_cache, atol=0.02, rtol=1e-3)
     elif rocm_neox:
         torch.testing.assert_close(kv_cache, ref_kv_cache, atol=1e-3, rtol=1e-3)
     else:
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
     torch.testing.assert_close(
-        query, ref_q_pe, atol=get_default_atol(query), rtol=get_default_rtol(query)
+        query,
+        ref_q_pe,
+        atol=0.04 if rocm_bf16 else get_default_atol(query),
+        rtol=get_default_rtol(query),
     )

@@ -6,7 +6,25 @@
 from typing import Any
 
 
-class VLLMValidationError(ValueError):
+class VLLMError(Exception):
+    """Base class for all vLLM-specific errors.
+
+    Subclasses are split into `VLLMClientError` (caused by the request, mapped
+    to 4xx) and `VLLMServerError` (caused by the server, mapped to 5xx).
+    Dispatching on this hierarchy lets the entrypoints decide the HTTP status
+    without relying on raw Python exception types such as `ValueError`.
+    """
+
+
+class VLLMClientError(VLLMError):
+    """Base class for errors caused by the client request (4xx)."""
+
+
+class VLLMServerError(VLLMError):
+    """Base class for errors caused by the server (5xx)."""
+
+
+class VLLMValidationError(VLLMClientError):
     """vLLM-specific validation error for request validation failures.
 
     Args:
@@ -36,7 +54,7 @@ class VLLMValidationError(ValueError):
         return f"{base} ({', '.join(extras)})" if extras else base
 
 
-class VLLMNotFoundError(Exception):
+class VLLMNotFoundError(VLLMClientError):
     """vLLM-specific NotFoundError"""
 
     pass
@@ -66,7 +84,7 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
         return self.message
 
 
-class VLLMUnprocessableEntityError(ValueError):
+class VLLMUnprocessableEntityError(VLLMClientError):
     """vLLM-specific error for unprocessable entity requests.
 
     This exception is raised when the request content is invalid or cannot be
