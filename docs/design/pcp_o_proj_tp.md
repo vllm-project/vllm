@@ -20,9 +20,11 @@ the name `pcp_o_proj_tp`.
 
 - `prefill_context_parallel_size > 1`.
 - `decode_context_parallel_size = 1`.
-- Only DeepSeek V2/V3/V3.2 and GLM-4 MoE Lite MLA are supported. GLM-4 MoE Lite
-  attention inherits the DeepSeekV2 MLA path, so it reuses the same explicit
-  prefetch and dynamic O-Proj implementation.
+- Only DeepSeek V2/V3/V3.2, GLM-4 MoE Lite MLA, and the GLM-5 family are
+  supported.
+  GLM-4 MoE Lite attention inherits the DeepSeekV2 MLA path. GLM-5.2 reuses the
+  NVIDIA DeepSeekV3.2 DSA path. Both reuse the same explicit prefetch and
+  dynamic O-Proj implementation.
 - O-Proj may use the unquantized linear method or ModelOpt W4A4 NVFP4 with a
   CUTLASS-compatible post-load layout. The NVFP4 adapter covers native CUTLASS
   and FlashInfer backends that use the same packed-weight and swizzled-scale
@@ -273,6 +275,43 @@ Across concurrency 1/8/16, enabling the feature changes mean TTFT by
 Mean TPOT changes by `+4.93%/+5.23%/+7.51%` and
 `+6.05%/+7.55%/+5.45%`, respectively; generated-token throughput changes by
 `-4.55%/-4.56%/-6.06%` and `-5.68%/-6.43%/-4.52%`.
+
+### GLM-5.2 SM100 smoke validation
+
+A follow-up smoke test used four NVIDIA SM100 GPUs and a GLM-5.2 ModelOpt
+NVFP4 checkpoint whose configuration excludes self-attention from
+quantization. The O-Proj therefore exercised the unquantized path. The test
+used PCP4TP1, DCP1, EP4, eager execution, FP8 KV cache, a 4,096-token model
+length, prefix caching disabled, `gpu_memory_utilization=0.90`, and the existing
+NVIDIA DeepSeekV3.2 model-class route. Both arms used the same locally prebuilt
+SM100 extensions.
+
+| Feature | Model-load memory/rank | Available KV cache/rank | KV cache tokens |
+| --- | ---: | ---: | ---: |
+| disabled | 129.88 GiB | 31.39 GiB | 706,624 |
+| enabled | 122.74 GiB | 38.60 GiB | 868,800 |
+
+The feature reduced model-load allocation by 7.14 GiB per rank and increased
+KV capacity by 162,176 tokens. Ready HBM did not decrease because the fixed
+GPU-memory-utilization target assigned the freed model memory to KV cache.
+
+Both variants completed all requests in two eight-request serving smokes. One
+of two deterministic continuation checks matched exactly; the short-context
+continuation diverged. Different collective reduction order can change
+autoregressive paths, so this smoke does not replace a model accuracy
+evaluation.
+
+The following single cold A/B pair is directional only and is not treated as
+stable performance evidence:
+
+| Workload | Metric | Disabled | Enabled | Change |
+| --- | --- | ---: | ---: | ---: |
+| 1,024 input / 32 output / c8 | Mean TTFT | 574.71 ms | 630.86 ms | +9.77% |
+| 1,024 input / 32 output / c8 | Mean TPOT | 199.40 ms | 216.18 ms | +8.41% |
+| 1,024 input / 32 output / c8 | Output throughput | 37.19 tok/s | 34.28 tok/s | -7.84% |
+| 128 input / 128 output / c8 | Mean TTFT | 457.97 ms | 502.81 ms | +9.79% |
+| 128 input / 128 output / c8 | Mean TPOT | 202.81 ms | 211.60 ms | +4.34% |
+| 128 input / 128 output / c8 | Output throughput | 39.02 tok/s | 37.37 tok/s | -4.25% |
 
 ## PCP8 parameter projections
 

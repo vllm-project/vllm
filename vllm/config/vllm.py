@@ -1429,12 +1429,13 @@ class VllmConfig:
             "DeepseekV2ForCausalLM",
             "DeepseekV3ForCausalLM",
             "DeepseekV32ForCausalLM",
+            "GlmMoeDsaForCausalLM",
             "Glm4MoeLiteForCausalLM",
         }
         if supported_architectures.isdisjoint(model_config.architectures):
             raise ValueError(
-                "PCP O-Proj TP MVP supports only DeepSeek V2/V3/V3.2 and "
-                "GLM-4 MoE Lite MLA architectures."
+                "PCP O-Proj TP MVP supports only DeepSeek V2/V3/V3.2, "
+                "GLM-4 MoE Lite, and GLM-5 family MLA architectures."
             )
         if self.parallel_config.enable_dbo:
             raise ValueError("PCP O-Proj TP MVP does not support DBO.")

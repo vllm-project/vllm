@@ -1821,6 +1821,28 @@ def test_pcp_o_proj_tp_requires_pcp_and_dcp_one():
     assert config.enable_pcp_o_proj_tp
 
 
+def test_pcp_o_proj_tp_accepts_glm5_family_architecture():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_pcp_o_proj_tp=True,
+            enable_dbo=False,
+        ),
+        model_config=SimpleNamespace(
+            enforce_eager=True,
+            dtype=vllm_config_module.torch.bfloat16,
+            use_mla=True,
+            architectures=["GlmMoeDsaForCausalLM"],
+        ),
+        lora_config=None,
+        offload_config=SimpleNamespace(
+            uva=SimpleNamespace(cpu_offload_gb=0),
+            prefetch=SimpleNamespace(offload_group_size=0),
+        ),
+    )
+
+    VllmConfig._verify_pcp_o_proj_tp_config(config)
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
