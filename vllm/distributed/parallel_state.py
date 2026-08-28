@@ -1415,6 +1415,35 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
+# The MoE DP-PCP group is used for activation dispatch and combine when DP and
+# PCP are enabled without sequence parallelism. Each group fixes ExternalDP,
+# PP, and TP while spanning DP x PCP ranks in DP -> PCP order, allowing one
+# variable-sized collective to cover both parallel axes.
+_MOE_DP_PCP_GROUP: GroupCoordinator | None = None
+
+
+def get_moe_dp_pcp_group() -> GroupCoordinator:
+    assert _MOE_DP_PCP_GROUP is not None, "MoE DP-PCP group is not initialized"
+    return _MOE_DP_PCP_GROUP
+
+
+def has_moe_dp_pcp_group() -> bool:
+    return _MOE_DP_PCP_GROUP is not None
+
+
+def _get_moe_dp_pcp_group_ranks(
+    all_ranks: torch.Tensor,
+    data_parallel_size: int,
+    prefill_context_parallel_size: int,
+) -> list[list[int]]:
+    # Fix ExternalDP, PP, and TP; flatten DP then PCP into each group.
+    ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(
+        -1,
+        data_parallel_size * prefill_context_parallel_size,
+    )
+    return [x.tolist() for x in ranks.unbind(0)]
+
+
 _EP: GroupCoordinator | None = None
 
 
@@ -1924,6 +1953,24 @@ def initialize_model_parallel(
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
     if config.model_config is None or config.model_config.is_moe:
+        global _MOE_DP_PCP_GROUP
+        assert _MOE_DP_PCP_GROUP is None, "MoE DP-PCP group is already initialized"
+        if (
+            not enable_elastic_ep
+            and data_parallel_size > 1
+            and prefill_context_model_parallel_size > 1
+        ):
+            _MOE_DP_PCP_GROUP = init_model_parallel_group(
+                _get_moe_dp_pcp_group_ranks(
+                    all_ranks,
+                    data_parallel_size,
+                    prefill_context_model_parallel_size,
+                ),
+                get_world_group().local_rank,
+                backend,
+                group_name="moe_dp_pcp_group",
+            )
+
         group_ranks = (
             all_ranks.transpose(1, 2)
             .reshape(
@@ -2108,6 +2155,11 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    global _MOE_DP_PCP_GROUP
+    if _MOE_DP_PCP_GROUP:
+        _MOE_DP_PCP_GROUP.destroy()
+    _MOE_DP_PCP_GROUP = None
 
     global _EP
     if _EP:

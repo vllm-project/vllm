@@ -12,7 +12,9 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_moe_dp_pcp_group,
     get_pcp_group,
+    has_moe_dp_pcp_group,
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
@@ -54,7 +56,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
 
-    def _uses_combined_dp_pcp(self, is_sequence_parallel: bool) -> bool:
+    def _uses_dp_pcp_metadata(self, is_sequence_parallel: bool) -> bool:
         if is_sequence_parallel or self.dp_world_size == 1:
             return False
         dp_metadata = get_forward_context().dp_metadata
@@ -64,17 +66,28 @@ class AgRsAll2AllManager(All2AllManagerBase):
             and dp_metadata.num_tokens_across_dp_pcp_cpu is not None
         )
 
+    def _uses_moe_dp_pcp_group(self, is_sequence_parallel: bool) -> bool:
+        return has_moe_dp_pcp_group() and self._uses_dp_pcp_metadata(
+            is_sequence_parallel
+        )
+
+    def _uses_staged_dp_pcp(self, is_sequence_parallel: bool) -> bool:
+        return not has_moe_dp_pcp_group() and self._uses_dp_pcp_metadata(
+            is_sequence_parallel
+        )
+
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
+        if self._uses_moe_dp_pcp_group(is_sequence_parallel):
+            return get_moe_dp_pcp_group()
         if self.dp_world_size > 1:
             return get_dp_group()
         return get_pcp_group()
 
-    def _dispatch_combined_dp_pcp(
+    def _dispatch_staged_dp_pcp(
         self, tensors: list[torch.Tensor], sizes: list[int]
     ) -> list[torch.Tensor]:
-        """All-gather in PCP-then-DP order to produce DP -> PCP layout."""
         dp_group = get_dp_group()
         pcp_group = get_pcp_group()
         pcp_size = pcp_group.world_size
@@ -91,10 +104,9 @@ class AgRsAll2AllManager(All2AllManagerBase):
         ]
         return dp_group.all_gatherv(tensors, dim=0, sizes=sizes_per_dp)
 
-    def _combine_combined_dp_pcp(
+    def _combine_staged_dp_pcp(
         self, hidden_states: torch.Tensor, sizes: list[int]
     ) -> torch.Tensor:
-        """Undo combined dispatch: reduce-scatter DP, then PCP."""
         dp_group = get_dp_group()
         pcp_group = get_pcp_group()
         pcp_size = pcp_group.world_size
@@ -110,9 +122,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
         dp_rank = dp_group.rank_in_group
         local_pcp_sizes = sizes[dp_rank * pcp_size : (dp_rank + 1) * pcp_size]
-        return pcp_group.reduce_scatterv(
-            hidden_states, dim=0, sizes=local_pcp_sizes
-        )
+        return pcp_group.reduce_scatterv(hidden_states, dim=0, sizes=local_pcp_sizes)
 
     def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
         if self.dp_world_size == 1:
@@ -143,18 +153,22 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
-        if self._uses_combined_dp_pcp(is_sequence_parallel):
-            gathered_tensors = self._dispatch_combined_dp_pcp(
-                tensors_to_gather, sizes
-            )
-        else:
-            assert len(sizes) == dist_group.world_size
-            assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
-            gathered_tensors = dist_group.all_gatherv(
-                tensors_to_gather,
-                dim=0,
-                sizes=sizes,
-            )
+        if self._uses_staged_dp_pcp(is_sequence_parallel):
+            gathered_tensors = self._dispatch_staged_dp_pcp(tensors_to_gather, sizes)
+            if extra_tensors is not None:
+                return (
+                    gathered_tensors[0],
+                    gathered_tensors[1],
+                    gathered_tensors[2:],
+                )
+            return gathered_tensors[0], gathered_tensors[1]
+        assert len(sizes) == dist_group.world_size
+        assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
+        gathered_tensors = dist_group.all_gatherv(
+            tensors_to_gather,
+            dim=0,
+            sizes=sizes,
+        )
 
         if extra_tensors is not None:
             return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
@@ -180,10 +194,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
-        if self._uses_combined_dp_pcp(is_sequence_parallel):
-            gathered_tensors = self._dispatch_combined_dp_pcp(
-                tensors_to_gather, sizes
-            )
+        if self._uses_staged_dp_pcp(is_sequence_parallel):
+            gathered_tensors = self._dispatch_staged_dp_pcp(tensors_to_gather, sizes)
         else:
             assert len(sizes) == dist_group.world_size
             assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -213,8 +225,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
         )
-        if self._uses_combined_dp_pcp(is_sequence_parallel):
-            return self._combine_combined_dp_pcp(hidden_states, sizes)
+        if self._uses_staged_dp_pcp(is_sequence_parallel):
+            return self._combine_staged_dp_pcp(hidden_states, sizes)
         assert len(sizes) == dist_group.world_size, (
             f"Expected one token count per dispatch rank, got {len(sizes)} "
             f"for world size {dist_group.world_size}."
