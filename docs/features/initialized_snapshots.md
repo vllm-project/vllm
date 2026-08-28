@@ -44,12 +44,16 @@ directory containing `cuda_plugin.so`.
 
 Run snapshot commands with `docker exec` inside a long-lived container. Restore
 hands the API server off as a detached process, so a one-shot container would
-stop that server when its PID 1 exits. This example also keeps the container
-filesystem and `/dev/shm` namespace stable for the lifetime of the artifact:
+stop that server when its PID 1 exits. Snapshot preflight requires every
+component of the artifact path to be owned by the invoking user or root, with
+the directory itself at mode 0700, and the commands below run as root inside
+the official image, so the bind-mounted host directory is created with `sudo`
+and root ownership. This example also keeps the container filesystem and
+`/dev/shm` namespace stable for the lifetime of the artifact:
 
 ```bash
 snapshot_root="$(pwd)/vllm-snapshots"
-install -d -m 0700 "${snapshot_root}"
+sudo install -d -m 0700 -o root -g root "${snapshot_root}"
 
 docker run --detach --name vllm-snapshot \
   --gpus all \
