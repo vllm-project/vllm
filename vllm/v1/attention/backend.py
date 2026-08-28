@@ -23,10 +23,14 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        KVCacheLayout,
+        KVCacheSpec,
+        KVQuantMode,
+    )
 
-from vllm.v1.kv_cache_interface import get_kv_quant_mode
+from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -69,13 +73,6 @@ class AttentionBackend(ABC):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
-    @classmethod
-    def get_supported_kernel_block_sizes_for_config(
-        cls, vllm_config: "VllmConfig"
-    ) -> list[int | MultipleOf]:
-        """Return kernel block sizes for a concrete engine configuration."""
-        return cls.get_supported_kernel_block_sizes()
-
     @staticmethod
     @abstractmethod
     def get_name() -> str:
@@ -89,68 +86,6 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def get_builder_cls():  # -> Type["AttentionMetadataBuilder"]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        raise NotImplementedError
-
-    @classmethod
-    def get_kv_cache_block_dim(
-        cls,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> int:
-        """Discover which tensor dim is the block index, since different
-        backends lay out dims differently."""
-        _S = 1234567
-        shape = cls.get_kv_cache_shape(
-            _S,
-            block_size,
-            num_kv_heads,
-            head_size,
-            cache_dtype_str=cache_dtype_str,
-        )
-        return shape.index(_S)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        """
-        Get the physical (memory layout) ordering of the kv cache dimensions.
-        Standard attention backends pack K and V into the content dim, giving
-        the logical shape [num_blocks, num_heads, block_size, 2 * head_size].
-        e.g. if get_kv_cache_stride_order returns (0, 2, 1, 3) then the physical
-        ordering of dimensions is
-        [num_blocks, block_size, num_heads, 2 * head_size].
-
-        If this function is unimplemented / raises NotImplementedError,
-        the physical layout of the KV cache will match the logical shape.
-
-        Args:
-            include_num_layers_dimension: if True, includes an additional
-                num_layers dimension, which is assumed to be prepended
-                to the logical KV cache shape.
-                With the above example, a return value (1, 0, 3, 2, 4)
-                corresponds to
-                [num_blocks, num_layers, block_size, num_heads, 2 * head_size].
-
-                If an additional dimension is NOT included in the returned
-                tuple, the physical layout will not include a layers dimension.
-
-        Returns:
-            A tuple of ints which is a permutation of range(len(shape)).
-        """
         raise NotImplementedError
 
     @classmethod
@@ -221,45 +156,6 @@ class AttentionBackend(ABC):
             return default_block_size
 
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
-
-    @classmethod
-    def get_preferred_block_size_for_config(
-        cls, default_block_size: int, vllm_config: "VllmConfig"
-    ) -> int:
-        """Return the preferred block size for a concrete engine config."""
-        return cls.get_preferred_block_size(default_block_size)
-
-    @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        """Whether the backend reads KV pages by the runtime block stride.
-
-        True when ``num_blocks`` is the outermost physical dimension of the KV
-        cache, so the backend tolerates a non-contiguous block dim. This gates
-        page size padding and cross-layer uniform KV layout.
-
-        Returns:
-            True if the backend's physical KV layout is num-blocks-first. False
-            otherwise, including when the backend does not define a layered
-            stride order.
-        """
-        try:
-            kv_cache_stride_order = cls.get_kv_cache_stride_order(
-                include_num_layers_dimension=False
-            )
-            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-        except (AttributeError, NotImplementedError):
-            return False
-
-        # Check that attention backend includes a layers dimension.
-        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
-            return False
-
-        # stride_order[0] == 0 means num_layers stays first in physical
-        # layout (identity permutation), so indexing by block stride is
-        # not supported.
-        return layered_kv_cache_stride_order[0] != 0
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -452,7 +348,9 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        """Layouts this backend's kernels can consume, most preferred first, or
+        None when the kernels consume any layout and express no preference."""
         return None
 
     @classmethod
@@ -900,7 +798,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # False => base 2      (lse = log2(sum(exp(qk))))
     #          -- e.g. FlashInfer trtllm-gen MLA
     # The DCP combine kernel (cp_lse_ag_out_rs / dcp_a2a_lse_reduce in
-    # vllm/v1/attention/ops/common.py) branches on this via its IS_BASE_E
+    # vllm/v1/attention/ops/dcp.py) branches on this via its IS_BASE_E
     # constexpr; getting it wrong silently corrupts the cross-shard
     # softmax denominator.
     lse_base_on_e: bool = True
