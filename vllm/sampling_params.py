@@ -787,6 +787,7 @@ class SamplingParams(
         tokenizer: TokenizerLike | None,
     ) -> None:
         self._validate_logprobs(model_config)
+        self._validate_stop_token_ids(model_config)
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_logits_processors(model_config)
@@ -858,6 +859,26 @@ class SamplingParams(
                     parameter="prompt_logprobs",
                     value=num_prompt_logprobs,
                 )
+
+    def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate stop_token_ids are within vocabulary range."""
+        if not self.stop_token_ids:
+            return
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.stop_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in stop_token_ids contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="stop_token_ids",
+                value=invalid_token_ids,
+            )
 
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
         """Validate logit_bias token IDs are within vocabulary range."""
