@@ -22,6 +22,10 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
@@ -401,18 +405,21 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.fp8_linear)
 
         layer._already_called_process_weights_after_loading = True
 
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # if batch invariant mode is enabled dequant
-        if envs.VLLM_BATCH_INVARIANT and not isinstance(
-            self.fp8_linear, CutlassFP8ScaledMMLinearKernel
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and not isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel)
+            and not isinstance(x, QuantizedActivation)
         ):
             weight_dequant = (
                 layer.weight.to(x.dtype) * layer.weight_scale.to(x.dtype).t()
