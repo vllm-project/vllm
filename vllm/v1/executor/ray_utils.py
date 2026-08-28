@@ -590,7 +590,7 @@ def initialize_ray_cluster(
             )
             ray.init(
                 address=ray_address,
-                num_gpus=parallel_config.world_size,
+                num_gpus=current_platform.device_count(),
                 runtime_env=parallel_config.ray_runtime_env,
             )
     else:
