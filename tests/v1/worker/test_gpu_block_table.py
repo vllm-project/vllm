@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
@@ -173,6 +174,72 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
     expected[second_start : second_start + 128] = torch.arange(
         9 * 128, 10 * 128, dtype=torch.int64, device=device
     )
+    assert torch.equal(actual, expected)
+
+
+def test_v1_slot_mapping_masks_out_of_range_block_indices():
+    from vllm.v1.worker.block_table import BlockTable
+
+    device = torch.device("cuda")
+    block_table = BlockTable(
+        block_size=16,
+        max_num_reqs=2,
+        max_num_blocks_per_req=1,
+        max_num_batched_tokens=2,
+        pin_memory=False,
+        device=device,
+        kernel_block_size=16,
+        cp_kv_cache_interleave_size=1,
+    )
+    block_table.add_row([5], row_idx=0)
+    block_table.add_row([9], row_idx=1)
+    block_table.commit_block_table(num_reqs=2)
+
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    positions = torch.tensor([0, 16], dtype=torch.int64, device=device)
+    block_table.compute_slot_mapping(
+        num_reqs=1,
+        query_start_loc=query_start_loc,
+        positions=positions,
+    )
+
+    expected = torch.tensor([80, PAD_SLOT_ID], dtype=torch.int64, device=device)
+    assert torch.equal(block_table.slot_mapping.gpu[:2], expected)
+
+
+def test_v2_slot_mapping_masks_out_of_range_block_indices():
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=2,
+        max_num_batched_tokens=2,
+        max_num_blocks_per_group=[1],
+        device=device,
+        kernel_block_sizes=[16],
+    )
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([5],),
+        overwrite=True,
+    )
+    block_tables.append_block_ids(
+        req_index=1,
+        new_block_ids=([9],),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    positions = torch.tensor([0, 16], dtype=torch.int64, device=device)
+    actual = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=2,
+    )[0]
+
+    expected = torch.tensor([80, PAD_SLOT_ID], dtype=torch.int64, device=device)
     assert torch.equal(actual, expected)
 
 
