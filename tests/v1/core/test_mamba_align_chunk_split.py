@@ -404,6 +404,36 @@ def test_heterogeneous_block_sizes_stop_chunks_on_the_mamba_grid() -> None:
     )
 
 
+def test_aligned_start_does_not_span_multiple_state_blocks() -> None:
+    """A full token budget must not skip interior state boundaries.
+
+    With the stop conditional on a mid-block start, a chunk beginning exactly
+    on a boundary could run to the budget-clamped end whenever the budget
+    exceeds one block, crossing k boundaries and leaving the k-1 interior
+    state slots permanently null (one state column is materialized per step).
+    """
+    prompt_len = 5 * HETERO_MAMBA_BLOCK_SIZE + 30
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    # Request the FULL remaining prompt every step, as a solo prefill with a
+    # budget larger than 2 blocks would (no per-block rationing).
+    pos, ends = 0, []
+    while pos < prompt_len:
+        request.num_computed_tokens = pos
+        num_new = _hetero_split(request, prompt_len - pos)
+        assert num_new > 0, f"no progress at {pos}"
+        pos += num_new
+        ends.append(pos)
+    expected_grid_ends = [
+        (i + 1) * HETERO_MAMBA_BLOCK_SIZE
+        for i in range(prompt_len // HETERO_MAMBA_BLOCK_SIZE)
+    ]
+    materialized = [e for e in ends if e % HETERO_MAMBA_BLOCK_SIZE == 0]
+    assert materialized == expected_grid_ends, (
+        f"state-grid chunk ends {materialized} != consecutive boundaries "
+        f"{expected_grid_ends}; interior slots stayed null (spanning chunk)"
+    )
+
+
 def _hetero_prefill(prompt_len: int) -> tuple[KVCacheManager, Request, dict[int, int]]:
     """Prefill one request through the real manager under the hetero layout.
 
