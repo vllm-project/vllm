@@ -3,12 +3,10 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 
 from vllm.config import ParallelConfig
 from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
-from vllm.distributed.parallel_state import _get_moe_dp_pcp_group_ranks
 from vllm.forward_context import DPMetadata, _compute_sp_num_tokens
 from vllm.v1.worker.gpu_worker import _dp_local_rank_offset
 
@@ -58,27 +56,6 @@ def test_ep_dispatch_sizes_preserve_dp_pcp_order_without_sp():
         assert sizes == [10, 7, 5, 3]
 
 
-@pytest.mark.parametrize(
-    ("dp_size", "pcp_size", "expected"),
-    [
-        (2, 2, [[0, 2, 4, 6], [1, 3, 5, 7]]),
-        (2, 1, [[0, 2], [1, 3]]),
-        (1, 2, [[0, 2], [1, 3]]),
-        (1, 1, [[0], [1]]),
-    ],
-)
-def test_moe_dp_pcp_group_ranks_fix_tp_coordinate(dp_size, pcp_size, expected):
-    all_ranks = torch.arange(dp_size * pcp_size * 2).reshape(1, dp_size, 1, pcp_size, 2)
-
-    group_ranks = _get_moe_dp_pcp_group_ranks(
-        all_ranks,
-        data_parallel_size=dp_size,
-        prefill_context_parallel_size=pcp_size,
-    )
-
-    assert group_ranks == expected
-
-
 def test_ag_rs_selects_moe_dp_pcp_group_for_non_sp(monkeypatch):
     moe_dp_pcp_group = object()
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
@@ -86,12 +63,17 @@ def test_ag_rs_selects_moe_dp_pcp_group_for_non_sp(monkeypatch):
         "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
         lambda: moe_dp_pcp_group,
     )
-    monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.has_moe_dp_pcp_group",
-        lambda: True,
-    )
-    assert manager._uses_moe_dp_pcp_group(is_sequence_parallel=False)
     assert manager._get_comm_group(is_sequence_parallel=False) is moe_dp_pcp_group
+
+
+def test_ag_rs_selects_ep_group_for_sp(monkeypatch):
+    ep_group = object()
+    manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.all2all.get_ep_group",
+        lambda: ep_group,
+    )
+    assert manager._get_comm_group(is_sequence_parallel=True) is ep_group
 
 
 def test_ag_rs_moe_dp_pcp_uses_one_collective_for_each_direction(monkeypatch):
@@ -111,17 +93,14 @@ def test_ag_rs_moe_dp_pcp_uses_one_collective_for_each_direction(monkeypatch):
             assert tensor.tolist() == [10, 11, 12, 20, 21, 22]
             return tensor[3:5]
 
-    monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
-        lambda: FakeMoeDpPcpGroup(),
-    )
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
     sizes = [1, 2, 2, 1]
     group = FakeMoeDpPcpGroup()
-    manager._get_comm_group = lambda is_sequence_parallel: group
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
+        lambda: group,
+    )
     manager._get_sizes = lambda num_local_tokens, comm_group: sizes
-    manager._uses_staged_dp_pcp = lambda is_sequence_parallel: False
-
     hidden_states, _, _ = manager.dispatch(
         torch.tensor([20, 21]),
         torch.tensor([1, 1]),
