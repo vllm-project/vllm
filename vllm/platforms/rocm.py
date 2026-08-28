@@ -58,7 +58,10 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
 # Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS: list[str] = []
+_ROCM_UNSUPPORTED_MODELS: list[str] = [
+    "HYV4ForCausalLM",
+    "HYV4MTPModel",
+]
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
