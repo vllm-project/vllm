@@ -128,8 +128,15 @@ class LLMEngine:
             # bytecode hooks pinning it (frees GPU memory on engine deletion).
             model = self._get_driver_model_for_cleanup()
             if model is not None:
+                # Pass a weak ref: weakref.finalize stores its args strongly in
+                # a class-level registry until it fires, so handing it the model
+                # directly pins the weights (and the KV cache hanging off its
+                # layers) for as long as this engine is reachable -- which, in
+                # process, is past engine shutdown. The hook we clean up is
+                # registered as a bound method of the wrapper module, so
+                # whenever there is a hook to remove the model is still alive.
                 self._finalizer = weakref.finalize(
-                    self, LLMEngine._cleanup_instance_caches, model
+                    self, LLMEngine._cleanup_instance_caches, weakref.ref(model)
                 )
 
         if self.external_launcher_dp:
@@ -444,10 +451,14 @@ class LLMEngine:
         return getattr(model_runner, "model", None)
 
     @staticmethod
-    def _cleanup_instance_caches(model) -> None:
+    def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
         from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
+        model = model_ref()
+        if model is None:
+            # Already collected, so nothing holds a hook to it either.
+            return
         for module in model.modules():
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()

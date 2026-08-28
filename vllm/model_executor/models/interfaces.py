@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import weakref
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -120,8 +121,15 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     return is_multimodal
 
 
-# Cache results of `SupportsMultiModal.get_language_model`
-_language_model_by_module = dict[nn.Module, "VllmModel"]()
+# Cache results of `SupportsMultiModal.get_language_model`.
+# Weak-keyed: the key is the top-level model, so a strong dict here would pin
+# every model ever loaded for the life of the interpreter, keeping its weights
+# -- and, through its layers, the KV cache -- resident after engine shutdown.
+# The value is a submodule of the key and torch modules hold no parent
+# back-reference, so it cannot resurrect the key.
+_language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @runtime_checkable
