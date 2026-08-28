@@ -262,12 +262,12 @@ def _driving(*servers):
             t.join(timeout=2)
 
 
-def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str | None:
-    """Wait until ``/v1/fault_tolerance/status`` records the FT apply outcome."""
+def _wait_for_ft_failure(server, deadline_s: int) -> str | None:
+    """Wait until ``/v1/fault_tolerance/status`` records the FT failure outcome."""
     engine_status = _wait_for_engines(
         [server],
-        match_key="last_ft_request_id",
-        match_values={request_id},
+        match_key="ft_state",
+        match_values={"failed"},
         deadline_s=deadline_s,
     )[0]
     return engine_status.get("ft_error") if engine_status else None
@@ -382,10 +382,8 @@ def test_scale_down_removes_dead_rank_and_recovers():
 
         # 3. DEAD engine rejects retry: recovery requires UNHEALTHY.
         assert faulted[victim_rank]["status"] == "dead", faulted[victim_rank]
-        request_id = _apply_ft(victim, "retry")["request_id"]
-        ft_error = _wait_for_ft_apply_outcome(
-            victim, request_id, FAULT_DETECTION_DEADLINE_S
-        )
+        _apply_ft(victim, "retry")
+        ft_error = _wait_for_ft_failure(victim, FAULT_DETECTION_DEADLINE_S)
         assert ft_error is not None, (
             "rejection was never recorded in /v1/fault_tolerance/status"
         )
