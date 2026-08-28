@@ -51,6 +51,7 @@ from .interfaces import (
     SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
+    supports_pp,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -105,10 +106,10 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
 
         return Step3VLImageProcessor(**kwargs)
 
-    def get_hf_processor(self) -> Step3VLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> Step3VLProcessor:
         return Step3VLProcessor(
             tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(),
+            image_processor=self.get_image_processor(**kwargs),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -169,8 +170,11 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
 
         def get_replacement_step1o(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
-            num_patches = int(out_item["num_patches"].data)
+            num_patches_data = out_item["num_patches"].data
             patch_newline_mask = out_item["patch_newline_mask"].data
+            assert isinstance(num_patches_data, torch.Tensor)
+            assert isinstance(patch_newline_mask, torch.Tensor)
+            num_patches = int(num_patches_data.item())
             image_repl_ids = hf_processor.get_image_repl_feature_ids(
                 1, num_patches, patch_newline_mask.tolist()
             )
@@ -514,7 +518,7 @@ class Step3VLForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -566,8 +570,10 @@ class Step3VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
+        language_model = self.get_language_model()
+        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     @property
@@ -626,6 +632,9 @@ class Step3VLForConditionalGeneration(
             return None
 
         if pixel_values is not None and patch_pixel_values is not None:
+            assert isinstance(pixel_values, torch.Tensor)
+            assert isinstance(patch_pixel_values, torch.Tensor)
+            assert isinstance(num_patches, torch.Tensor)
             return Step3VLImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values.to(self.dtype),
@@ -634,6 +643,7 @@ class Step3VLForConditionalGeneration(
             )
 
         if image_embeds is not None:
+            assert isinstance(image_embeds, torch.Tensor)
             return Step3VLImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds.to(self.dtype),
@@ -660,10 +670,10 @@ class Step3VLForConditionalGeneration(
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             image_features = image_input["data"]
-            return [
+            return tuple(
                 image_features[i].view(-1, image_features.shape[-1])
                 for i in range(image_features.shape[0])
-            ]
+            )
 
         image_features = self._get_vision_model_output(image_input["pixel_values"])
         patch_image_features = (
@@ -686,6 +696,7 @@ class Step3VLForConditionalGeneration(
         for i, num_patch in enumerate(num_patches_list):
             cur_feature = []
             if num_patch > 0:
+                assert patch_image_features is not None
                 patch_slice = patch_image_features[
                     cur_patch_idx : cur_patch_idx + num_patch
                 ]
@@ -695,7 +706,7 @@ class Step3VLForConditionalGeneration(
             merged_image_features.append(
                 torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
             )
-        return merged_image_features
+        return tuple(merged_image_features)
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -765,6 +776,7 @@ class Step3VLForConditionalGeneration(
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         num_patches = mm_kwargs.get("num_patches")
+        assert isinstance(num_patches, torch.Tensor)
 
         img_grid = (
             self.config.vision_config.image_size // self.config.vision_config.patch_size
