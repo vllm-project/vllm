@@ -22,10 +22,11 @@ pub enum GenerationTask {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/6ec92bcbc8/vllm/tasks.py#L10-L17>
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolingTask {
     /// Produce one embedding for each input sequence.
+    #[default]
     Embed,
     /// Produce sequence-level classification outputs.
     Classify,

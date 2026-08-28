@@ -999,6 +999,11 @@ class EngineCore:
                 request.mm_features
             )
 
+        # Direct EngineCore clients may bypass frontend input processing, so
+        # resolve model-dependent pooling defaults at this shared boundary.
+        if request.pooling_params is not None:
+            request.pooling_params.verify(self.vllm_config.model_config)
+
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.

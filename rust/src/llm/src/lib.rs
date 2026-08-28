@@ -43,6 +43,20 @@ pub struct Llm {
 }
 
 impl Llm {
+    async fn validate_task(&self, task: impl Into<EngineTask>) -> Result<()> {
+        let requested_task = task.into();
+        let supported_tasks = self.client.get_supported_tasks().await?;
+        if supported_tasks.contains(&requested_task) {
+            return Ok(());
+        }
+
+        Err(Error::UnsupportedTask {
+            model_name: self.client.model_name().to_string(),
+            requested_task,
+            supported_tasks: supported_tasks.to_vec(),
+        })
+    }
+
     async fn submit(
         &self,
         engine_request: EngineCoreRequest,
@@ -127,11 +141,13 @@ impl Llm {
 
     /// Submit one tokenized pooling request and collect its final output.
     pub async fn encode(&self, req: EncodeRequest) -> Result<EncodeOutput> {
+        let task = req.task;
         let prepared = req.prepare(self.randomize_request_id)?;
         let prompt_token_ids = prepared.prompt_token_ids().to_vec();
         let arrival_time = prepared.engine_request.arrival_time;
         let prompt_len = prepared.prompt_token_ids().len() as u32;
 
+        self.validate_task(task).await?;
         let (stream, _guard) = self.submit(prepared.engine_request).await?;
         let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),

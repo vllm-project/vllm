@@ -16,12 +16,14 @@ use super::task::PoolingTask;
 ///
 /// Original Python field documentation:
 /// <https://github.com/vllm-project/vllm/blob/6ec92bcbc8/vllm/config/pooler.py#L51-L115>
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct EngineCorePoolingParams {
     /// Whether to apply activation function to the pooler outputs.
-    pub use_activation: bool,
+    /// `None` lets engine-core resolve the model's default.
+    pub use_activation: Option<bool>,
     /// Reduce the dimensions of embeddings if model support matryoshka
     /// representation.
+    /// `None` lets engine-core resolve the model's default.
     pub dimensions: Option<u32>,
     /// If set, only the score corresponding to the `step_tag_id` in the
     /// generated sentence should be returned. Otherwise, the scores for all
