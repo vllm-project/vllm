@@ -12,6 +12,7 @@ PR:  https://github.com/vllm-project/vllm/pull/45586
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -116,7 +117,11 @@ def server(
         *(base + (extra_args or [])),
     ]
     proc = subprocess.Popen(
-        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        cmd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     url = f"http://localhost:{port}"
     try:
@@ -139,11 +144,27 @@ def server(
         _warm_up(url)
         yield url
     finally:
-        proc.terminate()
+        # vLLM's DP supervisor / engine-core / DP coordinator run as
+        # child processes and survive a plain terminate() of the parent,
+        # then collide with the next server (ZMQ BrokenPipeError in the
+        # coordinator). Kill the whole process group instead;
+        # start_new_session above makes the server a group leader.
+        _kill_server(proc, signal.SIGTERM)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=10)
         if proc.poll() is None:
-            proc.kill()
+            _kill_server(proc, signal.SIGKILL)
+
+
+def _kill_server(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the server's process group, falling back to the parent."""
+    if hasattr(os, "killpg"):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), sig)
+    elif sig == signal.SIGTERM:
+        proc.terminate()
+    else:
+        proc.kill()
 
 
 # ---------------------------------------------------------------------------
