@@ -66,7 +66,12 @@ from vllm.tracing import instrument
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
+from vllm.utils.mem_utils import (
+    MemoryProfilingResult,
+    MemorySnapshot,
+    format_gib,
+    memory_profiling,
+)
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -100,6 +105,33 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
         if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
         else 1
     )
+
+
+def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
+    """Memory in bytes to size the KV cache from when profiling measured a
+    release on ROCm, or None to keep what profiling measured.
+
+    The measurement is the drop in free device memory across startup, so it comes
+    out negative when anything else on the device released memory meanwhile. Torch
+    reserved is process local, so it stands in as a lower bound instead of refusing
+    to start. Kept to ROCm, where the AMD CI groups hit this, following #45490.
+    """
+    if profile_result.total_consumed >= 0 or not current_platform.is_rocm():
+        return None
+
+    baseline = profile_result.before_create
+    after_profile = profile_result.after_profile
+    torch_reserved = max(after_profile.torch_memory - baseline.torch_memory, 0)
+    logger.warning(
+        "Free memory grew by %s GiB during profiling (initial %s GiB, current "
+        "%s GiB). Sizing the KV cache from the %s GiB torch reserved instead of "
+        "the profiling difference.",
+        format_gib(-profile_result.total_consumed),
+        format_gib(baseline.free_memory),
+        format_gib(after_profile.free_memory),
+        format_gib(torch_reserved),
+    )
+    return torch_reserved
 
 
 if TYPE_CHECKING:
@@ -255,9 +287,6 @@ class Worker(WorkerBase):
                     if name in self._sleep_saved_draft_buffers:
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
-
-        if tags is None or "kv_cache" in tags:
-            self.model_runner.post_kv_cache_wake_up()
 
         self.synchronize_device()
 
@@ -546,24 +575,33 @@ class Worker(WorkerBase):
             else 0
         )
 
+        init_free_memory = self.init_snapshot.free_memory
+        free_gpu_memory = profile_result.after_profile.free_memory
+        rocm_fallback = maybe_rocm_profiling_fallback(profile_result)
+        if rocm_fallback is None:
+            # NOTE(woosuk): Here we assume that the other processes using the same
+            # GPU did not change their memory usage during the profiling.
+            assert init_free_memory >= free_gpu_memory, (
+                "Error in memory profiling. "
+                f"Initial free memory {format_gib(init_free_memory)} GiB, "
+                f"current free memory {format_gib(free_gpu_memory)} GiB. "
+                "This happens when other processes sharing the same container "
+                "release GPU memory while vLLM is profiling during initialization. "
+                "To fix this, ensure consistent GPU memory allocation or "
+                "isolate vLLM in its own container."
+            )
+        else:
+            profile_result.total_consumed = rocm_fallback
+            profile_result.non_kv_cache_memory = (
+                profile_result.total_consumed + profile_result.transient_peak_headroom
+            )
+
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
             profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        free_gpu_memory = profile_result.after_profile.free_memory
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {format_gib(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
@@ -689,8 +727,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(
+                tag="kv_cache"
+            ),
+        )
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
