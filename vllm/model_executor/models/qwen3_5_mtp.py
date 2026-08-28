@@ -81,10 +81,16 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        # With no pipeline parallelism, this is attached from the target model
+        # after loading. Avoid materializing a temporary full-vocabulary copy.
+        self.embed_tokens: VocabParallelEmbedding | None
+        if get_pp_group().world_size == 1:
+            self.embed_tokens = None
+        else:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
@@ -141,6 +147,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None, (
+            "embed_tokens must be shared from the target model before inference"
+        )
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -240,7 +249,11 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        if get_pp_group().is_last_rank:
+        self._share_target_vocab_weights = get_pp_group().world_size == 1
+        self.lm_head: ParallelLMHead | PPMissingLayer | None
+        if self._share_target_vocab_weights:
+            self.lm_head = None
+        elif get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
@@ -248,6 +261,7 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
+                assert self.model.embed_tokens is not None
                 self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
@@ -299,14 +313,23 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
+        assert self.lm_head is not None, (
+            "lm_head must be shared from the target model before inference"
+        )
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        shared_weight_names = ("embed_tokens", "lm_head")
+
         def remap_weight_names(weights):
             for name, weight in weights:
+                if self._share_target_vocab_weights and any(
+                    key in name for key in shared_weight_names
+                ):
+                    continue
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
-                elif any(key in name for key in ["embed_tokens", "lm_head"]):
+                elif any(key in name for key in shared_weight_names):
                     if "embed_tokens" in name:
                         name = name.replace("language_model.", "")
                 else:
