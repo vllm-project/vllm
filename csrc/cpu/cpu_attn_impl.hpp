@@ -1022,18 +1022,10 @@ class AttentionMainLoop {
       // BlockSizeAlignment tokens in a block
       const int64_t v_cache_token_group_stride =
           attention_impl_t::v_cache_token_group_stride(block_size);
-      constexpr int64_t pv_headdim_alignment = []() {
-        if constexpr (requires { tile_gemm_t::PVHeadDimAlignment; }) {
-          return tile_gemm_t::PVHeadDimAlignment;
-        }
-        return headdim_alignment;
-      }();
       // v_cache_head_group_stride: stride of V cache when move to next
       // HeadDimAlignment head dims in a block
       const int64_t v_cache_head_group_stride =
-          pv_headdim_alignment == headdim_alignment
-              ? attention_impl_t::v_cache_head_group_stride(block_size)
-              : block_size * pv_headdim_alignment;
+          attention_impl_t::v_cache_head_group_stride(block_size);
       const int32_t token_group_num = kv_tile_token_num / blocksize_alignment;
       const int32_t token_group_num_per_block =
           block_size / blocksize_alignment;
@@ -1158,7 +1150,7 @@ class AttentionMainLoop {
         int32_t curr_group_num_in_block =
             token_group_num_per_block - start_block_group_offset;
         int32_t remaining_group_num = token_group_num;
-        int32_t head_dim_group_num = head_dim / pv_headdim_alignment;
+        int32_t head_dim_group_num = head_dim / headdim_alignment;
         using pv_prob_buffer_t =
           std::conditional_t<prequantize_probabilities, uint8_t,
                      prob_buffer_t>;
@@ -1197,7 +1189,7 @@ class AttentionMainLoop {
                 block_size, curr_token_num, accum_c);
 
             // Update
-            curr_partial_q_buffer += pv_headdim_alignment;
+            curr_partial_q_buffer += headdim_alignment;
             v_cache_block_ptr += v_cache_head_group_stride;
           }
 

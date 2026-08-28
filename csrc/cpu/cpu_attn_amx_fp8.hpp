@@ -378,7 +378,6 @@ class TileGemm122<uint8_t, kv_cache_t> {
 
  public:
   static constexpr bool prequantize_probabilities = true;
-  static constexpr int64_t PVHeadDimAlignment = 64;
 
   FORCE_INLINE static void quantize_probability_row(
       const float* src, uint8_t* dst, int32_t cols) {
@@ -577,7 +576,7 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
   using prob_buffer_t = scalar_t;   // BF16 softmax probs (PV phase)
 
   constexpr static int64_t BlockSizeAlignment = 64;
-  constexpr static int64_t HeadDimAlignment = 2 * (AMX_TILE_ROW_BYTES / 4);
+  constexpr static int64_t HeadDimAlignment = 64;
   constexpr static int64_t MaxQHeadNumPerIteration = 32;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::AMX_FP8;
