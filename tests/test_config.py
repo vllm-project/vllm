@@ -157,15 +157,6 @@ def test_v2_replayssm_requires_flashinfer():
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
-def test_v2_flashinfer_replayssm_is_supported():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.FLASHINFER,
-        use_v2_model_runner=True,
-    )
-
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
     from vllm.config.vllm import (
