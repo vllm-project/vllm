@@ -37,7 +37,6 @@ def test_finalize_args_are_held_strongly():
     del model
     gc.collect()
 
-    # Still alive: finalize's registry holds args until the finalizer fires.
     assert ref() is not None
     del owner
     gc.collect()
@@ -51,7 +50,6 @@ def test_cleanup_tolerates_a_dead_model():
     gc.collect()
     assert ref() is None
 
-    # Must be a no-op rather than an AttributeError on None.
     LLMEngine._cleanup_instance_caches(ref)
 
 

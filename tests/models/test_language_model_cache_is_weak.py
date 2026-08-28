@@ -56,5 +56,4 @@ def test_cached_entry_is_dropped_with_its_key():
     del model
     gc.collect()
 
-    # No stale entry keyed on a dead module is left behind.
     assert not any(isinstance(k, _MultiModalModel) for k in _language_model_by_module)
