@@ -38,6 +38,7 @@ from vllm.snapshot.manifest import (
     SnapshotSecurityError,
     read_manifest,
     validate_artifact_root,
+    validate_identity,
     write_manifest_atomic,
 )
 from vllm.snapshot.runtime import ProcessInventory, _decode_endpoint, _TcpSocketRecord
@@ -395,6 +396,37 @@ def test_snapshot_create_abort_reaps_after_process_group_cleanup(
     assert process.pid not in tools._children
 
 
+def _supply_waitid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`wait_ready` binds Linux-only `os.waitid` before it reads the marker."""
+    monkeypatch.setattr(os, "waitid", lambda *_args: None, raising=False)
+
+
+def test_snapshot_wait_ready_reads_back_the_oracle_the_child_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _supply_waitid(monkeypatch)
+    snapshot_server.write_ready_atomic(tmp_path / "ready.json", _oracle())
+
+    assert LocalSnapshotTools().wait_ready(tmp_path, os.getpid()) == _oracle()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"token_ids": [12095], "sampled_token_logprob": -0.125},
+        {"token_ids": ["12095"], "text": " Paris", "sampled_token_logprob": -0.125},
+    ],
+)
+def test_snapshot_wait_ready_rejects_a_malformed_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]
+):
+    _supply_waitid(monkeypatch)
+    (tmp_path / "ready.json").write_text(json.dumps(payload))
+
+    with pytest.raises(SnapshotCreateError, match="ready marker invalid"):
+        LocalSnapshotTools().wait_ready(tmp_path, os.getpid())
+
+
 def test_snapshot_create_abort_rejects_surviving_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -447,6 +479,38 @@ async def test_snapshot_child_rejects_mismatch_before_publication(
         await snapshot_server.run_vllm_snapshot_child(control, argparse.Namespace())
 
 
+def test_snapshot_release_marker_ignores_unknown_keys(tmp_path: Path):
+    marker = tmp_path / "release.json"
+    marker.write_text(json.dumps({"release": True, "port": 8000, "unknown": 1}))
+
+    listener = snapshot_server.read_release_marker(marker)
+
+    assert listener == snapshot_server.ListenerConfig(host=None, port=8000)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ["release"],
+        {"port": 8000},
+        {"release": "true", "port": 8000},
+        {"release": True, "port": 0},
+        {"release": True, "port": 70000},
+        {"release": True, "port": True},
+        {"release": True, "port": "8000"},
+        {"release": True, "port": 8000, "host": 5},
+    ],
+)
+def test_snapshot_release_marker_rejects_an_invalid_payload(
+    tmp_path: Path, payload: object
+):
+    marker = tmp_path / "release.json"
+    marker.write_text(json.dumps(payload))
+
+    with pytest.raises(snapshot_server.SnapshotBarrierError, match="release marker"):
+        snapshot_server.read_release_marker(marker)
+
+
 def test_snapshot_create_rolls_back_failed_dump(tmp_path: Path):
     target = tmp_path / "snapshot"
     tools = _fake_snapshot_tools()
@@ -477,6 +541,16 @@ def test_snapshot_restore_rejects_identity_mismatch(tmp_path: Path):
     with pytest.raises(SnapshotCompatibilityError, match="vllm_version"):
         restore_snapshot(args, tools=identity_mismatch)
     identity_mismatch.restore.assert_not_called()
+
+
+def test_snapshot_identity_mismatch_names_every_differing_field():
+    with pytest.raises(SnapshotCompatibilityError) as mismatch:
+        validate_identity(
+            _manifest(),
+            _runtime_identity(vllm_version="different", gpu_uuid="GPU-other"),
+        )
+
+    assert str(mismatch.value) == "snapshot mismatch: vllm_version, gpu_uuid"
 
 
 def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):

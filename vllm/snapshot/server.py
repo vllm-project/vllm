@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from vllm.snapshot.manifest import _write_json_atomic
+from pydantic import ValidationError
+
+from vllm.snapshot.manifest import ReleaseMarker, _validation_path, _write_json_atomic
 from vllm.snapshot.types import Oracle, oracles_match
 
 _CANARY_PROMPT = "The capital of France is"
@@ -58,15 +60,13 @@ def read_release_marker(path: Path) -> ListenerConfig:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise SnapshotBarrierError("release marker is not valid JSON") from error
-    if not isinstance(payload, dict) or payload.get("release") is not True:
-        raise SnapshotBarrierError("release marker is missing release=true")
-    host = payload.get("host")
-    port = payload.get("port")
-    if host is not None and not isinstance(host, str):
-        raise SnapshotBarrierError("release marker host must be a string")
-    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
-        raise SnapshotBarrierError("release marker port must be between 1 and 65535")
-    return ListenerConfig(host=host, port=port)
+    try:
+        marker = ReleaseMarker.model_validate(payload)
+    except ValidationError as error:
+        raise SnapshotBarrierError(
+            f"release marker is invalid: {_validation_path(error)}"
+        ) from error
+    return ListenerConfig(host=marker.host, port=marker.port)
 
 
 def parse_control_args(argv: list[str]) -> tuple[ControlArgs, list[str]]:

@@ -12,6 +12,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
     ValidationError,
     field_validator,
     model_validator,
@@ -93,13 +96,45 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
         return self
 
 
+class ReleaseMarker(BaseModel):
+    """Release marker the controller writes; unknown keys are ignored."""
+
+    release: Literal[True]
+    host: StrictStr | None = None
+    port: Annotated[StrictInt, Field(ge=1, le=65535)]
+
+    @field_validator("release", mode="before")
+    @classmethod
+    def _require_json_true(cls, value: Any) -> Any:
+        # A literal accepts 1 as True; the barrier requires JSON true itself.
+        if value is not True:
+            raise ValueError("release must be JSON true")
+        return value
+
+
+class ReadyMarker(BaseModel):
+    """Ready marker the child writes; unknown keys are ignored."""
+
+    token_ids: tuple[StrictInt, ...]
+    text: StrictStr
+    sampled_token_logprob: StrictFloat | StrictInt
+
+
 def validate_identity(
     expected: SnapshotRuntimeIdentity, actual: SnapshotRuntimeIdentity
 ) -> None:
     """Require an exact match for every field that can affect compatibility."""
-    for field_name in SnapshotRuntimeIdentity.model_fields:
-        if getattr(expected, field_name) != getattr(actual, field_name):
-            raise SnapshotCompatibilityError(f"snapshot mismatch: {field_name}")
+    # ``expected`` may be a manifest, so compare the identity fields only.
+    fields = set(SnapshotRuntimeIdentity.model_fields)
+    expected_values = expected.model_dump(include=fields)
+    actual_values = actual.model_dump(include=fields)
+    differing = [
+        name
+        for name in SnapshotRuntimeIdentity.model_fields
+        if expected_values[name] != actual_values[name]
+    ]
+    if differing:
+        raise SnapshotCompatibilityError(f"snapshot mismatch: {', '.join(differing)}")
 
 
 def _existing_path_chain(path: Path):

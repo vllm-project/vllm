@@ -29,11 +29,14 @@ from pathlib import Path
 from typing import NoReturn
 
 import regex as re
+from pydantic import ValidationError
 
 from vllm.snapshot.manifest import (
+    ReadyMarker,
     SnapshotManifest,
     SnapshotRuntimeIdentity,
     _fsync_directory,
+    _validation_path,
     _write_json_atomic,
     validate_artifact_root,
     write_manifest_atomic,
@@ -265,11 +268,16 @@ class LocalSnapshotTools:
         waitid = os.waitid  # type: ignore[attr-defined]
         while time.monotonic() < deadline:
             if ready_file.is_file() and ready_file.stat().st_size:
-                payload = json.loads(ready_file.read_text())
+                try:
+                    marker = ReadyMarker.model_validate_json(ready_file.read_text())
+                except ValidationError as error:
+                    raise SnapshotCreateError(
+                        f"snapshot ready marker invalid: {_validation_path(error)}"
+                    ) from error
                 return Oracle(
-                    token_ids=tuple(payload["token_ids"]),
-                    text=payload["text"],
-                    sampled_token_logprob=payload["sampled_token_logprob"],
+                    token_ids=marker.token_ids,
+                    text=marker.text,
+                    sampled_token_logprob=marker.sampled_token_logprob,
                 )
             process = self._children.get(root_pid)
             if process is not None and waitid(
