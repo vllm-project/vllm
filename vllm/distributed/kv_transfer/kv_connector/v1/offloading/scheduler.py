@@ -1263,7 +1263,14 @@ class OffloadingConnectorScheduler:
             if req.status is RequestStatus.FINISHED_ABORTED:
                 num_tokens_after_batch = req.num_computed_tokens
             elif req.is_finished():
-                num_tokens_after_batch = req.num_tokens
+                # The final sampled token came out of the previous
+                # position's forward pass; no further pass runs, so its own
+                # KV slot is never written. Under spec decode that slot holds
+                # the first rejected draft's KV. Storing a block ending there
+                # would publish KV the GPU prefix cache itself declines to
+                # commit, and a later request with the same tokens would
+                # load it.
+                num_tokens_after_batch = req.num_tokens - 1
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
