@@ -173,7 +173,7 @@ def _mp_race_construct_and_write(
             kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
-        t = region.create_next_view(cpu_page_size)
+        t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
         done_queue.put({"rank": rank, "error": None})
         cleanup_queue.get()  # wait for parent's verification to finish
@@ -190,110 +190,112 @@ def iid():
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — shape, stride and storage offset
+# create_next_worker_view — shape, stride and storage offset
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_shape_and_stride(iid):
+def test_create_next_worker_view_shape_and_stride(iid):
     """Returned tensor must have shape (num_blocks, tensor_page_size) and
     stride (row_stride, 1) where row_stride = cpu_page_size * num_workers."""
     with _region(iid, num_blocks=4, cpu_page_size=2 * PAGE_SIZE) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.shape == (4, PAGE_SIZE)
         # num_workers=1 → row_stride = cpu_page_size
         assert t.stride() == (2 * PAGE_SIZE, 1)
         del t
 
 
-def test_create_next_view_storage_offset_rank0(iid):
+def test_create_next_worker_view_storage_offset_rank0(iid):
     """rank=0 worker's first tensor must start at byte 0 of the mmap."""
     with _region(iid, cpu_page_size=PAGE_SIZE, num_workers=2, rank=0) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.data_ptr() == r._base.data_ptr()  # storage_offset == 0
         del t
 
 
-def test_create_next_view_storage_offset_rank1(iid):
+def test_create_next_worker_view_storage_offset_rank1(iid):
     """rank=1 worker's first tensor must start cpu_page_size bytes into the mmap."""
     with _multi_region(iid, num_workers=2, num_blocks=4) as (r0, r1):
-        t1 = r1.create_next_view(PAGE_SIZE)
+        t1 = r1.create_next_worker_view(PAGE_SIZE)
         assert t1.data_ptr() == r1._base.data_ptr() + PAGE_SIZE
         del t1
 
 
-def test_create_next_view_row_stride_with_multiple_workers(iid):
+def test_create_next_worker_view_row_stride_with_multiple_workers(iid):
     """With num_workers=4, row_stride must be 4 * cpu_page_size."""
     with _region(iid, num_blocks=2, num_workers=4) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.stride(0) == 4 * PAGE_SIZE
         del t
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — cursor advancement
+# create_next_worker_view — cursor advancement
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_cursor_advances(iid):
-    """Each call to create_next_view must advance _worker_offset by tensor_page_size."""
+def test_create_next_worker_view_cursor_advances(iid):
+    """Each create_next_worker_view call must advance _worker_offset by
+    tensor_page_size."""
     with _region(iid, cpu_page_size=3 * PAGE_SIZE) as r:
         assert r._worker_offset == 0
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == PAGE_SIZE
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == 2 * PAGE_SIZE
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == 3 * PAGE_SIZE  # exactly at area end
 
 
-def test_create_next_view_exact_fill_succeeds(iid):
+def test_create_next_worker_view_exact_fill_succeeds(iid):
     """Allocations whose total exactly equals cpu_page_size must all succeed."""
     with _region(iid, cpu_page_size=2 * PAGE_SIZE) as r:
-        r.create_next_view(PAGE_SIZE)  # first half
-        r.create_next_view(PAGE_SIZE)  # fills to area end — must not raise
+        r.create_next_worker_view(PAGE_SIZE)  # first half
+        r.create_next_worker_view(PAGE_SIZE)  # fills to area end — must not raise
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — overflow guard
+# create_next_worker_view — overflow guard
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_single_overflow_raises(iid):
+def test_create_next_worker_view_single_overflow_raises(iid):
     """A single allocation larger than cpu_page_size must raise AssertionError."""
     with (
         _region(iid) as r,
         pytest.raises(AssertionError, match="exceeds worker area end"),
     ):
-        r.create_next_view(PAGE_SIZE + 1)
+        r.create_next_worker_view(PAGE_SIZE + 1)
 
 
-def test_create_next_view_cumulative_overflow_raises(iid):
+def test_create_next_worker_view_cumulative_overflow_raises(iid):
     """Successive allocations that cumulatively exceed cpu_page_size must raise."""
     with _region(iid, cpu_page_size=2 * PAGE_SIZE) as r:
-        r.create_next_view(PAGE_SIZE)  # ok — half used
-        r.create_next_view(PAGE_SIZE)  # ok — full
+        r.create_next_worker_view(PAGE_SIZE)  # ok — half used
+        r.create_next_worker_view(PAGE_SIZE)  # ok — full
         with pytest.raises(AssertionError, match="exceeds worker area end"):
-            r.create_next_view(1)  # one byte too many
+            r.create_next_worker_view(1)  # one byte too many
 
 
-def test_create_next_view_overflow_does_not_mutate_cursor(iid):
-    """A failed create_next_view must leave _worker_offset unchanged."""
+def test_create_next_worker_view_overflow_does_not_mutate_cursor(iid):
+    """A failed create_next_worker_view must leave _worker_offset unchanged."""
     with _region(iid) as r:
         offset_before = r._worker_offset
         with pytest.raises(AssertionError):
-            r.create_next_view(PAGE_SIZE + 1)
+            r.create_next_worker_view(PAGE_SIZE + 1)
         assert r._worker_offset == offset_before
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — data correctness and layout
+# create_next_worker_view — data correctness and layout
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_write_visible_in_raw_mmap(iid):
-    """Writes into a create_next_view view must appear at the correct raw mmap offset"""
+def test_create_next_worker_view_write_visible_in_raw_mmap(iid):
+    """Writes into a create_next_worker_view view must appear at the correct
+    raw mmap offset"""
     with _region(iid, num_blocks=4) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         t[2, :] = 42  # write to block row 2
 
         raw = memoryview(r.mmap_obj)
@@ -303,11 +305,11 @@ def test_create_next_view_write_visible_in_raw_mmap(iid):
         del raw, t
 
 
-def test_create_next_view_multi_tensor_layout(iid):
+def test_create_next_worker_view_multi_tensor_layout(iid):
     """Two tensors from the same worker land at consecutive byte offsets per row."""
     with _region(iid, num_blocks=2, cpu_page_size=2 * PAGE_SIZE) as r:
-        ta = r.create_next_view(PAGE_SIZE)
-        tb = r.create_next_view(PAGE_SIZE)
+        ta = r.create_next_worker_view(PAGE_SIZE)
+        tb = r.create_next_worker_view(PAGE_SIZE)
 
         ta[:, :] = 1
         tb[:, :] = 2
@@ -322,8 +324,8 @@ def test_create_next_view_multi_tensor_layout(iid):
         del raw, ta, tb
 
 
-def test_create_next_view_multiprocess_slots(iid):
-    """Each worker process calls create_next_view and writes distinct data;
+def test_create_next_worker_view_multiprocess_slots(iid):
+    """Each worker process calls create_next_worker_view and writes distinct data;
     the parent verifies each slot lands at the correct interleaved offset."""
     num_workers = 2
     num_blocks = 4
@@ -356,7 +358,7 @@ def test_create_next_view_multiprocess_slots(iid):
         )
         child.start()
 
-        t0 = region.create_next_view(PAGE_SIZE)
+        t0 = region.create_next_worker_view(PAGE_SIZE)
         t0[:, :] = 11
 
         result = done_queue.get(timeout=30)
@@ -379,13 +381,13 @@ def test_create_next_view_multiprocess_slots(iid):
         _cleanup_file(region.mmap_path)
 
 
-def test_create_next_view_worker_isolation(iid):
+def test_create_next_worker_view_worker_isolation(iid):
     """Writes by worker 0 must not affect worker 1's slot and vice versa."""
     num_workers = 2
     num_blocks = 4
     with _multi_region(iid, num_workers=num_workers, num_blocks=num_blocks) as regions:
-        t0 = regions[0].create_next_view(PAGE_SIZE)
-        t1 = regions[1].create_next_view(PAGE_SIZE)
+        t0 = regions[0].create_next_worker_view(PAGE_SIZE)
+        t1 = regions[1].create_next_worker_view(PAGE_SIZE)
 
         t0[:, :] = 11
         t1[:, :] = 22
@@ -712,14 +714,14 @@ def test_cleanup_idempotent(iid):
     r.cleanup()  # must be a no-op
 
 
-def test_cleanup_after_create_next_view_releases_mmap(iid):
-    """cleanup() must close the mmap even after create_next_view was called.
-    create_next_view returns a view that shares storage with _base; both must be
+def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
+    """cleanup() must close the mmap even after create_next_worker_view was called.
+    create_next_worker_view returns a view that shares storage with _base; both must be
     released before mmap.close() can succeed."""
     r = _make_region(iid)
     mmap_obj = r.mmap_obj
 
-    t = r.create_next_view(PAGE_SIZE)
+    t = r.create_next_worker_view(PAGE_SIZE)
     del t
 
     r.cleanup()

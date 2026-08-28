@@ -164,6 +164,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_batch_sharded_sampling: bool | None = None
+    """Use sharded sampling across tensor parallel ranks. Each rank samples
+    a slice of the batch instead of every rank sampling all of it. Currently
+    defaults to False if not set. Enabling it explicitly raises when the config
+    cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
+    least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
+    by implementing `compute_logits_local`."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -194,8 +201,8 @@ class ParallelConfig:
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -351,12 +358,26 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
-    dcp_comm_backend: DCPCommBackend = "ag_rs"
+    dcp_comm_backend: DCPCommBackend | None = None
     """Communication backend for Decode Context Parallel (DCP).
-    - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
+    - "ag_rs": AllGather + ReduceScatter (existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
+
+    `None` selects the model default, which is "ag_rs" unless the model
+    overrides it via [`set_dcp_defaults`][vllm.config.ParallelConfig.set_dcp_defaults].
+    """
+
+    dcp_q_replicate: bool | None = None
+    """Replicate the MLA query projection within each DCP group so decode can skip the
+    query all-gather.
+
+    With DCP the KV cache is sharded across the group, so the standard MLA decode path
+    all-gathers the query every step. Replicating the (small) query projection at load
+    time lets each rank materialize the full group-local head set and skip that 
+    collective, at the cost of computing the projection redundantly on every rank 
+    in the group.
     """
 
     cp_kv_cache_interleave_size: int = 1
@@ -538,12 +559,22 @@ class ParallelConfig:
                 f"{sorted({1, pcp, tp * pcp})}."
             )
 
-        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
-            raise ValueError(
-                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
-            )
-
         return self
+
+    def set_dcp_defaults(
+        self,
+        comm_backend: DCPCommBackend = "ag_rs",
+        q_replicate: bool = False,
+    ) -> None:
+        """Fill in the DCP options the user left unset.
+
+        Models can set their preferred DCP settings by calling this from their
+        `verify_and_update_config` hook.
+        """
+        if self.dcp_comm_backend is None:
+            self.dcp_comm_backend = comm_backend
+        if self.dcp_q_replicate is None:
+            self.dcp_q_replicate = q_replicate
 
     @property
     def world_size_across_dp(self) -> int:
@@ -677,6 +708,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -972,7 +1004,7 @@ class ParallelConfig:
 
         if self.enable_eplb and self.eplb_config.communicator is None:
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP (deferred remote setup).
+            # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
             # torch_gloo for static EP.  torch_nccl is avoided because NCCL
             # is incompatible with async EPLB (multi-stream conflicts) and
