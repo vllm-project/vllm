@@ -109,7 +109,11 @@ def _reclaim_orphaned_regions(own_path: str) -> None:
         try:
             if os.path.getsize(path) == 0:
                 continue
-            with open(path, "r+b") as f:
+            # /dev/shm is world-writable, so refuse to follow a symlink a
+            # local user may have planted under our glob; O_NOFOLLOW makes
+            # os.open raise ELOOP, which the enclosing handler catches.
+            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            with os.fdopen(fd, "r+b") as f:
                 try:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError:

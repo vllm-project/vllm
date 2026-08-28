@@ -912,3 +912,29 @@ def test_empty_region_file_is_not_reclaimed(iid):
             region.cleanup()
     finally:
         _cleanup_file(path)
+
+
+def test_symlink_in_shm_is_not_followed(iid, tmp_path):
+    """A planted symlink must not be opened or removed.
+
+    /dev/shm is world-writable, so a local user can create a name matching the
+    region glob that points somewhere else. Reclamation must refuse to follow
+    it rather than opening an arbitrary file for writing.
+    """
+    target = tmp_path / "victim"
+    target.write_bytes(b"untouched")
+    link = f"/dev/shm/vllm_offload_{iid}-evil.mmap"
+    os.symlink(target, link)
+    try:
+        region = _make_region(iid)
+        try:
+            assert target.exists(), "the symlink target must not be removed"
+            assert target.read_bytes() == b"untouched"
+            # Without O_NOFOLLOW the open() follows the link, the flock
+            # succeeds and the unlink below it removes the planted name --
+            # so a surviving symlink is what shows we never opened it.
+            assert os.path.islink(link), "the planted symlink must be left alone"
+        finally:
+            region.cleanup()
+    finally:
+        _cleanup_file(link)
