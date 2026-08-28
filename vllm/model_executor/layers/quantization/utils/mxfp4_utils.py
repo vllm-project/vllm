@@ -153,11 +153,14 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     if should_use_gfx1250_mx_scale_swizzle():
         from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
+        # preshuffle_factor / scale_kwidth must match PRESHUFFLE_FACTOR and
+        # SCALE_KWIDTH in the gfx1250 a8w4 kernel's SWIZZLE_MX_SCALE ==
+        # "GFX1250_SCALE" branch, which hardcodes 32 and 4.
         assert (
-            scale.dim() == 3 and scale.shape[-1] % 32 == 0 and scale.shape[-2] % 8 == 0
-        ), f"GFX1250 scale swizzle needs (E,K_SCALE%8,N%32); got {tuple(scale.shape)}"
+            scale.dim() == 3 and scale.shape[-1] % 32 == 0 and scale.shape[-2] % 4 == 0
+        ), f"GFX1250 scale swizzle needs (E,K_SCALE%4,N%32); got {tuple(scale.shape)}"
         scale = shuffle_scale_moe(
-            scale, arch="gfx1250", preshuffle_factor=32, scale_kwidth=8
+            scale, arch="gfx1250", preshuffle_factor=32, scale_kwidth=4
         )
 
     quant_tensor = convert_layout(
