@@ -18,8 +18,8 @@ class INCFp8LinearScheme(INCLinearScheme):
             activation_scheme="dynamic",
             weight_block_size=list(weight_block_size),
         )
-        self.inner_method = Fp8LinearMethod(self.quant_config)
-        self.inner_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+        self.linear_method = Fp8LinearMethod(self.quant_config)
+        self.linear_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -35,7 +35,7 @@ class INCFp8LinearScheme(INCLinearScheme):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        self.inner_method.create_weights(
+        self.linear_method.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
             output_partition_sizes=output_partition_sizes,
@@ -46,7 +46,7 @@ class INCFp8LinearScheme(INCLinearScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self.inner_method.process_weights_after_loading(layer)
+        self.linear_method.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -54,4 +54,4 @@ class INCFp8LinearScheme(INCLinearScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.inner_method.apply(layer, x, bias)
+        return self.linear_method.apply(layer, x, bias)

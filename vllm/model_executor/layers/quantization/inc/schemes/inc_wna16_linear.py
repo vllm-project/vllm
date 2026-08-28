@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 class INCWNA16LinearScheme(INCLinearScheme):
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.layer_config = layer_config
-        self.inner_method = self._build_inner_method()
+        self.linear_method = self._build_inner_method()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -143,7 +143,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         params_dtype: "torch.dtype",
         **extra_weight_attrs,
     ) -> None:
-        return self.inner_method.create_weights(
+        return self.linear_method.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
             output_partition_sizes=output_partition_sizes,
@@ -154,7 +154,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def process_weights_after_loading(self, layer: "torch.nn.Module") -> None:
-        return self.inner_method.process_weights_after_loading(layer)
+        return self.linear_method.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -162,7 +162,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         x: "torch.Tensor",
         bias: "torch.Tensor | None" = None,
     ) -> "torch.Tensor":
-        return self.inner_method.apply(layer, x, bias)
+        return self.linear_method.apply(layer, x, bias)
 
 
 class INCXPULinearBase(INCLinearScheme):
