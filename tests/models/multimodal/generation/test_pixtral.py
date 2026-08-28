@@ -22,9 +22,11 @@ from vllm.model_executor.models.pixtral import (
     PixtralForConditionalGeneration,
     _flatten_pixtral_image_patches,
     _make_packed_sequence_metadata,
-    _pad_pixtral_cu_seqlens,
+    _pad_pixtral_cumulative_seqlens,
+    _pad_pixtral_flashinfer_cu_seqlens,
     _pad_pixtral_sequence_lengths,
     get_sub_grids,
+    position_meshgrid_from_sizes,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -184,6 +186,26 @@ def test_pixtral_encoder_cudagraph_patch_layout() -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_position_meshgrid_from_sizes_matches_ij_meshgrid() -> None:
+    grid_sizes = [(2, 3), (1, 4), (3, 1)]
+    expected = torch.cat(
+        [
+            torch.stack(
+                torch.meshgrid(
+                    torch.arange(height),
+                    torch.arange(width),
+                    indexing="ij",
+                ),
+                dim=-1,
+            ).reshape(-1, 2)
+            for height, width in grid_sizes
+        ]
+    )
+    actual = position_meshgrid_from_sizes(grid_sizes)
+    torch.testing.assert_close(actual, expected)
+    assert position_meshgrid_from_sizes([]).shape == (0, 2)
+
+
 def test_pixtral_encoder_cudagraph_patch_merge_layout() -> None:
     grid_sizes = [(2, 4), (4, 2)]
     hidden_size = 3
@@ -214,12 +236,10 @@ def test_pixtral_supports_encoder_cudagraph() -> None:
 def test_pixtral_encoder_cudagraph_pads_attention_tail() -> None:
     src_cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
     dst_cu_seqlens = torch.empty(6, dtype=torch.int32)
-    _pad_pixtral_cu_seqlens(
+    _pad_pixtral_cumulative_seqlens(
         dst_cu_seqlens,
         src_cu_seqlens,
         input_capacity=8,
-        attn_backend=AttentionBackendEnum.FLASH_ATTN,
-        flashinfer_offset_scale=1,
     )
 
     assert dst_cu_seqlens.tolist() == [0, 2, 5, 5, 5, 8]
@@ -239,11 +259,10 @@ def test_pixtral_encoder_cudagraph_pads_flashinfer_offsets() -> None:
     src_cu_seqlens = torch.cat((src_qko, src_v))
     dst_cu_seqlens = torch.empty_like(src_cu_seqlens)
 
-    _pad_pixtral_cu_seqlens(
+    _pad_pixtral_flashinfer_cu_seqlens(
         dst_cu_seqlens,
         src_cu_seqlens,
         input_capacity=8,
-        attn_backend=AttentionBackendEnum.FLASHINFER,
         flashinfer_offset_scale=4,
     )
 
