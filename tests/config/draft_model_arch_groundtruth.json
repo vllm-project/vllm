@@ -1,0 +1,87 @@
+{
+    "abhigoyal/vllm-medusa-llama-68m-random": {
+        "architectures": [
+            "MedusaModel"
+        ],
+        "model_type": "medusa",
+        "text_model_type": "medusa",
+        "hidden_size": 768,
+        "total_num_hidden_layers": 1,
+        "total_num_attention_heads": 0,
+        "head_size": "Error: integer division or modulo by zero",
+        "vocab_size": 32000,
+        "total_num_kv_heads": 0,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.float32"
+    },
+    "luccafong/deepseek_mtp_draft_random": {
+        "architectures": [
+            "DeepSeekMTPModel"
+        ],
+        "model_type": "deepseek_mtp",
+        "text_model_type": "deepseek_mtp",
+        "hidden_size": 2560,
+        "total_num_hidden_layers": 1,
+        "total_num_attention_heads": 32,
+        "head_size": 576,
+        "vocab_size": 129280,
+        "total_num_kv_heads": 32,
+        "num_experts": 72,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
+    "eagle618/eagle-deepseek-v3-random": {
+        "architectures": [
+            "EagleDeepSeekMTPModel"
+        ],
+        "model_type": "eagle",
+        "text_model_type": "eagle",
+        "hidden_size": 2560,
+        "total_num_hidden_layers": 1,
+        "total_num_attention_heads": 32,
+        "head_size": 576,
+        "vocab_size": 129280,
+        "total_num_kv_heads": 32,
+        "num_experts": 72,
+        "is_deepseek_mla": true,
+        "is_multimodal_model": false,
+        "dtype": "bfloat16"
+    },
+    "yuhuili/EAGLE-LLaMA3-Instruct-8B": {
+        "architectures": [
+            "EagleLlamaForCausalLM"
+        ],
+        "model_type": "eagle",
+        "text_model_type": "eagle",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 1,
+        "total_num_attention_heads": 32,
+        "head_size": 128,
+        "vocab_size": 128256,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "float16"
+    },
+    "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B": {
+        "architectures": [
+            "Eagle3LlamaForCausalLM"
+        ],
+        "model_type": "eagle",
+        "text_model_type": "eagle",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 1,
+        "total_num_attention_heads": 32,
+        "head_size": 128,
+        "vocab_size": 128256,
+        "total_num_kv_heads": 8,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "float16"
+    }
+}

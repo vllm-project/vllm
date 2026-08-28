@@ -1,0 +1,9 @@
+model_name: "poolside/Laguna-XS.2-NVFP4"
+accuracy_threshold: 0.86
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --trust-remote-code

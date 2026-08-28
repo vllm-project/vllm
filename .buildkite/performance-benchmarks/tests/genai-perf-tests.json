@@ -1,0 +1,21 @@
+[
+    {
+        "test_name": "llama8B_tp1_genai_perf",
+        "qps_list": [4,8,16,32],
+        "common_parameters": {
+            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "tp": 1,
+            "port": 8000,
+            "num_prompts": 500,
+            "reuse_server": false
+        },
+        "vllm_server_parameters": {
+            "disable_log_stats": "",
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
+        },
+        "genai_perf_input_parameters": {
+        }
+    }
+]

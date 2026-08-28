@@ -1,0 +1,14 @@
+[package]
+name = "vllm-tracing"
+version.workspace = true
+edition.workspace = true
+description = "Shared tracing subscriber and log formatting for vLLM Rust binaries"
+license.workspace = true
+
+[dependencies]
+time.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+group: CRCR Report
+depends_on:
+  - image-build
+steps:
+  - label: ":satellite: Report nightly results to CRCR"
+    key: crcr-report
+    if: build.env("TORCH_NIGHTLY") == "1"
+    soft_fail: true
+    allow_dependency_failure: true
+    timeout_in_minutes: 15
+    commands:
+      - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh

@@ -1,0 +1,770 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Copyright 2024 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Transformers modeling backend base class."""
+
+import os
+from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from functools import cached_property
+from itertools import chain
+from operator import attrgetter
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+import regex as re
+import torch
+import transformers
+from packaging.version import Version
+from torch import nn
+from transformers import AutoModel
+from transformers.conversion_mapping import (
+    WeightRenaming,
+    get_model_conversion_mapping,
+)
+
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config.utils import getattr_iter
+from vllm.distributed import get_pp_group, get_tp_group
+from vllm.distributed.utils import get_pp_indices
+from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+    MLAAttention,
+)
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.models.interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
+from vllm.model_executor.models.interfaces_base import VllmModel
+from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
+from vllm.model_executor.models.transformers.fusers import MLAFuser
+from vllm.model_executor.models.transformers.utils import (
+    attrsetter,
+    can_enable_torch_compile,
+    get_feature_request_tip,
+    init_on_device_without_buffers,
+    log_replacement,
+    named_state,
+    replace_conv_class,
+    replace_embedding_class,
+    replace_linear_class,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    WeightsMapper,
+    extract_layer_index,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
+from vllm.sequence import IntermediateTensors
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedModel
+
+    from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
+
+
+class PreTrainedModelClasses(NamedTuple):
+    decoder: type["PreTrainedModel"]
+    encoders: dict[str, type["PreTrainedModel"]]
+    """Modality -> encoder class, for each modality that has one."""
+
+
+class Base(
+    nn.Module,
+    VllmModel,
+    SupportsQuant,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+):
+    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
+
+    def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        super().__init__()
+        logger.info("Using Transformers modeling backend.")
+
+        self.vllm_config = vllm_config
+        self.config = vllm_config.model_config.hf_config
+        self.text_config = self.config.get_text_config()
+        self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
+        self.device_config = vllm_config.device_config
+        self.model_config = vllm_config.model_config
+        self.parallel_config = vllm_config.parallel_config
+        self.quant_config = vllm_config.quant_config
+
+        self.pp_group = get_pp_group()
+        self.tp_group = get_tp_group()
+
+        # Attrs for weight loading (see self.load_weights)
+        self.ignore_unexpected_prefixes: list[str] = []
+        """Ignore unexpected weights whose qualname starts with these prefixes."""
+        self.ignore_unexpected_suffixes: list[str] = []
+        """Ignore unexpected weights whose qualname ends with these suffixes."""
+        self.packed_modules_mapping: dict[str, list[str]] = {}
+        """Fused module -> constituent projections, populated by `recursive_replace`
+        for the quantization machinery and loaders (e.g. bitsandbytes)."""
+        self.fusers: dict[str, BaseFuser] = {}
+        """Module qualname -> the fuser applied to it, populated
+        by `recursive_replace` for `create_attention_instances`."""
+
+        # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
+        self._target_class: type[nn.Module] = nn.Module
+        """Target class for Eagle3 aux hidden state recording."""
+        self._layer_names: dict[int, str] = {}
+        """Mapping from layer index to layer name for Eagle3."""
+        self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
+        """Kwargs to pass to model forward for Eagle3 aux hidden states."""
+
+        if self.quant_config:
+            quant_method_name = self.quant_config.get_name()
+            # Check for unsupported quantization methods.
+            if quant_method_name in ("mxfp4", "gpt_oss_mxfp4"):
+                raise NotImplementedError(
+                    "Transformers modeling backend does "
+                    "not support MXFP4 quantization yet."
+                )
+
+        self._patch_config()
+        self._decorate_for_torch_compile()
+        # Init on "meta" to delay allocating GPU tensors
+        with (
+            self._mark_model_components(vllm_config),
+            init_on_device_without_buffers("meta"),
+        ):
+            from_config_kwargs = self._from_config_kwargs
+            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+
+        # Create weight name to module qualname mapper
+        self._create_hf_to_vllm_mapper()
+        # Remove layers not on this pipeline parallel rank
+        self.pipeline_parallel()
+        # Substitute remaining layers with vLLM's layers as needed
+        self.recursive_replace()
+        # Create attention instances for KV cache allocation
+        self.attention_instances = self.create_attention_instances()
+
+        # Input embeddings
+        input_embeddings = self.model.get_input_embeddings()
+        if not isinstance(input_embeddings, PPMissingLayer):
+            self.model.set_input_embeddings(
+                replace_embedding_class(input_embeddings, self.quant_config)
+            )
+
+        # Initialize any parameters that have not had their modules replaced
+        self.init_parameters(self.model)
+
+        # Upcast weights Transformers always keeps in fp32
+        self.keep_in_fp32(self.model)
+
+        # Pipeline parallel intermediate tensors
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], self.text_config.hidden_size
+        )
+
+    def _patch_config(self):
+        """
+        Patch the config to ensure that the model is created correctly:
+
+        - Sets the attention implementation to "vllm" so the attention instances from
+        `create_attention_instances` are used
+        - Sets the dtype to the default torch dtype set by vLLM because Transformers
+        uses the config dtype when creating the model
+        """
+        self.text_config._attn_implementation = "vllm"
+        self.config.dtype = torch.get_default_dtype()
+
+    @contextmanager
+    def _mark_model_components(self, vllm_config: "VllmConfig"):
+        """Mark language model and tower submodules as `self.model` is created.
+
+        Nothing to do in `Base`, `MultiModalMixin` will override."""
+        yield
+
+    @cached_property
+    def _from_config_kwargs(self) -> dict[str, Any]:
+        """The kwargs used to create `self.model`."""
+        return dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+    def _find_encoder_classes(
+        self, model: "PreTrainedModel"
+    ) -> dict[str, type["PreTrainedModel"]]:
+        """Find the encoder class of each modality `model` has one for.
+
+        Text models have none. Multi-modal ones override this.
+        """
+        return {}
+
+    @cached_property
+    def _pre_trained_model_classes(self) -> PreTrainedModelClasses:
+        """The decoder class and the encoder class of each modality that has one.
+
+        Both come from a single throwaway model, since building one is not cheap.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**self._from_config_kwargs)
+        model_classes = PreTrainedModelClasses(
+            decoder=type(model.get_decoder()),
+            encoders=self._find_encoder_classes(model),
+        )
+        del model
+
+        logger.debug("Identified model classes as: %s", model_classes)
+        return model_classes
+
+    def _decorate_cls_for_torch_compile(
+        self,
+        cls: type["PreTrainedModel"],
+        dynamic_arg_dims: dict[str, int] | None,
+        enable_if: Callable[["VllmConfig"], bool],
+        is_encoder: bool,
+    ):
+        """
+        Decorate `cls` to indicate to vLLM that it supports torch compile.
+
+        Args:
+            cls: The PreTrainedModel class to decorate.
+            dynamic_arg_dims: A mapping from argument name to the dynamic dimensions
+                of the argument. If None, default dynamic arg dims will be used. See
+                [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
+                for more details.
+            enable_if: A function which takes in the vLLM config and returns whether
+                torch compile should be enabled for this class.
+            is_encoder: Whether the class being decorated is an encoder.
+        """
+        logger.debug(
+            "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
+            cls.__name__,
+            "encoder" if is_encoder else "decoder",
+            dynamic_arg_dims,
+        )
+
+        support_torch_compile(
+            dynamic_arg_dims=dynamic_arg_dims,
+            enable_if=enable_if,
+            is_encoder=is_encoder,
+        )(cls)
+
+    def _decorate_for_torch_compile(self):
+        """Decorate the model's decoder class to indicate to vLLM that it
+        supports torch compile if `can_enable_torch_compile` is True."""
+        self._decorate_cls_for_torch_compile(
+            cls=self._pre_trained_model_classes.decoder,
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            dynamic_arg_dims=dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+            ),
+            enable_if=can_enable_torch_compile,
+            is_encoder=False,
+        )
+
+    def _create_hf_to_vllm_mapper(self):
+        """
+        Create a WeightsMapper to map checkpoint weight names to module qualnames.
+
+        This handles:
+
+        - Transformers weight renaming from `WeightRenaming`
+        - Checkpoints saved with a base model prefix that is not `model`
+        - Checkpoints saved with no base model prefix
+        - Any quantization config specific mappings
+        """
+        self.hf_to_vllm_mapper = WeightsMapper()
+        orig_to_new_renaming = self.hf_to_vllm_mapper.orig_to_new_renaming
+        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
+
+        for mapping in get_model_conversion_mapping(self.model):
+            # Handle weights which have been renamed in Transformers
+            if isinstance(mapping, WeightRenaming):
+                orig_to_new_renaming.append(mapping)
+            # TODO: Handle WeightConverter to enable layer merging
+
+        # Handle unexpected weights which should be ignored
+        if self.model._keys_to_ignore_on_load_unexpected is not None:
+            for key in self.model._keys_to_ignore_on_load_unexpected:
+                orig_to_new_regex[re.compile(key)] = None
+
+        # Standardise base model prefix
+        bmp = self.model.base_model_prefix
+        expected_bmp = r"model.\1"
+        # Handle checkpoints saved with different base model prefix
+        if bmp and bmp != "model":
+            different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
+            orig_to_new_regex[different_bmp_pattern] = expected_bmp
+        # Handle direct children of self.model which were saved without the model prefix
+        direct_children = chain(
+            self.model.named_children(),
+            self.model.named_parameters(recurse=False),
+            self.model.named_buffers(recurse=False),
+        )
+        model_children = "|".join(name for name, _ in direct_children)
+        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).*)")
+        orig_to_new_regex[missing_bmp_pattern] = expected_bmp
+        # Handle weights saved as direct children of self.model which no longer are
+        unexpected_bmp_pattern = re.compile(rf"^(model\.)((?!{model_children}).+)")
+        orig_to_new_regex[unexpected_bmp_pattern] = r"\2"
+        # Handle lm_head which was saved inside the base model
+        nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
+        orig_to_new_regex[nested_lm_head_pattern] = r"\2"
+
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
+
+    def _get_tie_word_embeddings(self):
+        """
+        Check if the model has tied word embeddings.
+        """
+        # Models created with Transformers v4 and v5 will store this in different places
+        tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
+        tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
+        return tie_word_embeddings_v4 or tie_word_embeddings_v5
+
+    def pipeline_parallel(self):
+        """
+        Apply the model's pipeline parallelization plan.
+        """
+        if self.pp_group.world_size <= 1:
+            return
+
+        if self.model.supports_pp_plan:
+            module = self.model
+            names = list(module._pp_plan.keys())
+        else:
+            module = self.model.get_decoder()
+            has_parameters = lambda m: next(m.parameters(), None) is not None
+            names = [n for n, c in module.named_children() if has_parameters(c)]
+            tip = get_feature_request_tip(
+                self.model_config.model, self.model_config.trust_remote_code
+            )
+            logger.warning_once(
+                "%s does not define a pipeline parallel plan. The Transformers "
+                "modeling backend will infer the split from the layers of %s in order "
+                "of declaration and keep parameter-free modules on every rank. This "
+                "may fail if the model's structure is non-standard. %s",
+                type(self.model),
+                type(module),
+                tip,
+            )
+
+        module_lists = []
+        module_list_idx = None
+        for i, name in enumerate(names):
+            # attrgetter in case the module is nested (e.g. "text_model.layers")
+            if isinstance(attrgetter(name)(module), nn.ModuleList):
+                module_lists.append(name)
+                module_list_idx = i
+
+        if len(module_lists) > 1:
+            raise ValueError(
+                "Pipeline parallel of models with multiple `ModuleList`s "
+                "in the base model are not supported yet!"
+            )
+        if module_list_idx is None:
+            raise ValueError(f"Could not find `ModuleList` in {type(module)}")
+
+        # Layers before module list
+        for name in names[:module_list_idx]:
+            if self.pp_group.is_first_rank or (
+                self._get_tie_word_embeddings() and self.pp_group.is_last_rank
+            ):
+                continue
+            # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
+            attrsetter(name)(module, PPMissingLayer())
+
+        # Module list
+        start_layer, end_layer = get_pp_indices(
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
+        )
+        layers_name = names[module_list_idx]
+        # attrgetter in case the module is nested (e.g. "text_model.layers")
+        layers = attrgetter(layers_name)(module)
+        for i in range(len(layers)):
+            if start_layer <= i and i < end_layer:
+                continue
+            layers[i] = PPMissingLayer()
+
+        # Layers after module list
+        for name in names[module_list_idx + 1 :]:
+            # Modules that should be on last rank
+            if not self.pp_group.is_last_rank:
+                # attrsetter in case the module is nested (e.g. "text_model.norm")
+                attrsetter(name)(module, PPMissingLayer())
+
+    def recursive_replace(self):
+        """Recursively replace modules in the model as needed.
+
+        Currently, this replaces:
+
+        - GLUs with a fused `MergedColumnParallelLinear` + `...AndMul`
+        - Attention QKV projections with a fused `QKVParallelLinear` + split
+        - `nn.Linear` with vLLM's tensor parallel linear classes
+        - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
+        - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
+        """
+        tp_plan = self.model.tp_plan or {}
+
+        if not tp_plan and self.tp_group.world_size > 1:
+            tip = get_feature_request_tip(
+                self.model_config.model, self.model_config.trust_remote_code
+            )
+            logger.warning_once(
+                "%s does not define a tensor parallel plan. The Transformers modeling "
+                "backend will shard the model the best it can during graph fusion and "
+                "replicate the rest. This may be suboptimal or fail if the model does "
+                "not fuse cleanly. %s",
+                type(self.model),
+                tip,
+            )
+
+        # Prefix the patterns because we always start from `self.model`
+        tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
+        # Detect fusable patterns once per module class (cached, so this is cheap)
+        fusers = Fusers(self.model, self.vllm_config)
+
+        def register_fusion(fuser: BaseFuser, prefix: str):
+            """Register a fused layer's mappings just before it is built."""
+            self.fusers[prefix] = fuser
+
+            orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
+            self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
+
+            packed_modules_mapping = fuser.packed_modules_mapping
+            self.packed_modules_mapping.update(packed_modules_mapping)
+            if self.quant_config is not None:
+                self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
+
+        def _recursive_replace(module: nn.Module, prefix: str):
+            for child_name, child_module in module.named_children():
+                new_module = child_module
+                qual_name = maybe_prefix(prefix, child_name)
+                if (
+                    isinstance(module, nn.ModuleList)
+                    and len(module) == self.text_config.num_hidden_layers
+                ):
+                    # Populate Eagle3 attrs
+                    self._target_class = type(child_module)
+                    layer_name = qual_name.removeprefix("model.")
+                    self._layer_names[int(child_name)] = layer_name
+                    # MTP weights should not be loaded into the base model
+                    num_hidden_layers = self.text_config.num_hidden_layers
+                    names = (
+                        "n_predict",  # Override from SpeculativeConfig
+                        "num_nextn_predict_layers",  # Most models
+                        "mtp_num_hidden_layers",  # Qwen 3.5
+                    )
+                    n_predict = getattr_iter(self.text_config, names, 0)
+                    for i in range(num_hidden_layers, num_hidden_layers + n_predict):
+                        mtp_prefix = f"{prefix}.{i}."
+                        if mtp_prefix not in self.ignore_unexpected_prefixes:
+                            self.ignore_unexpected_prefixes.append(mtp_prefix)
+                # Replace modules as needed
+                if isinstance(child_module, nn.Linear):
+                    generator = (p for p in tp_plan if re.match(p, qual_name))
+                    pattern = next(generator, None)
+                    # Some weight loaders expect all linear layers to inherit
+                    # LinearBase, so we set a default style which causes any
+                    # unspecified layers to be replaced with ReplicatedLinear
+                    style = tp_plan.get(pattern, "replicate")
+                    new_module = replace_linear_class(
+                        child_module, style, self.quant_config, prefix=qual_name
+                    )
+                elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
+                    new_module = replace_conv_class(child_module)
+                elif (fuser := fusers[child_module]) is not None:
+                    register_fusion(fuser, qual_name)
+                    new_module = fuser.fuse(child_module, qual_name, self.vllm_config)
+                    logger.info_once(fuser.info(child_name))
+                    _recursive_replace(new_module, prefix=qual_name)
+                elif not isinstance(child_module, MoERunner):
+                    # MoERunner can contain aliases of shared experts and gates,
+                    # so we don't want to recurse into it and break weight loading.
+                    _recursive_replace(child_module, prefix=qual_name)
+
+                if new_module is not child_module:
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
+
+        _recursive_replace(self.model, prefix="model")
+
+    def create_attention_instances(self) -> dict[int, Attention]:
+        """
+        Create `Attention` instances to inform KV cache allocation.
+        """
+        mla_fusers = {}
+        attention_instances = {}
+        text_config = self.text_config
+        attn_cls = self._get_attn_cls()
+
+        # kv_lora_rank indicates that this is an MLA model
+        if getattr(text_config, "kv_lora_rank", None) is not None:
+            mla_fusers = {
+                extract_layer_index(prefix): (prefix, fuser)
+                for prefix, fuser in self.fusers.items()
+                if isinstance(fuser, MLAFuser)
+            }
+            if attn_cls is MLAAttention:
+                text_config._attn_implementation = "vllm_mla"
+            else:
+                # MLA model not using MLAAttention: recompute head_size for full attn
+                qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
+                qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+                if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:
+                    self.model_config.model_arch_config.head_size = qk_head_dim
+
+        logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
+
+        pp_rank = self.pp_group.rank_in_group
+        pp_size = self.pp_group.world_size
+        start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
+
+        for i in range(start, end):
+            # `[i]` is the whole-model config unless the checkpoint is
+            # heterogeneous, in which case it is this layer's own geometry.
+            arch_config = self.model_config.model_arch_config[i]
+            num_heads = self.model_config.get_num_attention_heads(
+                self.parallel_config, arch_config
+            )
+            head_size = arch_config.head_size
+            # Default to Llama scale, maybe updated in vllm_attention_forward
+            scale = head_size**-0.5
+            num_kv_heads = self.model_config.get_num_kv_heads(
+                self.parallel_config, arch_config
+            )
+
+            kwargs = dict(
+                num_heads=num_heads,
+                scale=scale,
+                cache_config=self.cache_config,
+                quant_config=self.quant_config,
+                prefix=f"{i}.attn",
+            )
+
+            if attn_cls is MLAAttention:
+                prefix, fuser = mla_fusers[i]
+                mla_module = self.get_submodule(prefix)
+                dims = get_mla_dims(self.model_config)
+                kwargs.update(
+                    scale=mla_module.scaling,
+                    qk_nope_head_dim=dims.qk_nope_head_dim,
+                    qk_rope_head_dim=dims.qk_rope_head_dim,
+                    v_head_dim=dims.v_head_dim,
+                    q_lora_rank=dims.q_lora_rank,
+                    kv_lora_rank=dims.kv_lora_rank,
+                    kv_b_proj=mla_module.get_submodule(fuser.kv_b_proj_name),
+                )
+            else:
+                kwargs.update(
+                    head_size=head_size,
+                    num_kv_heads=num_kv_heads,
+                    logits_soft_cap=logits_soft_cap,
+                )
+
+                # Handle interleaved sliding window attention
+                if (
+                    hasattr(text_config, "layer_types")
+                    and text_config.layer_types[i] == "sliding_attention"
+                ):
+                    kwargs["per_layer_sliding_window"] = text_config.sliding_window
+
+            attn_instance = attn_cls(**kwargs)
+            if attn_cls is MLAAttention:
+                # Attach MLA attn_instance to mla_module so it appears in
+                # model.named_modules() and runs its process_weights_after_loading
+                mla_module._vllm_mla_attn = attn_instance
+            attention_instances[i] = attn_instance
+        return attention_instances
+
+    def _get_attn_cls(self) -> type[AttentionLayerBase]:
+        """Return the `Attention` class to use for this model's layers."""
+        # In encoder models, the attention layers will have `is_causal=False`
+        is_encoder = lambda module: not getattr(module, "is_causal", True)
+        has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
+        is_multimodal = lambda config: config != config.get_text_config()
+        # vLLM does not support encoder-decoder models, so if any encoder layer is
+        # found in a text only model, we assume the whole model is an encoder model
+        if has_encoder(self.model) and not is_multimodal(self.config):
+            self.check_version("5.0.0", "encoder models support")
+            return EncoderOnlyAttention
+        if self.model_config.use_mla:
+            self.check_version("5.15.0.dev0", "optimized MLA support")
+            if any(isinstance(fuser, MLAFuser) for fuser in self.fusers.values()):
+                return MLAAttention
+            logger.warning_once(
+                "This model uses MLA but `MLAFuser` failed to match and/or fuse any "
+                "MLA attention layers. Falling back to full attention with a padded "
+                "`value` head dimension."
+            )
+            os.environ["VLLM_MLA_DISABLE"] = "1"
+        return Attention
+
+    def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
+        """
+        If a `parameter` is on the `meta` device, then its parent
+        `module` is the original module created by:
+
+        ```python
+        with torch.device("meta"):
+            self.model: "PreTrainedModel" = AutoModel.from_config(...)
+        ```
+        """
+        dtype = dtype or self.model_config.dtype
+        device = self.device_config.device
+
+        def _init_parameters(module: nn.Module):
+            for name, param in module.named_parameters(recurse=False):
+                # Already on device, nothing to do
+                if param.device != torch.device("meta"):
+                    continue
+                # Already a vLLM parameter, nothing to do
+                if hasattr(param, "weight_loader"):
+                    continue
+                data = torch.empty_like(param.data, dtype=dtype, device=device)
+                setattr(module, name, nn.Parameter(data=data))
+            for child in module.children():
+                _init_parameters(child)
+
+        _init_parameters(module)
+
+    def keep_in_fp32(self, module: nn.Module):
+        """Honor `_keep_in_fp32_modules_strict` as `from_pretrained` would."""
+        if self.model_config.dtype not in (torch.float16, torch.bfloat16):
+            return
+        fragments = getattr(module, "_keep_in_fp32_modules_strict", None)
+        if not fragments:
+            return
+        pattern = re.compile("|".join(re.escape(f) for f in fragments))
+        for name, tensor in named_state(module):
+            if not hasattr(tensor, "weight_loader") and pattern.search(name):
+                tensor.data = tensor.data.to(torch.float32)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings()(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors:
+        if not self.pp_group.is_first_rank:
+            assert intermediate_tensors is not None
+            input_ids = None
+            inputs_embeds = intermediate_tensors["hidden_states"]
+
+        # Add batch dimension before entering Transformers model
+        if input_ids is not None and input_ids.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            input_ids = input_ids[None, ...]
+        if inputs_embeds is not None and inputs_embeds.ndim == 2:
+            # [seq_len, hidden_size] -> [1, seq_len, hidden_size]
+            inputs_embeds = inputs_embeds[None, ...]
+        if positions.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            positions = positions[None, ...]
+
+        # Transformers models expect either input_ids or inputs_embeds, but not both
+        if input_ids is not None and inputs_embeds is not None:
+            input_ids = None
+
+        outputs = self.model(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            use_cache=False,
+            position_ids=positions,
+            attention_instances=self.attention_instances,
+            return_dict=False,
+            **self._output_aux_hidden_states_kwargs,
+            **kwargs,
+        )
+
+        # Remove batch dimension after exiting Transformers model
+        hidden_states = outputs[0][0, ...]
+        if self._output_aux_hidden_states_kwargs:
+            aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
+
+        if not self.pp_group.is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
+
+        if self._output_aux_hidden_states_kwargs and len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
+            ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
+        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    @staticmethod
+    def check_version(min_version: str, feature: str):
+        installed = Version(transformers.__version__)
+        required = Version(min_version)
+        if installed < required:
+            raise ImportError(
+                f"Transformers modeling backend requires transformers>={required} "
+                f"for {feature}, but got {installed}"
+            )
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.check_version("5.2.0", "Eagle3 support")
+        from transformers.utils.output_capturing import (
+            OutputRecorder,
+            maybe_install_capturing_hooks,
+        )
+
+        # The default value in PreTrainedModel is None
+        if self.model._can_record_outputs is None:
+            self.model._can_record_outputs = {}
+
+        target_class = self._target_class
+        for layer in layers:
+            # layer - 1 because we want the input to the layer
+            layer_name = self._layer_names[layer - 1]
+            layer_key = f"aux_hidden_state_{layer}"
+            aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
+            self.model._can_record_outputs[layer_key] = aux_hidden_state_i
+            self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
+
+        # Ensure that the capture hooks are installed before dynamo traces the model
+        maybe_install_capturing_hooks(self.model)
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = self.text_config.num_hidden_layers
+        return (2, num_layers // 2, num_layers - 3)

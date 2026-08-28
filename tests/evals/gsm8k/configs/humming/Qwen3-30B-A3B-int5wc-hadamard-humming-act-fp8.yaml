@@ -1,0 +1,13 @@
+model_name: "Qwen/Qwen3-30B-A3B"
+accuracy_threshold: 0.80
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --enforce-eager
+  --max-model-len 8192
+  --tensor-parallel-size 1
+  --quantization humming
+  --kernel-config.enable_flashinfer_autotune=False
+env:
+  VLLM_HUMMING_ONLINE_QUANT_CONFIG: '{"dtype":"int5","hadamard_block_size":-1}'
+  VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"float8e4m3"}'
