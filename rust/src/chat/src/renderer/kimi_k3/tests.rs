@@ -93,9 +93,14 @@ fn golden_dynamic_system_tool_declare() {
 }
 
 #[test]
+fn golden_dynamic_only_tool_declare() {
+    assert_golden("dynamic_only_tool_declare");
+}
+
+#[test]
 fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.tools = vec![ChatTool {
+    let tools = vec![ChatTool {
         name: "lookup".to_string(),
         description: None,
         parameters: json!({
@@ -109,6 +114,9 @@ fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
         }),
         strict: None,
     }];
+    request.tool_context =
+        crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
+            .expect("tool context should resolve");
 
     let rendered = render_request(&request);
 
@@ -122,12 +130,15 @@ fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
 #[test]
 fn tool_declare_preserves_present_optional_fields() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.tools = vec![ChatTool {
+    let tools = vec![ChatTool {
         name: "lookup".to_string(),
         description: Some("Look up a record".to_string()),
         parameters: json!({"type": "object"}),
         strict: Some(false),
     }];
+    request.tool_context =
+        crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
+            .expect("tool context should resolve");
 
     let rendered = render_request(&request);
 
@@ -319,15 +330,43 @@ fn native_k3_kwargs_take_precedence() {
 #[test]
 fn standard_none_disables_thinking() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.chat_options.template_kwargs.extend([
-        ("enable_thinking".to_string(), json!(false)),
-        ("reasoning_effort".to_string(), json!("none")),
-    ]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".to_string(), json!("none"));
 
     let rendered = render_request(&request);
 
     assert!(!rendered.contains("type=\"thinking-effort\""));
     assert!(rendered.ends_with("<|open|>response<|sep|>"));
+}
+
+#[test]
+fn native_thinking_true_overrides_standard_none() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.template_kwargs.extend([
+        ("thinking".to_string(), json!(true)),
+        ("reasoning_effort".to_string(), json!("none")),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("thinking_effort=max"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
+}
+
+#[test]
+fn enable_thinking_true_overrides_standard_none() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.template_kwargs.extend([
+        ("enable_thinking".to_string(), json!(true)),
+        ("reasoning_effort".to_string(), json!("none")),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("thinking_effort=max"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
 }
 
 #[test]

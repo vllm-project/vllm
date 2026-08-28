@@ -34,19 +34,19 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size():
+def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
     """
     device = torch.device("cuda")
 
-    # storage_block_size = block_size // compress_ratio = 256 // 4 = 64
+    # num_states = block_size // tokens_per_state = 256 // 4 = 64
     kv_cache_spec = MLAAttentionSpec(
         block_size=256,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=4,
+        tokens_per_state=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
     max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
@@ -95,7 +95,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
     valid_slots = md.slot_mapping[md.slot_mapping >= 0]
     assert valid_slots.numel() == 10  # 40 tokens / compress_ratio 4
 
-    storage_bs = kv_cache_spec.storage_block_size  # 64
+    storage_bs = kv_cache_spec.num_states  # 64
     # Compressed positions 60..63 land in block 5, positions 64..69 in block 7.
     expected = torch.tensor(
         [

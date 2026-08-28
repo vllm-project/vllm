@@ -487,6 +487,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         response_parser=response_parser,
                     )
 
+            reasoning_parser_kwargs = None
             if (
                 context.response_parser is not None
                 and context.response_parser.reasoning_parser is not None
@@ -515,12 +516,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                 sampling_params=sampling_params,
                 context=context,
                 lora_request=lora_request,
-                priority=request.priority,
+                priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
             generators.append(generator)
 
@@ -873,6 +872,8 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
+            # TODO: Build final response items from the accumulated streaming
+            # parser results instead of reparsing the complete output.
             output = self._make_response_output_items(
                 request,
                 final_output,
@@ -901,13 +902,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_reasoning_tokens == 0
             and isinstance(context, (SimpleContext, ParsableContext))
             and context.response_parser is not None
-            and context.response_parser.reasoning_parser is not None
         ):
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = (
-                context.response_parser.reasoning_parser.count_reasoning_tokens(
-                    accumulated
-                )
+            num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
+                accumulated
             )
 
         usage = ResponseUsage(

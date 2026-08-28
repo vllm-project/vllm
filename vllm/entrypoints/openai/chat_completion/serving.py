@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import Any, Final, cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -23,6 +20,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
     build_per_request_timing_metrics,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -39,10 +37,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -64,6 +63,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
@@ -107,6 +107,12 @@ def _make_prompt_tokens_details(
     )
 
 
+def _make_completion_tokens_details(
+    reasoning_tokens: int,
+) -> CompletionTokenUsageInfo:
+    return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+
 class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
@@ -148,6 +154,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
+        self._include_reasoning_tokens_details = bool(reasoning_parser)
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -188,6 +195,24 @@ class OpenAIServingChat(GenerateBaseServing):
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
         )
+
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
+
+        The same dict is used twice: to build the API-server-side parser
+        instance, and to populate
+        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
+        side. The latter crosses ZMQ as msgpack, so a handler that stashes
+        request-scoped state only the API-server-side parser needs (values
+        msgpack can't encode, or payloads not worth shipping) can drop
+        those entries here without affecting the in-process parser.
+
+        Must not mutate the argument -- the caller still needs the full
+        dict. The default forwards it unchanged.
+        """
+        return chat_template_kwargs
 
     async def render_chat_request(
         self,
@@ -348,12 +373,14 @@ class OpenAIServingChat(GenerateBaseServing):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
-                        "chat_template_kwargs": chat_template_kwargs,
+                        "chat_template_kwargs": self._engine_chat_template_kwargs(
+                            chat_template_kwargs
+                        ),
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
@@ -441,6 +468,9 @@ class OpenAIServingChat(GenerateBaseServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        # TODO: Remove once all reasoning parsers use the Parser Engine.
+        generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        previous_reasoning_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -539,6 +569,11 @@ class OpenAIServingChat(GenerateBaseServing):
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
                                 total_tokens=num_prompt_tokens,
+                                completion_tokens_details=(
+                                    _make_completion_tokens_details(0)
+                                    if self._include_reasoning_tokens_details
+                                    else None
+                                ),
                             )
 
                         data = chunk.model_dump_json(exclude_unset=True)
@@ -575,6 +610,11 @@ class OpenAIServingChat(GenerateBaseServing):
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
                                         total_tokens=num_prompt_tokens,
+                                        completion_tokens_details=(
+                                            _make_completion_tokens_details(0)
+                                            if self._include_reasoning_tokens_details
+                                            else None
+                                        ),
                                     )
 
                                 data = chunk.model_dump_json(exclude_unset=True)
@@ -633,6 +673,11 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
+                    if parser is not None:
+                        generated_token_ids[i].extend(output.token_ids)
+                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
+                            tuple(generated_token_ids[i])
+                        )
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -758,6 +803,13 @@ class OpenAIServingChat(GenerateBaseServing):
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
+                            completion_tokens_details=(
+                                _make_completion_tokens_details(
+                                    previous_reasoning_tokens[i]
+                                )
+                                if self._include_reasoning_tokens_details
+                                else None
+                            ),
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
@@ -771,6 +823,11 @@ class OpenAIServingChat(GenerateBaseServing):
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
+                    completion_tokens_details=_make_completion_tokens_details(
+                        sum(previous_reasoning_tokens)
+                    )
+                    if self._include_reasoning_tokens_details
+                    else None,
                 )
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
@@ -783,16 +840,21 @@ class OpenAIServingChat(GenerateBaseServing):
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
                 # ``--enable-force-include-usage``).
-                stream_per_request_metrics: PerRequestTimingMetrics | None = None
-                if (
-                    self.enable_per_request_metrics
-                    # See note in chat_completion_full_generator: suppress for n>1.
-                    and (request.n or 1) == 1
-                ):
-                    last_metrics = last_res.metrics if last_res is not None else None
-                    stream_per_request_metrics = build_per_request_timing_metrics(
-                        last_metrics, completion_tokens
-                    )
+                stream_per_request_metrics: PerRequestMetrics | None = None
+                # See note in chat_completion_full_generator: suppress for n>1.
+                if (request.n or 1) == 1:
+                    if self.enable_per_request_metrics:
+                        last_metrics = (
+                            last_res.metrics if last_res is not None else None
+                        )
+                        stream_per_request_metrics = build_per_request_timing_metrics(
+                            last_metrics, completion_tokens
+                        )
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        if stream_per_request_metrics is None:
+                            stream_per_request_metrics = PerRequestMetrics()
+                        stream_per_request_metrics.speculative_decoding = spec_stats
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -815,6 +877,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
+                completion_tokens_details=_make_completion_tokens_details(
+                    sum(previous_reasoning_tokens)
+                )
+                if self._include_reasoning_tokens_details
+                else None,
             )
 
             # Log complete streaming response if output logging is enabled
@@ -873,6 +940,7 @@ class OpenAIServingChat(GenerateBaseServing):
             )
 
         choices: list[ChatCompletionResponseChoice] = []
+        total_reasoning_tokens = 0
 
         role = self.get_chat_request_role(request)
         tool_parser_cls = (
@@ -910,6 +978,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
+                total_reasoning_tokens += parser.count_reasoning_tokens(token_ids)
                 if suppress_metadata:
                     logprobs = None
             else:
@@ -1007,15 +1076,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 and output.finish_reason == "stop"
             )
 
-            # Encode routed_experts for transport. JSON can't carry raw
-            # bytes, so we write the ndarray as a ``.npy`` byte stream
-            # and base64-encode it. ``pybase64`` is ~3x faster than the
-            # stdlib ``base64`` on large payloads thanks to SIMD.
-            routed_experts_b64 = None
-            if output.routed_experts is not None:
-                buf = io.BytesIO()
-                np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            routed_experts_b64 = (
+                numpy2base64(output.routed_experts)
+                if output.routed_experts is not None
+                else None
+            )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
@@ -1064,6 +1129,11 @@ class OpenAIServingChat(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=_make_completion_tokens_details(
+                total_reasoning_tokens
+            )
+            if self._include_reasoning_tokens_details
+            else None,
         )
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,
@@ -1074,17 +1144,20 @@ class OpenAIServingChat(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        per_request_metrics: PerRequestTimingMetrics | None = None
-        if (
-            self.enable_per_request_metrics
-            # Timing metrics describe a single generation stream. For n>1 the
-            # returned stats belong to only one of the n sequences, so they
-            # cannot be accurately attributed to the request; suppress instead.
-            and (request.n or 1) == 1
-        ):
-            per_request_metrics = build_per_request_timing_metrics(
-                final_res.metrics, num_generated_tokens
-            )
+        per_request_metrics: PerRequestMetrics | None = None
+        # Per-request metrics (timing + spec-decode acceptance) describe a single
+        # generation stream. For n>1 the stats belong to only one of the n
+        # sequences, so they cannot be attributed to the request; suppress.
+        if (request.n or 1) == 1:
+            if self.enable_per_request_metrics:
+                per_request_metrics = build_per_request_timing_metrics(
+                    final_res.metrics, num_generated_tokens
+                )
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                if per_request_metrics is None:
+                    per_request_metrics = PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
 
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None

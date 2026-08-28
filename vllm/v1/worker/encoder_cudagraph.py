@@ -19,6 +19,8 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
     EncoderItemSpec,
@@ -203,6 +205,10 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
+    def is_captured(self) -> bool:
+        """Return whether a CUDA graph pool is active."""
+        return self.graph_pool is not None
+
     def clear(self) -> None:
         """Release captured encoder CUDA graphs and the manager-local pool."""
         for graph_set in self.budget_graphs.values():
@@ -265,7 +271,10 @@ class EncoderCudaGraphManager:
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph, pool=self.graph_pool):
+        with (
+            torch.inference_mode(),
+            torch.cuda.graph(graph, pool=self.graph_pool, stream=current_stream()),
+        ):
             output = self.model.encoder_cudagraph_forward({**values}, path=path)
             output_buffer.copy_(output)
 
@@ -294,7 +303,19 @@ class EncoderCudaGraphManager:
 
     def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         """Get item specs from the model."""
-        return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
+        # Implementations read per-item grid/patch counts off device tensors
+        # to size the cudagraph buffers, so the D2H is inherent here.
+        with gpu_sync_allowed():
+            return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
+
+    def _select_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        """Select the mm kwargs for `indices` from the model."""
+        # Same as `_get_item_specs`: implementations re-read the per-item
+        # grid/patch counts to slice the batch, so the D2H is inherent.
+        with gpu_sync_allowed():
+            return self.model.select_encoder_cudagraph_items(mm_kwargs, indices)
 
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
@@ -411,9 +432,7 @@ class EncoderCudaGraphManager:
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
         for batch_indices, path_budgets in batches:
-            batch_mm_kwargs = self.model.select_encoder_cudagraph_items(
-                mm_kwargs, batch_indices
-            )
+            batch_mm_kwargs = self._select_items(mm_kwargs, batch_indices)
             graph_outputs: dict[str, torch.Tensor] = {}
             all_eager = True
 
@@ -487,11 +506,9 @@ class EncoderCudaGraphManager:
         ]
 
         if len(local_indices) > 0:
-            local_mm_kwargs = self.model.select_encoder_cudagraph_items(
-                mm_kwargs, local_indices
-            )
+            local_mm_kwargs = self._select_items(mm_kwargs, local_indices)
         else:
-            local_mm_kwargs = self.model.select_encoder_cudagraph_items(mm_kwargs, [])
+            local_mm_kwargs = self._select_items(mm_kwargs, [])
 
         max_output_tokens_per_rank = (
             max(
