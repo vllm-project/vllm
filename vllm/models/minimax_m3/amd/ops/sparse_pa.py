@@ -32,122 +32,28 @@ def _is_fp8_kv_cache_tensor(kv_cache: torch.Tensor) -> bool:
 
 
 @triton.jit
-def _build_sparse_block_table_kernel(
-    topk_ptr,  # [1, batch, topk] int32, selected logical 128-block ids
-    block_table_ptr,  # [batch, max_blocks] int32, logical 128-page table
-    seq_lens_ptr,  # [batch] int32
-    sparse_bt_ptr,  # [batch, topk * 8] int32, physical 16-page table
-    sparse_ctx_ptr,  # [batch] int32
+def _write_sparse_block_table_row(
+    topk_row,  # [topk] int32, selected logical block ids for this query
+    bt_row,  # [max_blocks] int32, this request's logical page table
+    sbt_row,  # [topk * PAGES_PER_BLOCK] int32, physical 16-page table
+    ctx_ptr,  # int32, this query's attended context length
+    abs_pos,  # absolute position of this query token, may be negative
     max_topk,
-    stride_topk_n,
     stride_topk_k,
-    stride_bt_b,
-    stride_sbt_b,
     SPARSE_BLOCK_SIZE_C: tl.constexpr,
     PAGES_PER_BLOCK: tl.constexpr,
+    BLOCK_PAGE_STRIDE: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
 ):
-    pid_b = tl.program_id(0)
-    seq_len = tl.load(seq_lens_ptr + pid_b)
-    has_tokens = seq_len > 0
-    last_blk = tl.maximum((seq_len - 1) // SPARSE_BLOCK_SIZE_C, 0)
+    """Compact one query's selected logical blocks into physical page-16 ids.
 
-    topk_row = topk_ptr + pid_b * stride_topk_n
-    bt_row = block_table_ptr + pid_b * stride_bt_b
-    sbt_row = sparse_bt_ptr + pid_b * stride_sbt_b
-
-    off_t = tl.arange(0, BLOCK_SIZE_T)
-    blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
-    valid = has_tokens & (blk >= 0)
-    is_tail = valid & (blk == last_blk)
-    is_full = valid & (blk != last_blk)
-
-    n_full = tl.sum(is_full.to(tl.int32), axis=0)
-    n_valid = tl.sum(valid.to(tl.int32), axis=0)
-    earlier_full = tl.cumsum(is_full.to(tl.int32), axis=0) - is_full.to(tl.int32)
-    slot = tl.where(is_full, earlier_full, n_full)
-
-    logical_page = tl.load(bt_row + blk, mask=valid, other=0).to(tl.int32)
-    base_phys = logical_page * PAGES_PER_BLOCK
-    dst_base = slot * PAGES_PER_BLOCK
-
-    for j in tl.static_range(PAGES_PER_BLOCK):
-        tl.store(sbt_row + dst_base + j, base_phys + j, mask=valid)
-
-    n_used = n_valid * PAGES_PER_BLOCK
-    off_w = tl.arange(0, BLOCK_SIZE_T * PAGES_PER_BLOCK)
-    row_width = max_topk * PAGES_PER_BLOCK
-    tl.store(
-        sbt_row + off_w,
-        tl.zeros_like(off_w),
-        mask=(off_w >= n_used) & (off_w < row_width),
-    )
-
-    tail_tokens = tl.where(has_tokens, seq_len - last_blk * SPARSE_BLOCK_SIZE_C, 0)
-    has_tail = tl.sum(is_tail.to(tl.int32), axis=0) > 0
-    ctx = n_full * SPARSE_BLOCK_SIZE_C + tl.where(has_tail, tail_tokens, 0)
-    ctx = tl.where(has_tail, ctx, tl.minimum(n_valid * SPARSE_BLOCK_SIZE_C, seq_len))
-    tl.store(sparse_ctx_ptr + pid_b, ctx)
-
-
-@torch.no_grad()
-def minimax_m3_build_sparse_block_table(
-    topk_idx: torch.Tensor,  # [1, batch, topk]
-    block_table: torch.Tensor,  # [batch, max_blocks]
-    seq_lens: torch.Tensor,  # [batch]
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compact selected logical sparse blocks into physical page-16 tables."""
-    assert topk_idx.shape[0] == 1, "AITER sparse PA requires num_kv_heads == 1"
-    batch = topk_idx.shape[1]
-    topk = topk_idx.shape[-1]
-    width = topk * PAGES_PER_SPARSE_BLOCK
-    sparse_bt = torch.empty((batch, width), dtype=torch.int32, device=topk_idx.device)
-    sparse_ctx = torch.empty((batch,), dtype=torch.int32, device=topk_idx.device)
-    _build_sparse_block_table_kernel[(batch,)](
-        topk_idx,
-        block_table,
-        seq_lens,
-        sparse_bt,
-        sparse_ctx,
-        topk,
-        topk_idx.stride(1),
-        topk_idx.stride(2),
-        block_table.stride(0),
-        sparse_bt.stride(0),
-        SPARSE_BLOCK_SIZE_C=SPARSE_BLOCK_SIZE,
-        PAGES_PER_BLOCK=PAGES_PER_SPARSE_BLOCK,
-        BLOCK_SIZE_T=triton.next_power_of_2(topk),
-    )
-    return sparse_bt, sparse_ctx
-
-
-@triton.jit
-def _build_sparse_block_table_prefill_kernel(
-    topk_ptr,  # [1, total_q, topk]
-    block_table_ptr,  # [batch, max_blocks]
-    req_id_ptr,  # [total_q]
-    abs_pos_ptr,  # [total_q]
-    sparse_bt_ptr,  # [total_q, topk * 8]
-    sparse_ctx_ptr,  # [total_q]
-    max_topk,
-    stride_topk_n,
-    stride_topk_k,
-    stride_bt_b,
-    stride_sbt_n,
-    SPARSE_BLOCK_SIZE_C: tl.constexpr,
-    PAGES_PER_BLOCK: tl.constexpr,
-    BLOCK_SIZE_T: tl.constexpr,
-):
-    pid_n = tl.program_id(0)
-    req_id = tl.load(req_id_ptr + pid_n)
-    abs_pos = tl.load(abs_pos_ptr + pid_n)
-    # Padded speculative rows can have negative positions; clamp to empty range.
+    ``BLOCK_PAGE_STRIDE`` is how many page ids a block spans, which is
+    ``PAGES_PER_BLOCK`` when each K/V side is its own dense plane and twice
+    that when both sides share a block. Padded rows carry a negative
+    ``abs_pos``, which clamps the causal range to empty.
+    """
     causal_len = tl.maximum(abs_pos + 1, 0)
     self_blk = abs_pos // SPARSE_BLOCK_SIZE_C
-
-    topk_row = topk_ptr + pid_n * stride_topk_n
-    bt_row = block_table_ptr + req_id * stride_bt_b
-    sbt_row = sparse_bt_ptr + pid_n * stride_sbt_n
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
     blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
@@ -161,7 +67,7 @@ def _build_sparse_block_table_prefill_kernel(
     slot = tl.where(is_full, earlier_full, n_full)
 
     logical_page = tl.load(bt_row + blk, mask=valid, other=0).to(tl.int32)
-    base_phys = logical_page * PAGES_PER_BLOCK
+    base_phys = logical_page * BLOCK_PAGE_STRIDE
     dst_base = slot * PAGES_PER_BLOCK
 
     for j in tl.static_range(PAGES_PER_BLOCK):
@@ -180,7 +86,99 @@ def _build_sparse_block_table_prefill_kernel(
     has_tail = tl.sum(is_tail.to(tl.int32), axis=0) > 0
     ctx = n_full * SPARSE_BLOCK_SIZE_C + tl.where(has_tail, tail_tokens, 0)
     ctx = tl.where(has_tail, ctx, tl.minimum(n_valid * SPARSE_BLOCK_SIZE_C, causal_len))
-    tl.store(sparse_ctx_ptr + pid_n, ctx)
+    tl.store(ctx_ptr, ctx)
+
+
+@triton.jit
+def _build_sparse_block_table_kernel(
+    topk_ptr,  # [1, batch * DECODE_QUERY_LEN, topk] int32, logical block ids
+    block_table_ptr,  # [batch, max_blocks] int32, logical 128-page table
+    seq_lens_ptr,  # [batch] int32
+    sparse_bt_ptr,  # [batch * DECODE_QUERY_LEN, topk * 8] int32
+    sparse_ctx_ptr,  # [batch * DECODE_QUERY_LEN] int32
+    max_topk,
+    stride_topk_n,
+    stride_topk_k,
+    stride_bt_b,
+    stride_sbt_b,
+    SPARSE_BLOCK_SIZE_C: tl.constexpr,
+    PAGES_PER_BLOCK: tl.constexpr,
+    BLOCK_PAGE_STRIDE: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    DECODE_QUERY_LEN: tl.constexpr,
+):
+    # One program per query token. The decode indexer flattens speculative rows
+    # as ``req_id * DECODE_QUERY_LEN + local_q``, and a request's query tokens
+    # are the last DECODE_QUERY_LEN positions of its sequence, so both the
+    # request id and the absolute position follow from the program id.
+    pid_n = tl.program_id(0)
+    req_id = pid_n // DECODE_QUERY_LEN
+    local_q = pid_n % DECODE_QUERY_LEN
+    seq_len = tl.load(seq_lens_ptr + req_id)
+    abs_pos = seq_len - DECODE_QUERY_LEN + local_q
+
+    _write_sparse_block_table_row(
+        topk_ptr + pid_n * stride_topk_n,
+        block_table_ptr + req_id * stride_bt_b,
+        sparse_bt_ptr + pid_n * stride_sbt_b,
+        sparse_ctx_ptr + pid_n,
+        abs_pos,
+        max_topk,
+        stride_topk_k,
+        SPARSE_BLOCK_SIZE_C,
+        PAGES_PER_BLOCK,
+        BLOCK_PAGE_STRIDE,
+        BLOCK_SIZE_T,
+    )
+
+
+@triton.jit
+def _build_sparse_block_table_prefill_kernel(
+    topk_ptr,  # [1, total_q, topk]
+    block_table_ptr,  # [batch, max_blocks]
+    req_id_ptr,  # [total_q]
+    abs_pos_ptr,  # [total_q]
+    sparse_bt_ptr,  # [total_q, topk * 8]
+    sparse_ctx_ptr,  # [total_q]
+    max_topk,
+    stride_topk_n,
+    stride_topk_k,
+    stride_bt_b,
+    stride_sbt_n,
+    SPARSE_BLOCK_SIZE_C: tl.constexpr,
+    PAGES_PER_BLOCK: tl.constexpr,
+    BLOCK_PAGE_STRIDE: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    req_id = tl.load(req_id_ptr + pid_n)
+    abs_pos = tl.load(abs_pos_ptr + pid_n)
+
+    _write_sparse_block_table_row(
+        topk_ptr + pid_n * stride_topk_n,
+        block_table_ptr + req_id * stride_bt_b,
+        sparse_bt_ptr + pid_n * stride_sbt_n,
+        sparse_ctx_ptr + pid_n,
+        abs_pos,
+        max_topk,
+        stride_topk_k,
+        SPARSE_BLOCK_SIZE_C,
+        PAGES_PER_BLOCK,
+        BLOCK_PAGE_STRIDE,
+        BLOCK_SIZE_T,
+    )
+
+
+def _alloc_sparse_block_table(
+    topk_idx: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert topk_idx.shape[0] == 1, "AITER sparse PA requires num_kv_heads == 1"
+    total_q = topk_idx.shape[1]
+    width = topk_idx.shape[-1] * PAGES_PER_SPARSE_BLOCK
+    return (
+        torch.empty((total_q, width), dtype=torch.int32, device=topk_idx.device),
+        torch.empty((total_q,), dtype=torch.int32, device=topk_idx.device),
+    )
 
 
 @torch.no_grad()
@@ -189,15 +187,12 @@ def minimax_m3_build_sparse_block_table_prefill(
     block_table: torch.Tensor,  # [batch, max_blocks]
     query_req_id: torch.Tensor,  # [total_q]
     query_abs_pos: torch.Tensor,  # [total_q]
+    block_page_stride: int = PAGES_PER_SPARSE_BLOCK,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build one page-16 sparse block table row per prefill query token."""
-    assert topk_idx.shape[0] == 1, "AITER sparse PA requires num_kv_heads == 1"
-    total_q = topk_idx.shape[1]
+    sparse_bt, sparse_ctx = _alloc_sparse_block_table(topk_idx)
     topk = topk_idx.shape[-1]
-    width = topk * PAGES_PER_SPARSE_BLOCK
-    sparse_bt = torch.empty((total_q, width), dtype=torch.int32, device=topk_idx.device)
-    sparse_ctx = torch.empty((total_q,), dtype=torch.int32, device=topk_idx.device)
-    _build_sparse_block_table_prefill_kernel[(total_q,)](
+    _build_sparse_block_table_prefill_kernel[(topk_idx.shape[1],)](
         topk_idx,
         block_table,
         query_req_id,
@@ -211,6 +206,7 @@ def minimax_m3_build_sparse_block_table_prefill(
         sparse_bt.stride(0),
         SPARSE_BLOCK_SIZE_C=SPARSE_BLOCK_SIZE,
         PAGES_PER_BLOCK=PAGES_PER_SPARSE_BLOCK,
+        BLOCK_PAGE_STRIDE=block_page_stride,
         BLOCK_SIZE_T=triton.next_power_of_2(topk),
     )
     return sparse_bt, sparse_ctx
@@ -221,27 +217,41 @@ def minimax_m3_build_sparse_block_table_decode(
     topk_idx: torch.Tensor,  # [1, batch * decode_query_len, topk]
     block_table: torch.Tensor,  # [batch, max_blocks]
     seq_lens: torch.Tensor,  # [batch]
-    decode_query_len: int,
+    decode_query_len: int = 1,
+    block_page_stride: int = PAGES_PER_SPARSE_BLOCK,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build one page-16 sparse block table row per decode query token."""
-    if decode_query_len == 1:
-        return minimax_m3_build_sparse_block_table(topk_idx, block_table, seq_lens)
-
     total_q = topk_idx.shape[1]
     expected_q = block_table.shape[0] * decode_query_len
     assert total_q == expected_q, (
         "MiniMax-M3 decode top-k rows must equal batch * decode_query_len: "
         f"{total_q} != {expected_q}"
     )
-    pos = torch.arange(total_q, dtype=torch.int32, device=topk_idx.device)
-    query_req_id = torch.div(pos, decode_query_len, rounding_mode="floor")
-    q_offset = pos - query_req_id * decode_query_len
-    query_abs_pos = (seq_lens[query_req_id] - decode_query_len + q_offset).to(
-        torch.int32
+    sparse_bt, sparse_ctx = _alloc_sparse_block_table(topk_idx)
+    topk = topk_idx.shape[-1]
+    _build_sparse_block_table_kernel[(total_q,)](
+        topk_idx,
+        block_table,
+        seq_lens,
+        sparse_bt,
+        sparse_ctx,
+        topk,
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        block_table.stride(0),
+        sparse_bt.stride(0),
+        SPARSE_BLOCK_SIZE_C=SPARSE_BLOCK_SIZE,
+        PAGES_PER_BLOCK=PAGES_PER_SPARSE_BLOCK,
+        BLOCK_PAGE_STRIDE=block_page_stride,
+        BLOCK_SIZE_T=triton.next_power_of_2(topk),
+        DECODE_QUERY_LEN=decode_query_len,
     )
-    return minimax_m3_build_sparse_block_table_prefill(
-        topk_idx, block_table, query_req_id, query_abs_pos
-    )
+    return sparse_bt, sparse_ctx
+
+
+# Retained for the decode_query_len == 1 callers (and tests) that predate the
+# speculative-decode rows.
+minimax_m3_build_sparse_block_table = minimax_m3_build_sparse_block_table_decode
 
 
 @triton.jit
@@ -313,6 +323,21 @@ def minimax_m3_insert_index_cache(
     )
 
 
+def _sides_are_packed(k_cache: torch.Tensor, v_cache: torch.Tensor) -> bool:
+    """Whether a block holds both its K and V pages instead of one side."""
+    return v_cache.shape[0] != k_cache.shape[0]
+
+
+def _block_page_stride(k_cache: torch.Tensor, v_cache: torch.Tensor) -> int:
+    """How many page ids one sparse block spans.
+
+    Each side owns ``PAGES_PER_SPARSE_BLOCK`` pages. When the sides are dense
+    planes a block is exactly that wide; when they interleave, a block covers
+    both sides' pages and V is reached from the same page id at a fixed offset.
+    """
+    return PAGES_PER_SPARSE_BLOCK * (2 if _sides_are_packed(k_cache, v_cache) else 1)
+
+
 def _gluon_scale_arg(
     scale: torch.Tensor | None,
     *,
@@ -361,7 +386,11 @@ def minimax_m3_sparse_attn_decode_aiter(
     decode_query_len: int = 1,
 ) -> None:
     sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_decode(
-        topk_idx, block_table, seq_lens, decode_query_len
+        topk_idx,
+        block_table,
+        seq_lens,
+        decode_query_len,
+        _block_page_stride(k_cache, v_cache),
     )
     _run_gluon_decode(
         q,
@@ -384,23 +413,20 @@ def minimax_m3_sparse_attn_prefill_aiter(
     v_cache: torch.Tensor,
     topk_idx: torch.Tensor,  # [1, total_q, topk]
     block_table: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    prefix_lens: torch.Tensor,
+    query_req_id: torch.Tensor,  # [total_q] int32, owning request per token
+    query_abs_pos: torch.Tensor,  # [total_q] int32, absolute position per token
     num_kv_heads: int,
     sm_scale: float,
     output: torch.Tensor,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> None:
-    total_q = q.shape[0]
-    pos = torch.arange(total_q, dtype=torch.int32, device=q.device)
-    query_req_id = torch.searchsorted(cu_seqlens_q[1:].contiguous(), pos, right=True)
-    query_req_id = query_req_id.to(torch.int32)
-    query_abs_pos = (prefix_lens[query_req_id] + (pos - cu_seqlens_q[query_req_id])).to(
-        torch.int32
-    )
     sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_prefill(
-        topk_idx, block_table, query_req_id, query_abs_pos
+        topk_idx,
+        block_table,
+        query_req_id,
+        query_abs_pos,
+        _block_page_stride(k_cache, v_cache),
     )
     _run_gluon_decode(
         q,
@@ -445,8 +471,11 @@ def _run_gluon_decode(
     group_size = num_q_heads // num_kv_heads
 
     nphys16, hkv = k_cache.shape[0], k_cache.shape[1]
+    # V is offset by half a block when the sides interleave, so it holds fewer
+    # pages than K even though both are addressed by the same page id.
+    v_nphys16 = v_cache.shape[0]
     k_cache_view = k_cache.view(nphys16 * hkv, 1, *k_cache.shape[2:])
-    v_cache_view = v_cache.view(nphys16 * hkv, 1, *v_cache.shape[2:])
+    v_cache_view = v_cache.view(v_nphys16 * hkv, 1, *v_cache.shape[2:])
     q_view = q.view(total_q * num_kv_heads, group_size, head_size)
     out_view = output.view(total_q * num_kv_heads, group_size, head_size)
 
@@ -463,11 +492,19 @@ def _run_gluon_decode(
     is_fp8 = _is_fp8_kv_cache_tensor(k_cache)
     compute_type = aiter_dtypes.fp8 if is_fp8 else q.dtype
     if is_fp8:
+        if _sides_are_packed(k_cache, v_cache) and not all(
+            scale is None or scale.numel() == 1 for scale in (k_scale, v_scale)
+        ):
+            raise NotImplementedError(
+                "MiniMax-M3 AITER sparse PA supports only scalar KV scales "
+                "when K and V pages share a block; per-token scales would "
+                "need the same page renumbering."
+            )
         k_scale_arg = _gluon_scale_arg(
             k_scale, num_phys_pages=nphys16, num_kv_heads=hkv
         )
         v_scale_arg = _gluon_scale_arg(
-            v_scale, num_phys_pages=nphys16, num_kv_heads=hkv
+            v_scale, num_phys_pages=v_nphys16, num_kv_heads=hkv
         )
     else:
         k_scale_arg = v_scale_arg = None
