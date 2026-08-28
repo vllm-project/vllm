@@ -12,6 +12,7 @@ from tests.ir.ir_test_utils import (
     clone_args,
     supported_providers,
 )
+from tests.utils import set_random_seed
 from vllm import ir
 from vllm.platforms import current_platform
 
@@ -51,7 +52,7 @@ def test_rms_norm_registration():
 )
 class TestRMSNorm:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
-        torch.manual_seed(0)
+        set_random_seed(0)
         x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
             num_tokens=4,
             hidden_size=8,
@@ -270,7 +271,7 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
 )
 class TestFusedAddRMSNorm:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
-        torch.manual_seed(0)
+        set_random_seed(0)
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
             num_tokens=4,
             hidden_size=8,
