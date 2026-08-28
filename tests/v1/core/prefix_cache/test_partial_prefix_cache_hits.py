@@ -1786,3 +1786,436 @@ def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
     assert num_computed == 4
     assert [len(group) for group in computed_blocks.blocks] == [1, 1]
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
+
+
+def test_hybrid_sliding_window_group_keeps_block_aligned_hits():
+    """Sliding-window groups force block-aligned hybrid cache hits."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+    req0 = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+    manager.cache_blocks(req0, 8)
+    swa_block_ids = [b.block_id for b in manager.get_blocks("0").blocks[0]]
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", tokens + [9, 10, 11, 12], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert not manager.coordinator.enable_partial_hash_hits
+    assert num_computed == 8
+    # Out-of-window positions are null; matched blocks keep their cached slots.
+    swa_hit = computed_blocks.blocks[0]
+    null_block = manager.block_pool.null_block
+    assert len(swa_hit) * block_size == num_computed
+    assert swa_hit[-1] is not null_block
+    assert all(
+        block is null_block or block.block_id == swa_block_ids[i]
+        for i, block in enumerate(swa_hit)
+    )
+
+
+def test_hybrid_without_block_aligned_group_keeps_fine_grained_hits():
+    """Without a block-aligned group, fine-grained Mamba hits remain available."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    assert manager.coordinator.enable_partial_hash_hits
+
+
+def test_hybrid_partial_hash_truncates_every_full_attention_group():
+    """Trim every full-attention group to the reconciled hit."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_a"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            # Use a distinct spec so the groups remain separate.
+            KVCacheGroupSpec(
+                ["full_b"],
+                FullAttentionSpec(
+                    block_size=2 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    # The wider group holds three blocks and must be trimmed for a shorter hit.
+    req = make_request(
+        "0",
+        [i // 2 for i in range(24)],
+        hash_block_size,
+        sha256,
+    )
+
+    # The Mamba group is shorter and drives reconciliation.
+    for group_id in (0, 1):
+        group_bs = block_size * (1 + group_id)
+        num_full = 24 // group_bs
+        blocks = pool.get_new_blocks(num_full)
+        pool.cache_full_blocks(
+            request=req,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=num_full,
+            block_size=group_bs,
+            kv_cache_group_id=group_id,
+        )
+
+    # Store a genuinely partial Mamba hit.
+    mamba_block = pool.get_new_blocks(1)[0]
+    pool.cache_partial_block(
+        request=req,
+        block=mamba_block,
+        num_tokens=6,
+        kv_cache_group_id=2,
+        block_size=block_size,
+    )
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+
+    # No group may report blocks beyond the reconciled hit.
+    for group_id, blocks in enumerate(computed_blocks.blocks):
+        group_block_size = manager.coordinator.single_type_managers[group_id].block_size
+        assert len(blocks) <= -(-max(num_computed, 0) // group_block_size), (
+            f"group {group_id} returned {len(blocks)} blocks of "
+            f"{group_block_size} tokens, past the reconciled hit of "
+            f"{num_computed} tokens"
+        )
+
+
+def _two_dense_groups_plus_mamba_config(
+    hash_block_size: int, block_size: int, coarse_block_size: int
+) -> KVCacheConfig:
+    """Build two dense groups and one Mamba align group."""
+    return KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_fine"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["full_coarse"],
+                FullAttentionSpec(
+                    block_size=coarse_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
+def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
+    """Do not treat dense block-size granularity as an uncached prefix."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size  # fine group + mamba: 4
+    coarse_block_size = 2 * block_size  # 8
+    kv_cache_config = _two_dense_groups_plus_mamba_config(
+        hash_block_size, block_size, coarse_block_size
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
+
+    # Fine group: three whole 4-token blocks, reaching 12 tokens.
+    fine_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=fine_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    # Coarse group has one whole 8-token block; the gap is granularity.
+    coarse_blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=coarse_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=coarse_block_size,
+        kv_cache_group_id=1,
+    )
+    # Mamba matches the fine group, so no sparse group lags.
+    mamba_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=2,
+    )
+
+    _blocks, hit_length, num_uncached = manager.coordinator.find_longest_cache_hit(
+        req.block_hashes, req.num_tokens - 1
+    )
+
+    assert hit_length == 8
+    assert num_uncached == 0, (
+        f"num_uncached_common_prefix_tokens={num_uncached}, expected 0: the "
+        "gap comes from two full-attention groups' block-size granularity, "
+        "not from a sparse-retention group lagging behind."
+    )
+
+
+def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
+    """Detect a sparse lag when both dense groups agree."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    coarse_block_size = 2 * block_size
+    kv_cache_config = _two_dense_groups_plus_mamba_config(
+        hash_block_size, block_size, coarse_block_size
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
+
+    fine_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=fine_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    # The partial entry brings the coarse group to the 12-token boundary.
+    coarse_blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=coarse_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=coarse_block_size,
+        kv_cache_group_id=1,
+    )
+    pool.cache_partial_block(
+        request=req,
+        block=coarse_blocks[1],
+        num_tokens=12,
+        kv_cache_group_id=1,
+        block_size=coarse_block_size,
+    )
+    # Mamba lags at 8 tokens.
+    mamba_blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=2,
+    )
+
+    _blocks, hit_length, num_uncached = manager.coordinator.find_longest_cache_hit(
+        req.block_hashes, req.num_tokens - 1
+    )
+
+    assert hit_length == 8
+    assert num_uncached == 4, (
+        f"num_uncached_common_prefix_tokens={num_uncached}, expected 4: mamba "
+        "genuinely has not cached the shared prefix both full-attention "
+        "groups agree on."
+    )
+
+
+@pytest.mark.parametrize("mamba_num_blocks", [3, 2])
+def test_connector_fast_path_trims_the_deeper_dense_group(mamba_num_blocks):
+    """Trim dense connector hits to the shortest full-attention prefix."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size  # fine dense group + mamba: 4
+    coarse_block_size = 2 * block_size  # 8
+    kv_cache_config = _two_dense_groups_plus_mamba_config(
+        hash_block_size, block_size, coarse_block_size
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
+
+    # Fine reaches 12 tokens; coarse reaches 8, so the reported hit is 8.
+    fine_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=fine_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    coarse_blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=coarse_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=coarse_block_size,
+        kv_cache_group_id=1,
+    )
+    mamba_blocks = pool.get_new_blocks(mamba_num_blocks)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=mamba_num_blocks,
+        block_size=block_size,
+        kv_cache_group_id=2,
+    )
+
+    blocks, num_local, _boundary, _diverged = manager.get_computed_blocks_for_connector(
+        req
+    )
+
+    assert num_local == 8, (
+        f"expected the reported hit to be min over the dense groups (8), "
+        f"got {num_local}"
+    )
+    if mamba_num_blocks == 3:
+        expected, expected_local, expected_boundary = manager.get_computed_blocks(req)
+        assert num_local == expected_local
+        assert _boundary == expected_boundary
+        assert _diverged is False
+        assert [[block.block_id for block in group] for group in blocks.blocks] == [
+            [block.block_id for block in group] for group in expected.blocks
+        ]
+        assert all(
+            block.is_null for block in blocks.blocks[2][num_local // block_size :]
+        )
+        return
+
+    assert _diverged is False
+    # Dense groups are safe to trim because they are downward-closed.
+    for group_id in manager.coordinator.full_attention_group_ids:
+        group_blocks = blocks.blocks[group_id]
+        group_block_size = manager.coordinator.single_type_managers[group_id].block_size
+        allowed = -(-num_local // group_block_size)
+        assert len(group_blocks) <= allowed, (
+            f"group {group_id} returned {len(group_blocks)} blocks of "
+            f"{group_block_size} tokens, past the reported hit of "
+            f"{num_local} tokens ({allowed} blocks)"
+        )

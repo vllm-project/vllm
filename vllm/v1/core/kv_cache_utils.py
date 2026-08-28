@@ -2321,3 +2321,75 @@ def resolve_block_hashes(
         return block_hashes
     assert block_size % hash_block_size == 0
     return BlockHashListWithBlockSize(block_hashes, hash_block_size, block_size)
+
+
+def partial_hash_hits_enabled(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    hash_block_size: int,
+    *,
+    dcp_world_size: int = 1,
+) -> bool:
+    """Return whether fine-grained prefix-cache hits are supported."""
+    specs = [
+        next(iter(g.kv_cache_spec.kv_cache_specs.values()))
+        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        else g.kv_cache_spec
+        for g in kv_cache_groups
+    ]
+    if not any(
+        isinstance(spec, MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and (
+            spec.block_size > hash_block_size
+            if dcp_world_size == 1
+            else spec.block_size >= hash_block_size
+        )
+        for spec in specs
+    ):
+        return False
+
+    unsupported = set()
+    for spec in specs:
+        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        assert manager_cls is not None, f"No manager registered for KVCacheSpec {spec}"
+        # Mamba state is replicated across DCP ranks; attention KV is
+        # partitioned, scaling the manager's effective block size.
+        block_size = (
+            spec.block_size
+            if isinstance(spec, MambaSpec)
+            else spec.block_size * dcp_world_size
+        )
+        if (
+            not manager_cls.supports_fine_grained_hash_lookup
+            and block_size != hash_block_size
+        ):
+            unsupported.add(manager_cls.__name__)
+    if not unsupported:
+        return True
+    logger.warning_once(
+        "Disabling fine-grained (partial) prefix-cache hits: the prefix match "
+        "unit is %d but these block-aligned-only KV cache managers use a "
+        "larger block size: %s.",
+        hash_block_size,
+        ", ".join(sorted(unsupported)),
+    )
+    return False
+
+
+def truncate_downward_closed_groups(
+    groups: Iterable[tuple[KVCacheSpec, Sequence[int]]],
+    hit_length: int,
+    hit_blocks_by_group: Sequence[list["KVCacheBlock"] | None],
+    hit_length_by_group: list[int],
+    block_size_of: Callable[[int], int],
+) -> None:
+    """Trim each downward-closed group's blocks to ``hit_length``."""
+    for spec, group_ids in groups:
+        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        if manager_cls is None or not manager_cls.is_downward_closed:
+            continue
+        for group_id in group_ids:
+            if (blocks := hit_blocks_by_group[group_id]) is None:
+                continue
+            del blocks[cdiv(hit_length, block_size_of(group_id)) :]
+            hit_length_by_group[group_id] = hit_length

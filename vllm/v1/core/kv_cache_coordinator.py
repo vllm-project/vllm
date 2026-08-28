@@ -5,12 +5,14 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.math_utils import round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
+    truncate_downward_closed_groups,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -271,6 +273,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
+        num_new_tokens: int | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -285,6 +288,7 @@ class KVCacheCoordinator(ABC):
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            num_new_tokens: The number of tokens newly scheduled in this step.
 
         Returns:
             The new allocated blocks.
@@ -296,6 +300,7 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
+                num_new_tokens,
             )
             for manager in self.single_type_managers
         )
@@ -619,36 +624,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "full-attention and Mamba groups, got: "
                     f"{type(g.kv_cache_spec).__name__}."
                 )
-        # Fine-grained hash hits require Mamba "align" and compatible cache
-        # managers in every group. TP needs hashing finer than the Mamba block;
-        # DCP accepts equality because it scales the effective full-attention
-        # block instead.
-        has_partial_mamba_group = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and (
-                (dcp_world_size == 1 and g.kv_cache_spec.block_size > hash_block_size)
-                or (
-                    dcp_world_size > 1 and g.kv_cache_spec.block_size >= hash_block_size
-                )
-            )
-            for g in kv_cache_config.kv_cache_groups
+        # Partial hash hits are limited to full-attention + mamba ("align"),
+        # and only when no other group forces block-aligned lookup.
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups,
+            hash_block_size,
+            dcp_world_size=dcp_world_size,
         )
-        self.enable_partial_hash_hits = has_partial_mamba_group
-        if self.enable_partial_hash_hits:
-            unsupported_partial_hit_managers = {
-                type(manager).__name__
-                for manager in self.single_type_managers
-                if not manager.supports_fine_grained_hash_lookup
-                and manager.block_size != hash_block_size
-            }
-            if unsupported_partial_hit_managers:
-                self.enable_partial_hash_hits = False
-                logger.warning_once(
-                    "Disabling fine-grained prefix-cache hits because these KV "
-                    "cache managers require block-aligned lookups: %s.",
-                    ", ".join(sorted(unsupported_partial_hit_managers)),
-                )
         self.verify_and_split_kv_cache_groups()
 
     @property
@@ -705,6 +687,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.full_attention_group_id: int | None = (
             first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
+        # Keep every full-attention group as a dense reference.
+        self.full_attention_group_ids: list[int] = [
+            group_id
+            for group in self.attention_groups
+            if isinstance(group.spec, FullAttentionSpec)
+            for group_id in group.group_ids
+        ]
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
         for group in self.attention_groups:
@@ -867,17 +856,20 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            group_block_size = self.single_type_managers[
-                first_group.group_ids[0]
-            ].block_size
-            num_blocks = cdiv(hit_length, group_block_size)
-            for group_id in first_group.group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
-                    hit_length_by_group[group_id] = hit_length
+        if len(self.full_attention_group_ids) > 1:
+            # Dense groups may differ only because of block-size granularity.
+            longest_hit_length = min(
+                hit_length_by_group[gid] for gid in self.full_attention_group_ids
+            )
+
+        # Trim lists looked up before the fixed-point hit was reduced.
+        truncate_downward_closed_groups(
+            ((g.spec, g.group_ids) for g in self.attention_groups),
+            hit_length,
+            hit_blocks_by_group,
+            hit_length_by_group,
+            lambda gid: self.single_type_managers[gid].block_size,
+        )
 
         # Uncached shared prefix detection: if any attn. group cached a longer
         # prefix than the reconciled hit, it is an uncached common prefix across
