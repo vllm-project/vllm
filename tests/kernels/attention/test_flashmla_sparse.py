@@ -4,6 +4,63 @@ import pytest
 import torch
 
 
+def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride():
+    from vllm.models.deepseek_v4.sparse_mla import build_c128a_topk_metadata
+
+    device = torch.device("cuda")
+    capacity_width = 512
+    global_decode_buffer = torch.empty(
+        (2, capacity_width), dtype=torch.int32, device=device
+    )
+    prefill_buffer = torch.empty_like(global_decode_buffer)
+    kwargs = dict(
+        positions=torch.tensor([255, 511, 383, 639], device=device),
+        compress_ratio=128,
+        num_decode_tokens=2,
+        token_to_req_indices=torch.tensor(
+            [0, 1, 0, 1], dtype=torch.int32, device=device
+        ),
+        block_table=torch.tensor([[3], [5]], dtype=torch.int32, device=device),
+        block_size=capacity_width,
+        slot_mapping=torch.arange(4, dtype=torch.int64, device=device),
+        global_decode_buffer=global_decode_buffer,
+        decode_lens_buffer=torch.empty(2, dtype=torch.int32, device=device),
+        prefill_buffer=prefill_buffer,
+    )
+    captured_decode, _, captured_prefill = build_c128a_topk_metadata(
+        max_compressed_tokens=256,
+        **kwargs,
+    )
+    assert captured_decode.shape == captured_prefill.shape == (2, 256)
+    assert captured_decode.stride(0) == captured_prefill.stride(0) == capacity_width
+
+    captured_rows = torch.empty((4, 4), dtype=torch.int32, device=device)
+    captured_rows[:2].copy_(captured_decode[:, :4])
+    captured_rows[2:].copy_(captured_prefill[:, :4])
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_rows[:2].copy_(captured_decode[:, :4])
+        captured_rows[2:].copy_(captured_prefill[:, :4])
+
+    global_decode_buffer.fill_(-99)
+    prefill_buffer.fill_(-99)
+    build_c128a_topk_metadata(
+        max_compressed_tokens=128,
+        **kwargs,
+    )
+    graph.replay()
+
+    assert captured_rows.cpu().tolist() == [
+        [1536, 1537, -1, -1],
+        [2560, 2561, 2562, 2563],
+        [0, 1, 2, -1],
+        [0, 1, 2, 3],
+    ]
+    assert torch.all(global_decode_buffer[:, 128:] == -99)
+    assert torch.all(prefill_buffer[:, 128:] == -99)
+
+
 def test_sparse_flashmla_metadata_smoke():
     import vllm.v1.attention.ops.flashmla as fm
 

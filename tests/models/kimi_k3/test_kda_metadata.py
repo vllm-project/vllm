@@ -87,6 +87,7 @@ def _make_builder(
     device: torch.device = DEVICE,
     mamba_cache_mode: str = "none",
     use_recoverssm: bool = False,
+    num_prefill_checkpoint_blocks: int = 0,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -110,6 +111,7 @@ def _make_builder(
             dtypes=(torch.float16,),
             mamba_cache_mode=mamba_cache_mode,
             num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
+            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -119,6 +121,70 @@ def _make_builder(
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
         builder.recoverssm_context = Mock()
     return builder
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[50, 32], query_lens=[50, 16])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True, True]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        device=device,
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        common_attn_metadata.block_table_tensor,
+        common_attn_metadata.seq_lens,
+        builder.kv_cache_spec,
+        "align",
+    )
+    actual = builder.build(0, common_attn_metadata)
+
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices,
+        torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32, device=device),
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets,
+        torch.tensor([48, 0], dtype=torch.int32, device=device),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_internal_checkpoint_metadata_skips_unaligned_offset():
+    device = torch.device("cuda")
+    # The checkpoint block boundary is 48, but this query starts at token 1,
+    # making the real checkpoint offset 47, which is not FlashKDA-aligned.
+    batch = BatchSpec(seq_lens=[50], query_lens=[49])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        device=device,
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        common_attn_metadata.block_table_tensor,
+        common_attn_metadata.seq_lens,
+        builder.kv_cache_spec,
+        "align",
+    )
+    actual = builder.build(0, common_attn_metadata)
+
+    assert actual.checkpoint is None
 
 
 @pytest.mark.parametrize(
@@ -280,6 +346,13 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         use_recoverssm=True,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    if mamba_cache_mode == "align":
+        builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
+            builder.kv_cache_spec,
+            mamba_cache_mode,
+        )
     context = builder.recoverssm_context
     assert context is not None
     actual = builder.build(
@@ -454,6 +527,36 @@ def test_kimi_k3_kda_backend_uses_private_metadata_builder():
     assert issubclass(KimiK3KDAAttentionBackend, GDNAttentionBackend)
     assert issubclass(KimiK3KDAMetadata, GDNAttentionMetadata)
     assert issubclass(KimiK3KDAMetadataBuilder, GDNAttentionMetadataBuilder)
+
+
+def test_kimi_k3_metadata_uses_precomputed_aligned_state_indices():
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False, False]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    precomputed_indices = torch.tensor(
+        [
+            [101, 102, 103],
+            [201, 202, 203],
+            [301, 302, 303],
+        ],
+        dtype=torch.int32,
+    )
+    builder.mamba_aligned_state_indices = precomputed_indices
+
+    metadata = builder.build(0, common_attn_metadata)
+
+    torch.testing.assert_close(
+        metadata.non_spec_state_indices_tensor,
+        precomputed_indices[: batch.batch_size, 0],
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

@@ -76,6 +76,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
+        if self.pcp_rank > 0:
+            return
+
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
         # moment in which requests expiration is set (P side) and the moment in
@@ -287,7 +290,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         assert (
             len(remote_block_ids)
             == len(local_block_ids)
-            == len(self.kv_cache_config.kv_cache_groups)
+            == len(self.kv_cache_config.transfer_groups)
         )
         local_block_ids, remote_block_ids = self._apply_prefix_caching(
             decode_block_ids=local_block_ids,
