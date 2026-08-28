@@ -21,6 +21,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     _masked_mha_workspace_fits,
@@ -824,18 +825,20 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 
     captured = {}
 
-    def _stub_kernel(q, kv, indices, lengths):
+    def _stub_kernel(q, kv, indices, lengths, actual_num_heads):
         captured["indices"] = indices
+        captured["actual_num_heads"] = actual_num_heads
         return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
 
     stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
 
     out = FlashMLASparseImpl._forward_bf16_kv(
-        stub_impl, q, kv_cache, topk_indices, attn_metadata
+        stub_impl, q, kv_cache, topk_indices, attn_metadata, q.shape[1]
     )
 
     assert out.shape[0] == num_mqa_tokens
     assert captured["indices"].shape[0] == num_mqa_tokens
+    assert captured["actual_num_heads"] == q.shape[1]
     reference = _triton_convert_reference_impl(
         attn_metadata.req_id_per_token[:num_mqa_tokens],
         attn_metadata.block_table,
@@ -882,6 +885,35 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
     )
 
 
+@pytest.mark.parametrize(
+    ("backend_name", "tensor_parallel_size", "query_len"),
+    [
+        ("FLASHMLA_SPARSE", 4, 48 * 1024),
+        ("FLASHMLA_SPARSE", 8, 112 * 1024),
+        ("FLASHINFER_MLA_SPARSE", 4, 36 * 1024),
+        ("FLASHINFER_MLA_SPARSE", 8, 64 * 1024),
+    ],
+)
+def test_masked_mha_workspace_guards_long_routing_policy(
+    backend_name, tensor_parallel_size, query_len
+):
+    assert _use_masked_mha(
+        backend_name=backend_name,
+        tensor_parallel_size=tensor_parallel_size,
+        qk_head_dim=256,
+        v_head_dim=256,
+        query_len=query_len,
+        seq_len=query_len,
+        has_context=False,
+    )
+    assert not _masked_mha_workspace_fits(
+        batch_size=1,
+        max_query_len=query_len,
+        max_context_chunk_seq_len=0,
+        workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+    )
+
+
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
     base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
@@ -910,14 +942,25 @@ PREFILL_BATCH_SPECS = {
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize(
+    ("num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [
+        pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
+        pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
+    ],
+)
 def test_sparse_backend_prefill_correctness(
     default_vllm_config,
     dist_init,
     batch_name,
     kv_cache_dtype,
+    num_heads,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
     workspace_init,
 ):
-    """Test single-pass dense and masked MHA for sparse MLA prefill."""
+    """Test dense and masked MHA across supported sparse MLA dimensions."""
     backend_cls = FlashMLASparseBackend
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
@@ -925,11 +968,7 @@ def test_sparse_backend_prefill_correctness(
     dtype = torch.bfloat16
     block_size = 64
 
-    num_heads = 128
     kv_lora_rank = 512
-    qk_nope_head_dim = 128
-    qk_rope_head_dim = 64
-    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
     masked_mha = batch_name.startswith("masked_mha")
     topk_tokens = 200 if masked_mha else 512
