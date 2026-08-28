@@ -1965,6 +1965,19 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
     @classmethod
+    @functools.cache
+    def qwen3_next_fp8_qkv_prep_available(cls) -> bool:
+        if not is_aiter_found_and_supported():
+            return False
+        try:
+            from aiter.ops.triton.rope.qwen3_next_fp8_qkv import (  # noqa: F401
+                qwen3_next_fp8_qkv_prep,
+            )
+        except (ImportError, ModuleNotFoundError):
+            return False
+        return True
+
+    @classmethod
     @if_aiter_supported
     def is_custom_all_reduce_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._CUSTOM_ALL_REDUCE_ENABLED
@@ -3237,6 +3250,9 @@ class rocm_aiter_ops:
         return_lse: bool = False,
         out: torch.Tensor | None = None,
         sink_ptr: torch.Tensor | None = None,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
     ):
         """
         Flash attention with variable length sequences.
@@ -3248,6 +3264,22 @@ class rocm_aiter_ops:
         Note: This performs lazy import of aiter.flash_attn_varlen_func
         """
         from aiter import flash_attn_varlen_func
+
+        descales = (q_descale, k_descale, v_descale)
+        if any(descale is not None for descale in descales) and any(
+            descale is None for descale in descales
+        ):
+            raise ValueError(
+                "AITER FP8 attention requires q_descale, k_descale, and "
+                "v_descale together"
+            )
+        extra_kwargs = {}
+        if q_descale is not None:
+            extra_kwargs = {
+                "q_descale": q_descale,
+                "k_descale": k_descale,
+                "v_descale": v_descale,
+            }
 
         return flash_attn_varlen_func(
             q=q,
@@ -3266,6 +3298,50 @@ class rocm_aiter_ops:
             return_lse=return_lse,
             out=out,
             sink_ptr=sink_ptr,
+            **extra_kwargs,
+        )
+
+    @staticmethod
+    def qwen3_next_fp8_qkv_prep(
+        q_gate: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        query_norm_weight: torch.Tensor,
+        key_norm_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        *,
+        num_actual_tokens: int,
+        quant_token_start: int,
+        quant_sequence_start: int,
+        num_query_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rotary_dim: int,
+        eps: float,
+    ):
+        from aiter.ops.triton.rope.qwen3_next_fp8_qkv import (
+            qwen3_next_fp8_qkv_prep,
+        )
+
+        return qwen3_next_fp8_qkv_prep(
+            q_gate,
+            key,
+            value,
+            query_norm_weight,
+            key_norm_weight,
+            cos_sin_cache,
+            positions,
+            cu_seqlens,
+            num_actual_tokens=num_actual_tokens,
+            quant_token_start=quant_token_start,
+            quant_sequence_start=quant_sequence_start,
+            num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
+            eps=eps,
         )
 
     @staticmethod

@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -17,6 +18,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -43,6 +45,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.qwen3_next_fp8_qkv import (
+    qwen3_next_fp8_qkv_prep,
+)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -53,7 +58,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, PrequantizedQKV
 
 from .interfaces import (
     EagleModelMixin,
@@ -74,6 +79,8 @@ from .utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -321,18 +328,79 @@ class Qwen3NextAttention(nn.Module):
             and supports_dtype
             and (text_only or supports_mrope)
         )
+        self.use_prequantized_qkv = (
+            self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and current_platform.is_rocm()
+            and text_only
+            and self.attn.supports_prequantized_qkv_input
+            and rocm_aiter_ops.qwen3_next_fp8_qkv_prep_available()
+        )
+        if self.use_prequantized_qkv:
+            logger.info_once("Using AITER Qwen3 Next prequantized FP8 QKV preparation")
 
     def _project_qkv_gate(
         self,
         qkv: torch.Tensor,
         positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        PrequantizedQKV | None,
+    ]:
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
         split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
         gating is disabled.
         """
+        if self.use_prequantized_qkv:
+            q_gate, k, v = qkv.split(
+                [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+            )
+            pos = positions[0] if positions.ndim == 2 else positions
+            (
+                q,
+                k,
+                gate,
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                q_descale,
+                k_descale,
+                v_descale,
+            ) = qwen3_next_fp8_qkv_prep(
+                q_gate,
+                k,
+                v,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rotary_emb.cos_sin_cache,
+                pos,
+                self.attn.layer_name,
+                self.q_norm.variance_epsilon,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.rotary_emb.rotary_dim,
+            )
+            return (
+                q,
+                k,
+                v,
+                gate,
+                PrequantizedQKV(
+                    query=q_fp8,
+                    key=k_fp8,
+                    value=v_fp8,
+                    query_descale=q_descale,
+                    key_descale=k_descale,
+                    value_descale=v_descale,
+                ),
+            )
+
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
@@ -360,7 +428,7 @@ class Qwen3NextAttention(nn.Module):
                     else None
                 ),
             )
-            return q, k, v, gate
+            return q, k, v, gate, None
 
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(
@@ -382,7 +450,7 @@ class Qwen3NextAttention(nn.Module):
             -1, self.num_kv_heads * self.head_dim
         )
         q, k = self.rotary_emb(positions, q, k)
-        return q, k, v, gate
+        return q, k, v, gate, None
 
     def forward(
         self,
@@ -390,8 +458,13 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        attn_output = self.attn(q, k, v)
+        q, k, v, gate, prequantized_qkv = self._project_qkv_gate(qkv, positions)
+        attn_output = self.attn(
+            q,
+            k,
+            v,
+            prequantized_qkv=prequantized_qkv,
+        )
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output, _ = self.o_proj(attn_output)
@@ -695,6 +768,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
