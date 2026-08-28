@@ -464,14 +464,15 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
                 virtual_block_indices * BLOCKS_PER_KV_BLOCK
                 + local_block_offsets // block_size
             )
+            in_range = block_indices < block_table_stride
             block_numbers = tl.load(
                 block_table_ptr + row_offset + block_indices,
-                mask=mask & is_local,
+                mask=mask & is_local & in_range,
                 other=0,
             ).to(tl.int64)
             slot_offsets = local_block_offsets % block_size
             slot_ids = block_numbers * block_size + slot_offsets
-            slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+            slot_ids = tl.where(is_local & in_range, slot_ids, PAD_ID)
             tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
     def dispatch(  # type: ignore[override]
