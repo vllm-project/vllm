@@ -362,7 +362,7 @@ def test_breakable_cudagraph_default_on_opt_out(monkeypatch, is_rocm):
 
 def test_breakable_cudagraph_yields_to_explicit_compilation(monkeypatch):
     """Breakable cudagraphs (default-on) yield when a compilation mode is
-    explicitly set, unless the env var explicitly enables breakable."""
+    explicitly set; setting both explicitly is a startup error."""
     import vllm.envs as envs
 
     envs.disable_envs_cache()
@@ -379,11 +379,10 @@ def test_breakable_cudagraph_yields_to_explicit_compilation(monkeypatch):
     assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
-    # Explicitly enabling breakable wins over the compilation mode.
+    # Explicitly enabling both is contradictory: rejected at config time.
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-    config = make_config()
-    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is True
-    assert config.compilation_config.mode == CompilationMode.NONE
+    with pytest.raises(ValueError, match="conflicts with the explicitly"):
+        VllmConfig._maybe_enable_breakable_cudagraph(make_config())
 
 
 @pytest.mark.parametrize(

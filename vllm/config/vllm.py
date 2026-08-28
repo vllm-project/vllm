@@ -723,8 +723,17 @@ class VllmConfig:
             self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.NONE
         )
+        env_set = "VLLM_USE_BREAKABLE_CUDAGRAPH" in os.environ
+        if env_set and explicitly_compiled and is_breakable_cudagraph_enabled():
+            raise ValueError(
+                "VLLM_USE_BREAKABLE_CUDAGRAPH=1 conflicts with the explicitly "
+                f"set compilation mode {self.compilation_config.mode}: "
+                "breakable cudagraphs replace torch.compile-based "
+                "compilation. Either set VLLM_USE_BREAKABLE_CUDAGRAPH=0 or "
+                "drop the explicit compilation mode."
+            )
         enabled = is_breakable_cudagraph_enabled() and not (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ and explicitly_compiled
+            not env_set and explicitly_compiled
         )
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
