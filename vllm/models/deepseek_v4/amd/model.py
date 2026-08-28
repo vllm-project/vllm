@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    DeepseekV4HeterogeneousAiterExperts,
     rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -216,10 +218,13 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("expert parallelism is enabled")
     if parallel_config.enable_eplb:
         reasons.append("EPLB is enabled")
-    if parallel_config.tensor_parallel_size != 8:
-        reasons.append("tensor parallelism is not 8")
-    if parallel_config.data_parallel_size != 1:
-        reasons.append("data parallelism is enabled")
+    if parallel_config.tensor_parallel_size * parallel_config.data_parallel_size != 8:
+        reasons.append("tensor parallelism times data parallelism is not 8")
+    if (
+        parallel_config.tensor_parallel_size > 1
+        and parallel_config.data_parallel_size > 1
+    ):
+        reasons.append("combined tensor and data parallelism is unsupported")
     if parallel_config.prefill_context_parallel_size != 1:
         reasons.append("prefill context parallelism is enabled")
     if vllm_config.kernel_config.moe_backend != "aiter":
@@ -295,15 +300,42 @@ def _prepare_native_fp8_shared_expert(
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     intermediate_size: int,
+    shard_rank: int = 0,
+    shard_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Expand native block-128 E8M0 scales to FHMoE's 1x32 layout."""
+    """Shard and expand native block-128 E8M0 scales for FHMoE's 1x32 layout."""
     if w13.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
         raise ValueError("Heterogeneous shared-expert weights must be FP8 E4M3.")
     hidden_size = w13.shape[1]
-    if w13.shape != (2 * intermediate_size, hidden_size):
+    full_intermediate_size = intermediate_size * shard_size
+    if w13.shape != (2 * full_intermediate_size, hidden_size):
         raise ValueError(f"Unexpected shared W13 shape {tuple(w13.shape)}.")
-    if w2.shape != (hidden_size, intermediate_size):
+    if w2.shape != (hidden_size, full_intermediate_size):
         raise ValueError(f"Unexpected shared W2 shape {tuple(w2.shape)}.")
+    if not 0 <= shard_rank < shard_size:
+        raise ValueError(f"Invalid shared expert shard {shard_rank}/{shard_size}.")
+    start = shard_rank * intermediate_size
+    end = start + intermediate_size
+    w13 = torch.cat(
+        (
+            w13[start:end],
+            w13[full_intermediate_size + start : full_intermediate_size + end],
+        ),
+        dim=0,
+    ).contiguous()
+    w2 = w2[:, start:end].contiguous()
+
+    scale_start = start // 128
+    scale_end = end // 128
+    full_scale_rows = full_intermediate_size // 128
+    w13_scale = torch.cat(
+        (
+            w13_scale[scale_start:scale_end],
+            w13_scale[full_scale_rows + scale_start : full_scale_rows + scale_end],
+        ),
+        dim=0,
+    ).contiguous()
+    w2_scale = w2_scale[:, scale_start:scale_end].contiguous()
 
     def scale_bytes(scale: torch.Tensor) -> torch.Tensor:
         if scale.dtype == torch.float8_e8m0fnu:
@@ -356,10 +388,38 @@ def _prepare_native_fp8_shared_expert(
 
 
 class DeepseekV4HeterogeneousMxfp4MoEMethod(Mxfp4MoEMethod):
+    def __init__(self, moe):
+        super().__init__(moe)
+        if moe.dp_size > 1:
+            self.experts_cls = DeepseekV4HeterogeneousAiterExperts
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         super().process_weights_after_loading(layer)
         assert isinstance(layer, DeepseekV4HeterogeneousSharedRoutedExperts)
         layer.prepare_heterogeneous_shared_expert()
+        if self.moe.dp_size == 1:
+            return
+        if self.moe_kernel is None:
+            raise RuntimeError("The heterogeneous modular kernel is unavailable.")
+        experts = self.moe_kernel.fused_experts
+        if not isinstance(experts, DeepseekV4HeterogeneousAiterExperts):
+            raise RuntimeError("The heterogeneous AITER experts are unavailable.")
+        if (
+            layer.shared_w1 is None
+            or layer.shared_w2 is None
+            or layer.shared_w1_scale is None
+            or layer.shared_w2_scale is None
+            or layer._routed_quant_config is None
+        ):
+            raise RuntimeError("The heterogeneous shared weights are unavailable.")
+        experts.configure_shared_expert(
+            shared_w1=layer.shared_w1,
+            shared_w2=layer.shared_w2,
+            shared_w1_scale=layer.shared_w1_scale,
+            shared_w2_scale=layer.shared_w2_scale,
+            shared_expert_id=layer.shared_expert_id,
+            routed_quant_config=layer._routed_quant_config,
+        )
 
 
 class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
@@ -395,12 +455,15 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         if shared_expert is None:
             raise RuntimeError("The native shared-expert module was released.")
 
+        moe_parallel_config = self.moe_config.moe_parallel_config
         shared = _prepare_native_fp8_shared_expert(
             shared_expert.gate_up_proj.weight,
             shared_expert.down_proj.weight,
             shared_expert.gate_up_proj.weight_scale_inv,
             shared_expert.down_proj.weight_scale_inv,
             self.moe_config.intermediate_size_per_partition,
+            shard_rank=moe_parallel_config.tp_rank,
+            shard_size=moe_parallel_config.tp_size,
         )
         self.shared_w1 = rocm_aiter_ops.shuffle_weight_a16w4(shared[0], 16, True)
         self.shared_w2 = rocm_aiter_ops.shuffle_weight_a16w4(shared[1], 16, False)
@@ -458,7 +521,24 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         ):
             raise RuntimeError("Heterogeneous shared weights were not prepared.")
 
-        if _use_heterogeneous_fhmoe(x.shape[0]):
+        num_fhmoe_tokens = x.shape[0]
+        if self.moe_config.dp_size > 1:
+            dp_metadata = get_forward_context().dp_metadata
+            assert dp_metadata is not None
+            sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+            assert sizes is not None
+            num_fhmoe_tokens = sum(sizes)
+
+        if _use_heterogeneous_fhmoe(num_fhmoe_tokens):
+            if self.moe_config.dp_size > 1:
+                return self.quant_method.apply(
+                    layer=self,
+                    x=x,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    shared_experts=None,
+                    shared_experts_input=None,
+                )
             self._ensure_moe_quant_config_init()
             quant_config = self.quant_method.moe_quant_config
             if quant_config is None:
@@ -474,7 +554,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 expert_mask=self.expert_map,
                 quant_config=quant_config,
                 output_dtype=x.dtype,
-                moe_sorting_dispatch_policy=(rocm_aiter_ops.get_moe_dispatch_policy()),
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
                 shared_w1=self.shared_w1,
                 shared_w2=self.shared_w2,
                 shared_w1_scale=self.shared_w1_scale,
@@ -486,23 +566,33 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         if shared_expert is None or self._routed_quant_config is None:
             raise RuntimeError("The separate shared-expert fallback is unavailable.")
         shared_out = shared_expert(x)
-        routed_w1 = self.w13_weight[: self.shared_expert_id]
-        routed_w2 = self.w2_weight[: self.shared_expert_id]
-        routed_w1.is_shuffled = True
-        routed_w2.is_shuffled = True
-        routed = rocm_aiter_fused_experts(
-            hidden_states=x,
-            w1=routed_w1,
-            w2=routed_w2,
-            topk_weights=topk_weights[:, :-1].contiguous(),
-            topk_ids=topk_ids[:, :-1].contiguous(),
-            moe_config=self.moe_config,
-            activation=self.activation,
-            expert_mask=self.expert_map,
-            quant_config=self._routed_quant_config,
-            output_dtype=x.dtype,
-            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
-        )
+        if self.moe_config.dp_size > 1:
+            routed = self.quant_method.apply(
+                layer=self,
+                x=x,
+                topk_weights=topk_weights[:, :-1].contiguous(),
+                topk_ids=topk_ids[:, :-1].contiguous(),
+                shared_experts=None,
+                shared_experts_input=None,
+            )
+        else:
+            routed_w1 = self.w13_weight[: self.shared_expert_id]
+            routed_w2 = self.w2_weight[: self.shared_expert_id]
+            routed_w1.is_shuffled = True
+            routed_w2.is_shuffled = True
+            routed = rocm_aiter_fused_experts(
+                hidden_states=x,
+                w1=routed_w1,
+                w2=routed_w2,
+                topk_weights=topk_weights[:, :-1].contiguous(),
+                topk_ids=topk_ids[:, :-1].contiguous(),
+                moe_config=self.moe_config,
+                activation=self.activation,
+                expert_mask=self.expert_map,
+                quant_config=self._routed_quant_config,
+                output_dtype=x.dtype,
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            )
         return routed + shared_out
 
 

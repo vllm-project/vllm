@@ -586,3 +586,137 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
+
+
+class DeepseekV4HeterogeneousAiterExperts(AiterExperts):
+    """AITER experts with DeepSeek V4's native-FP8 shared expert attached."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+        self.shared_w1: torch.Tensor | None = None
+        self.shared_w2: torch.Tensor | None = None
+        self.shared_w1_scale: torch.Tensor | None = None
+        self.shared_w2_scale: torch.Tensor | None = None
+        self.shared_expert_id = -1
+        self.routed_quant_config: FusedMoEQuantConfig | None = None
+
+    def configure_shared_expert(
+        self,
+        shared_w1: torch.Tensor,
+        shared_w2: torch.Tensor,
+        shared_w1_scale: torch.Tensor,
+        shared_w2_scale: torch.Tensor,
+        shared_expert_id: int,
+        routed_quant_config: FusedMoEQuantConfig,
+    ) -> None:
+        self.shared_w1 = shared_w1
+        self.shared_w2 = shared_w2
+        self.shared_w1_scale = shared_w1_scale
+        self.shared_w2_scale = shared_w2_scale
+        self.shared_expert_id = shared_expert_id
+        self.routed_quant_config = routed_quant_config
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        del global_num_experts, a2_scale, workspace13, workspace2
+        routed_columns = self.moe_config.experts_per_token
+        route_columns = topk_ids.shape[1]
+        if route_columns not in (routed_columns, routed_columns + 1):
+            raise ValueError(
+                "DeepSeek V4 heterogeneous routes must have either "
+                f"{routed_columns} or {routed_columns + 1} columns, "
+                f"got {route_columns}."
+            )
+
+        num_local_tokens = (
+            expert_tokens_meta.expert_num_tokens
+            if expert_tokens_meta is not None
+            else None
+        )
+        quant_config = self.routed_quant_config
+        shared_w1 = shared_w2 = shared_w1_scale = shared_w2_scale = None
+        shared_expert_id = -1
+        if route_columns == routed_columns + 1:
+            if any(
+                tensor is None
+                for tensor in (
+                    self.shared_w1,
+                    self.shared_w2,
+                    self.shared_w1_scale,
+                    self.shared_w2_scale,
+                )
+            ):
+                raise RuntimeError("Heterogeneous shared weights were not configured.")
+            quant_config = self.quant_config
+            shared_w1 = self.shared_w1
+            shared_w2 = self.shared_w2
+            shared_w1_scale = self.shared_w1_scale
+            shared_w2_scale = self.shared_w2_scale
+            shared_expert_id = self.shared_expert_id
+        else:
+            if quant_config is None or self.shared_expert_id < 0:
+                raise RuntimeError("Routed-only fallback was not configured.")
+            w1 = w1[: self.shared_expert_id]
+            w2 = w2[: self.shared_expert_id]
+            w1.is_shuffled = True
+            w2.is_shuffled = True
+
+        result = rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_mask=expert_map,
+            quant_config=quant_config,
+            moe_config=self.moe_config,
+            a1q_scale=a1q_scale,
+            num_local_tokens=num_local_tokens,
+            output_dtype=output.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+        )
+        if (
+            output.shape == result.shape
+            and output.dtype == result.dtype
+            and output.device == result.device
+            and output.is_contiguous()
+            and result.is_contiguous()
+            and output._base is None
+        ):
+            output.set_(result)
+        else:
+            output.copy_(result)
