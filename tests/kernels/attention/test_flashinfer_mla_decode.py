@@ -22,9 +22,9 @@ requires_sm90 = pytest.mark.skipif(
     not current_platform.is_device_capability_family(90),
     reason="This test requires an SM90 GPU.",
 )
-requires_sm100 = pytest.mark.skipif(
-    not current_platform.has_device_capability(100),
-    reason="This test requires an SM100 or newer GPU.",
+requires_sm10x = pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test requires an SM10x GPU.",
 )
 
 # Deepseek R1 MLA config.
@@ -92,7 +92,7 @@ def ref_mla(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("bs", [1, 2, 4, 16])
 @pytest.mark.parametrize("block_size", [32, 64])
-@requires_sm100
+@requires_sm10x
 def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     torch.set_default_device("cuda")
     torch.manual_seed(42)
@@ -130,7 +130,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     torch.testing.assert_close(out_ans, out_ref, atol=1e-2, rtol=1e-2)
 
 
-@requires_sm100
+@requires_sm10x
 def test_flashinfer_trtllm_sparse_mla_decode_without_rope():
     """The native sparse MLA path supports a zero-width rotary tail."""
     torch.set_default_device("cuda")
@@ -284,7 +284,7 @@ def test_flashinfer_sm90_fp8_mla_decode_without_rope():
     torch.testing.assert_close(out, out_ref, atol=2e-2, rtol=2e-2)
 
 
-@requires_sm100
+@requires_sm10x
 def test_flashinfer_mla_decode_workspace_supports_autotune():
     """vLLM's FlashInfer MLA decode workspace must be int8 for autotuning.
 

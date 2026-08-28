@@ -1038,6 +1038,14 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# The vLLM wheel still pins the stable FlashInfer Python package. Restore the
+# release candidate after installing vLLM so it matches the cubin and JIT cache.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
+        uv pip install --system --no-deps --reinstall \
+            "https://github.com/flashinfer-ai/flashinfer/releases/download/${FLASHINFER_RELEASE_TAG}/flashinfer_python-${FLASHINFER_VERSION}-py3-none-any.whl"; \
+    fi
+
 RUN --mount=type=cache,target=/opt/uv/cache \
 . /etc/environment && \
 uv pip list
@@ -1153,6 +1161,13 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
+
+# Keep FlashInfer Python aligned with the release-candidate runtime packages.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
+        uv pip install --system --no-deps --reinstall \
+            "https://github.com/flashinfer-ai/flashinfer/releases/download/${FLASHINFER_RELEASE_TAG}/flashinfer_python-${FLASHINFER_VERSION}-py3-none-any.whl"; \
     fi
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
