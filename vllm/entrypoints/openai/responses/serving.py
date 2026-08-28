@@ -78,6 +78,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
+from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
     ResponsesPreviousMessages,
@@ -484,6 +485,11 @@ class OpenAIServingResponses(GenerateBaseServing):
                 engine_input=engine_input,
                 sampling_params=sampling_params,
                 context=context,
+                tok_params=(
+                    request.build_tok_params(self.model_config)
+                    if isinstance(context, HarmonyContext)
+                    else None
+                ),
                 lora_request=lora_request,
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
@@ -604,6 +610,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         engine_input: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
+        tok_params: TokenizeParams | None = None,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
@@ -659,6 +666,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 engine_input = self.online_renderer.render_responses_harmony_messages(
                     context.messages,
                     cache_salt=cache_salt,
+                    tok_params=tok_params,
                 )
 
                 sampling_params.max_tokens = max_model_len - self._extract_prompt_len(

@@ -61,6 +61,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
+from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
     _extract_allowed_tools_from_mcp_requests,
@@ -654,8 +655,8 @@ class TestInitializeToolSessions:
         assert render_request.cache_salt == "request-salt"
 
     @pytest.mark.asyncio
-    async def test_harmony_tool_followup_preserves_cache_salt(
-        self, serving_responses_instance
+    async def test_harmony_tool_followup_preserves_render_params(
+        self, serving_responses_instance, monkeypatch: pytest.MonkeyPatch
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
@@ -682,12 +683,16 @@ class TestInitializeToolSessions:
         serving_responses_instance.engine_client.generate.side_effect = (
             lambda *args, **kwargs: generate_output()
         )
+        monkeypatch.setattr(
+            "vllm.renderers.online_renderer.render_for_completion",
+            lambda messages: [1, 2, 3, 4],
+        )
+        online_renderer = serving_responses_instance.online_renderer
+        online_renderer.renderer = SimpleNamespace(
+            tokenizer=SimpleNamespace(truncation_side="left")
+        )
         serving_responses_instance.online_renderer.render_responses_harmony_messages = (
-            MagicMock(
-                side_effect=lambda messages, *, cache_salt: tokens_input(
-                    [8, 9], cache_salt=cache_salt
-                )
-            )
+            OnlineRenderer.render_responses_harmony_messages.__get__(online_renderer)
         )
         serving_responses_instance._extract_prompt_len = MagicMock(return_value=2)
 
@@ -696,6 +701,11 @@ class TestInitializeToolSessions:
             engine_input=tokens_input([1], cache_salt="request-salt"),
             sampling_params=MagicMock(),
             context=context,
+            tok_params=TokenizeParams(
+                max_total_tokens=3,
+                max_output_tokens=1,
+                truncate_prompt_tokens=-1,
+            ),
         ):
             pass
 
@@ -704,6 +714,7 @@ class TestInitializeToolSessions:
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
         )
         assert followup_engine_input.get("cache_salt") == "request-salt"
+        assert followup_engine_input["prompt_token_ids"] == [3, 4]
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
