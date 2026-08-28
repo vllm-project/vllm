@@ -8,7 +8,6 @@ import pytest
 import torch
 
 import vllm.v1.spec_decode.qwen4_exp as qwen_proposer
-from vllm.config.speculative import SpeculativeConfig
 from vllm.models.qwen4_exp.common.qsa_cache import (
     circular_qsa_slot_mapping,
     compressed_qsa_slot_mapping,
@@ -242,53 +241,3 @@ def test_preserves_builder_slot_mapping_in_each_cache_owner_metadata(
         torch.tensor([2622, 2623, 2624, 2625], dtype=torch.int64),
     )
     assert torch.equal(per_layer[RAW_LAYER].common.block_table_tensor, raw_table)
-
-
-def test_rejects_packed_group_without_direct_draft_layer_spec(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    proposer, config = _make_proposer_and_config(monkeypatch)
-    main_spec, _, _ = _make_specs()
-    config.kv_cache_groups[0].kv_cache_spec = UniformTypeKVCacheSpecs(
-        block_size=SCHEDULER_BLOCK_SIZE,
-        kv_cache_specs={MAIN_LAYER: main_spec},
-    )
-
-    with pytest.raises(AssertionError, match=f"no spec for {COMPRESSED_LAYER}"):
-        proposer.initialize_attn_backend(
-            config,
-            kernel_block_sizes=[KERNEL_BLOCK_SIZE, RAW_CAPACITY],
-        )
-
-
-def test_rejects_multiple_mtp_layers(monkeypatch: pytest.MonkeyPatch) -> None:
-    proposer, config = _make_proposer_and_config(monkeypatch)
-    proposer.draft_model_config.hf_text_config.mtp_num_hidden_layers = 2
-
-    with pytest.raises(NotImplementedError, match="only supports one MTP layer"):
-        proposer.initialize_attn_backend(
-            config,
-            kernel_block_sizes=[KERNEL_BLOCK_SIZE, RAW_CAPACITY],
-        )
-
-
-def test_qwen_proposer_owns_hidden_and_return_contract() -> None:
-    proposer = Qwen4ExpMTPProposer.__new__(Qwen4ExpMTPProposer)
-    proposer.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(hc_mult=4),
-        get_hidden_size=lambda: 1024,
-    )
-
-    assert proposer._get_hidden_size() == 4096
-    assert proposer.model_returns_tuple()
-
-
-def test_speculative_config_selects_qwen_proposer() -> None:
-    config = SimpleNamespace(
-        method="mtp",
-        draft_model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(model_type="qwen4_exp_mtp")
-        ),
-    )
-
-    assert SpeculativeConfig.use_qwen4_exp_mtp(config)

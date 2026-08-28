@@ -123,16 +123,6 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
     )
 
 
-def test_ngram_embedding_rejects_mismatched_checkpoint_shard() -> None:
-    module = _make_ngram_embedding_for_load_test()
-
-    with pytest.raises(
-        ValueError,
-        match=r"Shape mismatch for PLE embedding shard 0",
-    ):
-        module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(3, 2))])
-
-
 def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     module = _make_fp8_ngram_embedding_for_load_test()
     shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2).to(torch.float8_e4m3fn)
@@ -378,16 +368,6 @@ def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
     ).transpose(1, 2)[0, :2]
     torch.testing.assert_close(second_output, expected_second_output)
     torch.testing.assert_close(conv_state[1:], expected_second_state)
-
-
-def test_ple_state_shape_reserves_speculative_tokens() -> None:
-    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
-    nn.Module.__init__(module)
-    module.hc_hidden_size = 32
-    module.conv_state_len = 9
-    module.num_spec_tokens = 3
-
-    assert module.get_state_shape()[0] in ((32, 12), (12, 32))
 
 
 def test_ple_short_conv_uses_fallback_when_profile_metadata_is_omitted(

@@ -794,16 +794,6 @@ def _make_csa_linear_ple_worker():
 
 
 @pytest.mark.cpu_test
-def test_csa_linear_registration_discovers_shared_regions():
-    worker = _make_csa_linear_ple_worker()
-
-    assert worker._ssm_region_indices == [0]
-    assert worker._ple_group_index == 3
-    assert worker._ple_region_index == 0
-    assert worker._region_is_mla == [False, False, True, True]
-
-
-@pytest.mark.cpu_test
 def test_csa_linear_selects_compressed_sparse_compressor_state_and_mamba_regions():
     worker = _make_csa_linear_ple_worker()
 

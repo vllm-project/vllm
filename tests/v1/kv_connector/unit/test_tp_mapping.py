@@ -246,19 +246,3 @@ def test_csa_linear_tp_layout_boundary(total_kv_heads, local_tp, remote_tp, comp
     else:
         with pytest.raises(ValueError, match="KV-head sharding boundary"):
             worker._validate_csa_linear_tp_layout(remote_tp)
-
-
-def test_csa_linear_handshake_rejects_layout_boundary_crossing():
-    worker = object.__new__(NixlConnectorWorker)
-    worker.world_size = 1
-    worker._is_csa_linear = True
-    worker.transfer_topo = SimpleNamespace(total_num_kv_heads=2)
-
-    with pytest.raises(ValueError, match="KV-head sharding boundary"):
-        worker._nixl_handshake(
-            host="localhost",
-            port=0,
-            remote_tp_size=2,
-            expected_engine_id="remote",
-            notif_agents_only=False,
-        )

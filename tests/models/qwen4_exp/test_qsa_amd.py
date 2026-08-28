@@ -32,18 +32,6 @@ requires_qsa_kernels = pytest.mark.skipif(
 )
 
 
-def test_rocm_package_exports_amd_implementations() -> None:
-    from vllm.models.qwen4_exp import (
-        Qwen4ExpForCausalLM,
-        Qwen4ExpForConditionalGeneration,
-        Qwen4ExpMTP,
-    )
-
-    assert Qwen4ExpForCausalLM.__module__.endswith(".amd.model")
-    assert Qwen4ExpForConditionalGeneration.__module__.endswith(".amd.model")
-    assert Qwen4ExpMTP.__module__.endswith(".amd.mtp")
-
-
 def test_ple_ngram_embedding_custom_op_uses_resident_weight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

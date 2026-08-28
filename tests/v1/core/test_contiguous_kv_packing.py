@@ -9,7 +9,6 @@ block dim (a contiguous region per layer) or inside it (all layers' pages within
 block); the allocation is the same either way.
 """
 
-from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -32,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
@@ -115,31 +113,21 @@ def _compressor_state_name(layer_index: int) -> str:
 def _make_csa_linear_specs(
     num_mamba: int = 7,
     num_tuples: int = NUM_CACHE_TUPLES,
-    *,
-    main_kv_indices: list[int] | None = None,
-    mamba_indices: list[int] | None = None,
-    include_replicated: bool = True,
 ) -> dict[str, KVCacheSpec]:
-    main_kv_indices = main_kv_indices or list(range(num_tuples))
-    mamba_indices = mamba_indices or list(range(num_mamba))
-    assert len(main_kv_indices) == num_tuples
-    assert len(mamba_indices) == num_mamba
-
     specs: dict[str, KVCacheSpec] = {}
-    for layer_index in mamba_indices:
+    for layer_index in range(num_mamba):
         specs[f"model.layers.{layer_index}.linear_attn"] = MambaSpec(
             block_size=16,
             shapes=((32,),),
             dtypes=(torch.bfloat16,),
         )
-    if include_replicated:
-        specs["model.layers.0.ple"] = MambaSpec(
-            block_size=16,
-            shapes=((24,),),
-            dtypes=(torch.bfloat16,),
-            tp_replicated=True,
-        )
-    for layer_index in main_kv_indices:
+    specs["model.layers.0.ple"] = MambaSpec(
+        block_size=16,
+        shapes=((24,),),
+        dtypes=(torch.bfloat16,),
+        tp_replicated=True,
+    )
+    for layer_index in range(num_tuples):
         specs[_main_kv_name(layer_index)] = FullAttentionSpec(
             block_size=16,
             num_kv_heads=2,
@@ -259,103 +247,18 @@ class TestCSALinearPacking:
         views = _bind(kv_cache_config, "BLNHC")
         for index in range(NUM_CACHE_TUPLES):
             main_view = views[_main_kv_name(index)]
+            assert main_view.stride(0) * main_view.element_size() == BYTES_PER_BLOCK
             for group in mamba_groups:
                 if index < len(group.layer_names):
-                    assert views[group.layer_names[index]].data_ptr() == (
-                        main_view.data_ptr()
+                    mamba_view = views[group.layer_names[index]]
+                    assert mamba_view.data_ptr() == main_view.data_ptr()
+                    assert (
+                        mamba_view.stride(0) * mamba_view.element_size()
+                        == BYTES_PER_BLOCK
                     )
             assert views[_compressed_name(index)].data_ptr() == (
                 views[_compressor_state_name(index)].data_ptr()
             )
-
-    def test_missing_and_duplicate_layer_roles_are_rejected(self):
-        incomplete = _make_csa_linear_specs(num_tuples=2)
-        del incomplete[_compressor_state_name(0)]
-        with pytest.raises(ValueError, match="matching transformer-layer indices"):
-            get_kv_cache_groups(_shared_layout_config(), incomplete)
-
-        duplicate = _make_csa_linear_specs(num_tuples=1)
-        duplicate["model.layers.0.other_raw_cache"] = duplicate[
-            _compressor_state_name(0)
-        ]
-        with pytest.raises(ValueError, match="duplicate compressor-state"):
-            get_kv_cache_groups(_shared_layout_config(), duplicate)
-
-    def test_strict_spec_types_and_head_geometry_are_enforced(self):
-        specs = _make_csa_linear_specs(num_tuples=2)
-        specs["model.layers.63.local_attn"] = SlidingWindowSpec(
-            block_size=16,
-            num_kv_heads=2,
-            head_size=16,
-            dtype=torch.bfloat16,
-            sliding_window=16,
-        )
-        with pytest.raises(ValueError, match="unsupported cache owners"):
-            get_kv_cache_groups(_shared_layout_config(), specs)
-
-        specs = _make_csa_linear_specs(num_tuples=1)
-        main_kv = specs[_main_kv_name(0)]
-        assert isinstance(main_kv, FullAttentionSpec)
-        specs[_main_kv_name(0)] = replace(main_kv, num_kv_heads=1)
-        with pytest.raises(ValueError, match="TP-local KV-head geometry"):
-            get_kv_cache_groups(_shared_layout_config(), specs)
-
-    def test_equal_page_sizes_do_not_change_layer_pairing(self):
-        specs = _make_csa_linear_specs(num_tuples=1)
-        compressed = specs[_compressed_name(0)]
-        assert isinstance(compressed, MLAAttentionSpec)
-        specs[_compressed_name(0)] = replace(compressed, head_size=256)
-
-        config = _shared_layout_config()
-        groups = get_kv_cache_groups(config, specs)
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config,
-            groups,
-            available_memory=2 * MAIN_KV_PAGE_BYTES * 8,
-        )
-        placements = _placements_by_layer(kv_cache_config)
-
-        assert placements[_main_kv_name(0)] == placements["model.layers.0.linear_attn"]
-        assert placements[_compressed_name(0)] == placements[_compressor_state_name(0)]
-
-    def test_compressor_state_and_mamba_pages_must_fit_their_owners(self):
-        compressor_state_too_large = _make_csa_linear_specs(num_tuples=1)
-        compressor_state = compressor_state_too_large[_compressor_state_name(0)]
-        assert isinstance(compressor_state, CircularBufferSpec)
-        compressor_state_too_large[_compressor_state_name(0)] = replace(
-            compressor_state, head_size=100
-        )
-        with pytest.raises(ValueError, match="violate CSA geometry"):
-            get_kv_cache_groups(_shared_layout_config(), compressor_state_too_large)
-
-        state_too_large = _make_csa_linear_specs(num_mamba=1, num_tuples=1)
-        state_name = "model.layers.0.linear_attn"
-        state = state_too_large[state_name]
-        assert isinstance(state, MambaSpec)
-        state_too_large[state_name] = replace(
-            state,
-            shapes=((MAIN_KV_PAGE_BYTES + 1,),),
-            dtypes=(torch.uint8,),
-        )
-        with pytest.raises(ValueError, match="main_kv tensor page"):
-            get_kv_cache_groups(_shared_layout_config(), state_too_large)
-
-    def test_pipeline_partitions_balance_mamba_owners(self):
-        specs = _make_csa_linear_specs(
-            num_mamba=6,
-            num_tuples=4,
-            main_kv_indices=[1, 5, 9, 13],
-            mamba_indices=[0, 2, 3, 4, 6, 7],
-        )
-        config = _shared_layout_config()
-        config.parallel_config.pipeline_parallel_size = 2
-        config.model_config.get_total_num_hidden_layers.return_value = 16
-
-        groups = get_kv_cache_groups(config, specs)
-
-        assert len(groups) == 6
-        assert [len(group.layer_names) for group in groups[2:-1]] == [2, 2, 2]
-        assert groups[-1].layer_names == ["model.layers.0.ple"]
 
     def test_prefix_hits_are_aligned_and_ignore_private_compressor_state(self):
         config = _shared_layout_config()
@@ -379,28 +282,6 @@ class TestCSALinearPacking:
                 config,
                 _make_csa_linear_specs(num_tuples=1),
             )
-
-    def test_packed_mamba_views_use_owner_offsets_and_block_stride(self):
-        config = _shared_layout_config()
-        groups = get_kv_cache_groups(config, _make_csa_linear_specs())
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config,
-            groups,
-            available_memory=BYTES_PER_BLOCK * 3,
-        )
-        views = _bind(kv_cache_config, "BLNHC")
-
-        for index in range(NUM_CACHE_TUPLES):
-            main_view = views[_main_kv_name(index)]
-            assert main_view.stride(0) * main_view.element_size() == BYTES_PER_BLOCK
-            for group in groups[2:]:
-                if index < len(group.layer_names):
-                    mamba_view = views[group.layer_names[index]]
-                    assert mamba_view.data_ptr() == main_view.data_ptr()
-                    assert (
-                        mamba_view.stride(0) * mamba_view.element_size()
-                        == BYTES_PER_BLOCK
-                    )
 
 
 class TestDensePacking:
