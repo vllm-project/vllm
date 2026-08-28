@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config import ParallelConfig
@@ -57,29 +58,30 @@ def test_ep_dispatch_sizes_preserve_dp_pcp_order_without_sp():
         assert sizes == [10, 7, 5, 3]
 
 
-def test_moe_dp_pcp_group_ranks_fix_tp_coordinate():
-    all_ranks = torch.arange(8).reshape(1, 2, 1, 2, 2)
+@pytest.mark.parametrize(
+    ("dp_size", "pcp_size", "expected"),
+    [
+        (2, 2, [[0, 2, 4, 6], [1, 3, 5, 7]]),
+        (2, 1, [[0, 2], [1, 3]]),
+        (1, 2, [[0, 2], [1, 3]]),
+        (1, 1, [[0], [1]]),
+    ],
+)
+def test_moe_dp_pcp_group_ranks_fix_tp_coordinate(dp_size, pcp_size, expected):
+    all_ranks = torch.arange(dp_size * pcp_size * 2).reshape(1, dp_size, 1, pcp_size, 2)
 
     group_ranks = _get_moe_dp_pcp_group_ranks(
         all_ranks,
-        data_parallel_size=2,
-        prefill_context_parallel_size=2,
+        data_parallel_size=dp_size,
+        prefill_context_parallel_size=pcp_size,
     )
 
-    assert group_ranks == [[0, 2, 4, 6], [1, 3, 5, 7]]
+    assert group_ranks == expected
 
 
 def test_ag_rs_selects_moe_dp_pcp_group_for_non_sp(monkeypatch):
     moe_dp_pcp_group = object()
-    pcp_group = SimpleNamespace(world_size=2)
-    dp_metadata = SimpleNamespace(num_tokens_across_dp_pcp_cpu=torch.tensor([1]))
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
-    manager.dp_world_size = 2
-
-    monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_pcp_group",
-        lambda: pcp_group,
-    )
     monkeypatch.setattr(
         "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
         lambda: moe_dp_pcp_group,
@@ -88,11 +90,6 @@ def test_ag_rs_selects_moe_dp_pcp_group_for_non_sp(monkeypatch):
         "vllm.distributed.device_communicators.all2all.has_moe_dp_pcp_group",
         lambda: True,
     )
-    monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_forward_context",
-        lambda: SimpleNamespace(dp_metadata=dp_metadata),
-    )
-
     assert manager._uses_moe_dp_pcp_group(is_sequence_parallel=False)
     assert manager._get_comm_group(is_sequence_parallel=False) is moe_dp_pcp_group
 

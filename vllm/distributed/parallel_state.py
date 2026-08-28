@@ -1415,10 +1415,11 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
-# The MoE DP-PCP group is used for activation dispatch and combine when DP and
-# PCP are enabled without sequence parallelism. Each group fixes ExternalDP,
-# PP, and TP while spanning DP x PCP ranks in DP -> PCP order, allowing one
-# variable-sized collective to cover both parallel axes.
+# The MoE DP-PCP group is the activation dispatch and combine group for static
+# MoE execution without sequence parallelism. Each group fixes ExternalDP, PP,
+# and TP while spanning DP x PCP ranks in DP -> PCP order. A size-one DP or PCP
+# dimension naturally degenerates to the remaining dimension, so this group is
+# used uniformly for every non-SP MoE topology.
 _MOE_DP_PCP_GROUP: GroupCoordinator | None = None
 
 
@@ -1955,11 +1956,7 @@ def initialize_model_parallel(
     if config.model_config is None or config.model_config.is_moe:
         global _MOE_DP_PCP_GROUP
         assert _MOE_DP_PCP_GROUP is None, "MoE DP-PCP group is already initialized"
-        if (
-            not enable_elastic_ep
-            and data_parallel_size > 1
-            and prefill_context_model_parallel_size > 1
-        ):
+        if not enable_elastic_ep:
             _MOE_DP_PCP_GROUP = init_model_parallel_group(
                 _get_moe_dp_pcp_group_ranks(
                     all_ranks,

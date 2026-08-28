@@ -67,9 +67,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         )
 
     def _uses_moe_dp_pcp_group(self, is_sequence_parallel: bool) -> bool:
-        return has_moe_dp_pcp_group() and self._uses_dp_pcp_metadata(
-            is_sequence_parallel
-        )
+        return not is_sequence_parallel and has_moe_dp_pcp_group()
 
     def _uses_staged_dp_pcp(self, is_sequence_parallel: bool) -> bool:
         return not has_moe_dp_pcp_group() and self._uses_dp_pcp_metadata(
