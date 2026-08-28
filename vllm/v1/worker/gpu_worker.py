@@ -93,6 +93,19 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 
+def _dp_local_rank_offset(parallel_config) -> int:
+    """Return the local device offset of a data-parallel replica."""
+    dp_local_rank = parallel_config.data_parallel_rank_local
+    if dp_local_rank is None:
+        dp_local_rank = parallel_config.data_parallel_index
+    model_parallel_world_size = (
+        parallel_config.pipeline_parallel_size
+        * parallel_config.prefill_context_parallel_size
+        * parallel_config.tensor_parallel_size
+    )
+    return dp_local_rank * model_parallel_world_size
+
+
 def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
     spec_config = vllm_config.speculative_config
     return (
@@ -323,18 +336,8 @@ class Worker(WorkerBase):
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
             ):
-                # Use local DP rank if available, otherwise use global DP rank.
-                dp_local_rank = self.parallel_config.data_parallel_rank_local
-                if dp_local_rank is None:
-                    dp_local_rank = self.parallel_config.data_parallel_index
-
-                tp_pp_world_size = (
-                    self.parallel_config.pipeline_parallel_size
-                    * self.parallel_config.tensor_parallel_size
-                )
-
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * TP_PP_PCP_WORLD_SIZE + MODEL_LOCAL_RANK
+                self.local_rank += _dp_local_rank_offset(self.parallel_config)
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.

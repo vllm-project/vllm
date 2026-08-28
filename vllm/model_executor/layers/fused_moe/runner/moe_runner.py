@@ -636,8 +636,23 @@ class MoERunner(MoERunnerInterface):
         returns a no-op context.
         """
         ctx = get_forward_context()
+        parallel_config = self.moe_config.moe_parallel_config
+        num_dispatchers_per_dp_rank = self.moe_config.sp_size
+        if parallel_config.use_all2all_kernels:
+            if parallel_config.is_sequence_parallel:
+                assert parallel_config.ep_size % parallel_config.dp_size == 0
+                num_dispatchers_per_dp_rank = (
+                    parallel_config.ep_size // parallel_config.dp_size
+                )
+            else:
+                # TP is an expert-sharding axis in non-SP MoE and is reduced
+                # separately. Only PCP contributes another token dispatcher.
+                num_dispatchers_per_dp_rank = parallel_config.pcp_size
         return (
-            ctx.dp_metadata.sp_local_sizes(self.moe_config.sp_size)
+            ctx.dp_metadata.sp_local_sizes(
+                self.moe_config.sp_size,
+                num_dispatchers_per_dp_rank,
+            )
             if ctx.dp_metadata
             else nullcontext()
         )

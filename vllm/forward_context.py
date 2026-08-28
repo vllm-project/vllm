@@ -59,19 +59,33 @@ class BatchDescriptor:
 
 
 def _compute_sp_num_tokens(
-    num_tokens_across_dp_cpu: torch.Tensor, sequence_parallel_size: int
+    num_tokens_across_dp_cpu: torch.Tensor,
+    sequence_parallel_size: int,
+    num_replicas_per_token_count: int | None = None,
 ) -> list[int]:
+    """Expand token counts into EP-dispatcher order.
+
+    Sequence parallelism first shards each token count across TP. Remaining
+    dispatcher axes replicate that resulting local count.
+    """
+    if num_replicas_per_token_count is None:
+        num_replicas_per_token_count = sequence_parallel_size
+    assert num_replicas_per_token_count >= sequence_parallel_size
+
     sp_tokens = (
         num_tokens_across_dp_cpu + sequence_parallel_size - 1
     ) // sequence_parallel_size
 
-    sp_tokens = sp_tokens.repeat_interleave(sequence_parallel_size)
+    sp_tokens = sp_tokens.repeat_interleave(num_replicas_per_token_count)
     return sp_tokens.tolist()
 
 
 @dataclass
 class DPMetadata:
     num_tokens_across_dp_cpu: torch.Tensor
+    # Flattened in DP -> PCP order. Each entry is the token count local to one
+    # PCP coordinate before any TP sequence-parallel sharding.
+    num_tokens_across_dp_pcp_cpu: torch.Tensor | None = None
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: list[int] | None = None
@@ -96,16 +110,64 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
-        return DPMetadata(num_tokens_across_dp_cpu)
+        num_tokens_across_dp_pcp_cpu = None
+        if (
+            parallel_config.data_parallel_size > 1
+            and parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.enable_expert_parallel
+        ):
+            from vllm.distributed import get_pcp_group
+
+            pcp_group = get_pcp_group()
+            counts_by_pcp = [
+                torch.empty_like(num_tokens_across_dp_cpu)
+                for _ in range(pcp_group.world_size)
+            ]
+            torch.distributed.all_gather(
+                counts_by_pcp,
+                num_tokens_across_dp_cpu,
+                group=pcp_group.cpu_group,
+            )
+            # all_gather produces PCP -> DP. EP ranks are DP -> PCP -> TP.
+            num_tokens_across_dp_pcp_cpu = torch.stack(
+                counts_by_pcp, dim=1
+            ).flatten()
+
+        return DPMetadata(
+            num_tokens_across_dp_cpu,
+            num_tokens_across_dp_pcp_cpu,
+        )
 
     @contextmanager
-    def sp_local_sizes(self, sequence_parallel_size: int):
+    def sp_local_sizes(
+        self,
+        sequence_parallel_size: int,
+        num_dispatchers_per_dp_rank: int | None = None,
+    ):
         """
         Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
+        token_counts = self.num_tokens_across_dp_cpu
+        count_groups_per_dp_rank = 1
+        if self.num_tokens_across_dp_pcp_cpu is not None:
+            token_counts = self.num_tokens_across_dp_pcp_cpu
+            count_groups_per_dp_rank = (
+                token_counts.numel() // self.num_tokens_across_dp_cpu.numel()
+            )
+
+        if num_dispatchers_per_dp_rank is None:
+            num_dispatchers_per_dp_rank = (
+                sequence_parallel_size * count_groups_per_dp_rank
+            )
+        assert num_dispatchers_per_dp_rank % count_groups_per_dp_rank == 0
+        num_replicas_per_token_count = (
+            num_dispatchers_per_dp_rank // count_groups_per_dp_rank
+        )
         self.local_sizes = _compute_sp_num_tokens(
-            self.num_tokens_across_dp_cpu, sequence_parallel_size
+            token_counts,
+            sequence_parallel_size,
+            num_replicas_per_token_count,
         )
         try:
             yield self.local_sizes
