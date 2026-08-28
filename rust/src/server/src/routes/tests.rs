@@ -37,6 +37,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -888,6 +889,126 @@ where
 
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
     test_app_with_stream_output_specs(default_stream_output_specs()).await
+}
+
+async fn test_app_with_embedding_output() -> (axum::Router, MockEngineTask) {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-embeddings".to_vec();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id,
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                assert!(request.sampling_params.is_none());
+                let pooling = request.pooling_params.as_ref().expect("pooling params");
+                assert_eq!(pooling.task.as_deref(), Some("embed"));
+                assert_eq!(pooling.dimensions, Some(2));
+                assert_eq!(pooling.use_activation, Some(false));
+                assert_eq!(
+                    request.prompt_token_ids.as_deref(),
+                    Some([FAKE_BOS_TOKEN_ID, b'h' as u32, b'i' as u32].as_slice())
+                );
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![EngineCoreOutput {
+                            request_id: request.request_id,
+                            pooling_output: Some(
+                                WireNdArray::from_f32(vec![2], vec![0.25, -0.5])
+                                    .expect("embedding tensor"),
+                            ),
+                            finish_reason: Some(EngineCoreFinishReason::Stop),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
+#[tokio::test]
+async fn embeddings_returns_openai_response_and_pooling_usage() {
+    let (mut app, engine_task) = test_app_with_embedding_output().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/embeddings")
+                .header("content-type", "application/json")
+                .header("x-request-id", "embedding-request")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "input": "hi",
+                        "dimensions": 2,
+                        "use_activation": false,
+                        "encoding_format": "float"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let mut value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    value["created"] = json!("<timestamp>");
+    expect_test::expect![[r#"
+        Object {
+            "id": String("embd-embedding-request"),
+            "object": String("list"),
+            "created": String("<timestamp>"),
+            "model": String("Qwen/Qwen1.5-0.5B-Chat"),
+            "data": Array [
+                Object {
+                    "object": String("embedding"),
+                    "index": Number(0),
+                    "embedding": Array [
+                        Number(0.25),
+                        Number(-0.5),
+                    ],
+                },
+            ],
+            "usage": Object {
+                "prompt_tokens": Number(3),
+                "total_tokens": Number(3),
+                "completion_tokens": Number(0),
+                "prompt_tokens_details": Null,
+            },
+        }
+    "#]]
+    .assert_debug_eq(&value);
+
+    engine_task.finish().await;
 }
 
 async fn test_app_with_stream_output_specs(

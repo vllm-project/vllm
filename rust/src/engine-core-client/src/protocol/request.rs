@@ -66,6 +66,42 @@ pub struct ReasoningParserKwargs {
     pub chat_template_kwargs: HashMap<String, serde_json::Value>,
 }
 
+/// Pooling parameters sent to the Python engine-core.
+///
+/// The tuple field order mirrors Python's array-like `PoolingParams` struct.
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct EngineCorePoolingParams {
+    pub use_activation: Option<bool>,
+    pub dimensions: Option<u32>,
+    pub step_tag_id: Option<u32>,
+    pub returned_token_ids: Option<Vec<u32>>,
+    pub task: Option<String>,
+    pub requires_token_ids: bool,
+    pub skip_reading_prefix_cache: Option<bool>,
+    pub late_interaction_params: Option<OpaqueValue>,
+    pub extra_kwargs: Option<OpaqueValue>,
+    pub output_kind: u8,
+}
+
+impl EngineCorePoolingParams {
+    /// Build parameters for the OpenAI embeddings endpoint.
+    pub fn embeddings(dimensions: Option<u32>, use_activation: Option<bool>) -> Self {
+        Self {
+            // Python's verified embed parameters default activation on.
+            use_activation: Some(use_activation.unwrap_or(true)),
+            dimensions,
+            step_tag_id: None,
+            returned_token_ids: None,
+            task: Some("embed".to_string()),
+            requires_token_ids: false,
+            skip_reading_prefix_cache: Some(false),
+            late_interaction_params: None,
+            extra_kwargs: None,
+            output_kind: 2,
+        }
+    }
+}
+
 /// Engine-core add-request payload sent from frontend to engine.
 ///
 /// Original Python definition:
@@ -77,9 +113,7 @@ pub struct EngineCoreRequest {
     /// Multimodal features attached to the request.
     pub mm_features: Option<MmFeatures>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
-    /// Pooling parameters are preserved in the schema but not yet strongly
-    /// typed.
-    pub pooling_params: Option<OpaqueValue>,
+    pub pooling_params: Option<EngineCorePoolingParams>,
     pub arrival_time: f64,
     #[serde(default)]
     pub lora_request: Option<lora::LoraRequest>,
@@ -158,6 +192,50 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
+
+    #[test]
+    fn embedding_pooling_params_match_python_tuple_layout() {
+        let params = EngineCorePoolingParams::embeddings(Some(128), Some(false));
+        let value = rmpv::ext::to_value(params).expect("encode pooling params");
+
+        expect_test::expect![[r#"
+            Array(
+                [
+                    Boolean(
+                        false,
+                    ),
+                    Integer(
+                        PosInt(
+                            128,
+                        ),
+                    ),
+                    Nil,
+                    Nil,
+                    String(
+                        Utf8String {
+                            s: Ok(
+                                "embed",
+                            ),
+                        },
+                    ),
+                    Boolean(
+                        false,
+                    ),
+                    Boolean(
+                        false,
+                    ),
+                    Nil,
+                    Nil,
+                    Integer(
+                        PosInt(
+                            2,
+                        ),
+                    ),
+                ],
+            )
+        "#]]
+        .assert_debug_eq(&value);
+    }
     use crate::protocol::multimodal::{
         MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
     };
