@@ -67,12 +67,13 @@ def test_multi_node_assignment() -> None:
         gpus_needed = len(workers)
         deadline = time.monotonic() + 60
         node_id = ray.get_runtime_context().get_node_id()
-        wait_interval = 1
-        while time.monotonic() < deadline:
+        while True:
             free_gpus = available_resources_per_node().get(node_id, {}).get("GPU", 0)
             if free_gpus >= gpus_needed:
                 break
-            wait_interval *= 2
-            time.sleep(wait_interval)
-        else:
-            raise TimeoutError("placement group resources were not released")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("placement group resources were not released")
+
+            time.sleep(min(1, remaining))
