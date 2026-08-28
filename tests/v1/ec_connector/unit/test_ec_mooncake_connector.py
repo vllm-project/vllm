@@ -526,7 +526,9 @@ class TestECMooncakeSchedulerMetadata:
             )
             try:
                 scheduler._event_shard_count = len(ports)
-                scheduler._cancelled_transfer_ids.add(transfer_id)
+                scheduler._cancelled_transfer_ids[transfer_id] = (
+                    time.monotonic() + _LEASE_TTL_SECONDS
+                )
                 scheduler._event_zmq_socket = Mock()
                 scheduler._event_zmq_socket.recv_json.side_effect = [
                     {**event, "shard": port} for port in ports
@@ -536,6 +538,115 @@ class TestECMooncakeSchedulerMetadata:
 
                 assert transfer_id not in scheduler._pending_specs
                 assert transfer_id not in scheduler._event_ready_shards
+                assert scheduler._consumer_scheduler_metrics["events_cancelled"] == (
+                    len(ports)
+                )
+            finally:
+                scheduler.shutdown()
+
+    def test_cancel_between_shards_drops_the_partial_readiness(
+        self, mock_vllm_config_consumer, mock_request_with_3_mm
+    ):
+        """A cancel mid-aggregation leaves nothing for the late shards to finish.
+
+        The early shards are already counted when the request releases the
+        item. Only clearing them keeps the remaining notifications from
+        completing the set and rebuilding a spec for a buffer the worker
+        freed as it cancelled.
+        """
+        request = mock_request_with_3_mm
+        request.mm_features = request.mm_features[:1]
+        mm_hash = request.mm_features[0].identifier
+        transfer_id = "half-reported-transfer"
+        request.ec_transfer_params = {
+            "ec_items": [{"mm_hash": mm_hash, "transfer_id": transfer_id}]
+        }
+        event = {
+            "mm_hash": mm_hash,
+            "transfer_id": transfer_id,
+            "ready": True,
+            "reservation_id": "reservation",
+            "nbytes": 16,
+            "shape": [4],
+            "dtype": "float32",
+        }
+
+        def deliver(scheduler, *shards):
+            scheduler._event_zmq_socket.recv_json.side_effect = [
+                {**event, "shard": shard} for shard in shards
+            ] + [zmq.Again()]
+            scheduler._drain_pending = True
+            scheduler._drain_push_notifications()
+
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            try:
+                scheduler._reservation_zmq_addr = "tcp://127.0.0.1:19101"
+                scheduler._event_shard_count = 4
+                scheduler._event_zmq_socket = Mock()
+
+                deliver(scheduler, 0, 1)
+                assert scheduler._event_ready_shards[transfer_id] == {0, 1}
+
+                with patch.object(scheduler, "_cancel_remote", return_value=True):
+                    scheduler.update_state_after_free(request, 0)
+                assert transfer_id in scheduler._cancelled_transfer_ids
+                assert transfer_id not in scheduler._event_ready_shards
+
+                deliver(scheduler, 2, 3)
+
+                assert transfer_id not in scheduler._pending_specs
+                assert transfer_id not in scheduler._event_ready_shards
+                assert scheduler._consumer_scheduler_metrics["events_cancelled"] == 2
+            finally:
+                scheduler.shutdown()
+
+    def test_cancelled_transfer_ids_stay_bounded(self, mock_vllm_config_consumer):
+        """The ignore list is swept, not accumulated.
+
+        It is consulted for every readiness notification and grows by one
+        entry per multimodal item the instance serves, so retaining ids the
+        worker has itself forgotten leaks for the life of the process.
+        """
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            try:
+                scheduler._reservation_zmq_addr = "tcp://127.0.0.1:19101"
+                scheduler._event_zmq_socket = Mock()
+                scheduler._event_zmq_socket.recv_json.side_effect = zmq.Again()
+                with patch.object(scheduler, "_cancel_remote", return_value=True):
+                    for name in ("first", "second", "third"):
+                        scheduler._queue_cancel(name)
+
+                now = time.monotonic()
+                assert scheduler._cancelled_transfer_ids["third"] > now
+                assert scheduler._cancelled_transfer_ids["third"] <= (
+                    now + _LEASE_TTL_SECONDS
+                )
+
+                # Ignored for exactly as long as the worker refuses to reserve
+                # the id again, and no longer. The drain is what sweeps.
+                scheduler._cancelled_transfer_ids["first"] = 0.0
+                scheduler._drain_pending = True
+                scheduler._drain_push_notifications()
+                assert list(scheduler._cancelled_transfer_ids) == ["second", "third"]
+
+                # The count is the backstop for a rate that outruns the TTL.
+                with patch(
+                    "vllm.distributed.ec_transfer.ec_connector."
+                    "mooncake_ec_connector._MAX_CANCELLED_TRANSFER_IDS",
+                    1,
+                ):
+                    scheduler._drain_pending = True
+                    scheduler._drain_push_notifications()
+                assert list(scheduler._cancelled_transfer_ids) == ["third"]
+                assert (
+                    scheduler._consumer_scheduler_metrics["cancel_records_dropped"] == 2
+                )
             finally:
                 scheduler.shutdown()
 
@@ -1731,6 +1842,39 @@ class TestECMooncakeWorkerTransfer:
                 consumer._expire_push_reservations()
                 replacement = consumer._reserve_push_destination(payload)
                 assert replacement["write"]
+            finally:
+                consumer.shutdown()
+
+    def test_repeated_cancel_does_not_strand_older_tombstones(
+        self, mock_vllm_config_consumer
+    ):
+        """Re-cancelling refreshes a tombstone without breaking the sweep order.
+
+        The sweep stops at the first live record, so a refreshed one that kept
+        its original position would shield every older record behind it and
+        the table would grow for the life of the process.
+        """
+        mock_vllm_config_consumer.ec_transfer_config.ec_buffer_device = "cpu"
+        mock_vllm_config_consumer.ec_transfer_config.ec_buffer_size = 4096
+        mock_vllm_config_consumer.ec_transfer_config.ec_connector_extra_config[
+            "consumer_buffer_pool_size"
+        ] = 4096
+
+        with patch_ec_mooncake_deps():
+            consumer = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.WORKER
+            )
+            try:
+                consumer._ensure_consumer_pool(torch.device("cpu"), allow_host=True)
+                assert consumer._cancel_push("refreshed-transfer", "")
+                assert consumer._cancel_push("stale-transfer", "")
+                consumer._cancelled_transfers["stale-transfer"] = 0.0
+                assert consumer._cancel_push("refreshed-transfer", "")
+
+                consumer._expire_push_reservations()
+
+                assert list(consumer._cancelled_transfers) == ["refreshed-transfer"]
+                assert consumer._consumer_worker_metrics["cancel_records_dropped"] == 1
             finally:
                 consumer.shutdown()
 

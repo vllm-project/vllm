@@ -52,6 +52,10 @@ _DRAIN_MIN_INTERVAL = 0.005
 # reserve reply. Cap the queue so a shard nobody subscribed to cannot grow
 # without bound.
 _MAX_PENDING_EVENTS = 4096
+# A cancelled transfer stays on the scheduler's ignore list for as long as the
+# worker refuses to reserve it again. The count is a backstop for a rate that
+# outruns that TTL; the race it guards is a single drain interval wide.
+_MAX_CANCELLED_TRANSFER_IDS = 1 << 16
 
 _MOONCAKE_IMPORT_ERROR: ImportError | None
 try:
@@ -750,7 +754,7 @@ class ECMooncakeConnector(ECConnectorBase):
         self._consumer_pool_disabled = self._consumer_pool_capacity <= 0
         self._consumer_lock = threading.Lock()
         self._push_reservations: dict[str, _PushReservation] = {}
-        self._cancelled_transfers: dict[str, float] = {}
+        self._cancelled_transfers: OrderedDict[str, float] = OrderedDict()
         self._control_server: ECMooncakeControlServer | None = None
         self._consumer_metrics_log_interval = float(
             self._extra.get("consumer_metrics_log_interval", 10)
@@ -770,7 +774,9 @@ class ECMooncakeConnector(ECConnectorBase):
         self._consumer_pending_since: dict[str, float] = {}
         self._pending_spec_deadlines: dict[str, float] = {}
         self._pending_cancels: dict[str, Future[Any]] = {}
-        self._cancelled_transfer_ids: set[str] = set()
+        # Cancelled transfers, oldest deadline first, so the sweep can stop
+        # at the first live entry.
+        self._cancelled_transfer_ids: OrderedDict[str, float] = OrderedDict()
 
         # Scheduler (consumer): transfer_id -> pending tensor layout.
         self._pending_specs: dict[str, ECMooncakeLoadSpec] = {}
@@ -1414,6 +1420,30 @@ class ECMooncakeConnector(ECConnectorBase):
         self._consumer_scheduler_metrics.clear()
         self._consumer_metrics_started_at = now
 
+    @staticmethod
+    def _expire_cancel_records(records: OrderedDict[str, float], now: float) -> int:
+        """Drop the cancels that can no longer be told apart from unknown ids.
+
+        Both roles keep one record per multimodal item they handle, and both
+        consult it on a per-item hot path, so a full rescan costs the square
+        of the item rate: at 53 items/s the worker's 300 s window is 16k
+        entries and its sweep ran under `_consumer_lock` on every
+        reservation. Callers append in deadline order -- `move_to_end` when
+        refreshing one -- so the front is always the oldest and the sweep
+        stops at the first live entry.
+
+        Returns:
+            How many records were dropped.
+        """
+        dropped = 0
+        while records:
+            expires_at = next(iter(records.values()))
+            if expires_at > now and len(records) <= _MAX_CANCELLED_TRANSFER_IDS:
+                break
+            records.popitem(last=False)
+            dropped += 1
+        return dropped
+
     def _expire_push_reservations_locked(self) -> None:
         now = time.monotonic()
         allocator = self._consumer_pool_allocator
@@ -1427,9 +1457,9 @@ class ECMooncakeConnector(ECConnectorBase):
                 )
             self._push_reservations.pop(transfer_id)
             self._consumer_worker_metrics["reservations_expired"] += 1
-        for transfer_id, expires_at in list(self._cancelled_transfers.items()):
-            if expires_at <= now:
-                self._cancelled_transfers.pop(transfer_id)
+        self._consumer_worker_metrics["cancel_records_dropped"] += (
+            self._expire_cancel_records(self._cancelled_transfers, now)
+        )
 
     def _expire_push_reservations(self) -> int:
         with self._consumer_lock:
@@ -1595,6 +1625,7 @@ class ECMooncakeConnector(ECConnectorBase):
             self._cancelled_transfers[transfer_id] = (
                 time.monotonic() + _LEASE_TTL_SECONDS
             )
+            self._cancelled_transfers.move_to_end(transfer_id)
             if reservation is None:
                 self._consumer_worker_metrics["cancellations_pre_reserved"] += 1
                 return True
@@ -1748,7 +1779,7 @@ class ECMooncakeConnector(ECConnectorBase):
             try:
                 cancelled = future.result()
             except Exception:
-                self._cancelled_transfer_ids.discard(transfer_id)
+                self._cancelled_transfer_ids.pop(transfer_id, None)
                 self._consumer_scheduler_metrics["cancellations_failed"] += 1
                 logger.warning(
                     "EC Mooncake reservation cancellation failed", exc_info=True
@@ -2351,7 +2382,9 @@ class ECMooncakeConnector(ECConnectorBase):
             or transfer_id in self._cancelled_transfer_ids
         ):
             return
-        self._cancelled_transfer_ids.add(transfer_id)
+        self._cancelled_transfer_ids[transfer_id] = (
+            time.monotonic() + _LEASE_TTL_SECONDS
+        )
         self._pending_cancels[transfer_id] = self._control_executor.submit(
             self._cancel_remote,
             self._reservation_zmq_addr,
@@ -2415,6 +2448,9 @@ class ECMooncakeConnector(ECConnectorBase):
         self._drained_at = now
         self._poll_pending_cancels()
         self._expire_pending_specs()
+        self._consumer_scheduler_metrics["cancel_records_dropped"] += (
+            self._expire_cancel_records(self._cancelled_transfer_ids, now)
+        )
         if self._reservation_zmq_addr is not None:
             self._ensure_event_channel()
         socket = self._event_zmq_socket
@@ -2431,6 +2467,7 @@ class ECMooncakeConnector(ECConnectorBase):
                 self._consumer_scheduler_metrics["events_ready"] += 1
                 transfer_id = str(data["transfer_id"])
                 if transfer_id in self._cancelled_transfer_ids:
+                    self._consumer_scheduler_metrics["events_cancelled"] += 1
                     continue
                 if identifier in self._ready_hashes:
                     # Redundant only for as long as the hash stays ready; hold
