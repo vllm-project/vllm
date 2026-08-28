@@ -617,7 +617,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         state_indices = state_indices_tensor_d.to(
             device=conv_state.device, dtype=torch.int64
         )
-        # TODO: need double-check
         # FULL cudagraph padded decode rows use NULL_BLOCK_ID. Remap them to
         # slot 0 for a safe gather, then zero output and skip write-back.
         valid_state = state_indices != NULL_BLOCK_ID
