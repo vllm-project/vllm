@@ -14,16 +14,59 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_external_computed_blocks_do_not_corrupt_free_pool():
+    block_size = 4
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    manager = FullAttentionManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "request"
+    manager.allocate_new_blocks(
+        request_id,
+        num_tokens=3 * block_size,
+        num_tokens_main_model=3 * block_size,
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    # Speculative allocations can exceed the blocks implied by the eventual
+    # external computed-token count. This must not request a negative number
+    # of blocks, which inflates the free-queue counter.
+    manager.allocate_external_computed_blocks(
+        request_id,
+        num_local_computed_tokens=0,
+        num_external_computed_tokens=block_size,
+    )
+
+    assert block_pool.get_num_free_blocks() == num_free_blocks
+    assert len(manager.req_to_blocks[request_id]) == 3
 
 
 def get_sliding_window_manager(
