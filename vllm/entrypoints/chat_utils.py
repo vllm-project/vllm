@@ -1407,7 +1407,13 @@ def _get_interleaved_text_prompt(
 ) -> str:
     for idx, elem in enumerate(texts):
         if elem in placeholder_storage:
-            texts[idx] = placeholder_storage[elem].pop(0)
+            slots = placeholder_storage[elem]
+            if not slots:
+                raise VLLMValidationError(
+                    f"Found more '{elem}' placeholders in input prompt than "
+                    "actual multimodal data items."
+                )
+            texts[idx] = slots.pop(0)
 
     return "\n".join(texts)
 
