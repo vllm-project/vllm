@@ -11,6 +11,7 @@ import importlib
 import importlib.util
 import os
 import shutil
+import threading
 from collections.abc import Callable
 from typing import Any, NoReturn
 
@@ -171,6 +172,50 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
+
+_AUTOTUNE_DELAY_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def autotune_with_torch_cuda_delay(*args, **kwargs):
+    if not has_flashinfer():
+        yield
+        return
+
+    autotuner = _get_submodule("flashinfer.autotuner")
+    if autotuner is None or not hasattr(autotuner, "autotune"):
+        yield
+        return
+
+    autotune_fn = autotuner.autotune
+    implementation_name = getattr(autotune_fn, "__module__", "")
+    implementation = (
+        _get_submodule(implementation_name) if implementation_name else None
+    )
+    delay_owners = []
+    for module in (autotuner, implementation):
+        if (
+            module is not None
+            and hasattr(module, "delay_kernel")
+            and all(module is not owner for owner in delay_owners)
+        ):
+            delay_owners.append(module)
+
+    def torch_delay(microseconds: int) -> None:
+        torch.cuda._sleep(max(1, int(microseconds) * 1000))
+
+    with _AUTOTUNE_DELAY_LOCK:
+        original_delays = [owner.delay_kernel for owner in delay_owners]
+        for owner in delay_owners:
+            owner.delay_kernel = torch_delay
+        try:
+            with autotune_fn(*args, **kwargs):
+                yield
+        finally:
+            for owner, original_delay in zip(
+                delay_owners, original_delays, strict=True
+            ):
+                owner.delay_kernel = original_delay
 
 
 @functools.cache
@@ -727,6 +772,36 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_nvfp4_quantize_128x4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_nvfp4_quantize_128x4_op(
+        a: torch.Tensor, a_global_sf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import nvfp4_quantize as nvfp4_quantize_
+
+        return nvfp4_quantize_(
+            a,
+            a_global_sf,
+            sfLayout=SfLayout.layout_128x4,
+            do_shuffle=False,
+        )
+
+    @torch.library.register_fake("vllm::flashinfer_nvfp4_quantize_128x4")
+    def flashinfer_nvfp4_quantize_128x4_fake(
+        a: torch.Tensor, a_global_sf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, n = a.shape
+        rounded_m = cdiv(m, 128) * 128
+        scale_n = cdiv(n // 16, 4) * 4
+        return (
+            torch.empty(m, n // 2, dtype=torch.uint8, device=a.device),
+            torch.empty(rounded_m, scale_n, dtype=torch.uint8, device=a.device),
+        )
+
+    @torch.library.custom_op(
         "vllm::flashinfer_mxfp8_quantize_8x4",
         mutates_args=[],
         device_types="cuda",
@@ -985,6 +1060,16 @@ def flashinfer_quant_nvfp4_8x4_sf_layout(
     return flashinfer_nvfp4_quantize(a, a_global_sf)
 
 
+def flashinfer_nvfp4_quantize_128x4(
+    a: torch.Tensor, a_global_sf: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not has_flashinfer():
+        raise RuntimeError("FlashInfer is required for NVFP4 quantization")
+    return torch.ops.vllm.flashinfer_nvfp4_quantize_128x4.default(
+        a, a_global_sf
+    )
+
+
 flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
     "flashinfer.gemm", "fp8_blockscale_gemm_sm90"
 )
@@ -1094,6 +1179,7 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
+    "autotune_with_torch_cuda_delay",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
@@ -1114,6 +1200,7 @@ __all__ = [
     "flashinfer_scaled_fp8_mm",
     "flashinfer_scaled_fp8_mm_out",
     "flashinfer_quant_nvfp4_8x4_sf_layout",
+    "flashinfer_nvfp4_quantize_128x4",
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",

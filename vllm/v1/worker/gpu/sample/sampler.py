@@ -103,6 +103,72 @@ class Sampler:
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
 
+    def get_vocab_parallel_sampling_params(
+        self, input_batch: InputBatch
+    ) -> tuple[str, int, float, float, bool] | None:
+        """Return parameters for the exact vocab-parallel greedy fast path.
+
+        The compact lm-head path does not materialize logits, so requests that
+        need any logits processor remain on the regular sampler.  Keeping this
+        check in the sampler makes the model runner independent of sampling
+        state details and keeps the fast path semantics narrow.
+        """
+        idx_mapping_np = input_batch.idx_mapping_np
+        if (
+            idx_mapping_np.size == 0
+            or self.compute_nans
+            or self.return_sampling_mask
+            or self.trace_replay_state is not None
+            or np.any(self.needs_logits_processing[idx_mapping_np])
+            or self.sampling_states.max_num_logprobs(idx_mapping_np) != NO_LOGPROBS
+            or self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) > 0
+            or self.sampling_states.any_explicit_seed(idx_mapping_np)
+        ):
+            return None
+
+        temperatures = self.sampling_states.temperature.np[idx_mapping_np]
+        top_ks = self.sampling_states.top_k.np[idx_mapping_np]
+        top_ps = self.sampling_states.top_p.np[idx_mapping_np]
+        min_ps = self.sampling_states.min_p.np[idx_mapping_np]
+        if not (
+            np.all(temperatures == 0.0)
+            and np.all(top_ks == self.sampling_states.vocab_size)
+            and np.all(top_ps == 1.0)
+            and np.all(min_ps == 0.0)
+        ):
+            return None
+
+        return (
+            "greedy",
+            self.sampling_states.vocab_size,
+            1.0,
+            0.0,
+            False,
+        )
+
+    def make_sampler_output(
+        self,
+        sampled: torch.Tensor,
+        input_batch: InputBatch,
+        *,
+        num_nans: torch.Tensor | None = None,
+    ) -> SamplerOutput:
+        """Build the standard one-token output for pre-sampled rows."""
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled.view(-1, 1),
+            logprobs_tensors=None,
+            num_nans=num_nans,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
+
     def get_logprobs_dims(
         self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
     ) -> tuple[int, int] | None:

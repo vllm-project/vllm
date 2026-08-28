@@ -72,6 +72,48 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
+@triton.jit(do_not_specialize=["max_spec_len"])
+def _compact_greedy_rejection_sample_kernel(
+    output_token_ids_ptr,
+    target_token_ids_ptr,
+    draft_sampled_ptr,
+    cu_num_logits_ptr,
+    max_spec_len,
+):
+    req_idx = tl.program_id(0)
+    start_idx = 0 if req_idx == 0 else tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_draft_tokens = end_idx - start_idx - 1
+
+    rejected = False
+    for pos in range(num_draft_tokens):
+        if not rejected:
+            target_token_id = tl.load(target_token_ids_ptr + start_idx + pos).to(
+                tl.int64
+            )
+            draft_token_id = tl.load(
+                draft_sampled_ptr + start_idx + pos + 1
+            ).to(tl.int64)
+            accepted = target_token_id == draft_token_id
+            token_id = draft_token_id
+            if not accepted:
+                rejected = True
+                token_id = target_token_id
+            tl.store(
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                token_id,
+            )
+
+    if not rejected:
+        bonus_token_id = tl.load(target_token_ids_ptr + end_idx - 1).to(tl.int64)
+        tl.store(
+            output_token_ids_ptr
+            + req_idx * (max_spec_len + 1)
+            + num_draft_tokens,
+            bonus_token_id,
+        )
+
+
 class RejectionSampler:
     def __init__(
         self,
@@ -296,6 +338,70 @@ class RejectionSampler:
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
+
+    def sample_from_greedy_tokens(
+        self,
+        target_token_ids: torch.Tensor,
+        input_batch: InputBatch,
+    ) -> SamplerOutput:
+        """Verify greedy drafts using only target token IDs."""
+        assert target_token_ids.ndim == 1
+        assert target_token_ids.shape[0] == int(input_batch.cu_num_logits_np[-1])
+        assert input_batch.num_draft_tokens_per_req is not None
+        assert self.synthetic_conditional_rates is None
+        assert not self.use_block_verification
+
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        sampled = torch.full(
+            (input_batch.num_reqs, self.num_speculative_steps + 1),
+            -1,
+            dtype=torch.int64,
+            device=target_token_ids.device,
+        )
+        if target_token_ids.is_cuda:
+            _compact_greedy_rejection_sample_kernel[(input_batch.num_reqs,)](
+                sampled,
+                target_token_ids,
+                draft_sampled,
+                input_batch.cu_num_logits,
+                self.num_speculative_steps,
+            )
+        else:
+            cu_num_logits = input_batch.cu_num_logits_np
+            for req_idx in range(input_batch.num_reqs):
+                start_idx = int(cu_num_logits[req_idx])
+                end_idx = int(cu_num_logits[req_idx + 1])
+                num_draft_tokens = end_idx - start_idx - 1
+                rejected = False
+                for pos in range(num_draft_tokens):
+                    if rejected:
+                        break
+                    target_token = int(target_token_ids[start_idx + pos])
+                    draft_token = int(draft_sampled[start_idx + pos + 1])
+                    sampled[req_idx, pos] = (
+                        draft_token if target_token == draft_token else target_token
+                    )
+                    rejected = target_token != draft_token
+                if not rejected:
+                    sampled[req_idx, num_draft_tokens] = int(
+                        target_token_ids[end_idx - 1]
+                    )
+
+        num_sampled = (sampled != -1).sum(dim=-1, dtype=torch.int32)
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )

@@ -488,12 +488,13 @@ class ExecuteModelState(NamedTuple):
     sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
-    logits: torch.Tensor
+    logits: torch.Tensor | None
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
+    pre_sampled_output: SamplerOutput | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
@@ -3751,16 +3752,70 @@ class GPUModelRunner(
             ec_connector_output,
         )
 
+    def _can_use_hybrid_greedy(
+        self,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> bool:
+        if not envs.VLLM_HYBRID_NVFP4_LM_HEAD:
+            return False
+        if self.broadcast_pp_output or spec_decode_metadata is not None:
+            return False
+        if scheduler_output.has_structured_output_requests:
+            return False
+        if not hasattr(self.model, "get_top_tokens"):
+            return False
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not sampling_metadata.all_greedy:
+            return False
+        if sampling_metadata.generators:
+            return False
+        if self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES:
+            return False
+        if (
+            sampling_metadata.max_num_logprobs is not None
+            or sampling_metadata.logprob_token_ids
+            or sampling_metadata.allowed_token_ids_mask is not None
+            or sampling_metadata.bad_words_token_ids
+            or not sampling_metadata.no_penalties
+        ):
+            return False
+
+        for logitproc in sampling_metadata.logitsprocs.non_argmax_invariant:
+            biases = getattr(logitproc, "biases", None)
+            if biases is not None:
+                if biases:
+                    return False
+                continue
+            min_toks = getattr(logitproc, "min_toks", None)
+            if min_toks is not None:
+                if min_toks:
+                    return False
+                continue
+            return False
+
+        holder = sampling_metadata.thinking_budget_state_holder
+        if holder is not None and holder.has_tracked_requests():
+            return False
+        num_reqs = self.input_batch.num_reqs
+        return num_reqs > 0 and bool(
+            np.all(self.input_batch.temperature_cpu[:num_reqs] == 0.0)
+        )
+
     def _sample(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        pre_sampled_output: SamplerOutput | None = None,
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         # Update output token ids with tokens sampled in last step
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
+        if pre_sampled_output is not None:
+            return pre_sampled_output
         if spec_decode_metadata is None:
             return self.sampler(
                 logits=logits,
@@ -4590,8 +4645,23 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
+                pre_sampled_output = None
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                if self._can_use_hybrid_greedy(
+                    scheduler_output, spec_decode_metadata
+                ):
+                    logger.info_once(
+                        "Using hybrid NVFP4 lm-head greedy sampling fast path.",
+                        scope="global",
+                    )
+                    sampled = self.model.get_top_tokens(sample_hidden_states)
+                    pre_sampled_output = SamplerOutput(
+                        sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
+                        logprobs_tensors=None,
+                    )
+                    logits = None
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4621,6 +4691,7 @@ class GPUModelRunner(
                 )
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
+                pre_sampled_output = None
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
@@ -4630,6 +4701,7 @@ class GPUModelRunner(
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
+            pre_sampled_output,
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
@@ -4681,6 +4753,7 @@ class GPUModelRunner(
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
+            pre_sampled_output,
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
@@ -4690,12 +4763,15 @@ class GPUModelRunner(
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
+            assert pre_sampled_output is None
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(
+                logits, spec_decode_metadata, pre_sampled_output
+            )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

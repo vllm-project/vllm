@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
@@ -413,5 +414,62 @@ def warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
+
+    if (
+        envs.VLLM_HYBRID_NVFP4_LM_HEAD
+        and not model_runner.is_pooling_model
+        and hasattr(model_runner.model, "get_top_tokens")
+    ):
+        next_block_id = 1
+        req_id = "_v2_vocab_parallel_warmup_greedy_"
+        decode_block_deltas = [
+            block_count(prompt_len + decode_query_len, spec) - held
+            for spec, held in zip(kv_cache_specs, prefill_block_counts)
+        ]
+        request = NewRequestData.from_request(
+            Request(
+                req_id,
+                prompt_token_ids,
+                SamplingParams(
+                    max_tokens=max(2, decode_query_len + 1),
+                    temperature=0.0,
+                ),
+                None,
+                mm_features=warmup_mm_features,
+            ),
+            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
+            prefill_token_ids=prompt_token_ids,
+        )
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [request]
+        output.num_scheduled_tokens = {req_id: prompt_len}
+        output.total_num_scheduled_tokens = prompt_len
+        output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+        worker_execute_model(output)
+        worker_sample_tokens(None)
+
+        if num_spec_steps > 0:
+            cached = CachedRequestData.make_empty()
+            cached.req_ids = [req_id]
+            cached.num_computed_tokens = [prompt_len]
+            cached.num_output_tokens = [1]
+            cached.new_block_ids = [
+                tuple(_alloc_blocks(n) for n in decode_block_deltas)
+                if any(decode_block_deltas)
+                else None
+            ]
+            decode = SchedulerOutput.make_empty()
+            decode.scheduled_cached_reqs = cached
+            decode.num_scheduled_tokens = {req_id: decode_query_len}
+            decode.scheduled_spec_decode_tokens = {req_id: [0] * num_spec_steps}
+            decode.total_num_scheduled_tokens = decode_query_len
+            decode.num_common_prefix_blocks = [0] * num_kv_cache_groups
+            worker_execute_model(decode)
+            worker_sample_tokens(None)
+
+        cleanup = SchedulerOutput.make_empty()
+        cleanup.finished_req_ids = {req_id}
+        worker_execute_model(cleanup)
+
     model_runner.kv_connector.set_disabled(False)
     torch.accelerator.synchronize()

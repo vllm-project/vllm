@@ -20,7 +20,17 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
+
+if HAS_TRITON:
+    from vllm.model_executor.layers.argmax_triton import (
+        indexed_argmax_triton,
+        reduce_global_argmax_triton,
+    )
+else:
+    indexed_argmax_triton = None
+    reduce_global_argmax_triton = None
 
 logger = init_logger(__name__)
 
@@ -211,6 +221,70 @@ class LogitsProcessor(PluggableLayer):
             )
         tp_size = lm_head.tp_size
 
+        hybrid_state = getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None)
+        shard_indices = lm_head.shard_indices
+        num_pad = shard_indices.num_org_vocab_padding
+        local_vocab_size = getattr(shard_indices, "num_elements_padded", None)
+        if local_vocab_size is None:
+            local_vocab_size = getattr(
+                lm_head,
+                "num_embeddings_per_partition",
+                self.vocab_size,
+            )
+        active_vocab_size = local_vocab_size - num_pad
+        if (
+            hybrid_state is not None
+            and self.soft_cap is None
+            and self.scale > 0.0
+            and hybrid_state.can_use(
+                hidden_states,
+                bf16_weight=lm_head.weight,
+                active_vocab_size=active_vocab_size,
+                top_k=1,
+            )
+        ):
+            coarse_logits = hybrid_state.coarse_logits(
+                hidden_states,
+                embedding_bias,
+            )
+            if num_pad > 0:
+                coarse_logits[..., -num_pad:] = -float("inf")
+            candidate_indices = hybrid_state.select_candidates(
+                coarse_logits,
+                top_k=1,
+            )
+            exact_logits = hybrid_state.refine_logits(
+                hidden_states,
+                lm_head.weight,
+                candidate_indices,
+                embedding_bias,
+            )
+            if (
+                indexed_argmax_triton is not None
+                and exact_logits.is_cuda
+                and 0 < exact_logits.shape[-1] <= 1024
+            ):
+                local_max_vals, global_indices = indexed_argmax_triton(
+                    exact_logits,
+                    candidate_indices,
+                    index_offset=shard_indices.org_vocab_start_index,
+                )
+            else:
+                local_max_vals, candidate_pos = exact_logits.max(dim=-1)
+                local_max_indices = candidate_indices.gather(
+                    -1, candidate_pos.unsqueeze(-1)
+                ).squeeze(-1)
+                global_indices = (
+                    local_max_indices + shard_indices.org_vocab_start_index
+                )
+            if self.scale != 1.0:
+                local_max_vals = local_max_vals * self.scale
+            return self.reduce_local_argmax(
+                local_max_vals,
+                global_indices,
+                tp_size=tp_size,
+            )
+
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if self.soft_cap is not None:
             logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
@@ -223,23 +297,40 @@ class LogitsProcessor(PluggableLayer):
             logits[..., -num_pad:] = -float("inf")
 
         local_max_vals, local_max_indices = logits.max(dim=-1)
-
-        # Convert shard-local indices to global vocab indices.
         vocab_start = lm_head.shard_indices.org_vocab_start_index
         global_indices = local_max_indices + vocab_start
 
         if tp_size == 1:
             return global_indices
 
-        # All-gather (value, index) pairs, then reduce to global argmax.
-        # Use float32 to avoid bf16 precision loss on large vocab indices.
         local_pair = torch.stack(
             [local_max_vals.float(), global_indices.float()], dim=-1
         )
-        # [batch, 2] -> [batch, 2 * tp_size]
         gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
-        # [batch, tp_size, 2] where [:, :, 0]=values, [:, :, 1]=indices
         gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
+        max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
+        top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
+        return top_tokens.squeeze(-1).to(torch.int64)
+
+    def reduce_local_argmax(
+        self,
+        local_max_vals: torch.Tensor,
+        global_indices: torch.Tensor,
+        *,
+        tp_size: int,
+    ) -> torch.Tensor:
+        if tp_size == 1:
+            return global_indices.to(torch.int64)
+
+        local_pair = torch.stack(
+            [local_max_vals.float(), global_indices.float()], dim=-1
+        )
+        gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
+        if reduce_global_argmax_triton is not None and gathered.is_cuda:
+            return reduce_global_argmax_triton(gathered, tp_size=tp_size).to(
+                torch.int64
+            )
+        gathered = gathered.view(gathered.shape[0], tp_size, 2)
         max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
         top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
         return top_tokens.squeeze(-1).to(torch.int64)

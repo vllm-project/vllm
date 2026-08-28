@@ -1381,6 +1381,63 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        sample_hidden_states = hidden_states[input_batch.logits_indices]
+        assert self.sampler is not None
+
+        fast_path_params = None
+        if (
+            envs.VLLM_HYBRID_NVFP4_LM_HEAD
+            and self.batch_sharder is None
+            and grammar_output is None
+            and not input_batch.has_structured_output_reqs
+        ):
+            fast_path_params = self.sampler.get_vocab_parallel_sampling_params(
+                input_batch
+            )
+
+        if fast_path_params is not None and fast_path_params[0] == "greedy":
+            if input_batch.num_draft_tokens == 0 and hasattr(
+                self.model, "get_top_tokens"
+            ):
+                logger.info_once(
+                    "Using the hybrid lm-head greedy sampling fast path.",
+                    scope="global",
+                )
+                sampled = self.model.get_top_tokens(sample_hidden_states)
+                sampler_output = self.sampler.make_sampler_output(
+                    sampled.to(torch.int64), input_batch
+                )
+                return (
+                    sampler_output,
+                    sampler_output.num_sampled,
+                    sampler_output.num_rejected,
+                )
+
+            if (
+                input_batch.num_draft_tokens > 0
+                and self.rejection_sampler is not None
+                and self.speculator is not None
+                and self.speculator.draft_logits is None
+                and self.rejection_sampler.synthetic_conditional_rates is None
+                and not self.rejection_sampler.use_block_verification
+                and hasattr(self.model, "get_top_tokens")
+            ):
+                logger.info_once(
+                    "Using the hybrid lm-head greedy speculative sampling "
+                    "fast path.",
+                    scope="global",
+                )
+                target_token_ids = self.model.get_top_tokens(sample_hidden_states)
+                sampler_output = self.rejection_sampler.sample_from_greedy_tokens(
+                    target_token_ids,
+                    input_batch,
+                )
+                return (
+                    sampler_output,
+                    sampler_output.num_sampled,
+                    sampler_output.num_rejected,
+                )
+
         shard_metadata = None
         global_input_batch = input_batch
         if self.batch_sharder is not None:
@@ -1397,7 +1454,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
         if grammar_output is not None:

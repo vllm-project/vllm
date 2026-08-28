@@ -31,6 +31,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.hybrid_nvfp4_lm_head_warmup import (
+    hybrid_nvfp4_lm_head_warmup,
+)
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
@@ -137,6 +140,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    hybrid_nvfp4_lm_head_warmup(worker)
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])

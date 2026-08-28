@@ -63,6 +63,15 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+        elif envs.VLLM_HYBRID_NVFP4_LM_HEAD and isinstance(layer, ParallelLMHead):
+            from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+                prepare_hybrid_nvfp4_lm_head,
+            )
+
+            prepare_hybrid_nvfp4_lm_head(
+                layer,
+                candidates=envs.VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES,
+            )
 
     def apply(
         self,
