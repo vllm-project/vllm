@@ -494,10 +494,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
-        self.video_pruning_rate = self.multimodal_config.video_pruning_rate
+        self._init_video_pruning(multimodal_config)
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
         # attributes needed by EVS-related functions inherited from Qwen3-VL
@@ -713,10 +710,7 @@ class Qwen3_5MoeForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
-        self.video_pruning_rate = self.multimodal_config.video_pruning_rate
+        self._init_video_pruning(multimodal_config)
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
         # attributes needed by EVS-related functions inherited from Qwen3-VL
