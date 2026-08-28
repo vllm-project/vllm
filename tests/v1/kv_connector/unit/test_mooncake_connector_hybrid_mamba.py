@@ -199,6 +199,44 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         connector.connector_worker = None
 
 
+def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+        factor = 4
+        worker._physical_blocks_per_logical_kv_block = factor
+
+        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        physical_page_bytes = fa_spec.page_size_bytes // factor
+        fa_cache = torch.empty(
+            kv_cache_config.num_blocks * factor,
+            physical_page_bytes,
+            dtype=torch.uint8,
+        )
+
+        worker.register_kv_caches({"model.layers.0.self_attn": fa_cache})
+
+        assert worker.block_len_per_layer == [physical_page_bytes]
+        assert worker.kv_block_len_per_layer == [physical_page_bytes]
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+
 def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
