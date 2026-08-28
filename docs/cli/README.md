@@ -196,7 +196,7 @@ Running with a local file:
 
 ```bash
 vllm run-batch \
-    -i features/openai_batch/openai_example_batch.jsonl \
+    -i examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```

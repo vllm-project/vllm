@@ -393,6 +393,9 @@ void fused_kda_decode(
     std::optional<torch::stable::Tensor> output_gate,
     std::optional<torch::stable::Tensor> norm_weight, double norm_eps);
 
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
 void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
@@ -526,8 +529,16 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
-                  double beta = 1.0, double linear_beta = -1.0);
+void situ_and_mul(
+    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
+    double linear_beta = -1.0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor& scale,
+    torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
+    int64_t group_size = 0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,
