@@ -168,10 +168,20 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
         # nccl.ep HT combine below still gets the full static buffer).
         actual = int(recv_total.item())
         m = self._num_recv_full
-        if 0 < actual < m:
+        if actual < m:
             # Round up for allocator/kernel-config stability; padded rows within
             # the round-up carry topk_idx -1 -> skip_id -> expert_map -1 (masked).
-            m = min(self._num_recv_full, -(-actual // 128) * 128)
+            #
+            # Floor at one block rather than folding "actual > 0" into the
+            # condition above: a rank that receives NO tokens would otherwise
+            # skip the trim entirely and run the full static buffer (65k+ rows)
+            # through moe_align/sort/GEMMs/activation/moe_sum -- the maximum
+            # workload for zero work. That is the common case on the decoder at
+            # low concurrency, where few tokens spread over many ranks leave
+            # some ranks empty, and combine is a barrier so the whole fleet
+            # waits. The floor is needed because -(-0 // 128) * 128 == 0 and
+            # the downstream kernels are not built for an empty view.
+            m = min(self._num_recv_full, max(128, -(-actual // 128) * 128))
             expert_x = expert_x[:m]
             recv_idx = recv_idx[:m]
             recv_w = recv_w[:m]
