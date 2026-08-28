@@ -64,6 +64,7 @@ MTPModelTypes = Literal[
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
+XPressModelTypes = Literal["xpress"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
 ]
@@ -77,6 +78,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
+    XPressModelTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
@@ -607,6 +609,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
+            "xpress",
         )
         factors.append(uses_aux_hidden_states)
 
@@ -1076,6 +1079,9 @@ class SpeculativeConfig:
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
+            elif self.method == "xpress":
+                if self.target_model_config is None:
+                    raise ValueError("target_model_config must be present for xpress")
             elif self.method == "dspark":
                 # DeepSeek DSpark can ship the weights inside the target checkpoint
                 if self.target_model_config is None:
@@ -1239,7 +1245,13 @@ class SpeculativeConfig:
                         draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                if self.method in (
+                    "eagle",
+                    "eagle3",
+                    "dflash",
+                    "dspark",
+                    "xpress",
+                ):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -1256,6 +1268,10 @@ class SpeculativeConfig:
                     in self.draft_model_config.architectures
                 ):
                     self.method = "dflash"
+                elif (
+                    "xpress" in self.draft_model_config.model.lower()
+                ):
+                    self.method = "xpress"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
@@ -1367,7 +1383,7 @@ class SpeculativeConfig:
                     ):
                         hf.n_predict = hf.block_size
 
-                if self.method in ("dflash", "dspark"):
+                if self.method in ("dflash", "dspark", "xpress"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -1801,7 +1817,7 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark", "xpress")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
