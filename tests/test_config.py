@@ -360,6 +360,32 @@ def test_breakable_cudagraph_default_on_opt_out(monkeypatch, is_rocm):
     assert config.compilation_config.mode is None
 
 
+def test_breakable_cudagraph_yields_to_explicit_compilation(monkeypatch):
+    """Breakable cudagraphs (default-on) yield when a compilation mode is
+    explicitly set, unless the env var explicitly enables breakable."""
+    import vllm.envs as envs
+
+    envs.disable_envs_cache()
+
+    def make_config():
+        return SimpleNamespace(
+            model_config=None,
+            compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
+        )
+
+    # Default-on, but an explicitly requested compilation mode wins.
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+    # Explicitly enabling breakable wins over the compilation mode.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is True
+    assert config.compilation_config.mode == CompilationMode.NONE
+
+
 @pytest.mark.parametrize(
     ("model_type", "expected_architecture"),
     [
@@ -1888,8 +1914,14 @@ def test_is_prefix_caching_supported(
         ("inductor", ["none", "-fused_layernorm"], False),
     ],
 )
-def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: bool):
+def test_is_custom_op_enabled(
+    backend: str, custom_ops: list[str], expected: bool, monkeypatch
+):
     """Test that is_custom_op_enabled works correctly."""
+    # Pin breakable cudagraphs (default-on) off: with no explicit
+    # compilation mode it forces CompilationMode.NONE, which flips the
+    # custom-op base default this test pins for the compiled path.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     config = VllmConfig(
         compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
     )
@@ -1982,8 +2014,13 @@ def test_validate_mamba_align_subblock_prefill():
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
+def test_vllm_config_defaults(
+    model_id, compilation_config, optimization_level, monkeypatch
+):
     """Test that optimization-level defaults are correctly applied."""
+    # These cases exercise the torch.compile-based default path; pin
+    # breakable cudagraphs (default-on) off, as it changes the defaults.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     model_config = None
     if model_id is not None:
@@ -2065,7 +2102,7 @@ def test_vllm_config_callable_defaults():
     not current_platform.support_static_graph_mode(),
     reason="Explicit overrides may be force-overwritten without static graph support.",
 )
-def test_vllm_config_explicit_overrides():
+def test_vllm_config_explicit_overrides(monkeypatch):
     """Test that explicit property overrides work correctly with callable defaults.
 
     When users explicitly set configuration properties, those values
@@ -2073,6 +2110,10 @@ def test_vllm_config_explicit_overrides():
     optimization levels.
     """
     from vllm.config.compilation import PassConfig
+
+    # Pin breakable cudagraphs (default-on) off: it changes the default
+    # compilation mode this test asserts on.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
     moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
@@ -2166,9 +2207,13 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
-def test_fusion_pass_op_priority():
+def test_fusion_pass_op_priority(monkeypatch):
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""
+    # Pin breakable cudagraphs (default-on) off: it forces
+    # CompilationMode.NONE when no compilation mode is explicitly set,
+    # which skips the inductor fusion defaults this test pins.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     # Default config, O2, rms_norm+quant fusion disabled
     cfg1 = VllmConfig()

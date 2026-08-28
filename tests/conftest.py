@@ -252,11 +252,16 @@ def dist_init():
 
 
 @pytest.fixture
-def default_vllm_config():
+def default_vllm_config(monkeypatch):
     """Set a default VllmConfig for tests that directly test CustomOps or pathways
     that use get_current_vllm_config() outside of a full engine context.
     """
     from vllm.config import VllmConfig, set_current_vllm_config
+
+    # Pin breakable cudagraphs (default-on) off: it forces
+    # CompilationMode.NONE, which flips the custom-op base default to "all"
+    # and breaks direct CustomOp use on CPU tensors.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     config = VllmConfig()
     with set_current_vllm_config(config):

@@ -712,21 +712,20 @@ class VllmConfig:
         return bool(architectures & default_breakable_cudagraph_architectures())
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
-        if (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and self._uses_breakable_cudagraph_by_default()
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
-                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
-            )
-
         from vllm.compilation.breakable_cudagraph import (
             is_breakable_cudagraph_enabled,
         )
 
-        enabled = is_breakable_cudagraph_enabled()
+        # Breakable cudagraphs are on by default, but yield when
+        # compilation was explicitly enabled: an explicitly-set compilation
+        # mode implies the torch.compile-based piecewise path instead.
+        explicitly_compiled = (
+            self.compilation_config.mode is not None
+            and self.compilation_config.mode != CompilationMode.NONE
+        )
+        enabled = is_breakable_cudagraph_enabled() and not (
+            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ and explicitly_compiled
+        )
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
@@ -1473,7 +1472,7 @@ class VllmConfig:
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            and not breakable_cudagraph_enabled
         ):
             logger.info_once(
                 "Cudagraph mode %s is not compatible with compilation mode %s."
@@ -1718,7 +1717,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
                 assert (
                     self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                    or breakable_cudagraph_enabled
                 ), (
                     "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
