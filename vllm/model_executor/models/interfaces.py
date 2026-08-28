@@ -11,6 +11,7 @@ from collections.abc import (
 )
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -75,6 +76,12 @@ MambaStateShapes: TypeAlias = (
     | tuple[tuple[int, int, int]]
     | tuple[tuple[int, int], tuple[int, int]]
     | tuple[tuple[int, int], tuple[int, int, int]]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]
 )
 
 
@@ -159,6 +166,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """
     A flag that indicates whether this model supports
     `multimodal_config.mm_device_do_normalize`.
+    """
+
+    supports_tower_connector_lora: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `lora_config.enable_tower_connector_lora`.
     """
 
     requires_raw_input_tokens: ClassVar[bool] = False
@@ -309,7 +322,13 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
+
+        Marked components are also routed through the active offloader (when
+        it supports tower offloading), since `make_layers` only ever sees the
+        decoder layer stack.
         """
+        from vllm.model_executor.offloader import get_offloader
+
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
         if isinstance(modalities, str):
@@ -335,6 +354,14 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                 yield
 
         self._tower_model_names = children_names
+
+        # Towers are constructed directly, so `make_layers` never routes them
+        # through the offloader. Do it here, at the same construction stage,
+        # so offloaded tower weights are never allocated on the device.
+        offloader = get_offloader()
+        if offloader.supports_tower_offload:
+            for name in children_names:
+                offloader.wrap_modules(iter([attrgetter(name)(self)]), prefix=name)
 
     @contextmanager
     def _mark_composite_model(
@@ -1099,8 +1126,8 @@ def supports_mamba_prefix_caching(
 
 @runtime_checkable
 class SupportsReplaySSM(Protocol):
-    """The interface for models whose Mamba2 layers support ReplaySSM cached
-    standard decode.
+    """The interface for models whose recurrent layers support ReplaySSM
+    cached decode.
 
     This is currently experimental.
     """
@@ -1144,7 +1171,7 @@ class SupportsLateInteraction(Protocol):
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
+    hf_to_vllm_mapper: "WeightsMapper | None" = None
     packed_modules_mapping: ClassVar[dict[str, list[str]]]
     quant_config: QuantizationConfig | None = None
 
@@ -1178,8 +1205,7 @@ class SupportsQuant:
         if self.quant_config is None:
             return
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
-            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
-            self.quant_config.apply_vllm_mapper(unstacked_mapper)
+            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
             self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 

@@ -2,7 +2,7 @@ group: Rust Frontend E2E
 depends_on:
   - image-build
 steps:
-- label: Rust Frontend OpenAI Coverage
+- label: ":nvidia: (H200) Rust Frontend OpenAI Coverage"
   timeout_in_minutes: 30
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -18,9 +18,9 @@ steps:
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
 
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
-  - tests/entrypoints/openai/completion/test_shutdown.py
+  - tests/entrypoints/launchers/test_shutdown.py
   - tests/entrypoints/openai/test_return_token_ids.py
-  - tests/entrypoints/openai/test_uds.py
+  - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
@@ -30,14 +30,14 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
-  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   # test_comparison streams differently: Rust emits a separate first (prompt_token_ids) chunk and
   # finish chunk without logprobs, while the test reads `logprobs.tokens` on every chunk.
   - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
-  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
-- label: Rust Frontend Serve/Admin Coverage
+- label: ":nvidia: (H200) Rust Frontend Serve/Admin Coverage"
   timeout_in_minutes: 25
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -58,7 +58,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   # server_load can be flaky under the Rust frontend; keep it excluded for now.
-  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
   # test_generate_logprobs expects Python-style top_logprobs truncation (dedup sampled + cap at max(k, 1)).
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
@@ -66,7 +66,7 @@ steps:
   # /tokenizer_info is not implemented in the Rust frontend (the CLI flag is accepted as a no-op).
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
 
-- label: Rust Frontend Core Correctness
+- label: ":nvidia: (H200) Rust Frontend Core Correctness"
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -80,7 +80,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
-- label: Rust Frontend Tool Use
+- label: ":nvidia: (H200) Rust Frontend Tool Use"
   device: h200_35gb
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -95,7 +95,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
-- label: Rust Frontend Distributed
+- label: ":nvidia: (L4) Rust Frontend Distributed"
   timeout_in_minutes: 25
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
@@ -108,6 +108,7 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/utils.py
+  - tests/v1/distributed/test_dense_dp_world_size.py
   - tests/v1/distributed/test_external_lb_dp.py
   - tests/v1/distributed/test_hybrid_lb_dp.py
   - tests/v1/distributed/test_internal_lb_dp.py
@@ -115,6 +116,7 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export NCCL_CUMEM_HOST_ENABLE=0
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
