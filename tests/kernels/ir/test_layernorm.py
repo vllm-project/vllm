@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import zlib
+
 import pytest
 import torch
 
@@ -19,6 +21,18 @@ from vllm.platforms import current_platform
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
 IS_GPGPU_DEVICE = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+
+def seed_from_params(*params) -> None:
+    """Seed torch from the test parameters.
+
+    The scaling-property checks below compare two float paths that can legally
+    differ by a couple of ULP, so an unseeded draw occasionally lands on a
+    rounding boundary and fails. Deriving the seed from the parameters keeps
+    every parametrized invocation a distinct case while making it reproducible.
+    """
+    key = "|".join(str(p) for p in params).encode()
+    torch.manual_seed(zlib.crc32(key))
 
 
 @pytest.mark.skipif(
@@ -52,6 +66,7 @@ def test_rms_norm_registration():
 )
 class TestRMSNorm:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        seed_from_params(dtype, n_tokens, hidden_size, epsilon)
         x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
             num_tokens=4,
             hidden_size=8,
@@ -266,6 +281,7 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
 )
 class TestFusedAddRMSNorm:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        seed_from_params(dtype, n_tokens, hidden_size, epsilon)
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
             num_tokens=4,
             hidden_size=8,
