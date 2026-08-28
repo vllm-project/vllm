@@ -17,6 +17,8 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
 )
 from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
 HEAD_SIZES = [24, 128]

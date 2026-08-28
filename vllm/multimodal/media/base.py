@@ -79,6 +79,10 @@ class MediaIO(ABC, Generic[_T]):
             merged.update(runtime_kwargs)
         return merged
 
+    def get_max_bytes(self) -> int | None:
+        """Return the maximum encoded payload size accepted by this media IO."""
+        return None
+
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError

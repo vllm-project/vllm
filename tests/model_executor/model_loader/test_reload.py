@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import inspect
+from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -214,6 +216,21 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_restore_layer_replaces_postprocessed_tensor_attribute():
+    layer = torch.nn.Linear(2, 3, bias=False)
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
+    del layer.weight
+    layer.weight = torch.empty(3, 2)
+
+    restore_layer_on_meta(layer, info)
+
+    assert isinstance(layer.weight, torch.nn.Parameter)
+    assert layer.weight.is_meta
 
 
 def test_materialize_layer_preserves_non_meta_tensors():
@@ -569,6 +586,35 @@ def test_get_numel_loaded_caps_at_param_size():
     args = inspect.signature(loader).bind(param, loaded_weight)
     num_loaded, _ = get_numel_loaded(loader, args)
     assert num_loaded == 10
+
+
+def test_layerwise_loading_warning_only_checks_new_layers(monkeypatch):
+    layers = [torch.nn.Linear(16, 1, bias=False) for _ in range(2)]
+
+    def partial_weight_loader(param, loaded_weight):
+        param.view(-1)[: loaded_weight.numel()].copy_(loaded_weight)
+
+    for layer in layers:
+        layer.weight.requires_grad_(False)
+        layer.weight.weight_loader = partial_weight_loader
+        reload_layerwise.initialize_online_processing(layer)
+
+    monkeypatch.setattr(reload_layerwise, "has_device_tensors", lambda _: True)
+    get_info_size = Mock(return_value=0)
+    warning_once = Mock()
+    monkeypatch.setattr(reload_layerwise, "get_info_size", get_info_size)
+    monkeypatch.setattr(reload_layerwise.logger, "warning_once", warning_once)
+
+    reload_layerwise.LOADING_LAYERS.clear()
+    try:
+        for layer in layers:
+            for _ in range(3):
+                layer.weight.weight_loader(layer.weight, torch.ones(1))
+    finally:
+        reload_layerwise.LOADING_LAYERS.clear()
+
+    assert get_info_size.call_count == 2
+    warning_once.assert_called_once()
 
 
 class _ComposedLoaderLayer(torch.nn.Module):
