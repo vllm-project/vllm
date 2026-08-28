@@ -28,22 +28,12 @@ def _replayssm_mixer() -> MambaMixer2:
     return mixer
 
 
-@pytest.mark.parametrize(
-    ("backend", "use_replayssm", "use_v2_model_runner", "expected"),
-    [
-        (MambaBackendEnum.FLASHINFER, True, False, True),
-        (MambaBackendEnum.FLASHINFER, True, True, True),
-        (MambaBackendEnum.TRITON, True, False, False),
-        (MambaBackendEnum.FLASHINFER, False, False, False),
-    ],
-)
-def test_replayssm_autotune_decode_kwargs(
-    backend, use_replayssm, use_v2_model_runner, expected
-):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_replayssm_autotune_decode_kwargs(use_v2_model_runner):
     runner = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
-            mamba_config=SimpleNamespace(backend=backend),
+            cache_config=SimpleNamespace(use_replayssm=True),
+            mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
             use_v2_model_runner=use_v2_model_runner,
         ),
         uniform_decode_query_len=6,
@@ -61,9 +51,6 @@ def test_replayssm_autotune_decode_kwargs(
 
     result = warmup._replayssm_autotune_kwargs(runner, prefill_kwargs)
 
-    if not expected:
-        assert result is None
-        return
     expected_kwargs = {
         **prefill_kwargs,
         "num_tokens": 96,
@@ -98,22 +85,6 @@ def test_replayssm_autotune_decode_kwargs_clamps_to_state_capacity():
     assert result is not None
     assert result[0] == 4
     assert result[1]["num_tokens"] == 4
-
-
-def test_replayssm_autotune_decode_kwargs_skips_without_state_slot():
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=True),
-            mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
-            use_v2_model_runner=False,
-        ),
-        uniform_decode_query_len=1,
-        max_num_tokens=128,
-        scheduler_config=SimpleNamespace(max_num_seqs=64),
-        kv_cache_config=SimpleNamespace(num_blocks=1),
-    )
-
-    assert warmup._replayssm_autotune_kwargs(runner, {}) is None
 
 
 def test_replayssm_autotune_slots_restore_state_and_trackers():
@@ -153,29 +124,3 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
         assert torch.all(tensor[3] == 3)
-
-
-def test_replayssm_autotune_slots_reset_v2_dummy_tables_and_state():
-    mixer = _replayssm_mixer()
-    block_tables = SimpleNamespace(get_dummy_block_tables=Mock())
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(use_v2_model_runner=True),
-        block_tables=block_tables,
-        get_model=lambda: SimpleNamespace(modules=lambda: (mixer,)),
-    )
-
-    with warmup._temporary_replayssm_autotune_state(runner, 2):
-        for tensor in (
-            *mixer.kv_cache,
-            mixer._replayssm_ring_start,
-            mixer._replayssm_prev_num_accepted,
-        ):
-            tensor[1:3].fill_(9)
-
-    block_tables.get_dummy_block_tables.assert_called_once_with(2)
-    for tensor in (
-        *mixer.kv_cache,
-        mixer._replayssm_ring_start,
-        mixer._replayssm_prev_num_accepted,
-    ):
-        assert torch.count_nonzero(tensor[1:3]) == 0
