@@ -479,12 +479,12 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    if rocm_aiter_ops.is_mha_enabled():
+        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
-    if rocm_aiter_ops.is_mha_enabled():
-        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
@@ -917,6 +917,14 @@ class RocmPlatform(Platform):
                     "Overriding cudagraph_mode to PIECEWISE."
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+        if (vllm_config.speculative_config is not None
+                and os.environ.get("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
+                                   "").lower() in ("true", "1")):
+            logger.warning(
+                "Shuffle KV cache layout is incompatible with speculative "
+                "decoding. Disabling VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT.")
+            os.environ["VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT"] = "0"
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"

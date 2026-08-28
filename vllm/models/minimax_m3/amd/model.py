@@ -735,7 +735,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.num_kv_heads * self.head_dim * self.kv_cache_torch_dtype.itemsize
         )
         return FullAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=self.impl.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             head_size_v=self.head_dim,
