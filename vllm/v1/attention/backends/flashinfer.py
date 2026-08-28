@@ -28,7 +28,9 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -188,6 +190,115 @@ def _make_xqa_ragged_draft_block_mask(
     if causal:
         bool_mask &= kv_idx <= q_idx.unsqueeze(1)
     return _pack_draft_block_bool_mask(bool_mask, num_packed)
+
+
+@triton.jit
+def _fill_xqa_ragged_draft_mask_kernel(
+    q_cu_ptr,
+    mask_ptr,
+    num_slots,
+    mask_row_stride,
+    CAUSAL: tl.constexpr,
+):
+    """Pack ragged XQA draft-mask rows on device (W3).
+
+    One program per (physical row, uint16 column). The owning request slot
+    is found by binary search over the device ``q_cu_seq_lens`` offsets;
+    rows at or beyond ``q_cu[num_slots]`` are graph padding and stored as
+    zero, so stale bits from a wider previous batch can never survive. All
+    decisions read device memory and the launch grid is fixed by the
+    preallocated buffer bounds — the runtime path performs no allocation,
+    no host readback, and is cudagraph-capture-safe. Bit semantics match
+    ``_make_xqa_ragged_draft_block_mask`` exactly (the test oracle).
+    """
+    row = tl.program_id(0)
+    col = tl.program_id(1)
+    total = tl.load(q_cu_ptr + num_slots)
+    if row < total:
+        lo = 0
+        hi = num_slots
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if tl.load(q_cu_ptr + mid) <= row:
+                lo = mid
+            else:
+                hi = mid
+        start = tl.load(q_cu_ptr + lo)
+        end = tl.load(q_cu_ptr + lo + 1)
+    else:
+        start = row
+        end = row
+    local = row - start
+    length = end - start
+    bits = 0
+    base = col * 16
+    for i in tl.static_range(16):
+        b = base + i
+        allow = b < length
+        if CAUSAL:
+            allow = allow & (b <= local)
+        bits = bits | tl.where(allow, 1 << i, 0)
+    tl.store(mask_ptr + row * mask_row_stride + col, bits.to(tl.uint16))
+
+
+def _trtllm_gen_varlen_decode_args(
+    decode_meta: "FlashInferTrtllmAPIDecode",
+    uniform_q_len_per_req: int | None,
+) -> tuple[torch.Tensor | None, int | None]:
+    """Map TRTLLM-gen decode metadata to the generic wrapper's varlen
+    arguments ``(cum_seq_lens_q, max_q_len)``.
+
+    Returns ``(None, None)`` — uniform passthrough — unless the metadata
+    explicitly authorizes varlen (``trtllm_gen_varlen``) AND the resolved
+    kernel is TRTLLM_GEN (Codex W6 review findings 1+2: never infer
+    varlen authorization from a non-None q_cu_seq_lens, which legacy
+    ragged XQA metadata also carries, and never authorize a non-TRTLLM-
+    gen kernel).
+    """
+    if not decode_meta.trtllm_gen_varlen:
+        return None, None
+    assert decode_meta.kernel == FlashInferDecodeKernel.TRTLLM_GEN, (
+        "trtllm_gen_varlen metadata requires the TRTLLM_GEN kernel"
+    )
+    assert decode_meta.q_cu_seq_lens is not None
+    return decode_meta.q_cu_seq_lens, decode_meta.q_len_per_req
+
+
+def _adaptive_xqa_mismatch_safe(vllm_config: VllmConfig | None) -> bool:
+    """Narrow conditional device/CPU query-lens-mismatch predicate.
+
+    True only for the configuration whose device-ragged XQA decode contract
+    was proven by the flashinfer-adaptive-mismatch W0 replay probe: target-
+    side adaptive verification on SM120/SM121 with dedicated XQA decode,
+    DCP=1, causal target attention, and no forced-native decode. Everything
+    else keeps the historical CPU-exact contract (never a blanket True).
+    The selector's mismatch gate, the manager's independent scan, and the
+    VARLEN_DECODE cudagraph result all consult this one predicate so they
+    cannot disagree.
+    """
+    if vllm_config is None:
+        return False
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is None
+        or not speculative_config.enable_adaptive_verification
+    ):
+        return False
+    if not current_platform.is_device_capability_family(120):
+        return False
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        return False
+    # Non-causal target verification runs the DFlash-style head attention,
+    # which is not part of the proven-safe XQA decode path.
+    if vllm_config.attention_config.use_non_causal:
+        return False
+    # Forced-native decode (attention_config.use_trtllm_attention is False,
+    # the same source force_use_trtllm_attention reads) cannot reach the
+    # device-ragged XQA path; keep the selector honest so it falls back to
+    # another backend instead of failing late at builder initialization.
+    if vllm_config.attention_config.use_trtllm_attention is False:
+        return False
+    return True
 
 
 @triton.jit
@@ -584,19 +695,28 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Only trtllm-gen decode (SM100 family) reads query offsets from the
-        # device tensor; XQA and wrapper decode plan from qo_indptr_cpu, and
-        # under DCP spec queries are routed to the prefill path.
-        if not current_platform.is_device_capability_family(100):
-            return False
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.model_config is None:
-            return True
-        pc = vllm_config.parallel_config
-        mc = vllm_config.model_config
-        return pc.decode_context_parallel_size == 1 and can_use_trtllm_attention(
-            mc.get_num_attention_heads(pc), mc.get_num_kv_heads(pc), is_prefill=False
-        )
+        # Which decode paths may diverge from the CPU even-distribution:
+        # - SM100: trtllm-gen decode reads query offsets from the device
+        #   tensor (#52157); XQA and wrapper decode plan from
+        #   qo_indptr_cpu, and under DCP spec queries are routed to the
+        #   prefill path.
+        # - SM120/121: the dedicated XQA decode kernel dereferences
+        #   q_cu_seq_lens on device (validated under FULL cudagraph
+        #   replay), so the narrow safe configuration may diverge. Fail
+        #   closed for everything else; the VARLEN_DECODE cudagraph gate
+        #   and the builder's finalize assertion catch configurations that
+        #   pass here class-level but cannot actually reach device-ragged
+        #   decode.
+        if current_platform.is_device_capability_family(100):
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is None or vllm_config.model_config is None:
+                return True
+            pc = vllm_config.parallel_config
+            mc = vllm_config.model_config
+            return pc.decode_context_parallel_size == 1 and can_use_trtllm_attention(
+                mc.get_num_attention_heads(pc), mc.get_num_kv_heads(pc), is_prefill=False
+            )
+        return _adaptive_xqa_mismatch_safe(get_current_vllm_config_or_none())
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -793,6 +913,14 @@ class FlashInferTrtllmAPIDecode:
 
     dcp_query_start_loc: torch.Tensor | None = None
     """Decode query boundaries for masking empty DCP shards during reduction."""
+    trtllm_gen_varlen: bool = False
+    """W6 prepare-only: this metadata authorizes TRTLLM-gen varlen decode
+    (device ``q_cu_seq_lens`` + fixed ``q_len_per_req`` maximum mapped to
+    the generic wrapper's cum_seq_lens_q / max_q_len). Set ONLY by the
+    prepared SM100 branch, which is unreachable until
+    ``supports_device_ragged_decode`` is enabled for TRTLLM-gen with
+    hardware validation. Never inferred from q_cu_seq_lens alone
+    (Codex W6 review finding 1)."""
 
 
 @dataclass
@@ -1011,6 +1139,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_xqa = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
         )
+        # SM12x-only dedicated XQA (the device-ragged adaptive path); main's
+        # use_xqa is the broader kernel flag.
+        self.use_dedicated_xqa = (
+            current_platform.is_device_capability_family(120)
+            and self.use_xqa
+        )
         self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )
@@ -1021,6 +1155,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
         )
+        # SM12x: dedicated XQA consumes device-side per-request query
+        # lengths (q_cu_seq_lens). Kernel-capability declaration — SM100
+        # trtllm-gen also exposes device cum_seq_lens_q + host max_q_len in
+        # the generic decode wrapper, but stays False until real-SM100
+        # capture/replay + model-output validation exists; enabling it
+        # additionally requires the shared predicate, the VARLEN_DECODE CG
+        # branch, and _finalize_adaptive_decode to accept non-XQA kernels
+        # (no XQA mask allocation/warmup is needed for trtllm-gen).
+        self.supports_device_ragged_decode = self.use_dedicated_xqa
+        # Conditional device-ragged XQA mode. Mode and width are resolved
+        # later by _finalize_adaptive_decode(), called from
+        # init_attn_backend with the runner-resolved decode width; the
+        # group's model role comes from the layers' construction-time tags
+        # (the transient compilation model_tag global is restored to
+        # "backbone" before builders are created, so it must never be read
+        # here). Until finalized, the mode is inert (legacy behavior
+        # everywhere).
+        self.adaptive_xqa_mismatch_mode = False
+        self.adaptive_max_decode_width = 0
+        self._adaptive_mask_buffer: torch.Tensor | None = None
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=(
@@ -1212,7 +1366,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return None
         # Longer requests are split off as prefills.
         return max_decode_query_len(vllm_config)
-
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
@@ -1313,6 +1466,244 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             qo_indptr[: num_decodes + 1],
             q_lens,
         )
+
+    def _finalize_adaptive_decode(self, decode_query_len: int) -> None:
+        """Resolve conditional mismatch mode after runner init (W1 revision).
+
+        Called by ``init_attn_backend`` with the runner-resolved decode
+        width (``num_speculative_steps + num_new_sampled_tokens_per_step`` —
+        the authoritative per-request verify width; ``num_new_sampled…`` is
+        model-state data that ``SpeculativeConfig`` does not expose, so it
+        must be threaded from the runner, never guessed from config fields).
+        The group's model role comes from the layers' construction-time
+        ``_vllm_model_tag`` attribute, which survives past
+        ``set_model_tag``'s restore; the transient compilation global does
+        not. Fail-closed: any unresolvable precondition leaves the mode off
+        or raises.
+        """
+        if not _adaptive_xqa_mismatch_safe(self.vllm_config):
+            return  # configuration cannot reach the device-ragged XQA path
+        layers = get_layers_from_vllm_config(
+            self.vllm_config, AttentionLayerBase, self.layer_names
+        )
+        if not layers:
+            raise ValueError(
+                f"Attention group {self.layer_names[:3]}… has no registered "
+                "attention layers; cannot resolve the model role required "
+                "for conditional mismatch support."
+            )
+        missing = [
+            name for name, l in layers.items() if not hasattr(l, "_vllm_model_tag")
+        ]
+        if missing:
+            raise ValueError(
+                f"Attention layer(s) {missing[:3]} lack a recorded "
+                "_vllm_model_tag; cannot safely classify the group's model "
+                "role for conditional mismatch support. All attention "
+                "layers must be constructed under a set_model_tag context."
+            )
+        tags = {l._vllm_model_tag for l in layers.values()}
+        if len(tags) > 1:
+            raise ValueError(
+                f"Attention group {self.layer_names[:3]}… mixes model roles "
+                f"{sorted(tags)}; conditional mismatch support requires a "
+                "single role per group."
+            )
+        model_role = next(iter(tags))
+        if model_role == "dspark_head":
+            # The drafter always runs full-length blocks; only the verifier
+            # sees device-trimmed query lengths (selector contract).
+            logger.info(
+                "FlashInfer adaptive-mismatch mode: OFF for dspark_head "
+                "group (drafter keeps full-length blocks)."
+            )
+            return
+        if not self.use_dedicated_xqa:
+            raise ValueError(
+                "Adaptive verification selected the FlashInfer backend for "
+                "its device-ragged XQA decode path, but this builder "
+                "(role=%s) resolved use_dedicated_xqa=False (native/uniform "
+                "decode only). Use another attention backend or disable "
+                "adaptive verification." % model_role
+            )
+        if decode_query_len is None or decode_query_len <= 1:
+            raise ValueError(
+                "Adaptive verification requires a multi-token decode width; "
+                f"the runner resolved decode_query_len={decode_query_len!r}."
+            )
+        # Persistent packed-mask buffer (W3), allocated once before any
+        # cudagraph capture: rows cover the padded worst case
+        # (max_num_reqs decode slots x the bound), columns are the packed
+        # uint16 draft-mask layout. The fill kernel rewrites it in place
+        # every step; nothing is ever reallocated in the runtime path.
+        # Allocate BEFORE flipping the mode flag (grok review nit): an
+        # allocation failure must not leave mismatch mode on with a None
+        # buffer.
+        num_u16_cols = 2 * ((decode_query_len + 31) // 32)
+        _mask_buffer = torch.zeros(
+            self.max_num_reqs * decode_query_len,
+            num_u16_cols,
+            dtype=torch.uint16,
+            device=self.device,
+        )
+        # Warm the fill kernel now (grok review minor): the first build()
+        # would otherwise JIT-compile it. build() runs eagerly before
+        # capture on every current path, but an explicit warmup keeps the
+        # kernel out of any future capture-only path by construction.
+        # num_slots=0 zeroes the whole buffer (total = q_cu[0] = 0).
+        # Transactional (Codex W7 review finding 3): the buffer is
+        # assigned to the builder only after allocation AND warmup both
+        # succeed, so any failure leaves no half-initialized state at all.
+        _fill_xqa_ragged_draft_mask_kernel[_mask_buffer.shape](
+            torch.zeros(1, dtype=torch.int32, device=self.device),
+            _mask_buffer,
+            0,
+            _mask_buffer.shape[1],
+            CAUSAL=True,
+        )
+        self._adaptive_mask_buffer = _mask_buffer
+        # Graph-stable, dynamic-SD-safe bound: every legal device
+        # verification width is at most the runner's decode_query_len by
+        # construction. Set after allocation/warmup so a failure leaves
+        # no half-initialized adaptive state at all (W7 G3).
+        self.adaptive_max_decode_width = decode_query_len
+        self.adaptive_xqa_mismatch_mode = True
+        # Codex W3+W4 review, W4 finding 1: with DSpark's
+        # parallel_drafting=True the spec-as-decode reorder threshold is
+        # 1 + 2*K (15 for K=7) while the decode bound is K+1 — real short
+        # extends of width bound+1..1+2*K would be classified as XQA
+        # decodes and violate XQA's per-request q_seq_len maximum. Clamp
+        # the threshold to the bound so anything wider routes through the
+        # prefill path (CPU-exact) instead. The runner sorts with its own
+        # decode_query_len while FlashInfer splits with
+        # builder.reorder_batch_threshold; this clamp sets the latter equal
+        # to the former, so sort order and classification stay consistent
+        # (equal values via the finalize hook, not one shared attribute).
+        self.reorder_batch_threshold = min(
+            self.reorder_batch_threshold or 1, decode_query_len
+        )
+        logger.info(
+            "FlashInfer adaptive-mismatch mode: decode_kernel=%s "
+            "use_dedicated_xqa=%s cg_support=%s dcp=%s max_decode_width=%s "
+            "(runner decode_query_len) mask_rows=%s model_role=%s",
+            self.flashinfer_trtllm_api_decode_kernel,
+            self.use_dedicated_xqa,
+            AttentionCGSupport.VARLEN_DECODE,
+            self.vllm_config.parallel_config.decode_context_parallel_size,
+            self.adaptive_max_decode_width,
+            self._adaptive_mask_buffer.shape[0],
+            model_role,
+        )
+
+    def _fill_adaptive_decode_mask(
+        self,
+        q_cu_seq_lens: torch.Tensor,
+        num_decodes: int,
+        num_decode_tokens: int,
+        causal: bool,
+    ) -> torch.Tensor:
+        """Rewrite the persistent ragged draft mask from device offsets.
+
+        Launched from build() on the current stream every adaptive step, so
+        the mask content always matches the (possibly rewritten) device
+        ``q_cu_seq_lens`` before the XQA call consumes it — including under
+        FULL cudagraph replay, where the runner's persistent offsets buffer
+        is updated in place and build() re-runs pre-replay. The launch grid
+        is fixed by the preallocated buffer, reads only device memory, and
+        zeroes all rows at or beyond ``q_cu[-1]`` (stale-proof padding).
+        """
+        buf = self._adaptive_mask_buffer
+        # Codex W3+W4 review, W3 finding 2: never hand XQA a persistent
+        # mask smaller than the batch's packed rows (a partial mask would
+        # be read past its valid shape). Host-known token count only —
+        # the fill path must never read device values.
+        assert num_decode_tokens <= buf.shape[0], (
+            f"{num_decode_tokens} decode rows exceed the persistent mask "
+            f"buffer's {buf.shape[0]} rows; over-bound requests must "
+            "route through prefill."
+        )
+        _fill_xqa_ragged_draft_mask_kernel[buf.shape](
+            q_cu_seq_lens,
+            buf,
+            num_decodes,
+            buf.shape[1],
+            CAUSAL=causal,
+        )
+        return buf
+
+    def _compute_decode_query_lens_mismatch(
+        self,
+        qo_indptr: torch.Tensor,
+        qo_indptr_cpu: torch.Tensor,
+        num_decodes: int,
+        num_decode_tokens: int,
+        num_actual_tokens: int,
+    ) -> tuple[int, torch.Tensor | None]:
+        """Mismatch-safe (adaptive) XQA query-width classification.
+
+        The device ``qo_indptr`` carries the trimmed, device-decided query
+        offsets whose values must never be read on the host. The width is
+        the fixed runner-resolved bound (``adaptive_max_decode_width`` =
+        the runner's ``decode_query_len``), never the aggregate
+        ``max_query_len`` (which can include a long prefill in mixed
+        batches) and never the CPU even-distribution width. The exact
+        single-token fast path is kept only when it is provable per
+        request: every CPU decode width exactly one (no zero-length padded
+        slots — a totals-conserving average of one is NOT sufficient,
+        e.g. a legal packed ``[2,1,1,0]``). With every per-request CPU
+        width one, adaptive's on-device redistribution conserves totals
+        within the per-request capacity and therefore cannot change any
+        width.
+        """
+        assert (
+            self.use_dedicated_xqa or self.supports_device_ragged_decode
+        ) and self.adaptive_xqa_mismatch_mode
+        if num_decodes == 0 or num_decode_tokens == 0:
+            return 1, None
+        decode_q_lens = (
+            qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+        )
+        if bool((decode_q_lens == 1).all()):
+            # Provable per-request width 1 -> device lens are forced to the
+            # same values; the uniform single-token path is exact.
+            return 1, None
+
+        bound = self.adaptive_max_decode_width
+        assert bound > 1, (
+            "Adaptive mismatch mode requires a decode width bound > 1 "
+            "(runner-resolved decode_query_len)."
+        )
+        # With the mismatch-mode threshold clamp in
+        # _finalize_adaptive_decode, decode classification only admits
+        # requests of at most the bound, so nothing wider — real short
+        # extend or profiler dummy — can reach the XQA decode path. The
+        # average alone could never prove this (Codex W3+W4 review, W4
+        # finding 1); the routing guarantee does.
+        # Totals are conserved between CPU and device, so the device's total
+        # active decode rows equal num_decode_tokens; these are a subset of
+        # the batch's tokens. (Padded graph rows are an execution-site
+        # invariant checked by W4's replay instrumentation, not derivable
+        # from the metadata buffers here.)
+        assert num_decode_tokens <= num_actual_tokens, (
+            f"{num_decode_tokens} decode tokens exceed the batch's "
+            f"{num_actual_tokens} total tokens"
+        )
+        scheduled_width = -(-num_decode_tokens // num_decodes)  # ceil div
+        assert bound >= scheduled_width, (
+            f"Decode width bound {bound} is below the scheduled width "
+            f"{scheduled_width} ({num_decode_tokens} tokens / "
+            f"{num_decodes} decodes); over-bound requests must route "
+            "through prefill, not mismatch XQA."
+        )
+        q_cu_seq_lens = qo_indptr[: num_decodes + 1]
+        # Zero-length padded request slots are preserved by the slice; the
+        # kernel dereferences the offsets on device (never synced here).
+        assert q_cu_seq_lens.dtype in (torch.int32, torch.uint32), (
+            f"q_cu_seq_lens must be int32/uint32, got {q_cu_seq_lens.dtype}"
+        )
+        assert q_cu_seq_lens.is_contiguous() and q_cu_seq_lens.dim() == 1
+        assert q_cu_seq_lens.numel() == num_decodes + 1
+        return bound, q_cu_seq_lens
 
     def _get_decode_mask(
         self,
@@ -1535,6 +1926,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Step 1: Decide which dispatch modes to use:
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
+        use_cascade = common_prefix_len > 0
+        if use_cascade and self.adaptive_xqa_mismatch_mode:
+            # W5 exclusion: cascade planning consumes the whole-batch CPU
+            # query layout through host-planned cascade wrappers, which
+            # device-ragged adaptive batches cannot provide. Cascade is an
+            # optimization; clearing it here — before any wrapper planning
+            # or block-table transformation — lets the batch flow through
+            # the ordinary full-KV prefill/decode paths, which remain
+            # correct. V2 currently always passes common_prefix_len=0
+            # (attn_utils), so this is defensive future-proofing, not a
+            # hot-path change.
+            logger.warning_once(
+                "FlashInfer cascade attention disabled for adaptive "
+                "device-ragged batches (cascade wrappers plan from the "
+                "whole-batch CPU query layout); using ordinary full-KV "
+                "attention."
+            )
+            use_cascade = False
         uses_spec_reorder = self.reorder_batch_threshold > 1
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
@@ -1842,24 +2251,121 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if num_decodes > 0:
             if decode_with_flashinfer_trtllm_api:
                 assert self.flashinfer_trtllm_api_decode_kernel is not None
+                # Defense-in-depth exclusions (the capability predicate and
+                # finalize already reject these configurations):
+                # device-ragged mismatch metadata must never ride the
+                # DCP-interleaved decode path or reach native/uniform-only
+                # decode.
+                assert not (self.adaptive_xqa_mismatch_mode and self.use_dcp), (
+                    "Adaptive mismatch mode does not support XQA under DCP."
+                )
+                assert (
+                    not self.adaptive_xqa_mismatch_mode
+                    or self.supports_device_ragged_decode
+                ), (
+                    "Adaptive mismatch mode requires a kernel with "
+                    "device-ragged capability; uniform-only TRTLLM-API "
+                    "metadata cannot carry device-ragged query lengths."
+                )
+                # Prepare-only trtllm-gen varlen branch: unreachable until
+                # supports_device_ragged_decode is enabled for SM100 with
+                # hardware validation (trtllm-gen needs no XQA mask).
+                _trtllm_gen_varlen_prepared = (
+                    self.adaptive_xqa_mismatch_mode
+                    and self.supports_device_ragged_decode
+                    and not self.use_dedicated_xqa
+                    and self.flashinfer_trtllm_api_decode_kernel
+                    == FlashInferDecodeKernel.TRTLLM_GEN
+                )
+                if (
+                    not self.use_dedicated_xqa
+                    and not self.use_trtllm_gen_varlen_decode
+                    and not _trtllm_gen_varlen_prepared
+                ):
+                    assert num_decode_tokens % num_decodes == 0, (
+                        "XQA/trtllm-gen decode requires uniform query lengths "
+                        f"per request. Got {num_decode_tokens=} and {num_decodes=}."
+                    )
                 seq_lens_decode = seq_lens[:num_decodes]
                 if self.use_dcp:
                     assert common_attn_metadata.dcp_local_seq_lens is not None
                     seq_lens_decode = common_attn_metadata.dcp_local_seq_lens[
                         :num_decodes
                     ]
-                q_len_per_req, q_cu_seq_lens, ragged_q_lens = (
-                    self._compute_decode_query_lens(
-                        qo_indptr, qo_indptr_cpu, num_decodes, num_decode_tokens
-                    )
-                )
+                q_len_per_req = 1
+                q_cu_seq_lens = None
                 decode_mask = None
-                if self.use_xqa:
-                    decode_mask = self._get_decode_mask(
-                        q_len_per_req,
-                        ragged_q_lens,
-                        num_decodes,
-                        bool(causal),
+                if self.use_dedicated_xqa:
+                    if self.adaptive_xqa_mismatch_mode:
+                        # Device-ragged dispatch (W2): the CPU
+                        # even-distribution is never consulted for ragged
+                        # classification; the offsets pass through as device
+                        # truth and the width is the runner-resolved bound.
+                        # The draft mask arrives with W3's persistent
+                        # device-built buffer — never build it from the CPU
+                        # even-distribution here.
+                        q_len_per_req, q_cu_seq_lens = (
+                            self._compute_decode_query_lens_mismatch(
+                                qo_indptr,
+                                qo_indptr_cpu,
+                                num_decodes,
+                                num_decode_tokens,
+                                num_actual_tokens,
+                            )
+                        )
+                        if q_cu_seq_lens is not None and q_len_per_req > 1:
+                            # W3: rewrite the persistent packed mask from
+                            # the current device offsets and hand XQA the
+                            # stable buffer (mask is mandatory for
+                            # q_seq_len > 1; never build it from the CPU
+                            # even-distribution).
+                            decode_mask = self._fill_adaptive_decode_mask(
+                                q_cu_seq_lens,
+                                num_decodes,
+                                num_decode_tokens,
+                                bool(causal),
+                            )
+                        elif q_len_per_req > 1:
+                            # Unreachable with the threshold clamp: the
+                            # provable single-token path returns q_len 1,
+                            # and nothing wider than the bound is ever
+                            # classified as a decode.
+                            raise AssertionError(
+                                "Mismatch decode classified a multi-token "
+                                "uniform batch without ragged offsets."
+                            )
+                    else:
+                        q_len_per_req, q_cu_seq_lens, ragged_q_lens = (
+                            self._compute_decode_query_lens(
+                                qo_indptr,
+                                qo_indptr_cpu,
+                                num_decodes,
+                                num_decode_tokens,
+                            )
+                        )
+                        decode_mask = self._get_decode_mask(
+                            q_len_per_req,
+                            ragged_q_lens,
+                            num_decodes,
+                            bool(causal),
+                        )
+                elif _trtllm_gen_varlen_prepared:
+                    # W6 prepare-only SM100 trtllm-gen varlen branch:
+                    # pass the device offsets and the fixed maximum
+                    # through the metadata; the generic decode wrapper
+                    # receives them as cum_seq_lens_q / max_q_len in
+                    # forward(). Unreachable in this tree (the flag is
+                    # XQA-only until SM100 hardware validation); no
+                    # packed mask — trtllm-gen does not use the XQA
+                    # draft mask.
+                    q_len_per_req, q_cu_seq_lens = (
+                        self._compute_decode_query_lens_mismatch(
+                            qo_indptr,
+                            qo_indptr_cpu,
+                            num_decodes,
+                            num_decode_tokens,
+                            num_actual_tokens,
+                        )
                     )
                 elif self.use_trtllm_gen_varlen_decode:
                     # CPU placeholders may underestimate query lengths;
@@ -1881,9 +2387,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     dcp_query_start_loc=(
                         qo_indptr[: num_decodes + 1] if self.use_dcp else None
                     ),
+                    trtllm_gen_varlen=_trtllm_gen_varlen_prepared,
                 )
             else:
                 assert seq_lens_cpu is not None
+                # W5 exclusion: native FlashInfer decode plans uniform
+                # multi-token batches from CPU query lengths and cannot
+                # inherit the mismatch declaration.
+                assert not self.adaptive_xqa_mismatch_mode, (
+                    "Adaptive mismatch mode requires the dedicated XQA "
+                    "decode path; native FlashInfer decode is uniform-only."
+                )
                 pure_decode = num_prefills == 0
                 use_cudagraph = (
                     self.enable_cuda_graph
@@ -2677,6 +3191,32 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
+                if decode_with_xqa and q_len_per_req is not None and q_len_per_req > 1:
+                    raise NotImplementedError(
+                        "FlashInfer XQA speculative decode is not wired in vLLM yet."
+                    )
+
+                # W6 prepare-only: SM100 trtllm-gen varlen metadata maps
+                # to the generic wrapper's cum_seq_lens_q / max_q_len ONLY
+                # when the metadata explicitly authorizes it — never
+                # inferred from a non-None q_cu_seq_lens (Codex W6 review
+                # finding 1), which legacy ragged XQA metadata also has.
+                _varlen_q_cu, _varlen_max_q_len = (
+                    _trtllm_gen_varlen_decode_args(
+                        attn_metadata.decode, q_len_per_req
+                    )
+                )
+                if _varlen_q_cu is not None:
+                    q_len_per_req = None
+
+                # XQA decode can use model-dtype Q with FP8 KV, so only include
+                # q_scale when the decode query is actually FP8.
+                bmm1_scale = (
+                    self.get_xqa_bmm1_scale(layer, attn_metadata.q_data_type_decode)
+                    if decode_with_xqa
+                    else self.bmm1_scale
+                )
+
                 lse = None
                 if use_dcp:
                     out = torch.empty(
@@ -2708,8 +3248,16 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=get_flashinfer_layout_string(kv_cache_layout),
                     backend=attn_metadata.decode.kernel.value,
                     q_len_per_req=q_len_per_req,
-                    max_q_len=max_q_len,
-                    cum_seq_lens_q=q_cu_seq_lens,
+                    # Varlen precedence: the explicitly-authorized
+                    # trtllm_gen_varlen metadata (prepare-only) wins over
+                    # the metadata-derived pair; the two are mutually
+                    # exclusive on every live path.
+                    max_q_len=(
+                        _varlen_max_q_len if _varlen_q_cu is not None else max_q_len
+                    ),
+                    cum_seq_lens_q=(
+                        _varlen_q_cu if _varlen_q_cu is not None else q_cu_seq_lens
+                    ),
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     ),

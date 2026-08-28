@@ -201,6 +201,7 @@ def init_attn_backend(
     device: torch.device,
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
+    decode_query_len: int | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -299,6 +300,15 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
+            # Deferred adaptive-mismatch finalization (flashinfer-adaptive-
+            # mismatch W1 revision): every builder of the group receives the
+            # runner-resolved decode width and resolves its model role from
+            # the layers' construction-time tags. Builders without the hook
+            # are unaffected.
+            if decode_query_len is not None:
+                for group_builder in group.metadata_builders:
+                    if hasattr(group_builder, "_finalize_adaptive_decode"):
+                        group_builder._finalize_adaptive_decode(decode_query_len)
             # The microbatches' builders share the workspace: they all issue
             # attention on the one compute stream the threads hand off, so the
             # buffer is written serially, as it already is across steps.
