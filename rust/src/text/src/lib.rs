@@ -9,7 +9,9 @@
 
 use std::mem::take;
 
-pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
+pub use backend::{
+    DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
+};
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
@@ -19,7 +21,7 @@ pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
     DecodedTextEvent, DecodedTokenLogprob, Finished, TextDecodeOptions, TextOutputStreamExt,
 };
-pub use request::{Prompt, SamplingParams, TextRequest};
+pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;

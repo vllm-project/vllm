@@ -24,6 +24,26 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
+
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool,
+    backend: str,
+) -> torch.Tensor:
+    from flashinfer import mm_bf16
+
+    return mm_bf16(
+        a,
+        b,
+        bias=bias,
+        pdl=pdl,
+        out_dtype=torch.bfloat16,
+        backend=backend,
+    )
+
+
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
 # Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
@@ -61,6 +81,58 @@ def has_flashinfer() -> bool:
         )
         return False
     return True
+
+
+@functools.cache
+def has_flashinfer_bf16_gemm() -> bool:
+    """Return whether FlashInfer exposes the BF16 dense GEMM API."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and callable(getattr(mod, "mm_bf16", None))
+
+
+@functools.cache
+def is_flashinfer_bf16_gemm_supported(
+    backend: str,
+    compute_capability: int | None = None,
+) -> bool:
+    """Return whether an exact FlashInfer BF16 backend is available."""
+    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
+        return False
+
+    mod = _get_submodule("flashinfer")
+    mm_bf16 = getattr(mod, "mm_bf16", None) if mod is not None else None
+    backend_supported = getattr(mm_bf16, "is_backend_supported", None)
+    if not callable(backend_supported):
+        return False
+
+    if compute_capability is None:
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None:
+            return False
+        compute_capability = device_capability.to_int()
+
+    try:
+        return bool(backend_supported(backend, compute_capability))
+    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+@functools.cache
+def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
+    """Return whether the CuTeDSL BF16 dense GEMM backend is available."""
+    if not is_flashinfer_bf16_gemm_supported("cute-dsl"):
+        return False
+    try:
+        from flashinfer.cute_dsl.utils import is_cute_dsl_available
+        from flashinfer.utils import is_sm100a_supported
+    except (ImportError, ModuleNotFoundError):
+        return False
+    try:
+        return is_cute_dsl_available() and is_sm100a_supported(torch.device("cuda"))
+    except (RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -126,6 +198,7 @@ flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
     "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
 )
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+flashinfer_mxfp4_quantize = _lazy_import_wrapper("flashinfer", "mxfp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
 silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
     "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
@@ -157,6 +230,10 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
     "flashinfer.decode",
     "trtllm_batch_decode_sparse_mla_dsv4",
     fallback_fn=_missing_sparse_mla,
+)
+flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "xqa_batch_decode_with_kv_cache",
 )
 
 
@@ -230,6 +307,22 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
         and callable(trtllm_batch_decode_with_kv_cache_mla)
         and callable(autotune)
     )
+
+
+@functools.cache
+def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
+    """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
+
+    The public sparse MLA API predates some DSV4 shapes, so checking only that
+    the callable exists can select a package that later aborts or rejects a
+    valid vLLM configuration. Inspect FlashInfer's dispatch table until it
+    exposes a public capability query.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
+    dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
+    return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
 
 
 @functools.cache
@@ -375,8 +468,8 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     """Return whether TRTLLM attention is available on the current platform
     for the given attention phase.
 
-    SM90 (Hopper) supports the XQA decode kernel but not TRTLLM prefill.
-    SM100+ supports TRTLLM for both phases. All others are unsupported.
+    SM90 (Hopper) and SM12x support the XQA decode kernel but not TRTLLM
+    prefill. SM100+ supports TRTLLM for both phases. All others are unsupported.
     """
     # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
@@ -386,8 +479,10 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     if not has_nvidia_artifactory():
         return False
 
-    # SM90 has XQA decode; prefill is not supported.
-    if current_platform.is_device_capability(90):
+    # SM90 and SM12x have XQA decode only.
+    if current_platform.is_device_capability(
+        90
+    ) or current_platform.is_device_capability_family(120):
         return not is_prefill
 
     # SM100/SM103 has both prefill and decode TRTLLM kernels.
@@ -490,11 +585,11 @@ def use_trtllm_attention(
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
-        elif current_platform.is_device_capability(90) and kv_cache_dtype.startswith(
-            "fp8"
-        ):
-            # SM90 + FP8 KV cache: prefer the XQA decode kernel. XQA does not
-            # support NVFP4 KV (that is an SM100 trtllm-gen path only).
+        elif (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(120)
+        ) and kv_cache_dtype.startswith("fp8"):
+            # SM90/SM12x + FP8 KV cache: prefer the XQA decode kernel.
             use_trtllm = True
         else:
             # Decode auto-detection
@@ -704,6 +799,36 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_mxfp8_quantize_8x4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mxfp8_quantize_8x4(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import mxfp8_quantize as mxfp8_quantize_
+
+        return mxfp8_quantize_(
+            a,
+            backend="cuda",
+            sf_swizzle_layout=SfLayout.layout_8x4,
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mxfp8_quantize_8x4",
+    )
+    def flashinfer_mxfp8_quantize_8x4_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, k = a.shape
+        scale_size = cdiv(m, 8) * 8 * cdiv(k // 32, 4) * 4
+        return (
+            torch.empty(m, k, dtype=torch.float8_e4m3fn, device=a.device),
+            torch.empty(scale_size, dtype=torch.uint8, device=a.device),
+        )
+
+    @torch.library.custom_op(
         "vllm::mm_mxfp8",
         mutates_args=[],
         device_types="cuda",
@@ -715,6 +840,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         out_dtype: torch.dtype,
         backend: str = "cutlass",
+        use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
@@ -726,6 +852,7 @@ if has_flashinfer():
             out=None,
             out_dtype=out_dtype,
             backend=backend,
+            use_8x4_sf_layout=use_8x4_sf_layout,
         )
 
     @torch.library.register_fake(
@@ -738,6 +865,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         out_dtype: torch.dtype,
         backend: str = "cutlass",
+        use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
@@ -1023,6 +1151,10 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "flashinfer_bf16_mm",
+    "has_flashinfer_bf16_gemm",
+    "is_flashinfer_bf16_gemm_supported",
+    "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
@@ -1036,6 +1168,7 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+    "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
