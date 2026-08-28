@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
@@ -1719,3 +1720,78 @@ def convert_to_wna16_moe_kernel_format(
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
+
+
+class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
+    """Class-based view of the WNA16 MoE kernel oracle."""
+
+    def backend_enum_cls(self) -> type[WNA16MoEBackend]:
+        return WNA16MoEBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[WNA16MoEBackend]:
+        return _get_priority_backends(moe_config)
+
+    def backend_to_kernel_cls(
+        self, backend: WNA16MoEBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> WNA16MoEBackend:
+        return map_wna16_backend(runner_backend)
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None = None,
+        activation_key: QuantKey | None = None,
+        weight_bits: int = 4,
+        is_awq: bool = False,
+        is_gptq: bool = False,
+        group_size: int = -1,
+        has_g_idx: bool = False,
+        has_zero_points: bool = False,
+        has_bias: bool = False,
+        is_act_int8: bool = False,
+        layer: torch.nn.Module | None = None,
+    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts] | None]:
+        return select_wna16_moe_backend(
+            moe_config,
+            weight_bits=weight_bits,
+            is_awq=is_awq,
+            is_gptq=is_gptq,
+            group_size=group_size,
+            has_g_idx=has_g_idx,
+            has_zero_points=has_zero_points,
+            has_bias=has_bias,
+            is_act_int8=is_act_int8,
+            layer=layer,
+        )
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: WNA16MoEBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        w13_g_idx: torch.Tensor | None = None,
+        w2_g_idx: torch.Tensor | None = None,
+        w13_g_idx_sort_indices: torch.Tensor | None = None,
+        w2_g_idx_sort_indices: torch.Tensor | None = None,
+        is_k_full: bool = True,
+    ) -> mk.FusedMoEKernel:
+        return make_wna16_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            backend,
+            routing_tables=routing_tables,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=is_k_full,
+        )
+
