@@ -254,6 +254,7 @@ class Scheduler(SchedulerInterface):
         )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
+        self.drop_last_prefix_cache_block = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # Positions past the computed tokens that the drafter reads mid-prefill.
@@ -272,6 +273,9 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
+            self.drop_last_prefix_cache_block = (
+                speculative_config.use_eagle_preserves_target_kv_cache()
+            )
             if self.use_eagle:
                 self.num_prefill_lookahead = (
                     self.num_spec_tokens
@@ -288,7 +292,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
-            use_eagle=self.use_eagle,
+            use_eagle=self.drop_last_prefix_cache_block,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -409,11 +413,13 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
+        # The last block-aligned position whose state can be cached.
+        # Eagle-family drafters pollute the target's last matching
+        # full-attention block with their lookahead KV write, so back off one
+        # block to avoid a Mamba cache miss. DFlash/DSpark draft from their own
+        # KV cache and never write target blocks.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle:
+        if self.drop_last_prefix_cache_block:
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens

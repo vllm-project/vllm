@@ -1795,6 +1795,12 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
+    def use_eagle_preserves_target_kv_cache(self) -> bool:
+        # Only eagle-family drafters share (and pollute via lookahead KV
+        # write) the target's full-attention KV cache groups; DFlash/DSpark
+        # draft from their own KV cache and never write target blocks.
+        return self.method in ("eagle", "eagle3", "mtp")
+
     def use_dflash(self) -> bool:
         return self.method == "dflash"
 
