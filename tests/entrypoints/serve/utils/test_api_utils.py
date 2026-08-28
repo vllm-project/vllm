@@ -8,8 +8,8 @@ import pytest
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
-    _redact_sensitive_args,
     get_max_tokens,
+    redact_sensitive_args,
     should_include_usage,
 )
 
@@ -121,7 +121,7 @@ class TestRedactSensitiveArgs:
 
     def test_redact_replaces_sensitive_values_only(self):
         args = {"api_key": self.API_KEY, "hf_token": "hf_secret", "other": "visible"}
-        redacted = _redact_sensitive_args(args)
+        redacted = redact_sensitive_args(args)
         assert redacted == {
             "api_key": "***",
             "hf_token": "***",
@@ -136,7 +136,7 @@ class TestRedactSensitiveArgs:
 
     def test_no_sensitive_fields_returns_original(self):
         args = {"model_tag": "org/model", "other": "visible"}
-        assert _redact_sensitive_args(args) is args
+        assert redact_sensitive_args(args) is args
 
     def test_api_key_not_in_log(self, monkeypatch, caplog):
         non_default = {
