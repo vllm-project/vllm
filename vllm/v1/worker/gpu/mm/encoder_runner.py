@@ -175,10 +175,9 @@ class EncoderRunner:
             encoder_outputs.extend(batch_outputs)
 
         if mm_lora_activation is not None and mm_lora_activation.requires_per_item:
-            if mm_lora_activation.num_items != len(mm_kwargs):
-                raise ValueError(
-                    "MM LoRA mapping items must match the multimodal encoder inputs"
-                )
+            assert mm_lora_activation.num_items == len(mm_kwargs), (
+                "MM LoRA mapping items must match the multimodal encoder inputs"
+            )
             for item_idx, mm_item in enumerate(mm_kwargs):
                 mm_lora_activation.activate((item_idx,))
                 for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(

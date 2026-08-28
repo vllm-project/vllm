@@ -58,7 +58,7 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -222,10 +222,6 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
-from vllm.v1.worker.gpu.mm.lora import (
-    MMEncoderLoraInput,
-    prepare_mm_lora_activation,
-)
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -3132,9 +3128,15 @@ class GPUModelRunner(
         # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
 
-        mm_lora_activation = None
         if self.lora_config and self.lora_manager.supports_tower_connector_lora():
-            mm_lora_inputs = []
+            # Build LoRA mappings independently for encoder inputs
+            # (encoder batch structure is different from main batch)
+            prompt_lora_mapping = []
+            token_lora_mapping = []
+            lora_requests = set()
+            encoder_token_counts = []
+            connector_token_counts = []
+
             for (req_id, pos_info), (modality, mm_item) in zip(
                 mm_lora_refs,
                 mm_kwargs,
@@ -3142,32 +3144,59 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
-                mm_lora_inputs.append(
-                    MMEncoderLoraInput(
-                        lora_id=lora_id,
-                        lora_request=(
-                            self.input_batch.lora_id_to_lora_request.get(lora_id)
-                        ),
-                        modality=modality,
-                        mm_kwargs=mm_item,
-                        num_mm_embeds=pos_info.get_num_embeds(),
-                    )
+                tower_tokens, connector_tokens = self.model.get_mm_lora_token_counts(  # type: ignore[attr-defined]
+                    modality=modality,
+                    mm_kwargs=mm_item,
+                    num_mm_embeds=pos_info.get_num_embeds(),
+                )
+                prompt_lora_mapping.append(lora_id)
+                token_lora_mapping.extend([lora_id] * tower_tokens)
+                encoder_token_counts.append(tower_tokens)
+                connector_token_counts.append(connector_tokens)
+
+                if lora_id > 0:
+                    lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
+                    if lora_request is not None:
+                        lora_requests.add(lora_request)
+
+            # Set tower adapter mapping
+            tower_mapping = LoRAMapping(
+                tuple(token_lora_mapping),
+                tuple(prompt_lora_mapping),
+                is_prefill=True,
+                type=LoRAMappingType.TOWER,
+            )
+            self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
+
+            # Only set connector mapping if the model actually has a connector.
+            # Some multimodal models inherit a stub `get_num_mm_connector_tokens`
+            # from `SupportsMultiModal`, which returns None and should not be
+            # treated as a signal that connector LoRA is supported.
+            mm_mapping = (
+                self.model.get_mm_mapping()  # type: ignore[attr-defined]
+                if hasattr(self.model, "get_mm_mapping")
+                else None
+            )
+            if (
+                mm_mapping is not None
+                and mm_mapping.connector
+                and all(count is not None for count in connector_token_counts)
+            ):
+                connector_token_mapping = np.repeat(
+                    np.array(prompt_lora_mapping, dtype=np.int32),
+                    np.array(connector_token_counts, dtype=np.int32),
+                )
+                connector_mapping = LoRAMapping(
+                    index_mapping=tuple(connector_token_mapping.tolist()),
+                    prompt_mapping=tuple(prompt_lora_mapping),
+                    is_prefill=True,
+                    type=LoRAMappingType.CONNECTOR,
                 )
 
-            mm_lora_activation = prepare_mm_lora_activation(
-                self.model,
-                self.lora_manager,
-                mm_lora_inputs,
-            )
-
-        if (
-            mm_lora_activation is not None
-            and mm_lora_activation.requires_per_item
-            and mm_lora_activation.num_items != len(mm_kwargs)
-        ):
-            raise ValueError(
-                "MM LoRA mapping items must match the multimodal encoder inputs"
-            )
+                self.lora_manager.set_active_adapters(
+                    lora_requests,
+                    connector_mapping,
+                )
 
         encoder_outputs: list[torch.Tensor] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
@@ -3189,10 +3218,7 @@ class GPUModelRunner(
             # because it doesn't yet support video batching.
             # TODO(ywang96): Fix memory profiling to take EVS into account and
             # remove this hack.
-            requires_per_item_lora = bool(
-                mm_lora_activation is not None and mm_lora_activation.requires_per_item
-            )
-            if requires_per_item_lora or (
+            if (
                 (
                     self.is_multimodal_pruning_enabled
                     or self.requires_sequential_video_encoding
@@ -3201,18 +3227,14 @@ class GPUModelRunner(
                 and num_items > 1
             ):
                 batch_outputs_lst = list[torch.Tensor]()
-                for item_idx in range(num_items):
-                    current_idx = current_item_idx + item_idx
-                    if requires_per_item_lora:
-                        assert mm_lora_activation is not None
-                        mm_lora_activation.activate((current_idx,))
-                    mm_kwargs_item = mm_kwargs[current_idx]
+                for video_idx in range(num_items):
+                    video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
                     with self.timed_encoder_operation(
-                        should_time, mm_lora_refs, current_idx, 1
+                        should_time, mm_lora_refs, current_item_idx + video_idx, 1
                     ):
                         _, _, micro_batch_mm_inputs = next(
                             group_and_batch_mm_kwargs(
-                                [mm_kwargs_item],
+                                [video_mm_kwargs_item],
                                 device=self.device,
                                 pin_memory=PIN_MEMORY,
                             )
