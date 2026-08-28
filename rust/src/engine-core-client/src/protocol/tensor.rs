@@ -185,12 +185,8 @@ impl WireNdArray {
 
         match self.dtype.as_str() {
             "float32" => decode_chunks(data, numel, f32::from_ne_bytes),
-            "float16" => decode_chunks(data, numel, |bytes| {
-                f16::from_bits(u16::from_ne_bytes(bytes)).to_f32()
-            }),
-            "bfloat16" => decode_chunks(data, numel, |bytes| {
-                bf16::from_bits(u16::from_ne_bytes(bytes)).to_f32()
-            }),
+            "float16" => decode_chunks(data, numel, |bytes| f16::from_ne_bytes(bytes).to_f32()),
+            "bfloat16" => decode_chunks(data, numel, |bytes| bf16::from_ne_bytes(bytes).to_f32()),
             dtype => Err(format!("unsupported pooling output dtype {dtype:?}")),
         }
     }

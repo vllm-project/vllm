@@ -138,7 +138,10 @@ async fn encode_lowers_request_and_collects_final_pooling_tensor() {
         "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"0\"}} 1"
     )));
     assert!(rendered.contains(&format!(
-        "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"0\"}} 0"
+        "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"0\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_generation_tokens_count{{model_name=\"{model_name}\",engine=\"0\"}} 1"
     )));
 
     let _ = shutdown_tx.send(());

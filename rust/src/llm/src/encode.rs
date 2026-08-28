@@ -14,7 +14,7 @@ use vllm_engine_core_client::protocol::tensor::WireTensor;
 use crate::error::{Error, Result};
 use crate::output::FinishReason;
 use crate::request::prepare_request_id;
-use crate::request_metrics::{PoolingRequestMetricsTracker, current_unix_timestamp_secs};
+use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
 /// Normalized parameters for one token-level pooling request.
 ///
@@ -89,6 +89,8 @@ impl TryFrom<WireTensor> for PoolingOutput {
     type Error = String;
 
     fn try_from(tensor: WireTensor) -> std::result::Result<Self, Self::Error> {
+        // TODO: Preserve the source dtype and resolved bytes here; perform
+        // float32 conversion at the text/API output boundary.
         let data = tensor.to_f32_vec()?;
         Ok(Self {
             shape: tensor.shape,
@@ -177,7 +179,7 @@ impl PreparedEncodeRequest {
 pub(crate) async fn collect_encode_output(
     prompt_token_ids: Vec<u32>,
     mut stream: EngineCoreOutputStream,
-    mut request_metrics: PoolingRequestMetricsTracker,
+    mut request_metrics: RequestMetricsTracker,
 ) -> Result<EncodeOutput> {
     let mut pooling_output: Option<WireTensor> = None;
     let mut cached_token_count = 0;
@@ -193,7 +195,8 @@ pub(crate) async fn collect_encode_output(
                 unreachable!("engine-core stream closes only after a final output or an error")
             }
         };
-        request_metrics.observe_output(raw.timestamp, &raw.output);
+        let received_at = current_unix_timestamp_secs();
+        request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
         let output = raw.output;
         cached_token_count = cached_token_count.max(
             output
@@ -205,7 +208,7 @@ pub(crate) async fn collect_encode_output(
         if let Some(tensor) = output.pooling_output
             && pooling_output.replace(tensor).is_some()
         {
-            request_metrics.record_finished(current_unix_timestamp_secs(), FinishReason::Error);
+            request_metrics.record_finished(received_at, FinishReason::Error);
             return Err(Error::PoolingRequest {
                 request_id: output.request_id,
                 message: "received more than one pooling output".to_string(),
@@ -213,7 +216,6 @@ pub(crate) async fn collect_encode_output(
         }
 
         if let Some(finish_reason) = output.finish_reason {
-            let received_at = current_unix_timestamp_secs();
             let semantic_finish_reason =
                 FinishReason::from_engine(finish_reason, output.stop_reason);
             if finish_reason == EngineCoreFinishReason::Error {
