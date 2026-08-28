@@ -32,7 +32,10 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
-from vllm.config.speculative import _validate_qwen3_omni_dspark
+from vllm.config.speculative import (
+    _normalize_ling_dspark,
+    _validate_qwen3_omni_dspark,
+)
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
@@ -2186,6 +2189,59 @@ def _make_qwen3_omni_dspark_configs():
         architectures=["Qwen3OmniDSparkModel"],
     )
     return target_model_config, draft_model_config
+
+
+def _make_ling_dspark_configs():
+    target_hf_config = SimpleNamespace(
+        model_type="bailing_hybrid",
+        architectures=["BailingMoeV3ForCausalLM"],
+        hidden_size=2560,
+        num_hidden_layers=42,
+        vocab_size=157184,
+    )
+    target_model_config = SimpleNamespace(
+        hf_config=target_hf_config,
+        architectures=["BailingMoeV3ForCausalLM"],
+        get_hidden_size=lambda: 2560,
+        get_total_num_hidden_layers=lambda: 42,
+        get_vocab_size=lambda: 157184,
+    )
+    draft_hf_config = SimpleNamespace(
+        model_type="qwen3",
+        architectures=["LingDSparkModel"],
+        hidden_size=2560,
+        num_hidden_layers=5,
+        num_target_layers=42,
+        target_layer_ids=[1, 11, 23, 29, 35],
+        vocab_size=157184,
+        block_size=8,
+        mask_token_id=156892,
+        markov_rank=256,
+        markov_head_type="vanilla",
+        enable_confidence_head=True,
+        confidence_head_with_markov=True,
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=draft_hf_config,
+        architectures=["LingDSparkModel"],
+    )
+    return target_model_config, draft_model_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_ling_dspark_checkpoint_contract_is_normalized():
+    target_config, draft_config = _make_ling_dspark_configs()
+
+    num_speculative_tokens = _normalize_ling_dspark(target_config, draft_config, 9)
+
+    assert num_speculative_tokens == 9
+    assert draft_config.hf_config.architectures == ["Qwen3DSparkModel"]
+    assert draft_config.hf_config.sample_from_anchor is True
+    assert draft_config.hf_config.dspark_bonus_anchor is False
+    assert draft_config.hf_config.kv_cache_block_size == 128
+
+    target_config, draft_config = _make_ling_dspark_configs()
+    assert _normalize_ling_dspark(target_config, draft_config, None) == 8
 
 
 @pytest.mark.skip_global_cleanup

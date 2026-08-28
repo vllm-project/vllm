@@ -244,12 +244,19 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.sliding_window = sliding_window
+        speculative_config = get_current_vllm_config().speculative_config
+        assert speculative_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            kv_cache_block_size=getattr(
+                draft_model_config.hf_config, "kv_cache_block_size", None
+            ),
             quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",

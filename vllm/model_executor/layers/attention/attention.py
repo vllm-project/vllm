@@ -245,6 +245,7 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        kv_cache_block_size: int | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -327,6 +328,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.kv_cache_block_size = kv_cache_block_size
         self.has_sink = extra_impl_args.get("sinks") is not None
 
         # NOTE: model_config may be None during certain tests
@@ -595,8 +597,14 @@ class Attention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        # Block size may get updated after model loading, refresh it
-        block_size = vllm_config.cache_config.block_size
+        # Executors call Platform.update_block_size_for_backend() after model
+        # loading, so read the current global value here unless this layer owns
+        # an independent size.
+        block_size = (
+            self.kv_cache_block_size
+            if self.kv_cache_block_size is not None
+            else vllm_config.cache_config.block_size
+        )
         # Encoder-only attention is prefill-only and keeps no autoregressive KV
         # cache. In hybrid models (e.g. Qwen3.5 / ColQwen3.5: GatedDeltaNet
         # linear_attention interleaved with full_attention) the runner iterates
