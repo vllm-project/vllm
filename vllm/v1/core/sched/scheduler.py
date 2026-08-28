@@ -2637,6 +2637,7 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
+            or self.kv_cache_manager.hisparse_coordinator.has_pending_work()
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None

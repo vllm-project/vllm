@@ -145,6 +145,14 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 
+def test_pending_hisparse_spill_keeps_scheduler_alive():
+    """A final host spill must complete after the last request finishes."""
+    scheduler = create_scheduler()
+    scheduler.kv_cache_manager.hisparse_coordinator.pending_spills[0] = Mock()
+
+    assert scheduler.has_requests()
+
+
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [

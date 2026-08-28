@@ -522,6 +522,9 @@ class HiSparseCoordinator:
             for pending in self.pending_spills.values()
         )
 
+    def has_pending_work(self) -> bool:
+        return bool(self.spills_to_send or self.pending_spills)
+
     def update_spills(
         self,
         enqueued_counts: Mapping[int, int],
