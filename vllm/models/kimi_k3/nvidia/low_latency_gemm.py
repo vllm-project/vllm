@@ -725,6 +725,7 @@ class _KimiK3LowLatencyApply:
     """Mixin: try the precomputed plan, else defer to the base method."""
 
     def __init__(self, plan: dict[int, ResolvedCall]) -> None:
+        super().__init__()
         self._plan = plan
 
     def apply(
