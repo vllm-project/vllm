@@ -416,11 +416,11 @@ RUN git init -q /src && cd /src \
 ARG ROCPROFILER_SDK_PR_7796=fae7fd57ffb8a76e811d6410b8a0cee1e94d710a
 ARG ROCPROFILER_SDK_PR_7924=f8db22adbe17686a9b05ae03367dd1ec73011653
 RUN cd /src \
-    && QI_PATHS='projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/hsa/*' \
+    && HSA_PATHS='projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/hsa/*' \
     && curl -fsSL -o /tmp/qi-7796.patch "${ROCPROFILER_SDK_REPO%.git}/commit/${ROCPROFILER_SDK_PR_7796}.patch" \
     && curl -fsSL -o /tmp/qi-7924.patch "${ROCPROFILER_SDK_REPO%.git}/commit/${ROCPROFILER_SDK_PR_7924}.patch" \
-    && git apply -p1 --include="$QI_PATHS" --verbose /tmp/qi-7796.patch \
-    && git apply -p1 --include="$QI_PATHS" --verbose /tmp/qi-7924.patch
+    && git apply -p1 --include="$HSA_PATHS" --verbose /tmp/qi-7796.patch \
+    && git apply -p1 --include="$HSA_PATHS" --verbose /tmp/qi-7924.patch
 RUN cd /src/projects/rocprofiler-sdk \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
