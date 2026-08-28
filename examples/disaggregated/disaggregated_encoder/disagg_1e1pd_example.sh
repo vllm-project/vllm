@@ -101,6 +101,21 @@ echo "make ec cache folder"
 mkdir -p "$EC_SHARED_STORAGE_PATH"
 
 ###############################################################################
+# Proxy
+#
+# Starts first and empty: every worker below registers itself once it is
+# serving, so nothing here has to name them.
+###############################################################################
+vllm disagg-proxy \
+    --host "0.0.0.0" \
+    --port "$PROXY_PORT" \
+    >"${PROXY_LOG}" 2>&1 &
+
+PIDS+=($!)
+
+wait_for_server "$PROXY_PORT"
+
+###############################################################################
 # Encoder worker
 ###############################################################################
 env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
@@ -116,7 +131,8 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &
@@ -138,7 +154,8 @@ env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
         }
     }' \
     >"${PD_LOG}" 2>&1 &
@@ -149,20 +166,6 @@ PIDS+=($!)
 wait_for_server "$ENCODE_PORT"
 wait_for_server "$PREFILL_DECODE_PORT"
 
-###############################################################################
-# Proxy
-###############################################################################
-python disagg_epd_proxy.py \
-    --host "0.0.0.0" \
-    --port "$PROXY_PORT" \
-    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
-    --prefill-servers-urls "disable" \
-    --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
-    >"${PROXY_LOG}" 2>&1 &
-
-PIDS+=($!)
-
-wait_for_server "$PROXY_PORT"
 echo "All services are up!"
 
 ###############################################################################

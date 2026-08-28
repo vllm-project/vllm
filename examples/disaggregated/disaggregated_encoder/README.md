@@ -6,8 +6,6 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 
 ## Files
 
-- `disagg_epd_proxy.py` - Proxy script that demonstrates the XeYpZd setup (X encode instances, Y prefill instances, Z decode instances). Currently stable for the 1e1p1d configuration.
-
 - `disagg_1e1p1d_example.sh` - Sets up the 1e1p1d configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
 - `disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
@@ -53,11 +51,11 @@ To support local image inputs (from your ```MEDIA_PATH``` directory), add the fo
 --allowed-local-media-path $MEDIA_PATH
 ```
 
-The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url": "file://'"$MEDIA_PATH_FILENAME"'}``` as multimodal inputs. Each URI is passed unchanged from the `disagg_encoder_proxy` to the encoder instance so that the encoder can load the media locally.
+The vllm instances and the proxy support local URIs with ```{"url": "file://'"$MEDIA_PATH_FILENAME"'}``` as multimodal inputs. Each URI is passed unchanged from the proxy to the encoder instance so that the encoder can load the media locally.
 
 ## EC connector and KV transfer
 
-The `ECExampleonnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
+The `ECExampleConnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
 
 ```bash
 # Add to encoder instance: 
@@ -65,7 +63,8 @@ The `ECExampleonnector` is used to store the encoder cache on local disk and fac
     "ec_connector": "ECExampleConnector",
     "ec_role": "ec_producer",
     "ec_connector_extra_config": {
-        "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+        "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+        "proxy_url": "http://localhost:'"$PROXY_PORT"'"
     }
 }' 
 
@@ -74,14 +73,15 @@ The `ECExampleonnector` is used to store the encoder cache on local disk and fac
     "ec_connector": "ECExampleConnector",
     "ec_role": "ec_consumer",
     "ec_connector_extra_config": {
-        "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+        "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+        "proxy_url": "http://localhost:'"$PROXY_PORT"'"
     }
 }' 
 ```
 
 `$EC_SHARED_STORAGE_PATH` is the path where the EC connector temporarily stores the cache.
 
-If you enable prefill instance (`--prefill-servers-urls` not disabled), you will need --kv-transfer-config to facilitate the PD disaggregation. Currently, we use the `NixlConnector` for this purpose. Refer to `tests/v1/kv_connector/nixl_integration` for more example codes on PD disaggregation with Nixl.
+If you run a separate prefill instance, you will need --kv-transfer-config to facilitate the PD disaggregation. Currently, we use the `NixlConnector` for this purpose. Refer to `tests/v1/kv_connector/nixl_integration` for more example codes on PD disaggregation with Nixl.
 
 ```bash
 # Add to prefill instance:    
@@ -97,30 +97,72 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 }' 
 ```
 
-## Proxy Instance Flags (`disagg_epd_proxy.py`)
+## Proxy
+
+Start the proxy first, with no topology:
+
+```bash
+vllm disagg-proxy --port 8000
+```
+
+It comes up with an empty roster and answers `503` until instances register.
+Each instance announces itself once it is serving, by naming the proxy in its
+EC transfer config:
+
+```bash
+"ec_connector_extra_config": {"proxy_url": "http://proxy-host:8000"}
+```
+
+A decode instance in an E+P+D deployment moves no embeddings and so has no EC
+role, but the proxy still has to know where to forward. Give it an EC config
+carrying nothing but the proxy URL:
+
+```bash
+--ec-transfer-config '{
+    "ec_connector_extra_config": {
+        "proxy_url": "http://proxy-host:8000"
+    }
+}'
+```
+
+The role is inferred, not declared: an encoder-only instance registers as
+`encode`, a KV producer as `prefill`, and anything else as `decode` -- which
+covers a fused prefill+decode instance.
+
+Adding capacity means starting another instance; removing it means stopping
+one. Nothing else has to be restarted or reconfigured.
+
+### Liveness
+
+The proxy probes every registered instance and stops routing to one that fails
+`--fail-threshold` probes in a row. A single missed probe is not enough: a busy
+encoder can miss one under load. An evicted instance keeps being probed and
+rejoins on its own once it answers again, so recovering from a blip does not
+mean restarting anything. After `--evicted-ttl` seconds without a response it
+is forgotten.
+
+Instances also re-announce periodically, so a proxy that restarts refills its
+roster by itself.
 
 | Flag | Description |
 | ---- | ----------- |
-| `--encode-servers-urls` | Comma-separated list of encoder endpoints. Every multimodal item extracted from the request is fanned out to one of these URLs in a round-robin fashion. |
-| `--prefill-servers-urls` | Comma-separated list of prefill endpoints. Set to `disable`, `none`, or `""` to skip the dedicated prefill phase and run E+PD (encoder + combined prefill/decode). |
-| `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |
-| `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
+| `--host`, `--port` | Bind address for the proxy (defaults: `0.0.0.0:8000`). |
+| `--probe-interval` | Seconds between health probes. `0` disables probing. |
+| `--probe-timeout` | Per-probe timeout. |
+| `--fail-threshold` | Consecutive failed probes before an instance stops being routed to. |
+| `--evicted-ttl` | Seconds to keep probing an unreachable instance before forgetting it. `0` probes forever. |
+| `--no-rewrite` | Forward media to the decoder unchanged instead of replacing it with a reference to the encoder's embedding. For A/B timing the rewrite itself. |
 
-Example usage:
-For E + PD setup:
+### Inspecting the roster
 
 ```bash
-$ python disagg_encoder_proxy.py \
-      --encode-servers-urls "http://e1:8001,http://e2:8002" \
-      --prefill-servers-urls "disable" \
-      --decode-servers-urls "http://pd1:8003,http://pd2:8004"
+curl http://proxy-host:8000/instances
 ```
 
-For E + P + D setup:
-
-```bash
-$ python disagg_encoder_proxy.py \
-      --encode-servers-urls "http://e1:8001,http://e2:8001" \
-      --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
-      --decode-servers-urls "http://d1:8005,http://d2:8006"
+```json
+{
+  "encode":  {"live": ["http://e1:8001", "http://e2:8001"], "evicted": []},
+  "prefill": {"live": [], "evicted": []},
+  "decode":  {"live": ["http://pd1:8003"], "evicted": []}
+}
 ```

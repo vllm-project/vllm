@@ -108,6 +108,21 @@ echo "make ec cache folder"
 mkdir -p "$EC_SHARED_STORAGE_PATH"
 
 ###############################################################################
+# Proxy
+#
+# Starts first and empty: every worker below registers itself once it is
+# serving, so nothing here has to name them.
+###############################################################################
+vllm disagg-proxy \
+    --host "0.0.0.0" \
+    --port "$PROXY_PORT" \
+    >"${PROXY_LOG}" 2>&1 &
+
+PIDS+=($!)
+
+wait_for_server "$PROXY_PORT"
+
+###############################################################################
 # Encoder worker
 ###############################################################################
 env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
@@ -123,7 +138,8 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &
@@ -148,7 +164,8 @@ vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
         }
     }' \
     --kv-transfer-config '{
@@ -161,6 +178,10 @@ PIDS+=($!)
 
 ###############################################################################
 # Decode worker
+#
+# No EC role: this worker moves no embeddings. It carries an EC config only
+# so it can announce itself, which is what tells the proxy where to send the
+# request once prefill is done.
 ###############################################################################
 env "$DEVICE_AFFINITY_ENV=$GPU_D" \
 UCX_NET_DEVICES=all \
@@ -177,6 +198,11 @@ vllm serve "$MODEL" \
         "kv_connector": "NixlConnector",
         "kv_role": "kv_consumer"
     }' \
+    --ec-transfer-config '{
+        "ec_connector_extra_config": {
+            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+        }
+    }' \
     >"${D_LOG}" 2>&1 &
 
 PIDS+=($!)
@@ -186,20 +212,6 @@ wait_for_server "$ENCODE_PORT"
 wait_for_server "$PREFILL_PORT"
 wait_for_server "$DECODE_PORT"
 
-###############################################################################
-# Proxy
-###############################################################################
-python disagg_epd_proxy.py \
-    --host "0.0.0.0" \
-    --port "$PROXY_PORT" \
-    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
-    --prefill-servers-urls "http://localhost:$PREFILL_PORT" \
-    --decode-servers-urls "http://localhost:$DECODE_PORT" \
-    >"${PROXY_LOG}" 2>&1 &
-
-PIDS+=($!)
-
-wait_for_server "$PROXY_PORT"
 echo "All services are up!"
 
 ###############################################################################

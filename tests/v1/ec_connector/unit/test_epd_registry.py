@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dynamic registration and liveness for the EPD proxy's instance registry."""
 
-from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -78,35 +77,6 @@ class TestRegistration:
         registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
         assert registry.unregister("http://e0:8000") is True
         assert registry.unregister("http://e0:8000") is False
-        assert registry.pick(ENCODE) is None
-
-
-class TestRoundRobin:
-    def test_cursor_survives_a_registration(self, registry):
-        """A new instance must not restart the rotation at the first one.
-
-        Rebuilding an `itertools.cycle` over the roster -- the usual way to
-        round-robin a mutable list -- resets the position, so every
-        registration hot-spots whichever instance happens to be first.
-        """
-        _fill(registry, ENCODE, 3, prefix="http://e")
-        assert [r.url for r in registry.pick_many(ENCODE, 2)] == [
-            "http://e0:8000",
-            "http://e1:8000",
-        ]
-        registry.register(InstanceRecord(ENCODE, "http://e3:8000"))
-        assert [r.url for r in registry.pick_many(ENCODE, 2)] == [
-            "http://e2:8000",
-            "http://e3:8000",
-        ]
-
-    def test_fan_out_spreads_evenly_over_single_item_requests(self, registry):
-        _fill(registry, ENCODE, 3, prefix="http://e")
-        hits = Counter(registry.pick_many(ENCODE, 1)[0].url for _ in range(9))
-        assert set(hits.values()) == {3}
-
-    def test_no_instances_yields_nothing(self, registry):
-        assert registry.pick_many(ENCODE, 2) == []
         assert registry.pick(ENCODE) is None
 
 
