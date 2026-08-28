@@ -26,7 +26,10 @@ from vllm.transformers_utils.configs.ovis import AIMv2Config
 
 class AIMv2SwiGLUFFN(nn.Module):
     def __init__(
-        self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str
+        self,
+        config: AIMv2Config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
     ):
         super().__init__()
         hidden_features = config.intermediate_size
@@ -91,7 +94,10 @@ class AIMv2ViTPreprocessor(nn.Module):
 
 class AIMv2Attention(nn.Module):
     def __init__(
-        self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str
+        self,
+        config: AIMv2Config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
     ):
         super().__init__()
         self.config = config
@@ -144,7 +150,10 @@ class AIMv2Attention(nn.Module):
 
 class AIMv2Block(nn.Module):
     def __init__(
-        self, config: AIMv2Config, quant_config: QuantizationConfig, prefix: str
+        self,
+        config: AIMv2Config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
     ):
         super().__init__()
         self.attn = AIMv2Attention(
@@ -166,7 +175,7 @@ class AIMv2Transformer(nn.Module):
     def __init__(
         self,
         config: AIMv2Config,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         *,
         require_post_norm: bool | None = None,
         prefix: str = "",
@@ -206,7 +215,7 @@ class AIMv2Model(torch.nn.Module):
     def __init__(
         self,
         config: AIMv2Config,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         *,
         require_post_norm: bool | None = None,
         prefix: str = "",
