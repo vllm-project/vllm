@@ -715,6 +715,53 @@ def test_shm_ring_buffer_creation_checks_free_space():
         ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
 
 
+def test_shm_ring_buffer_attach_retries_then_succeeds():
+    total_bytes = (24 * 1024 * 1024 + 2) * 10
+    attached = mock.Mock(size=total_bytes)
+    with (
+        mock.patch.object(
+            shm_broadcast.shared_memory,
+            "SharedMemory",
+            side_effect=[
+                FileNotFoundError(),
+                FileNotFoundError(),
+                attached,
+            ],
+        ) as mock_shared_memory,
+        mock.patch.object(shm_broadcast.time, "sleep") as mock_sleep,
+        mock.patch.object(shm_broadcast, "VLLM_SHM_ATTACH_TIMEOUT_S", 5.0),
+    ):
+        buffer = ShmRingBuffer(
+            n_reader=1,
+            max_chunk_bytes=24 * 1024 * 1024,
+            max_chunks=10,
+            name="fake-name",
+        )
+    assert buffer.shared_memory is attached
+    assert mock_shared_memory.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+def test_shm_ring_buffer_attach_raises_after_timeout():
+    with (
+        mock.patch.object(
+            shm_broadcast.shared_memory,
+            "SharedMemory",
+            side_effect=FileNotFoundError(),
+        ),
+        mock.patch.object(shm_broadcast.time, "sleep"),
+        mock.patch.object(shm_broadcast, "VLLM_SHM_ATTACH_TIMEOUT_S", 0.0),
+        pytest.raises(RuntimeError, match="fake-name") as exc_info,
+    ):
+        ShmRingBuffer(
+            n_reader=1,
+            max_chunk_bytes=24 * 1024 * 1024,
+            max_chunks=10,
+            name="fake-name",
+        )
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+
 def test_remote_subscribe_addr_unique_concurrent_writers(
     monkeypatch: pytest.MonkeyPatch,
 ):

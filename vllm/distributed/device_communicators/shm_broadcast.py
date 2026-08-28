@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
+VLLM_SHM_ATTACH_TIMEOUT_S = envs.VLLM_SHM_ATTACH_TIMEOUT_S
 # Cap on how long an idle reader parks before re-reading the authoritative SHM
 # written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
 # wakeup stays negligible (one flag check per reader every 5s).
@@ -335,19 +336,45 @@ class ShmRingBuffer:
                 "multiprocessing.resource_tracker.register",
                 lambda *args, **kwargs: None,
             ):
-                try:
-                    self.shared_memory = shared_memory.SharedMemory(name=name)
-                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
-                    # Some platforms allocate memory based on page size,
-                    # so the shared memory block size may be larger or equal
-                    # to the requested size. The size parameter is ignored
-                    # when attaching to an existing block.
-                    assert self.shared_memory.size >= self.total_bytes_of_buffer
-                except FileNotFoundError:
-                    # we might deserialize the object in a different node
-                    # in this case, this object is not used,
-                    # and we should suppress the error
-                    pass
+                # The writer creates the segment before this reader ever
+                # learns its name (readers only attach after receiving the
+                # writer's handle), so a missing segment here is not the
+                # legitimate cross-node case it may once have been: this
+                # branch is only reached for ranks already confirmed to be
+                # on the writer's node (see MessageQueue.create_from_handle).
+                # A FileNotFoundError means either a transient race (the
+                # writer hasn't finished creating the segment yet) or a real
+                # failure, so retry with backoff before giving up.
+                backoff_s = 0.05
+                deadline = time.monotonic() + VLLM_SHM_ATTACH_TIMEOUT_S
+                while True:
+                    try:
+                        self.shared_memory = shared_memory.SharedMemory(name=name)
+                        # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                        # Some platforms allocate memory based on page size,
+                        # so the shared memory block size may be larger or
+                        # equal to the requested size. The size parameter is
+                        # ignored when attaching to an existing block.
+                        assert self.shared_memory.size >= self.total_bytes_of_buffer
+                        break
+                    except FileNotFoundError as e:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                f"Failed to attach to shared memory segment "
+                                f"{name!r} after retrying for "
+                                f"{VLLM_SHM_ATTACH_TIMEOUT_S:.1f} seconds. This "
+                                "process was already confirmed to be on the "
+                                "same node as the writer, so the segment "
+                                "should exist. Possible causes: the writer "
+                                "process crashed or exited before creating "
+                                "the segment; the shared memory mount "
+                                f"({SHM_PATH}) is exhausted (see --shm-size / "
+                                "--ipc=host); or this container/pod does not "
+                                "actually share a /dev/shm namespace with the "
+                                "writer."
+                            ) from e
+                        time.sleep(backoff_s)
+                        backoff_s = min(backoff_s * 2, 1.0)
 
     def handle(self):
         return (
