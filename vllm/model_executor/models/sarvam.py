@@ -675,13 +675,6 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
-
 
 class SarvamMoEForCausalLM(BailingMoeForCausalLM):
     """Same as BailingMoeForCausalLM, but normalizes gate expert_bias pre-load."""

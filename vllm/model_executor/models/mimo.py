@@ -26,7 +26,6 @@
 # limitations under the License.
 """Inference-only MiMo model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -41,7 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
+from .utils import PPMissingLayer, WeightsMapper, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -120,10 +119,6 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def compute_logits(
         self,

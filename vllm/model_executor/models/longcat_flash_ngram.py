@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .longcat_flash import FlashConfig, FlashModel
-from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
+from .utils import PPMissingLayer, WeightsMapper, maybe_prefix
 
 
 def uses_ngram_embedding(config: FlashConfig) -> bool:
@@ -266,12 +266,6 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def get_expert_mapping(self):
         return self.model.get_expert_mapping()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # AutoWeightsLoader routes ``model.*`` to FlashNgramModel.load_weights
-        # (which handles the ngram split) and ``lm_head.*`` to the head.
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LongcatNgramModelState(DefaultModelState):

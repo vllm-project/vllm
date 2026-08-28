@@ -5,7 +5,15 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    Protocol,
+    TypeAlias,
+    overload,
+)
 
 import regex as re
 import torch
@@ -55,6 +63,14 @@ class WeightsMapper:
     orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
+
+    _RULE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "orig_to_new_regex",
+        "orig_to_new_substr",
+        "orig_to_new_stacked",
+        "orig_to_new_prefix",
+        "orig_to_new_suffix",
+    )
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -133,6 +149,33 @@ class WeightsMapper:
                 key = new_key.join(key.rsplit(suffix, 1))
 
         return key, shard_id
+
+    def rule_keys(self) -> frozenset[tuple[str, Any]]:
+        """Identify every rule in this mapper by its field and source pattern.
+
+        Two mappers that were built from a common base share the keys of the
+        rules they have in common, even though the mappers are distinct objects.
+        """
+        keys = {
+            (field, key) for field in self._RULE_FIELDS for key in getattr(self, field)
+        }
+        keys |= {("orig_to_new_renaming", id(r)) for r in self.orig_to_new_renaming}
+        return frozenset(keys)
+
+    def drop_rules(self, keys: frozenset[tuple[str, Any]]) -> "WeightsMapper":
+        """Mapper with the rules named by `keys` removed."""
+        kwargs: dict[str, Any] = {
+            field: {
+                k: v for k, v in getattr(self, field).items() if (field, k) not in keys
+            }
+            for field in self._RULE_FIELDS
+        }
+        kwargs["orig_to_new_renaming"] = [
+            r
+            for r in self.orig_to_new_renaming
+            if ("orig_to_new_renaming", id(r)) not in keys
+        ]
+        return replace(self, **kwargs)
 
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
@@ -235,6 +278,11 @@ class AutoWeightsLoader:
         self.module = module
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
+        # If the module has a `mtp_start_layer_idx` attribute,
+        # it is an MTP head and should only load spec layers.
+        self.loads_spec_layers_only = any(
+            hasattr(m, "mtp_start_layer_idx") for m in module.modules()
+        )
 
         # Weight tying makes two qualnames point at the same `nn.Parameter`
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
@@ -347,6 +395,7 @@ class AutoWeightsLoader:
         base_prefix: str,
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
+        applied_rules: frozenset[tuple[str, Any]] = frozenset(),
     ) -> Iterable[str]:
         if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             return
@@ -368,6 +417,20 @@ class AutoWeightsLoader:
                         loaded_params,
                     )
 
+        # If the module has a `hf_to_vllm_mapper` attribute, apply it to the weights.
+        # Models routinely put the backbone's rules on the outer class too, either by
+        # aliasing its mapper or by extending it, so that LoRA and quantization can
+        # find them. Running a rule again on a name it already mapped corrupts it
+        # (a `.w1 -> .w13` stacked rule would go on to produce `.w133`), so apply
+        # only the rules no ancestor has applied yet.
+        if not callable(getattr(module, "load_weights", None)):
+            module_mapper = getattr(module, "hf_to_vllm_mapper", None)
+            if module_mapper is not None:
+                module_mapper = module_mapper.drop_rules(applied_rules)
+                if rule_keys := module_mapper.rule_keys():
+                    weights = module_mapper.apply(weights)
+                    applied_rules |= rule_keys
+
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
 
@@ -380,7 +443,7 @@ class AutoWeightsLoader:
 
             if child_prefix in child_modules:
                 yield from self._load_module(
-                    prefix, child_modules[child_prefix], child_weights
+                    prefix, child_modules[child_prefix], child_weights, applied_rules
                 )
             elif child_prefix in child_params:
                 if self._can_skip(prefix):
@@ -403,6 +466,22 @@ class AutoWeightsLoader:
                     logger.debug("Ignoring missing %s", prefix)
 
                     continue
+
+                # Skip spec layers on base models and skip base layers on spec models.
+                config = getattr(self.module, "config", None)
+                if config is not None:
+                    is_spec_layer = (
+                        get_spec_layer_idx_from_weight_name(config, prefix + ".")
+                        is not None
+                    )
+                    if is_spec_layer != self.loads_spec_layers_only:
+                        logger.debug(
+                            "Skipping %s model layer %s",
+                            "base" if self.loads_spec_layers_only else "speculative",
+                            prefix,
+                        )
+
+                        continue
 
                 named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
@@ -441,7 +520,10 @@ class AutoWeightsLoader:
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
-        autoloaded_weights = set(self._load_module("", self.module, weights))
+        # Rules applied here must not be applied again further down the tree.
+        autoloaded_weights = set(
+            self._load_module("", self.module, weights, mapper.rule_keys())
+        )
         self._check_skipped_aliases(autoloaded_weights)
         return autoloaded_weights
 

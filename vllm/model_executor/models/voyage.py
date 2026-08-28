@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3 import Qwen3Model
-from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
 WeightItem = tuple[str, torch.Tensor]
@@ -61,7 +59,3 @@ class VoyageQwen3BidirectionalEmbedModel(nn.Module):
     ) -> torch.Tensor:
         out = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return self.linear(out)
-
-    def load_weights(self, weights: Iterable[WeightItem]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

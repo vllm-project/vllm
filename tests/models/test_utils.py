@@ -217,3 +217,59 @@ def test_get_rename_mapper_keeps_only_renames():
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
         assert mapper._map_name(name) is None
         assert renames._map_name(name) == name
+
+
+class ModuleWithSharedMapper(torch.nn.Module):
+    """Mimics a model that aliases its backbone's mapper onto the outer class."""
+
+    # Deliberately not idempotent: re-applying it to an already-mapped `ab`
+    # would produce `abb`.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={"a": "ab"})
+
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.hf_to_vllm_mapper = self.hf_to_vllm_mapper
+        self.model.ab = torch.nn.Linear(2, 4, bias=False)
+
+
+@pytest.mark.cpu_test
+def test_module_mapper_is_not_reapplied_on_recursion():
+    """A mapper an ancestor already applied must not run again on the way down."""
+    mod = ModuleWithSharedMapper()
+
+    weights = [("model.a.weight", torch.ones(4, 2))]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
+
+    assert loaded == {"model.ab.weight"}
+    assert torch.all(mod.model.ab.weight == 1.0)
+
+
+class ModuleWithExtendedMapper(torch.nn.Module):
+    """Mimics a model that extends its backbone's mapper instead of aliasing it.
+
+    The outer mapper is a distinct object, so the shared rules can only be
+    recognised by the rules themselves.
+    """
+
+    hf_to_vllm_mapper = ModuleWithSharedMapper.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"dropped.": None}
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.hf_to_vllm_mapper = ModuleWithSharedMapper.hf_to_vllm_mapper
+        self.model.ab = torch.nn.Linear(2, 4, bias=False)
+
+
+@pytest.mark.cpu_test
+def test_extended_module_mapper_does_not_reapply_inherited_rules():
+    """Extending a backbone's mapper must not re-run its rules on recursion."""
+    mod = ModuleWithExtendedMapper()
+
+    weights = [("model.a.weight", torch.ones(4, 2)), ("dropped.thing", torch.ones(1))]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
+
+    assert loaded == {"model.ab.weight"}
+    assert torch.all(mod.model.ab.weight == 1.0)

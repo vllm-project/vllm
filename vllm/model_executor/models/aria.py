@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
 
 import torch
@@ -37,7 +37,7 @@ from .idefics2_vision_model import (
 )
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import WeightsMapper, maybe_prefix
 
 
 class AriaImagePixelInputs(TensorSchema):
@@ -87,10 +87,6 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
             ".v_proj": (".qkv_proj", "v"),
         },
     )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class AriaProjectorMLP(nn.Module):
@@ -530,7 +526,3 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

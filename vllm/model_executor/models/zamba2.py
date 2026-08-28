@@ -8,7 +8,6 @@ architectures in a hybrid model optimized for efficient sequence modeling. The
 model alternates between state space model layers and attention-based layers.
 """
 
-from collections.abc import Iterable
 from itertools import cycle
 from typing import Any
 
@@ -46,7 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsMambaPrefixCaching
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import WeightsMapper, maybe_prefix
 
 
 class Zamba2LoRA(nn.Module):
@@ -962,7 +961,3 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
         """
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

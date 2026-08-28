@@ -61,7 +61,7 @@ def test_async_llm_startup_error(
         pytest.skip(reason="Not enough CUDA devices")
 
     # Monkeypatch an error in the model.
-    monkeypatch.setattr(LlamaForCausalLM, failing_method, evil_method)
+    monkeypatch.setattr(LlamaForCausalLM, failing_method, evil_method, raising=False)
 
     engine_args = AsyncEngineArgs(
         model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size

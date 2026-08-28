@@ -329,9 +329,28 @@ class BagelForConditionalGeneration(
     The image generation part is not supported in vLLM.
     """
 
-    # pos_embed is handled by the PositionEmbedding module
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"vit_pos_embed.pos_embed": None}
+        # Skip generation-related weights since we only support text2text and image2text
+        # Filter out all image generation components:
+        # - 'moe_gen': MoE generation weights
+        # - 'latent_pos_embed': Latent position embeddings for VAE
+        # - 'llm2vae', 'vae2llm': LLM-VAE projections
+        # - 'time_embedder': Timestep embeddings for diffusion
+        # - VAE encoder/decoder: Use specific prefixes to avoid matching vision encoder
+        orig_to_new_substr={
+            "moe_gen": None,
+            "latent_pos_embed": None,
+            "llm2vae": None,
+            "vae2llm": None,
+            "time_embedder": None,
+        },
+        orig_to_new_prefix={
+            # VAE encoder/decoder, not vision encoder
+            "decoder.": None,
+            "encoder.": None,
+            # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
+            "vit_pos_embed.pos_embed": None,
+        },
     )
 
     @classmethod
@@ -526,33 +545,8 @@ class BagelForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights from checkpoint."""
-        # Skip generation-related weights since we only support text2text and image2text
-        # Filter out all image generation components:
-        # - 'moe_gen': MoE generation weights
-        # - 'latent_pos_embed': Latent position embeddings for VAE
-        # - 'llm2vae', 'vae2llm': LLM-VAE projections
-        # - 'time_embedder': Timestep embeddings for diffusion
-        # - VAE encoder/decoder: Use specific prefixes to avoid matching vision encoder
-        generation_keywords = [
-            "moe_gen",
-            "latent_pos_embed",
-            "llm2vae",
-            "vae2llm",
-            "time_embedder",
-        ]
-        vae_prefixes = [
-            "decoder.",
-            "encoder.",
-        ]  # VAE encoder/decoder, not vision encoder
         filtered_weights = []
         for name, tensor in weights:
-            # Skip generation-related keywords
-            if any(skip in name for skip in generation_keywords):
-                continue
-            if any(name.startswith(prefix) for prefix in vae_prefixes):
-                continue
-
             if "patch_embedding.weight" in name and tensor.ndim == 2:
                 out_channels = tensor.shape[0]
                 in_features = tensor.shape[1]

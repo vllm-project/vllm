@@ -86,12 +86,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    maybe_prefix,
-    scatter_output_slices,
-)
+from .utils import WeightsMapper, maybe_prefix, scatter_output_slices
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -1909,7 +1904,3 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         )
 
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

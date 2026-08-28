@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-Omni-Moe model (thinker part)."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Any, cast
 
@@ -108,7 +108,6 @@ from .qwen2_5_vl import (
 )
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 from .utils import (
-    AutoWeightsLoader,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
@@ -551,10 +550,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         for _ in range(3):
             lengths = (lengths - 1) // 2 + 1
         return lengths
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -1045,10 +1040,6 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
 
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile(
@@ -1965,12 +1956,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-        return loaded_weights
 
     def _compute_audio_token_count(self, audio_feature_length: int) -> int:
         """Compute audio tokens from feature length using Qwen3-Omni formula."""

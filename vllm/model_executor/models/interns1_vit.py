@@ -21,8 +21,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
-from .utils import AutoWeightsLoader
-
 NORM2FN = {
     "rms_norm": RMSNorm,
     "layer_norm": nn.LayerNorm,
@@ -432,7 +430,3 @@ class InternS1VisionModel(nn.Module):
         encoder_outputs = self.layernorm(encoder_outputs)
 
         return encoder_outputs
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

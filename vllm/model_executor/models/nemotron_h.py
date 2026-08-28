@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only NemotronH model."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from itertools import islice
 
 import torch
@@ -72,7 +72,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsReplaySSM,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -885,7 +884,3 @@ class NemotronHForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

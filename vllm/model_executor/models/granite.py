@@ -30,7 +30,6 @@ learnable per-head attention sink (`self_attn.sinks`), and a per-layer RoPE base
 (`layer_rope_theta`, with 0 for NoPE).
 """
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -62,7 +61,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
@@ -387,10 +385,6 @@ class GraniteModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     hf_to_vllm_mapper = GraniteModel.hf_to_vllm_mapper
@@ -465,7 +459,3 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
                 ),
             }
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

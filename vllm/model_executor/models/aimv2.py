@@ -3,7 +3,6 @@
 
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
-from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -20,7 +19,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.transformers_utils.configs.ovis import AIMv2Config
 
 
@@ -230,7 +229,3 @@ class AIMv2Model(torch.nn.Module):
         x = self.trunk(x)
 
         return x
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

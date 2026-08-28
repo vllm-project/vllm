@@ -1089,10 +1089,6 @@ class GlmAsrForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
     @classmethod
     def _get_audio_token(cls, model_config: ModelConfig) -> str:
         """Get the audio token from processor.

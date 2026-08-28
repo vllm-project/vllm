@@ -22,6 +22,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
+from vllm.model_executor.model_loader.utils import autoload_weights
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -244,7 +245,7 @@ class IPCWeightTransferEngine(
         )
 
         with disable_mtp_completeness_check():
-            self.model.load_weights(weights)
+            autoload_weights(self.model, weights)
 
     def shutdown(self) -> None:
         self._packed_importer.close()

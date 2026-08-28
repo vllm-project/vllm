@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only GraniteMoe model."""
 
-from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -61,7 +60,6 @@ from vllm.sequence import IntermediateTensors
 from .granite import granite_layer_attn_params
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     make_layers,
@@ -374,10 +372,6 @@ class GraniteMoeModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
@@ -450,7 +444,3 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 ),
             }
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)

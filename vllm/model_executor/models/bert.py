@@ -4,6 +4,7 @@
 from collections.abc import Iterable, Set
 from dataclasses import replace
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BertConfig
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.pooler.tokwise import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.utils import autoload_weights
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -417,10 +419,6 @@ class BertModel(nn.Module, SupportsQuant):
 
         return self.encoder(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
@@ -443,10 +441,6 @@ class BertPoolingModel(BertModel):
 
         self.pooler = BertPooler(vllm_config.model_config)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 @default_pooling_type(seq_pooling_type="CLS")
 class BertEmbeddingModel(nn.Module, SupportsQuant):
@@ -461,6 +455,11 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     """
 
     is_pooling_model = True
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^(?!model\.)"): "model."},
+        orig_to_new_prefix={"model.lm_head.": None},
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -489,18 +488,6 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights_list = list(weights)
-
-        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
-        has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
-        if not has_model_prefix:
-            orig_to_new_prefix[""] = "model."
-        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
-
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights_list, mapper=mapper)
 
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(
@@ -745,7 +732,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 model_side.append((name, w))
 
         loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
+        loaded_model = autoload_weights(self.model, model_side)
         loaded.update({"model." + n for n in loaded_model})
 
         if mlm_side:
@@ -811,11 +798,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.bert.embed_input_ids(input_ids)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights)
-        return loaded_params
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -863,11 +845,6 @@ class BertForTokenClassification(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.bert.embed_input_ids(input_ids)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights)
-        return loaded_params
 
     def forward(
         self,
