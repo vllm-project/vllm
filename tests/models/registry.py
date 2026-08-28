@@ -1516,6 +1516,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
+    "LingDSparkModel": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash",
+        speculative_model="inclusionAI/Ling-3.0-flash-dspark",
+        is_available_online=False,
+        use_original_num_layers=True,
+        trust_remote_code=True,
+    ),
     "Qwen3OmniDSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         speculative_model="Qwen/Qwen3-Omni-30B-A3B-DSpark",
