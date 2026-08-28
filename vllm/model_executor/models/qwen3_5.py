@@ -233,6 +233,10 @@ class Qwen3_5Model(Qwen3NextModel):
             vllm_config.model_config.hf_text_config
         )
         parallel_config = vllm_config.parallel_config
+        self.is_sequence_parallel = (
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+        )
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
