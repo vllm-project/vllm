@@ -14,13 +14,17 @@ import pytest
 import torch
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
@@ -150,6 +154,49 @@ def test_dflash_does_not_back_off_last_cache_position() -> None:
         _split(request, PROMPT_LEN, drop_last_prefix_cache_block=True)
         == PROMPT_LEN
     )
+
+
+def test_sliding_window_group_tolerates_finer_alignment() -> None:
+    """A coordinator alignment finer than a sliding-window group's block size
+    must fall back to block-aligned hits instead of crashing the EngineCore.
+
+    Regression for #53505: with a hybrid mamba target configured with a
+    `prefix_match_unit` finer than the draft model's sliding-window block,
+    `alignment_tokens % block_size != 0` used to hit an assert and kill all
+    in-flight requests.
+    """
+    block_size = 560
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4 * block_size,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = SlidingWindowManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        needs_kv_cache_zeroing=False,
+        max_admission_blocks_per_request=10**9,
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(4)]
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=4 * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+    )
+    assert computed_blocks == ([],)
+    assert hit_length == 0
 
 
 def _run_chunked_prefill(
