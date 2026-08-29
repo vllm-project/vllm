@@ -34,11 +34,22 @@ def _encode_length(value: int) -> bytes:
     return value.to_bytes(_LENGTH_BYTES, "little")
 
 
+# Below this size, joining a chunk to its length header costs less than the
+# extra `hasher.update` call that keeping them apart would need. Above it, the
+# copy would be the dominant cost, so the header is fed separately. The bytes
+# reaching the digest are identical either way.
+_INLINE_HEADER_MAX_BYTES = 256
+
+
 def _framed(chunk: bytes | memoryview) -> Iterable[bytes | memoryview]:
     """Yield *chunk* preceded by its size in bytes."""
     size = chunk.nbytes if isinstance(chunk, memoryview) else len(chunk)
-    yield _encode_length(size)
-    yield chunk
+    header = _encode_length(size)
+    if size <= _INLINE_HEADER_MAX_BYTES:
+        yield header + bytes(chunk)
+    else:
+        yield header
+        yield chunk
 
 
 @functools.lru_cache(maxsize=3)
@@ -195,13 +206,11 @@ class MultiModalHasher:
         if obj is None:
             yield _TAG_NONE
         elif isinstance(obj, (list, tuple)):
-            yield _TAG_SEQUENCE
-            yield _encode_length(len(obj))
+            yield _TAG_SEQUENCE + _encode_length(len(obj))
             for elem in obj:
                 yield from cls.iter_value_to_bytes(elem)
         elif isinstance(obj, dict):
-            yield _TAG_MAPPING
-            yield _encode_length(len(obj))
+            yield _TAG_MAPPING + _encode_length(len(obj))
             for k, v in obj.items():
                 yield from _framed(str(k).encode("utf-8"))
                 yield from cls.iter_value_to_bytes(v)
