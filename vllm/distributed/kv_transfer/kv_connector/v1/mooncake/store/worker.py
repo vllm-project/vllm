@@ -1760,36 +1760,17 @@ class MooncakeStoreWorker:
             "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
 
-    def start_load_kv(
-        self,
-        metadata: MooncakeStoreConnectorMetadata,
-    ):
-        """No-op: loads are issued in get_finished() for overlap."""
-        pass
+    def start_load_kv(self, metadata: MooncakeStoreConnectorMetadata):
+        """Issue async loads.
 
-    def wait_for_save(
-        self,
-        metadata: MooncakeStoreConnectorMetadata,
-    ):
-        """No-op: stores are issued in get_finished() for overlap."""
-        pass
-
-    def get_finished(
-        self,
-        finished_req_ids: set[str],
-        meta: MooncakeStoreConnectorMetadata,
-    ) -> tuple[set[str], set[str]]:
-        """Issue all I/O and get completed send/recv request IDs.
-
-        All load and store I/O requests are issued here (after model
-        compute is launched on the compute stream) for better
-        compute-I/O overlap.
+        Runs after the forward launch on steps without sync loads
+        (SchedulerOutput.has_sync_kv_loads), keeping load submission off
+        the critical path while preserving compute-I/O overlap.
         """
         if self._capacity_only:
-            return set(), set()
+            return
 
-        # Issue async loads
-        for request in meta.requests:
+        for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:
                 continue
@@ -1798,21 +1779,40 @@ class MooncakeStoreWorker:
             self.recv_request_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
-        # Issue stores with CUDA event synchronization.
-        if self.can_put:
-            current_event = None
-            for request in meta.requests:
-                if request.can_save:
-                    current_event = torch.cuda.Event()
-                    current_event.record()
-                    break
 
-            for request in meta.requests:
-                if not request.can_save:
-                    continue
-                request.current_event = current_event
-                assert self.kv_send_thread is not None
-                self.kv_send_thread.add_request(request)
+    def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
+        """Issue async stores with CUDA event synchronization.
+
+        Runs after the forward launch for compute-I/O overlap.
+        """
+        if self._capacity_only or not self.can_put:
+            return
+
+        current_event = None
+        for request in metadata.requests:
+            if request.can_save:
+                current_event = torch.cuda.Event()
+                current_event.record()
+                break
+
+        for request in metadata.requests:
+            if not request.can_save:
+                continue
+            request.current_event = current_event
+            assert self.kv_send_thread is not None
+            self.kv_send_thread.add_request(request)
+
+    def get_finished(
+        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
+    ) -> tuple[set[str], set[str]]:
+        """Get completed send/recv request IDs.
+
+        Loads are issued in start_load_kv() and stores in wait_for_save().
+        """
+        if self._capacity_only:
+            return set(), set()
+
+        if self.can_put:
             self._close_ended_store_requests(finished_req_ids, meta)
 
         # Blocks read by a store job are released by the scheduler when the job

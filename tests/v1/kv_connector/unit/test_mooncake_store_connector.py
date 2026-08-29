@@ -123,10 +123,14 @@ def test_worker_methods_delegate_to_store_worker():
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
+    connector.start_load_kv(MagicMock())
+    connector.wait_for_save()
     result = connector.get_finished(finished_req_ids)
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
+    worker.start_load_kv.assert_called_once_with(metadata)
+    worker.wait_for_save.assert_called_once_with(metadata)
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)
     assert result == ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.assert_called_once_with()

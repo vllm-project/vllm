@@ -3114,6 +3114,24 @@ def test_consumer_starts_send_thread_only_when_put_is_enabled(save_decode_cache)
     assert (worker.kv_send_thread is not None) == save_decode_cache
 
 
+def test_start_load_kv_queues_async_load():
+    w = _make_bare_worker()
+    req = _make_load_req(
+        "load-req",
+        [b"h0", b"h1"],
+        token_len=32,
+    )
+    assert req.load_spec is not None
+    req.load_spec.token_len = 0
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+
+    w.start_load_kv(meta)
+
+    assert req.load_spec.token_len == 32
+    assert w.recv_request_queue.get_nowait() is req
+
+
 def test_putting_consumer_queues_decode_save():
     w = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
     send_thread = MagicMock()
@@ -3125,7 +3143,7 @@ def test_putting_consumer_queues_decode_save():
 
     with patch.object(torch.cuda, "Event") as event_cls:
         event = event_cls.return_value
-        w.get_finished(set(), meta)
+        w.wait_for_save(meta)
 
     event.record.assert_called_once_with()
     send_thread.add_request.assert_called_once_with(req)
