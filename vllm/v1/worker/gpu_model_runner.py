@@ -4958,10 +4958,14 @@ class GPUModelRunner(
         """Broadcast sampled token ids (GPU) from last PP stage"""
         pp = get_pp_group()
         assert pp.is_last_rank
-        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
-        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
-            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
+        assert sampled_token_ids.dim() == 2, (
+            "PP+async expects sampled_token_ids to have shape [num_reqs, *]"
         )
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        # Spec decode produces multiple sampled columns; only the verifier's
+        # accepted sampled token is needed by earlier PP ranks for the next step.
+        if sampled_token_ids.shape[-1] != 1:
+            sampled_token_ids = sampled_token_ids[:, :1].contiguous()
         # Skip for chunked prefill: sampled tokens are dummy
         # and will be discarded, no need to broadcast.
         if not self._is_all_reqs_chunked_prefill():
