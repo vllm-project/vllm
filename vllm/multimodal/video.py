@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -177,8 +177,8 @@ class VideoBackend(VideoLoader):
 
     Samples ``num_frames`` uniformly across the video (or one frame every
     ``1/fps`` seconds, whichever produces fewer frames). The decoding codec
-    is selected via the ``backend`` kwarg (``"opencv"``, ``"pyav"``,
-    ``"torchcodec"``, ``"pynvvideocodec"``, or ``"deepstream"``),
+    is selected via the ``backend`` kwarg (``"opencv"``, ``"torchcodec"``,
+    ``"pynvvideocodec"``, or ``"deepstream"``),
     which can be passed through ``--media-io-kwargs``. Defaults to ``"opencv"``.
     """
 
@@ -232,16 +232,15 @@ class VideoBackend(VideoLoader):
                 dynamic subclass; ignored here.
             frame_recovery: Enable forward-scan recovery for failed frames.
                 Only honored by the OpenCV codec.
-            backend: Decoding codec — ``"opencv"``, ``"pyav"``,
-                ``"torchcodec"``, ``"pynvvideocodec"`` or ``"deepstream"``.
+            backend: Decoding codec — ``"opencv"``, ``"torchcodec"``,
+                ``"pynvvideocodec"`` or ``"deepstream"``.
             kwargs: Codec-specific options, validated against and forwarded to
                 ``backend``:
 
                 - ``num_ffmpeg_threads`` (TorchCodec): number of FFmpeg
                   decoding threads; ``0`` (default) relies on the FFmpeg
                   default value which is ``min(cpu_count + 1, 16)``.
-                  OpenCV will always use ``min(cpu_count, 16)`` while pyav
-                  will always use ``min(cpu_count, (height + 15) / 16)``.
+                  OpenCV will always use ``min(cpu_count, 16)``.
                 - ``seek_mode`` (TorchCodec): ``"exact"`` (default) guarantees
                   frame-accurate sampling by scanning the file on creation,
                   while ``"approximate"`` skips that scan for faster decoder
@@ -355,9 +354,7 @@ class Qwen3VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -436,9 +433,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -530,9 +525,7 @@ class DynamicVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -657,9 +650,7 @@ class GLM46VVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -757,9 +748,7 @@ class GLMGAVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
@@ -1073,9 +1062,7 @@ class NemotronVLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
