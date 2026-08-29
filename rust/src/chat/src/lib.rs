@@ -195,6 +195,7 @@ impl ChatRequestProcessor {
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
             intermediate: request.intermediate,
+            prompt_truncation: request.prompt_truncation,
             priority: request.priority,
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
