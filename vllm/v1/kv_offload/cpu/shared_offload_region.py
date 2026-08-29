@@ -104,44 +104,59 @@ class SharedOffloadRegion:
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            self.fd: int | None = os.open(
-                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
-        except FileExistsError:
-            # Joiner path — another worker won O_EXCL. Reopen and wait
-            # for the file to reach expected size.
-            self.fd = os.open(self.mmap_path, os.O_RDWR)
             try:
-                _wait_for_file_size(self.fd, self.total_size_bytes)
-            except (TimeoutError, OSError):
-                os.close(self.fd)
-                raise
-            logger.info("Opened existing mmap file %s", self.mmap_path)
-        else:
-            # Creator path. We won O_EXCL, so we own the file: any
-            # failure here must clean up so concurrent joiners don't
-            # land on a 0-byte stub and spin in _wait_for_file_size
-            # for the full 30 s timeout.
-            try:
-                check_shm_free_space(self.total_size_bytes)
-                os.ftruncate(self.fd, self.total_size_bytes)
-            except (RuntimeError, OSError):
-                os.unlink(self.mmap_path)
-                os.close(self.fd)
-                raise
-            self._creator = True
-            logger.info(
-                "Created mmap file %s (%.2f GB)",
-                self.mmap_path,
-                self.total_size_bytes / 1e9,
-            )
+                self.fd: int | None = os.open(
+                    self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+                )
+            except FileExistsError:
+                # Joiner path — another worker won O_EXCL. Reopen and wait
+                # for the file to reach expected size.
+                self.fd = os.open(self.mmap_path, os.O_RDWR)
+                try:
+                    _wait_for_file_size(self.fd, self.total_size_bytes)
+                except (TimeoutError, OSError):
+                    os.close(self.fd)
+                    raise
+                logger.info("Opened existing mmap file %s", self.mmap_path)
+            else:
+                # Creator path. We won O_EXCL, so we own the file: any
+                # failure here must clean up so concurrent joiners don't
+                # land on a 0-byte stub and spin in _wait_for_file_size
+                # for the full 30 s timeout.
+                try:
+                    check_shm_free_space(self.total_size_bytes)
+                    os.ftruncate(self.fd, self.total_size_bytes)
+                except (RuntimeError, OSError):
+                    os.unlink(self.mmap_path)
+                    os.close(self.fd)
+                    raise
+                self._creator = True
+                logger.info(
+                    "Created mmap file %s (%.2f GB)",
+                    self.mmap_path,
+                    self.total_size_bytes / 1e9,
+                )
 
-        self.mmap_obj: mmap.mmap | None = mmap.mmap(
-            self.fd,
-            self.total_size_bytes,
-            flags=mmap.MAP_SHARED,
-            prot=mmap.PROT_READ | mmap.PROT_WRITE,
-        )
+            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+                self.fd,
+                self.total_size_bytes,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+        except Exception:
+            # Peers block inside the barrier until the collective times out if
+            # we die before reaching it.  Arrive anyway so every worker calls
+            # barrier() exactly once and they fail on their own errors instead
+            # of hanging; a failure here must not replace ours.
+            if barrier is not None:
+                try:
+                    barrier()
+                except Exception:
+                    logger.warning(
+                        "Failed to release peers waiting at the mmap barrier",
+                        exc_info=True,
+                    )
+            raise
 
         if barrier is not None:
             # Every worker has mapped the file once the barrier releases, so

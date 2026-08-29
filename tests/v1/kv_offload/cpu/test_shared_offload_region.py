@@ -945,3 +945,39 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
     assert not os.path.exists(path), "SIGKILL must not leak the file"
     with _region(iid) as restarted:
         assert restarted._creator is True, "restart must be able to create anew"
+
+
+def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
+    """A worker that dies before the rendezvous must still arrive at the
+    barrier, or its peers block in the collective until it times out."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    )
+    barrier = MagicMock()
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        _make_region(iid, barrier=barrier)
+
+    barrier.assert_called_once_with()
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
+    """When releasing the peers fails too, the setup error that explains the
+    failure must be the one that propagates."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
+
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
