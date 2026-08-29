@@ -2,34 +2,20 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! Request-scoped multimodal preprocessing timing.
-//!
-//! Mirrors the Python frontend's `TimingContext` / `MultiModalTimingRegistry`
-//! (`vllm/multimodal/processing/context.py`, `vllm/multimodal/registry.py`) so
-//! the Rust chat frontend can expose the same per-stage preprocessing latencies
-//! that `vllm bench mm-processor` reports for the Python renderer.
-//!
-//! Recording is opt-in: a disabled context turns [`TimingContext::record`]
-//! into a no-op, and a disabled registry returns an empty map from
-//! [`MultiModalTimingRegistry::stat`], matching the Python `enabled` semantics.
+//! Mirrors the Python `TimingContext` / `MultiModalTimingRegistry`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-/// Per-request stats dictionary returned by [`TimingContext::stats_dict`] and
-/// [`MultiModalTimingRegistry::stat`]: `"{stage}_secs" => seconds`.
+/// `"{stage}_secs" => seconds` maps returned by `stats_dict` / `stat`.
 pub type StageStats = HashMap<String, f64>;
 
-/// Shared no-op context returned by a disabled registry so call sites can
-/// invoke [`TimingContext::record`] unconditionally.
+/// Shared no-op context used when the registry is disabled.
 static DISABLED_CONTEXT: LazyLock<Arc<TimingContext>> =
     LazyLock::new(|| Arc::new(TimingContext::disabled()));
 
-/// Per-stage timings recorded for one multimodal request.
-///
-/// Stage times live behind a [`Mutex`] that is only locked when a
-/// [`StageTimer`] is dropped, so individual stages can span `await` points
-/// without pinning the lock for their whole duration.
+/// Per-stage timings for one multimodal request.
 pub struct TimingContext {
     enabled: bool,
     stage_secs: Mutex<HashMap<&'static str, Duration>>,
@@ -44,8 +30,7 @@ impl TimingContext {
         }
     }
 
-    /// Create a disabled context whose [`TimingContext::record`] calls are
-    /// no-ops.
+    /// Create a disabled context where `record` is a no-op.
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -58,8 +43,7 @@ impl TimingContext {
         self.enabled
     }
 
-    /// Start timing `stage`; the elapsed wall-clock time is accumulated when
-    /// the returned [`StageTimer`] is dropped.
+    /// Start timing `stage`; elapsed time is recorded on timer drop.
     pub fn record(&self, stage: &'static str) -> StageTimer<'_> {
         StageTimer {
             ctx: self,
@@ -73,8 +57,7 @@ impl TimingContext {
         self.stage_secs.lock().unwrap().values().map(Duration::as_secs_f64).sum()
     }
 
-    /// Snapshot the recorded stages keyed by `"{stage}_secs"`, matching
-    /// Python's `TimingContext.get_stats_dict`.
+    /// Snapshot stages keyed by `"{stage}_secs"`.
     pub fn stats_dict(&self) -> StageStats {
         self.stage_secs
             .lock()
@@ -91,8 +74,7 @@ impl Default for TimingContext {
     }
 }
 
-/// RAII guard that records the elapsed time of a [`TimingContext::record`]
-/// scope into its owning context when dropped.
+/// RAII guard that records elapsed scope time into its context on drop.
 pub struct StageTimer<'a> {
     ctx: &'a TimingContext,
     stage: &'static str,
@@ -109,11 +91,7 @@ impl Drop for StageTimer<'_> {
 }
 
 /// Request-id-keyed registry of [`TimingContext`]s, mirroring Python's
-/// `MultiModalTimingRegistry` (`vllm/multimodal/registry.py`).
-///
-/// [`MultiModalTimingRegistry::stat`] drains and returns every recorded
-/// request's stats at once, matching the Python clear-on-read behavior so a
-/// benchmark can read a batch and immediately start a clean one.
+/// `MultiModalTimingRegistry`. `stat()` drains all recorded requests.
 pub struct MultiModalTimingRegistry {
     enabled: bool,
     contexts: Mutex<HashMap<String, Arc<TimingContext>>>,
@@ -133,8 +111,7 @@ impl MultiModalTimingRegistry {
         self.enabled
     }
 
-    /// Return the [`TimingContext`] for `request_id`, creating an enabled one
-    /// on first access. When disabled, returns a shared no-op context.
+    /// Return the context for `request_id`, creating one on first access.
     pub fn context(&self, request_id: &str) -> Arc<TimingContext> {
         if !self.enabled {
             return Arc::clone(&DISABLED_CONTEXT);
@@ -147,8 +124,7 @@ impl MultiModalTimingRegistry {
             .clone()
     }
 
-    /// Drain and return `{request_id: {stage_secs}}` records, clearing the
-    /// registry. Returns an empty map when disabled.
+    /// Drain and return `{request_id: {stage_secs}}` records.
     pub fn stat(&self) -> HashMap<String, StageStats> {
         if !self.enabled {
             return HashMap::new();
