@@ -1737,6 +1737,24 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
+
+            # [dbg-pc] reality check: of the blocks we advanced the cache counter
+            # over, how many are actually reusable (non-null AND hashed)? Printed
+            # ONCE over the whole range so it still fires when reusable==0 (the
+            # collapse case), which a per-block loop after `continue` would skip.
+            committed = blocks[num_cached_blocks_before:num_cached_blocks_after]
+            reusable = sum(
+                1 for b in committed if not b.is_null and b.block_hash is not None
+            )
+            nulls = sum(1 for b in committed if b.is_null)
+            assert isinstance(self.kv_cache_spec, MambaSpec)
+            print(
+                f"[dbg-pc] mamba-commit: req={request.request_id} "
+                f"mode={self.mamba_cache_mode} block_size={self.block_size} "
+                f"ckpt_blocks={self.kv_cache_spec.num_prefill_checkpoint_blocks} "
+                f"intended_blocks={len(committed)} reusable={reusable} null={nulls}"
+            )
+
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
                 block = blocks[idx]
                 # Skip null blocks (align-mode skipped states) and blocks that
@@ -1746,24 +1764,6 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
-
-                # [dbg-pc] reality check: of the blocks we advanced the cache counter
-                # over, how many are actually reusable (non-null AND hashed)?
-                blks = self.req_to_blocks[request.request_id][
-                    num_cached_blocks_before:num_cached_blocks_after
-                ]
-                reusable = sum(
-                    1 for b in blks if not b.is_null and b.block_hash is not None
-                )
-                nulls = sum(1 for b in blks if b.is_null)
-                intended_blocks = num_cached_blocks_after - num_cached_blocks_before
-                print(
-                    f"[dbg-pc] mamba-commit: req={request.request_id} "
-                    f"mode={self.mamba_cache_mode} "
-                    f"block_size={self.block_size} "
-                    f"intended_blocks={intended_blocks} "
-                    f"reusable={reusable} null={nulls}"
-                )
 
                 if self.mamba_cache_mode == "align":
                     # Offer every retained boundary with its exact block.
