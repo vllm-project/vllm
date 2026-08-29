@@ -4,9 +4,13 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch._ops import OpOverload
+
+if TYPE_CHECKING:
+    from vllm.config import AITERConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -1729,16 +1733,14 @@ class rocm_aiter_ops:
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
 
-    _MOE_DISPATCH_POLICY: int | None = None
+    # Cached class var like the toggles below; kept in sync by
+    # refresh_env_variables() and init_from_config().
+    _MOE_DISPATCH_POLICY: int = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 
     @classmethod
     @if_aiter_supported
     def get_moe_dispatch_policy(cls) -> int:
-        """Cached MoE sorting dispatch policy."""
-        if cls._MOE_DISPATCH_POLICY is None:
-            import vllm.envs as envs
-
-            cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+        """MoE sorting dispatch policy for AITER fused-MoE kernels."""
         return cls._MOE_DISPATCH_POLICY
 
     # Check if the env variable is set
@@ -1772,6 +1774,11 @@ class rocm_aiter_ops:
         the environment variables.
         for example, after monkey patching the env variables in the unit test,
         you can call this function to reload the env variables.
+
+        This is the env-var path; ``init_from_config`` is the config-driven
+        equivalent that syncs the same class vars from ``VllmConfig.aiter_config``.
+        Tests that monkeypatch ``VLLM_ROCM_USE_AITER*`` directly use this;
+        the engine syncs via ``init_from_config``.
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -1788,6 +1795,40 @@ class rocm_aiter_ops:
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+
+    @classmethod
+    def init_from_config(cls, aiter_config: "AITERConfig") -> None:
+        """Point the toggle cache at ``VllmConfig.aiter_config``.
+
+        Called once per process (front-end in ``VllmConfig.__post_init__``,
+        workers in ``WorkerBase.__init__``). ``aiter_config`` defaults every
+        field from the matching ``VLLM_ROCM_USE_AITER*`` env var, so this
+        preserves prior behaviour when the config is left unset.
+
+        This is the config-driven path; ``refresh_env_variables`` syncs the
+        same class vars straight from the env vars for tests that monkeypatch
+        them without going through ``VllmConfig``.
+
+        Args:
+            aiter_config: The ``AITERConfig`` from ``VllmConfig``.
+        """
+        cls._AITER_ENABLED = aiter_config.enabled
+        cls._CUSTOM_ALL_REDUCE_ENABLED = aiter_config.custom_all_reduce
+        cls._LINEAR_ENABLED = aiter_config.linear
+        cls._FMOE_ENABLED = aiter_config.moe
+        cls._MLA_ENABLED = aiter_config.mla
+        cls._MHA_ENABLED = aiter_config.mha
+        cls._SHUFFLE_KV_CACHE_ENABLED = aiter_config.shuffle_kv_cache_layout
+        cls._TRITON_UNIFIED_ATTN_ENABLED = aiter_config.unified_attention
+        cls._FP8BMM_ENABLED = aiter_config.fp8bmm
+        cls._FP4BMM_ENABLED = aiter_config.fp4bmm
+        cls._LINEAR_HIPBMM_ENABLED = aiter_config.linear_hipbmm
+        cls._TRITON_ROTARY_EMBED = aiter_config.triton_rope
+        cls._MOE_SHARED_EXPERTS_ENABLED = aiter_config.moe_shared_experts
+        cls._MOE_SITUV2_A8W4 = aiter_config.moe_situv2_a8w4
+        cls._TRITON_UNQUANT_GEMM = aiter_config.triton_gemm
+        cls._MOE_DISPATCH_POLICY = aiter_config.moe_dispatch_policy
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str):

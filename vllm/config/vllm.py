@@ -27,6 +27,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
+from .aiter import AITERConfig
 from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -365,6 +366,8 @@ class VllmConfig:
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
     """Kernel configuration."""
+    aiter_config: AITERConfig = Field(default_factory=AITERConfig)
+    """ROCm AITER operations configuration. Only used on ROCm."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -518,6 +521,10 @@ class VllmConfig:
             vllm_factors.append(self.kernel_config.compute_hash())
         else:
             vllm_factors.append(None)
+        if self.aiter_config:
+            vllm_factors.append(self.aiter_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
@@ -1452,6 +1459,12 @@ class VllmConfig:
         # must happen after compilation mode and backend are decided,
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
+
+        # Sync ROCm AITER op toggles from aiter_config. Runs here for the
+        # front-end / engine-core process and the single-GPU (UniProcExecutor)
+        # path; worker subprocesses re-sync in WorkerBase.__init__ because
+        # pickle does not re-run __post_init__.
+        self._maybe_sync_aiter_ops()
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
@@ -2782,6 +2795,22 @@ class VllmConfig:
                 interleave,
                 local_block_size,
             )
+
+    def _maybe_sync_aiter_ops(self) -> None:
+        """Push ``aiter_config`` into the ``rocm_aiter_ops`` toggle cache.
+
+        ``rocm_aiter_ops`` mirrors its toggles into class variables at import
+        time (from env vars) so the hot path is a plain attribute read. This
+        re-points that cache at ``aiter_config``, which is the typed,
+        cache-hashed, worker-serialized source of truth.
+        """
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm() or self.aiter_config is None:
+            return
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.init_from_config(self.aiter_config)
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.

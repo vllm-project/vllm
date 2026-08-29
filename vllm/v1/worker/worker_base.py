@@ -100,6 +100,13 @@ class WorkerBase:
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 
+        # pickle does not re-run VllmConfig.__post_init__ in worker
+        # subprocesses, so re-sync the ROCm AITER toggle cache here.
+        if current_platform.is_rocm():
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            rocm_aiter_ops.init_from_config(vllm_config.aiter_config)
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
