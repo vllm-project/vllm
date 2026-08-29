@@ -135,19 +135,21 @@ class LoRAKernelMeta:
                     stable=True,
                     out=(sorted_lora_ids, sorted_indices_cpu),
                 )
-                lora_ids, counts = torch.unique_consecutive(
+                unique_lora_ids, unique_counts = torch.unique_consecutive(
                     sorted_lora_ids, return_counts=True
                 )
                 lora_ids_cpu = torch.empty_like(
-                    lora_ids, dtype=torch.int32, pin_memory=PIN_MEMORY
-                ).copy_(lora_ids)
+                    unique_lora_ids, dtype=torch.int32, pin_memory=PIN_MEMORY
+                ).copy_(unique_lora_ids)
                 counts_cpu = torch.empty_like(
-                    counts, dtype=torch.int32, pin_memory=PIN_MEMORY
-                ).copy_(counts)
+                    unique_counts, dtype=torch.int32, pin_memory=PIN_MEMORY
+                ).copy_(unique_counts)
                 start_locs_cpu = torch.empty_like(counts_cpu, pin_memory=PIN_MEMORY)
                 torch.cumsum(counts_cpu, dim=0, out=start_locs_cpu)
             else:
-                indices_by_lora_id = [[] for _ in range(self.active_lora_ids.numel())]
+                indices_by_lora_id: list[list[int]] = [
+                    [] for _ in range(self.active_lora_ids.numel())
+                ]
                 for token_index, lora_id in enumerate(token_lora_mapping):
                     indices_by_lora_id[lora_id + 1].append(token_index)
 
