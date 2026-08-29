@@ -7,6 +7,7 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
+    MooncakeLookupResult,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
@@ -33,6 +34,9 @@ def _make_bare_scheduler(
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
+    scheduler.kv_cache_config = SimpleNamespace(
+        select_transfer_block_ids=lambda block_ids: tuple(block_ids)
+    )
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
@@ -177,6 +181,20 @@ def _add_unfinished_request(
         token_ids=token_ids[:44],
         prefill_end_tokens=prefill_end_tokens,
     )
+
+
+def test_update_state_excludes_nontransfer_groups():
+    """Store metadata must match the worker's registered cache groups."""
+    scheduler = _make_bare_scheduler()
+    scheduler.kv_cache_config = SimpleNamespace(
+        select_transfer_block_ids=lambda block_ids: (block_ids[0],)
+    )
+    request = SimpleNamespace(request_id="req-1")
+    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
+
+    assert scheduler._unfinished_requests["req-1"][1] == ([1, 2],)
 
 
 def _setup_decode_request(
@@ -685,9 +703,9 @@ class _StubLookupClient:
         num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
-    ) -> int:
+    ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
-        return self._hit_tokens
+        return MooncakeLookupResult(self._hit_tokens)
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():

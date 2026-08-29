@@ -69,13 +69,16 @@ class MooncakeStoreScheduler:
             kv_event_config and kv_event_config.enable_kv_cache_events
         )
         self.client = LookupKeyClient(vllm_config)
+        self.kv_cache_config = kv_cache_config
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_config.kv_cache_groups, self._hash_block_size
+            kv_cache_config.kv_cache_groups,
+            self._hash_block_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
         )
 
         # Per-request state
@@ -114,15 +117,16 @@ class MooncakeStoreScheduler:
         if request.num_tokens < align:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(
+        lookup_result = self.client.lookup(
             request.request_id,
             request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
-        if num_external_hit_tokens is None:
+        if lookup_result is None:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
+        num_external_hit_tokens = lookup_result.hit_length
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -144,6 +148,7 @@ class MooncakeStoreScheduler:
             vllm_cached_tokens=num_computed_tokens,
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=False,
+            tail_key_boundaries=lookup_result.tail_key_boundaries,
         )
 
         return need_to_allocate, self.load_async
@@ -157,7 +162,9 @@ class MooncakeStoreScheduler:
         """Update state after block allocation."""
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()
+            local_block_ids = self.kv_cache_config.select_transfer_block_ids(
+                blocks.get_block_ids()
+            )
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -220,12 +227,12 @@ class MooncakeStoreScheduler:
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
 
-            if isinstance(request.block_ids, tuple):
-                # Multi-group: preserve per-group structure.
-                unfolded_block_ids = tuple(b.copy() for b in request.block_ids)
-            else:
-                # Single-group legacy: list[int] -> 1-tuple.
-                unfolded_block_ids = (request.block_ids.copy(),)
+            unfolded_block_ids = tuple(
+                blocks.copy()
+                for blocks in self.kv_cache_config.select_transfer_block_ids(
+                    request.block_ids
+                )
+            )
 
             prefill_tokens = _new_req_prefill_tokens(request)
             request_tracker = RequestTracker(
@@ -259,16 +266,17 @@ class MooncakeStoreScheduler:
         if can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
+                if new_block_ids:
+                    new_block_ids = self.kv_cache_config.select_transfer_block_ids(
+                        new_block_ids
+                    )
 
                 req_meta = None
                 if req_id in cached_reqs.resumed_req_ids:
                     # Resumed after preemption
                     if not new_block_ids:
                         continue
-                    if isinstance(new_block_ids, tuple):
-                        new_block_ids = tuple(b.copy() for b in new_block_ids)
-                    else:
-                        new_block_ids = (new_block_ids.copy(),)
+                    new_block_ids = tuple(b.copy() for b in new_block_ids)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]

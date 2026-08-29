@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import itertools
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -31,16 +32,18 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
 
@@ -377,7 +380,9 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(graph, self.pool):
+                        with torch.cuda.graph(
+                            graph, self.pool, stream=current_stream()
+                        ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
@@ -491,6 +496,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        pcp_manager: "PCPManager | None" = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -540,6 +546,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len,
+                pcp_manager=pcp_manager,
             )
 
             # Capture with dummy rows marked as padding.
@@ -632,12 +639,16 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
+    pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
+    slot_mapping_provider: BlockTables | PCPManager = block_tables
+    if pcp_manager is not None:
+        slot_mapping_provider = pcp_manager
+    slot_mappings = slot_mapping_provider.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
@@ -750,7 +761,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         all_wrappers: list[Any] = []
         original_pools: dict[int, Any] = {}
         speculator = getattr(runner, "speculator", None)
-        spec_managers: list[tuple[str, CudaGraphManager]] = []
+        spec_manager_names: list[str] = []
         try:
             if not manager.needs_capture():
                 return 0
@@ -766,8 +777,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                 original_pools[id(wrapper)] = wrapper.graph_pool
                 wrapper.graph_pool = throwaway_pool
             if speculator is not None:
-                spec_managers = [
-                    (name, value)
+                spec_manager_names = [
+                    name
                     for name, value in vars(speculator).items()
                     if isinstance(value, CudaGraphManager)
                 ]
@@ -796,8 +807,11 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # Drop the speculator's cudagraph managers; the real
             # initialize_kv_cache re-creates them. Their profiling graphs
             # release the throwaway pool here rather than after the real init.
-            for name, _ in spec_managers:
+            for name in spec_manager_names:
                 setattr(speculator, name, None)
+            # Drop local references before teardown detaches the runner's
+            # manager and flushes the allocator.
+            del manager
             _teardown_profiling_state(runner)
     finally:
         platform_cls._global_graph_pool = saved_global_pool
@@ -859,13 +873,12 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     # capture_model() re-captures them.
     if runner.model_state.supports_mm_inputs:
         runner.model_state.encoder_runner.clear()
-    # Detach profiling KV tensors held by attention layers.
-    for layer in runner.compilation_config.static_forward_context.values():
-        if hasattr(layer, "kv_cache"):
-            kv_cache = layer.kv_cache
-            layer.kv_cache = (
-                torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
-            )
+    # Detach profiling KV tensors held by attention layers. The layers live
+    # in the static forward context for compiled models.
+    layers: Iterable[Any] = runner.compilation_config.static_forward_context.values()
+    if (model := getattr(runner, "model", None)) is not None:
+        layers = itertools.chain(layers, model.modules())
+    clear_layer_kv_caches(layers)
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()
