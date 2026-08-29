@@ -609,6 +609,22 @@ class KVCacheManager:
                         watermark_blocks,
                         reserved_blocks_by_pool,
                     )
+                    # Reclamation can transition this request from resident
+                    # storage to its fixed hot region. Account for that newly
+                    # required region before deciding that admission fits.
+                    num_blocks_to_allocate = (
+                        self.coordinator.get_num_blocks_to_allocate_by_pool(
+                            request_id=request.request_id,
+                            num_tokens=full_num_tokens,
+                            new_computed_blocks=new_computed_block_list,
+                            num_encoder_tokens=num_encoder_tokens,
+                            total_computed_tokens=total_computed_tokens,
+                            num_local_computed_tokens=num_local_computed_tokens,
+                            num_tokens_main_model=full_num_tokens,
+                            apply_admission_cap=True,
+                            hisparse_host_import=hisparse_host_import,
+                        )
+                    )
                     full_resident_lacks_capacity = self._lacks_device_capacity(
                         num_blocks_to_allocate,
                         watermark_blocks,
@@ -732,6 +748,23 @@ class KVCacheManager:
                 num_blocks_to_allocate,
                 watermark_blocks,
                 reserved_blocks_by_pool,
+            )
+            # Resident reclamation may require a hot region that was absent
+            # from the pre-reclaim estimate. Recompute rather than admitting
+            # against stale allocator requirements.
+            num_blocks_to_allocate = (
+                self.coordinator.get_num_blocks_to_allocate_by_pool(
+                    request_id=request.request_id,
+                    num_tokens=num_tokens_need_slot,
+                    new_computed_blocks=new_computed_block_list,
+                    num_encoder_tokens=num_encoder_tokens,
+                    total_computed_tokens=(
+                        num_local_computed_tokens + num_external_computed_tokens
+                    ),
+                    num_local_computed_tokens=num_local_computed_tokens,
+                    num_tokens_main_model=num_tokens_main_model,
+                    hisparse_host_import=hisparse_host_import,
+                )
             )
             lacks_capacity = self._lacks_device_capacity(
                 num_blocks_to_allocate,

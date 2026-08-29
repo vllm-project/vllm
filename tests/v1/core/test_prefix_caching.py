@@ -503,6 +503,35 @@ def test_hisparse_capacity_query_does_not_require_hot_blocks():
     )
 
 
+def test_hisparse_recomputes_capacity_after_reclaim_requires_hot(monkeypatch):
+    """A resident-to-hot transition must update the admission requirement."""
+    # One pool block is reserved as the null block. Holding three leaves one
+    # free; reclaiming one makes the stale two-block estimate fit while the
+    # refreshed estimate, including two hot blocks, does not.
+    manager = make_hisparse_kv_cache_manager(5, 16)
+    request = make_request(
+        "transitioning",
+        [0],
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    pool = manager.block_pools[0]
+    held = pool.get_new_blocks(3)
+
+    def reclaim(*_args):
+        for hot_manager in manager.hisparse_coordinator.hot_managers:
+            hot_manager.require_hot(request.request_id)
+        pool.free_blocks([held.pop()])
+
+    monkeypatch.setattr(manager, "_reclaim_resident_shortage", reclaim)
+
+    # The original two-block estimate fits after reclaim, but the transition
+    # adds a two-block hot region. Admission must defer instead of reaching
+    # BlockPool.get_new_blocks with an overcommitted shared pool.
+    assert manager.allocate_slots(request, num_new_tokens=1) is None
+    assert pool.get_num_free_blocks() == 2
+
+
 @pytest.mark.parametrize("ends_on_page_boundary", [False, True])
 def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
     ends_on_page_boundary: bool,
