@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.engine.protocol import StreamingInput
+from vllm.inputs import tokens_input
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -242,3 +243,146 @@ async def test_streaming_session_does_not_mutate_caller_prompt():
     # not the caller's object.
     first_chunk = next(p for p in processed_prompts if p == caller_prompt)
     assert first_chunk is not caller_prompt
+
+
+@pytest.mark.asyncio
+async def test_streaming_session_does_not_mutate_structured_tokens_prompt():
+    """Structured TokensInput prompts must not be mutated either.
+
+    Regression for the structured-input path of #54215: the nested
+    ``prompt_token_ids`` list inside a ``tokens_input(...)`` dict was
+    retained and extended by streaming updates just like a bare list.
+    """
+    request_id = "test-mutate-structured"
+    sampling_params = SamplingParams(max_tokens=4)
+
+    llm = MagicMock(spec=AsyncLLM)
+    llm.vllm_config = MagicMock()
+    llm.vllm_config.cache_config.kv_sharing_fast_prefill = False
+    llm.model_config = MagicMock()
+    llm.model_config.max_model_len = 2048
+    llm.log_requests = False
+    llm.errored = False
+    llm._pause_cond = asyncio.Condition()
+    llm._paused = False
+    llm._run_output_handler = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+
+    processed_prompts = []
+
+    def fake_process_inputs(**kwargs):
+        req = MagicMock()
+        req.request_id = f"req-{len(processed_prompts)}"
+        req.external_req_id = None
+        req.prompt_embeds = None
+        req.sampling_params = kwargs.get("params")
+        processed_prompts.append(kwargs["prompt"])
+        return req
+
+    async def fake_add_request(req, *args, **kwargs):
+        pass
+
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs = MagicMock(side_effect=fake_process_inputs)
+    llm.input_processor.assign_request_id = MagicMock()
+    llm._add_request = fake_add_request
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm, AsyncLLM
+    )
+
+    caller_ids = [100 + (i % 40) for i in range(64)]
+    caller_prompt = tokens_input(prompt_token_ids=caller_ids)
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=caller_prompt, sampling_params=sampling_params)
+        yield StreamingInput(prompt=[777] * 7, sampling_params=sampling_params)
+        yield StreamingInput(prompt=[888] * 5, sampling_params=sampling_params)
+
+    queue = await llm._add_streaming_input_request(
+        request_id, input_generator(), sampling_params
+    )
+    await queue._input_stream_task
+
+    # The caller's nested token list must be untouched by the session.
+    assert len(caller_ids) == 64
+    assert [100 + (i % 40) for i in range(64)] == caller_ids
+    assert 777 not in caller_ids and 888 not in caller_ids
+    # The input processor must have received a copy of the nested list,
+    # not the caller's object.
+    first_chunk = next(p for p in processed_prompts if p == caller_prompt)
+    assert first_chunk["prompt_token_ids"] is not caller_ids
+    assert first_chunk["prompt_token_ids"] == caller_ids
+
+
+@pytest.mark.asyncio
+async def test_streaming_session_does_not_mutate_enc_dec_prompt():
+    """Encoder-decoder structured prompts must not be mutated either.
+
+    Regression for the enc-dec variant of #54215: with
+    ``EncoderDecoderInput`` the decoder ``prompt_token_ids`` list is
+    nested under ``decoder_prompt`` and was retained (without copy)
+    until streaming updates extended it in the client process.
+    """
+    request_id = "test-mutate-enc-dec"
+    sampling_params = SamplingParams(max_tokens=4)
+
+    llm = MagicMock(spec=AsyncLLM)
+    llm.vllm_config = MagicMock()
+    llm.vllm_config.cache_config.kv_sharing_fast_prefill = False
+    llm.model_config = MagicMock()
+    llm.model_config.is_encoder_decoder = True
+    llm.model_config.max_model_len = 2048
+    llm.log_requests = False
+    llm.errored = False
+    llm._pause_cond = asyncio.Condition()
+    llm._paused = False
+    llm._run_output_handler = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+
+    processed_prompts = []
+
+    def fake_process_inputs(**kwargs):
+        req = MagicMock()
+        req.request_id = f"req-{len(processed_prompts)}"
+        req.external_req_id = None
+        req.prompt_embeds = None
+        req.sampling_params = kwargs.get("params")
+        processed_prompts.append(kwargs["prompt"])
+        return req
+
+    async def fake_add_request(req, *args, **kwargs):
+        pass
+
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs = MagicMock(side_effect=fake_process_inputs)
+    llm.input_processor.assign_request_id = MagicMock()
+    llm._add_request = fake_add_request
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm, AsyncLLM
+    )
+
+    caller_ids = [100 + (i % 40) for i in range(64)]
+    caller_prompt = {
+        "type": "enc_dec",
+        "encoder_prompt": {"type": "token", "prompt_token_ids": [7, 8, 9]},
+        "decoder_prompt": tokens_input(prompt_token_ids=caller_ids),
+    }
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=caller_prompt, sampling_params=sampling_params)
+        yield StreamingInput(prompt=[777] * 7, sampling_params=sampling_params)
+        yield StreamingInput(prompt=[888] * 5, sampling_params=sampling_params)
+
+    queue = await llm._add_streaming_input_request(
+        request_id, input_generator(), sampling_params
+    )
+    await queue._input_stream_task
+
+    # The caller's nested decoder token list must be untouched.
+    assert len(caller_ids) == 64
+    assert [100 + (i % 40) for i in range(64)] == caller_ids
+    assert 777 not in caller_ids and 888 not in caller_ids
+    # The input processor must receive a copy of the nested list.
+    first_chunk = next(p for p in processed_prompts if p == caller_prompt)
+    assert first_chunk["decoder_prompt"]["prompt_token_ids"] is not caller_ids
+    assert first_chunk["decoder_prompt"]["prompt_token_ids"] == caller_ids

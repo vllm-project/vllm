@@ -497,6 +497,29 @@ class AsyncLLM(EngineClient):
                         # Copy so session updates never mutate the caller's
                         # list object (see issue #54215).
                         prompt = list(prompt)
+                    elif isinstance(prompt, dict) and isinstance(
+                        prompt.get("prompt_token_ids"), list
+                    ):
+                        prompt = {
+                            **prompt,
+                            "prompt_token_ids": list(prompt["prompt_token_ids"]),
+                        }
+                    elif (
+                        isinstance(prompt, dict)
+                        and isinstance(prompt.get("decoder_prompt"), dict)
+                        and isinstance(
+                            prompt["decoder_prompt"].get("prompt_token_ids"), list
+                        )
+                    ):
+                        prompt = {
+                            **prompt,
+                            "decoder_prompt": {
+                                **prompt["decoder_prompt"],
+                                "prompt_token_ids": list(
+                                    prompt["decoder_prompt"]["prompt_token_ids"]
+                                ),
+                            },
+                        }
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=prompt,
