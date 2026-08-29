@@ -35,60 +35,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from ..common.ple import copy_ple_embedding_shard_
 
-_MASK64 = (1 << 64) - 1
-_SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
-_SPLITMIX_M1 = 0xBF58476D1CE4E5B9
-_SPLITMIX_M2 = 0x94D049BB133111EB
-_PLE_LAYER_PRIME = 10007
-
-
-def _splitmix64(value: int) -> int:
-    value = (value + _SPLITMIX_GAMMA) & _MASK64
-    value = ((value ^ (value >> 30)) * _SPLITMIX_M1) & _MASK64
-    value = ((value ^ (value >> 27)) * _SPLITMIX_M2) & _MASK64
-    return (value ^ (value >> 31)) & _MASK64
-
-
-def _is_prime_64(value: int) -> bool:
-    if value < 2:
-        return False
-    for prime in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
-        if value % prime == 0:
-            return value == prime
-    exponent = value - 1
-    shifts = 0
-    while exponent % 2 == 0:
-        exponent //= 2
-        shifts += 1
-    for base in (2, 325, 9375, 28178, 450775, 9780504, 1795265022):
-        if base % value == 0:
-            continue
-        witness = pow(base, exponent, value)
-        if witness in (1, value - 1):
-            continue
-        for _ in range(shifts - 1):
-            witness = pow(witness, 2, value)
-            if witness == value - 1:
-                break
-        else:
-            return False
-    return True
-
-
-def _nth_prime_after(start: int, count: int) -> int:
-    prime = int(start)
-    for _ in range(count):
-        candidate = prime + 1
-        if candidate <= 2:
-            prime = 2
-            continue
-        if candidate % 2 == 0:
-            candidate += 1
-        while not _is_prime_64(candidate):
-            candidate += 2
-        prime = candidate
-    return prime
-
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
     def __init__(
@@ -124,6 +70,102 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
+    _MASK64 = (1 << 64) - 1
+    _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
+    _SPLITMIX_M1 = 0xBF58476D1CE4E5B9
+    _SPLITMIX_M2 = 0x94D049BB133111EB
+    _PLE_LAYER_PRIME = 10007
+
+    @classmethod
+    def _splitmix64(cls, value: int) -> int:
+        """Mix an integer into a deterministic unsigned 64-bit value."""
+        value = (value + cls._SPLITMIX_GAMMA) & cls._MASK64
+        value = ((value ^ (value >> 30)) * cls._SPLITMIX_M1) & cls._MASK64
+        value = ((value ^ (value >> 27)) * cls._SPLITMIX_M2) & cls._MASK64
+        return (value ^ (value >> 31)) & cls._MASK64
+
+    @staticmethod
+    def _is_prime_64(value: int) -> bool:
+        """Return whether a 64-bit integer is prime."""
+        if value < 2:
+            return False
+        for prime in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+            if value % prime == 0:
+                return value == prime
+        exponent = value - 1
+        shifts = 0
+        while exponent % 2 == 0:
+            exponent //= 2
+            shifts += 1
+        for base in (2, 325, 9375, 28178, 450775, 9780504, 1795265022):
+            if base % value == 0:
+                continue
+            witness = pow(base, exponent, value)
+            if witness in (1, value - 1):
+                continue
+            for _ in range(shifts - 1):
+                witness = pow(witness, 2, value)
+                if witness == value - 1:
+                    break
+            else:
+                return False
+        return True
+
+    @classmethod
+    def _nth_prime_after(cls, start: int, count: int) -> int:
+        """Return the ``count``-th prime strictly greater than ``start``."""
+        prime = int(start)
+        for _ in range(count):
+            candidate = prime + 1
+            if candidate <= 2:
+                prime = 2
+                continue
+            if candidate % 2 == 0:
+                candidate += 1
+            while not cls._is_prime_64(candidate):
+                candidate += 2
+            prime = candidate
+        return prime
+
+    @classmethod
+    def _make_layer_multipliers(
+        cls,
+        *,
+        ngram_size: int,
+        unigram_vocab_size: int,
+        seed: int,
+        ple_dense_layer_id: int,
+    ) -> list[int]:
+        """Build deterministic hash multipliers for one PLE layer."""
+        max_multiplier = ((1 << 63) - 1) // unigram_vocab_size
+        half_bound = max(1, max_multiplier // 2)
+        base_seed = seed + cls._PLE_LAYER_PRIME * ple_dense_layer_id
+        multipliers = []
+        for index in range(ngram_size):
+            value = base_seed + cls._SPLITMIX_GAMMA * (index + 1)
+            multipliers.append(2 * (cls._splitmix64(value) % half_bound) + 1)
+        return multipliers
+
+    @classmethod
+    def _make_vocab_layout(
+        cls,
+        *,
+        ngram_vocab_size_base: int,
+        ngram_heads: int,
+        ple_dense_layer_id: int,
+    ) -> tuple[list[int], list[int], int]:
+        """Build per-head vocabulary sizes, offsets, and total row count."""
+        sizes: list[int] = []
+        offsets: list[int] = []
+        offset = 0
+        for local_head in range(ngram_heads):
+            global_head = ple_dense_layer_id * ngram_heads + local_head
+            size = cls._nth_prime_after(ngram_vocab_size_base - 1, global_head + 1)
+            sizes.append(size)
+            offsets.append(offset)
+            offset += size
+        return sizes, offsets, offset
+
     def __init__(
         self,
         config: Qwen4ExpTextConfig,
@@ -156,30 +198,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if self.split_ngram_parts <= 0:
             raise ValueError("split_ngram_parts must be positive")
 
-        max_multiplier = ((1 << 63) - 1) // self.unigram_vocab_size
-        half_bound = max(1, max_multiplier // 2)
-        seed = int(getattr(config, "seed", 1234))
-        base_seed = seed + _PLE_LAYER_PRIME * ple_dense_layer_id
-        multipliers = []
-        for index in range(self.ngram_size):
-            value = base_seed + _SPLITMIX_GAMMA * (index + 1)
-            multipliers.append(2 * (_splitmix64(value) % half_bound) + 1)
+        multipliers = self._make_layer_multipliers(
+            ngram_size=self.ngram_size,
+            unigram_vocab_size=self.unigram_vocab_size,
+            seed=int(getattr(config, "seed", 1234)),
+            ple_dense_layer_id=ple_dense_layer_id,
+        )
         self.register_buffer(
             "layer_multipliers",
             torch.tensor(multipliers, dtype=torch.long),
             persistent=True,
         )
 
-        ngram_vocab_size_base = int(config.ngram_vocab_size_base)
-        sizes: list[int] = []
-        offsets: list[int] = []
-        offset = 0
-        for local_head in range(self.ngram_heads):
-            global_head = ple_dense_layer_id * self.ngram_heads + local_head
-            size = _nth_prime_after(ngram_vocab_size_base - 1, global_head + 1)
-            sizes.append(size)
-            offsets.append(offset)
-            offset += size
+        sizes, offsets, total_vocab_size = self._make_vocab_layout(
+            ngram_vocab_size_base=int(config.ngram_vocab_size_base),
+            ngram_heads=self.ngram_heads,
+            ple_dense_layer_id=ple_dense_layer_id,
+        )
         self.register_buffer(
             "ngram_heads_vocab_sizes",
             torch.tensor(sizes, dtype=torch.long),
@@ -191,7 +226,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((offset + divisor - 1) // divisor) * divisor
+        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
         self.ngram_embedding = VocabParallelEmbedding(
             padded_vocab_size,
             self.head_dim,
