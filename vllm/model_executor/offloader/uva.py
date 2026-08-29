@@ -44,6 +44,7 @@ class UVAOffloader(BaseOffloader):
         self.cpu_offload_max_bytes = cpu_offload_max_bytes
         self.cpu_offload_bytes = 0
         self.cpu_offload_params = cpu_offload_params or set()
+        self._matched_cpu_offload_params: set[str] = set()
 
         self.pin_memory = should_pin_memory()
         self.uva_offloading = (
@@ -82,17 +83,22 @@ class UVAOffloader(BaseOffloader):
         if device == torch.device("cpu"):
             return module
 
-        if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
+        if (
+            self.cpu_offload_bytes >= self.cpu_offload_max_bytes
+            and not self.cpu_offload_params
+        ):
             return module
 
         # offload parameters to CPU
         # use pin_memory if possible, which helps cudagraph capture speed
         offloaded_parameters = False
         for name, p in module.named_parameters():
-            if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
-                # we use per-parameter offloading
-                # one module might have some parameters offloaded and some not
-                break
+            matched_params = {
+                param
+                for param in self.cpu_offload_params
+                if f".{param}." in f".{prefix}{name}."
+            }
+            self._matched_cpu_offload_params.update(matched_params)
 
             # Skip parameters an earlier wrap_modules call already offloaded.
             # The UVA path leaves p.device as the accelerator (a view of CPU
@@ -100,17 +106,13 @@ class UVAOffloader(BaseOffloader):
             if p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False):
                 continue
 
-            if self.cpu_offload_params:
-                # Check if parameter belongs to the offloading set
-                # Add dots here to ensure we match full segments only
-                # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight"
-                # but not "mlp.experts.w2_weight_scale"
-                should_offload = any(
-                    f".{param}." in f".{prefix}{name}."
-                    for param in self.cpu_offload_params
-                )
-                if not should_offload:
-                    continue
+            if self.cpu_offload_params and not matched_params:
+                continue
+
+            if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
+                # We offload whole parameters, so one parameter may exceed the
+                # remaining budget. Continue scanning to validate selectors.
+                continue
 
             cpu_data = p.data.to(device="cpu")
             if self.pin_memory:
@@ -153,3 +155,11 @@ class UVAOffloader(BaseOffloader):
             module.forward = forward
 
         return module
+
+    def post_init(self):
+        unmatched_params = self.cpu_offload_params - self._matched_cpu_offload_params
+        if unmatched_params:
+            logger.warning(
+                "CPU offload parameter selector(s) matched no parameters: %s",
+                ", ".join(sorted(unmatched_params)),
+            )

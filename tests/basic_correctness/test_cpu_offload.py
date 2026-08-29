@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Generator
 from operator import attrgetter
+from unittest.mock import Mock
 
 import pytest
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.utils import maybe_offload_embeddings
 from vllm.model_executor.offloader import (
+    BaseOffloader,
     PrefetchOffloader,
     UVAOffloader,
     get_offloader,
@@ -16,6 +23,82 @@ from vllm.model_executor.offloader import (
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from ..utils import compare_two_settings
+
+
+class _RecordingOffloader(BaseOffloader):
+    supports_direct_module_offload = True
+
+    def __init__(self):
+        self.calls: list[tuple[list[nn.Module], str]] = []
+
+    def wrap_modules(
+        self,
+        modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
+    ) -> list[nn.Module]:
+        modules = list(modules_generator)
+        self.calls.append((modules, prefix))
+        return modules
+
+
+def _model_with_direct_embedding() -> tuple[nn.Module, VocabParallelEmbedding]:
+    model = nn.Module()
+    model.language_model = nn.Module()
+    model.language_model.model = nn.Module()
+    embedding = VocabParallelEmbedding(16, 8, disable_tp=True)
+    model.language_model.model.embed_tokens = embedding
+    return model, embedding
+
+
+def test_direct_embedding_offload_preserves_prefix(monkeypatch, default_vllm_config):
+    model, embedding = _model_with_direct_embedding()
+    offloader = _RecordingOffloader()
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.get_offloader", lambda: offloader
+    )
+
+    maybe_offload_embeddings(model, prefix="outer")
+
+    assert offloader.calls == [([embedding], "outer.language_model.model.embed_tokens")]
+
+
+def test_direct_embedding_offload_skips_unsupported_offloader(
+    monkeypatch, default_vllm_config
+):
+    model, _ = _model_with_direct_embedding()
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available", lambda: False
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.should_pin_memory", lambda: False
+    )
+    offloader = UVAOffloader(cpu_offload_max_bytes=1024)
+    wrap_modules = Mock()
+    monkeypatch.setattr(offloader, "wrap_modules", wrap_modules)
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.get_offloader", lambda: offloader
+    )
+
+    maybe_offload_embeddings(model)
+
+    wrap_modules.assert_not_called()
+
+
+def test_uva_offloader_warns_for_unmatched_selectors(caplog, monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available", lambda: True
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.should_pin_memory", lambda: False
+    )
+    offloader = UVAOffloader(
+        cpu_offload_max_bytes=1024,
+        cpu_offload_params={"missing"},
+    )
+
+    offloader.post_init()
+
+    assert "matched no parameters: missing" in caplog.text
 
 
 @pytest.mark.parametrize("disable_pin_memory", [False, True])
@@ -158,7 +241,7 @@ def test_embedding_weight_offloading(vllm_runner, monkeypatch):
             max_num_seqs=1,
             enable_prefix_caching=False,
             cpu_offload_gb=1,
-            cpu_offload_params={"embed_tokens"},
+            cpu_offload_params={"language_model.model.embed_tokens"},
         ) as vllm_model:
             engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
