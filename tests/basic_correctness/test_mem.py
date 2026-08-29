@@ -6,6 +6,8 @@ import asyncio
 import pytest
 import torch
 
+import vllm.device_allocator.cumem as cumem
+import vllm.envs as envs
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
@@ -14,6 +16,22 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
+    """Wake discarded allocations with deterministic nonzero contents."""
+    original_create_and_map = cumem.create_and_map
+
+    def create_and_map_with_poison(handle) -> None:
+        original_create_and_map(handle)
+        _, size, ptr, _ = handle
+        cumem.libcudart.cudaMemset(ptr, byte_value, size)
+
+    cumem.create_and_map = create_and_map_with_poison
+    try:
+        allocator.wake_up()
+    finally:
+        cumem.create_and_map = original_create_and_map
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -98,16 +116,36 @@ def test_discard_tags():
     # Weights are still usable
     assert torch.allclose(weights, torch.ones_like(weights))
 
-    # Wake up and verify kv_cache is remapped (zeroed content)
+    # Wake up and verify kv_cache is remapped; discarded contents are undefined.
     allocator.wake_up()
-    # After wake_up the VA is remapped; content is not preserved
-    # but the allocation is valid
     assert kv.shape == (512, 512)
 
     # Full sleep/wake cycle still works after discard
     allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_level2_discards_ordinary_tensor_with_weights_tag():
+    """Reproduce the level-2 variant for an ordinary tensor in weights."""
+    allocator = get_mem_allocator_instance()
+
+    with allocator.use_memory_pool("weights"):
+        fake_weight = torch.full((4096,), 0x44, dtype=torch.uint8, device=DEVICE_TYPE)
+        ordinary_tensor = torch.full(
+            (4096,), 0x55, dtype=torch.uint8, device=DEVICE_TYPE
+        )
+
+    pointers = (fake_weight.data_ptr(), ordinary_tensor.data_ptr())
+    allocator.sleep(offload_tags=())
+    _wake_up_with_poisoned_mappings(allocator)
+    torch.accelerator.synchronize()
+
+    assert (fake_weight.data_ptr(), ordinary_tensor.data_ptr()) == pointers
+    assert torch.all(fake_weight == 0xA5)
+    assert torch.all(ordinary_tensor == 0xA5)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -377,7 +415,13 @@ def test_deep_sleep_async():
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache():
+def test_deep_sleep_fp8_kvcache_mrv1(monkeypatch: pytest.MonkeyPatch):
+    # Regression test for https://github.com/vllm-project/vllm/pull/28783.
+    # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
+    # to restore correct output after level-2 sleep.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
+
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 
@@ -409,3 +453,40 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@requires_fp8
+def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    llm = LLM(
+        "Qwen/Qwen2-0.5B",
+        enable_sleep_mode=True,
+        kv_cache_dtype="fp8",
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+
+    original_create_and_map = cumem.create_and_map
+
+    def create_and_map_with_poison(handle) -> None:
+        original_create_and_map(handle)
+        _, size, ptr, _ = handle
+        cumem.libcudart.cudaMemset(ptr, 0xA5, size)
+
+    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
+
+    # New requests must overwrite undefined remapped KV bytes before reading them.
+    llm.wake_up(tags=["kv_cache"])
+    actual = llm.generate(prompt, sampling_params)
+
+    assert expected[0].outputs[0].text == actual[0].outputs[0].text
