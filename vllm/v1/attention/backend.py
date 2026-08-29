@@ -220,6 +220,13 @@ class AttentionBackend(ABC):
         requests, so the total draft budget, the decode/prefill split point and the CPU
         prefill query lengths all stay correct.
 
+        Contract for mismatch-capable backends: device query-length totals are
+        conserved (their sum equals the CPU one), and each request's device query
+        length stays within the capacity the CPU scheduler admitted for it — at most
+        1 + num_speculative_tokens rows (the bonus token plus its draft window);
+        device-side redistribution moves budget between requests but never widens a
+        request beyond that bound.
+
         SSM backends opt out: their recurrent-state planning is built from the CPU
         per-request boundaries, which the trimmed batch no longer matches.
         """
