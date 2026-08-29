@@ -74,6 +74,7 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 def test_hisparse_spill_batches_wait_for_reused_staging(monkeypatch):
     """A spill batch must not overwrite staging still used by its predecessor."""
     worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = True
     worker.kernel_block_size = 2
     worker.spill_row_capacity = 2
     worker.pages_per_host_block = 1
@@ -179,6 +180,7 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
         for runtime in (leader, follower)
     ]
     worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = True
     worker.cache_handles = handles
     worker.mirror_src_slot_mappings = [torch.empty(3), torch.empty(3)]
     worker.hot_backing = torch.empty(1)
@@ -214,6 +216,83 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     )
     follower.invalidate_written_slots.assert_not_called()
     worker.host_write_event.record.assert_called_once_with(current_stream)
+
+
+def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
+    """A non-writer TP rank must not mirror rows into the shared host pool."""
+    dst_slots = torch.tensor([7, 8], dtype=torch.int64)
+    leader = SimpleNamespace(
+        eager_host_mirror=True,
+        is_group_leader=True,
+        invalidate_written_slots=MagicMock(),
+    )
+    handle = SimpleNamespace(
+        runtime=leader,
+        decode_batch=True,
+        num_actual_tokens=2,
+        num_decode_tokens=1,
+        req_id_per_token=torch.tensor([0], dtype=torch.int32),
+        mirror_slot_mapping=dst_slots,
+    )
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = False
+    worker.cache_handles = [handle]
+    worker.mirror_src_slot_mappings = [torch.empty(2)]
+    worker.hot_backing = torch.empty(1)
+    worker.mirror_layer_offsets = torch.empty(1)
+    worker.mirror_src_indices_ptrs = torch.empty(1)
+    worker.backup_host_anchor = torch.empty(1)
+    worker.backup_host_cache_ptrs = torch.empty(1)
+    worker.mirror_src_block_stride = 1
+    worker.mirror_src_block_size = 1
+    worker.mirror_src_rows = 2
+    backup_layers = MagicMock()
+    monkeypatch.setattr(
+        torch.ops._C_cache_ops,
+        "hisparse_backup_layers",
+        backup_layers,
+        raising=False,
+    )
+
+    worker._enqueue_host_mirror()
+
+    backup_layers.assert_not_called()
+    leader.invalidate_written_slots.assert_called_once()
+
+
+def test_hisparse_shared_host_reader_skips_spills():
+    """A non-writer TP rank must not duplicate spills or acknowledge them."""
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = False
+    worker.kernel_block_size = 1
+    worker.spill_row_capacity = 0
+    worker._enqueued_transfer_ids = []
+    worker._pending_transfer_events = []
+
+    worker._enqueue_transfers([SparseKVPageTransfer(1, 2, 0, (3,), True)])
+
+    assert worker._enqueued_transfer_ids == []
+    assert worker._pending_transfer_events == []
+
+
+def test_hisparse_shared_host_reader_waits_for_writer(monkeypatch):
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = False
+    worker.hot_backing = SimpleNamespace(device=torch.device("cuda:1"))
+    worker.host_write_event = MagicMock()
+    worker.host_caches = ()
+    worker.host_num_blocks = 1
+    worker._post_forward_transfers = []
+    worker._pending_invalid_block_ids = []
+    stream = MagicMock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda device: stream)
+
+    worker.start_step(
+        SimpleNamespace(host_block_copies=[], command=None, source_block_ids=[]),
+        None,
+    )
+
+    stream.wait_event.assert_called_once_with(worker.host_write_event)
 
 
 def test_hisparse_runtime_invalidates_only_scheduled_request_states():
