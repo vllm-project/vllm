@@ -120,7 +120,10 @@ class LoRAKernelMeta:
         num_tokens = len(token_lora_mapping)
         if not no_lora:
             mapping_cpu = torch.tensor(
-                token_lora_mapping, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
+                token_lora_mapping,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=PIN_MEMORY,
             )
             if num_tokens >= _VECTORIZED_METADATA_MIN_TOKENS:
                 sorted_lora_ids = torch.empty_like(mapping_cpu)
@@ -141,9 +144,7 @@ class LoRAKernelMeta:
                 counts_cpu = torch.empty_like(
                     counts, dtype=torch.int32, pin_memory=PIN_MEMORY
                 ).copy_(counts)
-                start_locs_cpu = torch.empty_like(
-                    counts_cpu, pin_memory=PIN_MEMORY
-                )
+                start_locs_cpu = torch.empty_like(counts_cpu, pin_memory=PIN_MEMORY)
                 torch.cumsum(counts_cpu, dim=0, out=start_locs_cpu)
             else:
                 indices_by_lora_id = [[] for _ in range(self.active_lora_ids.numel())]
