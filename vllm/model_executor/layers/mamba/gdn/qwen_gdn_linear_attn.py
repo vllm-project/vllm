@@ -197,6 +197,10 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+    # FlashInfer's chunked-prefill (CP) delta-rule kernels require int64
+    # cu_seqlens; the other dispatch paths cast internally.
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int64)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
