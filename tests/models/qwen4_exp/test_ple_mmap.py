@@ -101,6 +101,7 @@ def _write_ple_layer(
     cols: int,
     scale: float,
     write_scale: bool = True,
+    scale_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Write one PLE layer's shard + weight_scale tensors as synthetic
     safetensors files (no model.safetensors.index.json, matching the real
@@ -118,9 +119,7 @@ def _write_ple_layer(
         if rows > 0:
             tensors[f"{prefix}.shard_{shard_index}.weight"] = full[start : start + rows]
         if write_scale and shard_index == 0:
-            tensors[f"{prefix}.weight_scale"] = torch.tensor(
-                [scale], dtype=torch.bfloat16
-            )
+            tensors[f"{prefix}.weight_scale"] = torch.tensor([scale], dtype=scale_dtype)
         if tensors:
             safetensors.torch.save_file(
                 tensors,
@@ -1508,14 +1507,115 @@ def test_build_tables_raises_on_missing_shard_file(tmp_path: Path) -> None:
 
 
 def test_build_tables_raises_when_weight_scale_was_never_loaded(tmp_path: Path) -> None:
-    _write_ple_layer(tmp_path, layer_idx=0, vocab=10, parts=3, cols=2, scale=0.25)
-    embedding = ple_mmap.MmapNgramEmbedding(10, 2)  # weight_scale_loaded stays False
+    """Rows streamed but weight_scale absent from the same iterable is a
+    broken or truncated weight iterator, not an unstreamed family — this
+    must stay in the fail-closed True/False quadrant (weights_streamed
+    True, weight_scale_loaded False), never fall back to a header read."""
+    _write_ple_layer(
+        tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25, write_scale=True
+    )
+    module = _mmap_ngram_module_for_load_test(vocab=8, cols=2)
+    shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2).to(torch.float8_e4m3fn)
+    shard_1 = torch.arange(8, 16, dtype=torch.float32).reshape(4, 2)
+    shard_1 = shard_1.to(torch.float8_e4m3fn)
+
+    module.load_weights(
+        [
+            ("ngram_embedding.shard_0.weight", shard_0),
+            ("ngram_embedding.shard_1.weight", shard_1),
+        ]
+    )
+
+    assert module.ngram_embedding.weights_streamed is True
+    assert module.ngram_embedding.weight_scale_loaded is False
+
     cc = SimpleNamespace(
-        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 3)}
+        static_forward_context={"a.ple": _fake_ple_layer(0, module.ngram_embedding, 2)}
     )
     model_config = _model_config(tmp_path)
 
     with pytest.raises(RuntimeError, match="weight_scale was never loaded"):
+        ple_mmap.build_tables(model_config, cc)
+
+
+def test_build_tables_falls_back_to_header_scale_when_family_never_streamed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A layer whose ngram_embedding family was never routed to this
+    worker never streams anything, so weights_streamed stays False along
+    with weight_scale_loaded (the False/False quadrant) — that must attach
+    off a direct header read and warn, not raise the streamed-loader's
+    fail-closed error. The on-disk scale is F32 (0.1) to exercise the
+    no-cast rule: casting to the placeholder's default bf16 would silently
+    rewrite 0.1 to a different float and trip on nothing, masking the bug.
+    """
+    _write_ple_layer(
+        tmp_path,
+        layer_idx=0,
+        vocab=8,
+        parts=2,
+        cols=2,
+        scale=0.1,
+        write_scale=True,
+        scale_dtype=torch.float32,
+    )
+    embedding = ple_mmap.MmapNgramEmbedding(8, 2)
+    assert embedding.weights_streamed is False
+    assert embedding.weight_scale_loaded is False
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 2)}
+    )
+    model_config = _model_config(tmp_path)
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        ple_mmap.logger,
+        "warning",
+        lambda msg, *args: warnings.append((msg, args)),
+    )
+
+    ple_mmap.build_tables(model_config, cc)
+
+    assert embedding.weight_scale_loaded is True
+    assert embedding.weight_scale.dtype is torch.float32
+    assert torch.equal(
+        embedding.weight_scale, torch.tensor([0.1], dtype=torch.float32).squeeze()
+    )
+    assert len(warnings) == 1
+    assert warnings[0][1] == (0,)  # layer_idx
+
+
+def test_build_tables_raises_on_a_non_scalar_weight_scale(tmp_path: Path) -> None:
+    """A per-channel (multi-element) weight_scale would silently truncate to
+    its first element in _read_scale: _validate_layer_shards must refuse it
+    up front, before the False/False fallback (or any other quadrant) ever
+    gets a chance to attach off a truncated value.
+    """
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    vocab, parts, cols = 8, 2, 2
+    shard_size = (vocab + parts - 1) // parts
+    full = _synthetic_weight(vocab, cols)
+    for shard_index in range(parts):
+        start = shard_index * shard_size
+        rows = max(0, min(shard_size, vocab - start))
+        tensors: dict[str, torch.Tensor] = {
+            f"{prefix}.shard_{shard_index}.weight": full[start : start + rows]
+        }
+        if shard_index == 0:
+            tensors[f"{prefix}.weight_scale"] = torch.tensor(
+                [0.1, 0.2, 0.3, 0.4], dtype=torch.float32
+            )
+        safetensors.torch.save_file(
+            tensors, str(tmp_path / f"model-ple-0-{shard_index:05d}.safetensors")
+        )
+    embedding = ple_mmap.MmapNgramEmbedding(vocab, cols)
+    assert embedding.weights_streamed is False
+    assert embedding.weight_scale_loaded is False
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, parts)}
+    )
+    model_config = _model_config(tmp_path)
+
+    with pytest.raises(RuntimeError, match=r"per-channel"):
         ple_mmap.build_tables(model_config, cc)
 
 

@@ -877,6 +877,17 @@ def _validate_layer_shards(
             f"PLE mmap: layer {layer_idx} has FP8 shards but no "
             f"ngram_embedding.weight_scale under {model_path}"
         )
+    _scale_path, _scale_offset, scale_nbytes, scale_dtype_str = layer_shards.scale_entry
+    scale_torch_dtype = _SCALE_TORCH_DTYPES.get(scale_dtype_str)
+    if scale_torch_dtype is not None:
+        expected_nbytes = get_dtype_size(scale_torch_dtype)
+        if scale_nbytes != expected_nbytes:
+            raise RuntimeError(
+                f"PLE mmap: layer {layer_idx} weight_scale is {scale_nbytes} "
+                f"bytes, expected {expected_nbytes} for a single "
+                f"{scale_dtype_str} scalar — per-channel PLE scales are "
+                "unsupported; export a single global scale for this layer"
+            )
     return layer_shards.scale_entry
 
 
@@ -1022,26 +1033,44 @@ def _attach_table(
         layer_shards, embedding.embedding_dim, layer_idx, model_path
     )
     if not embedding.weight_scale_loaded:
-        raise RuntimeError(
-            f"PLE mmap: layer {layer_idx} weight_scale was never loaded "
-            "from the checkpoint's streamed weights"
+        if embedding.weights_streamed:
+            # Rows were streamed but the scale was not — a broken or
+            # truncated weight iterator, not an unstreamed family; stay
+            # fail-closed rather than guess at a header value.
+            raise RuntimeError(
+                f"PLE mmap: layer {layer_idx} weight_scale was never loaded "
+                "from the checkpoint's streamed weights"
+            )
+        # This layer's ngram_embedding family was never streamed at all
+        # (a loader topology that never routes PLE weights to this
+        # worker) — fall back to a direct header read instead of failing
+        # closed on a scale that had nothing to be lost from.
+        header_scale = _read_scale(scale_entry)
+        logger.warning(
+            "PLE mmap: layer %d weight_scale falling back to a direct "
+            "header read — this layer's ngram_embedding family was never "
+            "streamed through the checkpoint loader",
+            layer_idx,
         )
-    # Cross-check the streamed-and-registered scale against an independent
-    # direct read of the same tensor off disk: these are two self-consistent
-    # halves, and a mismatch would mean the streamed weight iterator silently
-    # renamed or skipped something.
-    header_scale = _read_scale(scale_entry).float()
-    streamed_scale = embedding.weight_scale.detach().to("cpu").float()
-    if not torch.allclose(header_scale, streamed_scale, atol=1e-6):
-        # .tolist()[:4], not .item(): a malformed (non-scalar) streamed
-        # scale must not crash the diagnostic itself with an unrelated
-        # "cannot be converted to Scalar" error.
-        raise RuntimeError(
-            f"PLE mmap: layer {layer_idx} weight_scale mismatch between the "
-            f"streamed checkpoint ({streamed_scale.flatten().tolist()[:4]}) "
-            f"and the header-parsed value "
-            f"({header_scale.flatten().tolist()[:4]})"
-        )
+        # Same device the streamed path resolves to: the buffer being replaced.
+        set_weight_scale(embedding, header_scale, embedding.weight_scale.device)
+    else:
+        # Cross-check the streamed-and-registered scale against an independent
+        # direct read of the same tensor off disk: these are two self-consistent
+        # halves, and a mismatch would mean the streamed weight iterator silently
+        # renamed or skipped something.
+        header_scale = _read_scale(scale_entry).float()
+        streamed_scale = embedding.weight_scale.detach().to("cpu").float()
+        if not torch.allclose(header_scale, streamed_scale, atol=1e-6):
+            # .tolist()[:4], not .item(): a malformed (non-scalar) streamed
+            # scale must not crash the diagnostic itself with an unrelated
+            # "cannot be converted to Scalar" error.
+            raise RuntimeError(
+                f"PLE mmap: layer {layer_idx} weight_scale mismatch between the "
+                f"streamed checkpoint ({streamed_scale.flatten().tolist()[:4]}) "
+                f"and the header-parsed value "
+                f"({header_scale.flatten().tolist()[:4]})"
+            )
 
     vocab = embedding.org_vocab_size
     # Verbatim shard-placement math from Qwen4ExpNGramEmbedding.load_weights
