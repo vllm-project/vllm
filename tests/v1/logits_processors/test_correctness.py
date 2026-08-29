@@ -42,7 +42,43 @@ from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
 
-print(f"[canary] cuda after imports: {torch.cuda.is_initialized()}", flush=True)
+
+def _canary(tag: str) -> None:
+    """Report CUDA state at both torch and driver level.
+
+    ``torch.cuda.is_initialized()`` only tracks torch's own lazy init, so it
+    misses a driver context created by any other library.
+    """
+    import os
+
+    driver_ctx: object = "unknown"
+    try:
+        from vllm.utils.import_utils import import_pynvml
+
+        pynvml = import_pynvml()
+        pynvml.nvmlInit()
+        try:
+            pid = os.getpid()
+            driver_ctx = any(
+                proc.pid == pid
+                for i in range(pynvml.nvmlDeviceGetCount())
+                for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(
+                    pynvml.nvmlDeviceGetHandleByIndex(i)
+                )
+            )
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception as e:  # noqa: BLE001
+        driver_ctx = f"err:{type(e).__name__}"
+
+    print(
+        f"[canary] {tag}: torch={torch.cuda.is_initialized()} "
+        f"driver_ctx={driver_ctx} pid={os.getpid()}",
+        flush=True,
+    )
+
+
+_canary("after imports")
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
@@ -54,7 +90,7 @@ DEVICES = [
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 
-print(f"[canary] cuda after module consts: {torch.cuda.is_initialized()}", flush=True)
+_canary("after module consts")
 
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
@@ -485,7 +521,7 @@ def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
     processor.apply(logits)
 
     assert torch.isneginf(logits).all()
-    print(f"[canary] cuda after test1: {torch.cuda.is_initialized()}", flush=True)
+    _canary("after test1")
 
 
 def test_min_tokens_restores_all_masked_structured_output_stop_token():
@@ -519,7 +555,7 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token():
 
     assert logits[0, 0] == 1.0
     assert torch.isneginf(logits[0, 1:]).all()
-    print(f"[canary] cuda after test2: {torch.cuda.is_initialized()}", flush=True)
+    _canary("after test2")
 
 
 def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode():
@@ -558,7 +594,7 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode
     assert logits[1, 0] == 3.0
     assert torch.isneginf(logits[1, 1:]).all()
     assert torch.isneginf(logits[:, 2:]).all()
-    print(f"[canary] cuda after test3: {torch.cuda.is_initialized()}", flush=True)
+    _canary("after test3")
 
 
 def _thinking_budget_params(kwargs: dict) -> None:
