@@ -9,11 +9,13 @@ then keeps weights and other model-owned allocations resident after shutdown.
 
 import gc
 import weakref
-from types import MethodType
 
 import pytest
-import torch
 import torch.nn as nn
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
+    Qwen2_5_VLVisionConfig,
+)
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
 
 from vllm.model_executor.models.interfaces import _language_model_by_module
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionTransformer
@@ -63,20 +65,33 @@ def test_cached_entry_is_dropped_with_its_key():
     assert not any(isinstance(k, _MultiModalModel) for k in _language_model_by_module)
 
 
-def test_qwen2_5_vl_rope_cache_does_not_pin_model():
-    model = object.__new__(Qwen2_5_VisionTransformer)
-    model._rope_by_thw_cache = LRUCache(capacity=1024)
-    model.get_window_index_thw = MethodType(
-        lambda self, t, h, w: (torch.arange(t * h * w), torch.tensor([t * h * w])),
-        model,
+def test_qwen2_5_vl_rope_cache_does_not_pin_model(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.models.qwen2_5_vl.is_vit_use_data_parallel",
+        lambda: True,
     )
-    model.rotary_pos_emb_thw = MethodType(
-        lambda self, t, h, w: (
-            torch.zeros(t * h * w, 1, 2),
-            torch.zeros(t * h * w, 1, 2),
-        ),
-        model,
+    monkeypatch.setattr(
+        "vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VisionPatchMerger",
+        lambda **_: nn.Identity(),
     )
+    model = Qwen2_5_VisionTransformer(
+        Qwen2_5_VLVisionConfig(
+            depth=0,
+            hidden_size=8,
+            intermediate_size=8,
+            num_heads=1,
+            in_channels=3,
+            patch_size=2,
+            spatial_merge_size=1,
+            temporal_patch_size=1,
+            window_size=2,
+            out_hidden_size=8,
+            fullatt_block_indexes=[],
+        )
+    )
+    assert isinstance(model._rope_by_thw_cache, LRUCache)
 
     first = model.get_rope_by_thw(1, 2, 2)
     assert model.get_rope_by_thw(1, 2, 2) is first
@@ -90,12 +105,36 @@ def test_qwen2_5_vl_rope_cache_does_not_pin_model():
     )
 
 
-def test_qwen3_vl_rope_cache_is_released_with_model():
-    model = object.__new__(Qwen3_VisionTransformer)
-    model._rot_pos_ids_cache = LRUCache(capacity=1024)
+def test_qwen3_vl_rope_cache_is_released_with_model(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.models.qwen3_vl.is_vit_use_data_parallel",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.qwen3_vl.Qwen3_VisionPatchMerger",
+        lambda **_: nn.Identity(),
+    )
+    model = Qwen3_VisionTransformer(
+        Qwen3VLVisionConfig(
+            depth=0,
+            hidden_size=8,
+            intermediate_size=8,
+            num_heads=1,
+            in_channels=3,
+            patch_size=2,
+            spatial_merge_size=1,
+            temporal_patch_size=1,
+            out_hidden_size=8,
+            num_position_embeddings=4,
+            deepstack_visual_indexes=[],
+        )
+    )
+    assert isinstance(model._rot_pos_ids_cache, LRUCache)
 
-    first = model.rot_pos_ids(2, 2, 2)
-    assert model.rot_pos_ids(2, 2, 2) is first
+    first = model.rot_pos_ids(2, 2, 1)
+    assert model.rot_pos_ids(2, 2, 1) is first
 
     model_ref = weakref.ref(model)
     tensor_ref = weakref.ref(first)
