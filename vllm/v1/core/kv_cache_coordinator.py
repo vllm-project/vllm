@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -27,6 +28,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Prefix-cache debug: gated by VLLM_DEBUG_PREFIX_CACHE=1. One line per request.
+_DBG_PREFIX_CACHE = bool(os.environ.get("VLLM_DEBUG_PREFIX_CACHE"))
 
 
 def _validate_prefix_cache_retention_interval(
@@ -748,6 +752,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # (``scheduler_block_size``); retention is passed separately so it
             # can keep both the coarse segment tails and the fine replay
             # boundary (which needs the fine value).
+            if _DBG_PREFIX_CACHE:
+                print(
+                    f"[dbg-pc] cache_blocks: req={request.request_id} "
+                    f"num_computed_tokens={num_computed_tokens} "
+                    f"aligned={cached_num_computed_tokens} "
+                    f"num_tokens_to_cache={num_tokens_to_cache} "
+                    f"retention_interval={self.retention_interval}"
+                )
             manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
@@ -814,6 +826,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     curr_hit_length = min(
                         curr_hit_length, hit_length_by_group[first_group_id]
                     )
+                    if _DBG_PREFIX_CACHE:
+                        logger.info(
+                            "[dbg-pc] loop: pass_cand=%d idx=%d spec=%s gids=%s "
+                            "FULL-ATTN-TRIM -> %d",
+                            hit_length,
+                            idx,
+                            type(spec).__name__,
+                            list(group_ids),
+                            curr_hit_length,
+                        )
                     continue
 
                 drop_eagle_block = use_eagle and idx not in eagle_verified
@@ -860,7 +882,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     hit_length_by_group[group_id] = _new_hit_length
 
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
-
+                if _DBG_PREFIX_CACHE:
+                    logger.info(
+                        "[dbg-pc] loop: pass_cand=%d idx=%d spec=%s gids=%s "
+                        "max_in=%d hit_out=%d drop_eagle=%s",
+                        hit_length,
+                        idx,
+                        type(spec).__name__,
+                        list(group_ids),
+                        _max_length,
+                        _new_hit_length,
+                        drop_eagle_block,
+                    )
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
@@ -886,6 +919,24 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )
+        if _DBG_PREFIX_CACHE:
+            per_group = [
+                (
+                    idx,
+                    type(spec).__name__,
+                    list(group_ids),
+                    max(hit_length_by_group[g] for g in group_ids),
+                )
+                for idx, (spec, group_ids, _, _) in enumerate(self.attention_groups)
+            ]
+            logger.info(
+                "[dbg-pc] lookup: max_len=%d reconciled_hit=%d longest_any=%d "
+                "per_group(idx,spec,gids,hit)=%s",
+                max_cache_hit_length,
+                hit_length,
+                longest_hit_length,
+                per_group,
+            )
         return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
 
     def find_longest_cache_hit_per_group(
