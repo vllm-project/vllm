@@ -251,6 +251,35 @@ def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     assert hit == 32
 
 
+def test_coordinator_fine_swa_eagle_reaches_mamba_checkpoint():
+    """The external-store mirror uses the SWA page-sized EAGLE peek too."""
+    hash_block_size = 2
+    groups = [
+        KVCacheGroupSpec(["full"], _full(hash_block_size)),
+        KVCacheGroupSpec(["mamba"], _mamba_align(8)),
+        KVCacheGroupSpec(
+            ["swa"],
+            _swa(block_size=4, sliding_window=4),
+            is_eagle_group=True,
+        ),
+    ]
+    coord = _make_coord(groups, hash_block_size, use_eagle=True)
+    hs = _hashes(12)
+
+    # Full attention has every fine boundary through token 22. Sparse Mamba
+    # retention keeps token 8 and the prompt tail, while SWA keeps its physical
+    # pages and prompt-tail alias. Reconciliation must land on token 8.
+    exists = {(0, bytes(h)) for h in hs[:11]}
+    exists |= {(1, bytes(hs[i])) for i in (3, 10)}
+    exists |= {(2, bytes(hs[i])) for i in (1, 3, 5, 7, 9, 10)}
+    _masks, hit = coord.find_longest_cache_hit(
+        hs,
+        max_length=23,
+        cached_block_pool=ExternalCachedBlockPool(hash_block_size, exists),
+    )
+    assert hit == 8
+
+
 # ----- store_mask -----
 
 
