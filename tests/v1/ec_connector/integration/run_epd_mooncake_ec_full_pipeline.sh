@@ -182,7 +182,7 @@ run_epd_mooncake() {
     --encode-servers-urls "http://localhost:$ENCODE_PORT" \
     --prefill-servers-urls "disable" \
     --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
-    --decode-ec-transfer-zmq-addrs \
+    --ec-consumer-zmq-addrs \
       "tcp://localhost:$EC_MOONCAKE_RESERVATION_PORT" \
     >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
   PIDS+=($!)
