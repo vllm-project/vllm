@@ -6,6 +6,7 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 
+from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
 
 from .base import (
@@ -14,9 +15,22 @@ from .base import (
     check_frame_pixel_limit,
 )
 
+logger = init_logger(__name__)
+
 try:
     from torchcodec.decoders import VideoDecoder
-except (ImportError, RuntimeError):
+except Exception:
+    # A broken optional dependency fails somewhere inside its own import chain,
+    # so the exception is whatever that chain raises: ImportError when absent,
+    # RuntimeError when the system ffmpeg libraries are missing, and OSError
+    # from torch.ops.load_library when an installed shared object cannot be
+    # loaded. Fall back for all of them, and log the cause so that an installed
+    # but unusable torchcodec is not silently swallowed.
+    logger.warning(
+        "torchcodec was found but failed to import; "
+        "the torchcodec video backend will be unavailable",
+        exc_info=True,
+    )
     VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
         "decoders.VideoDecoder"
     )
