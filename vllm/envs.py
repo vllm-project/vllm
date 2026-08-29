@@ -142,7 +142,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
@@ -1300,11 +1299,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
     ),
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
-    ),
     # Whether to use aiter rope.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
@@ -2270,6 +2264,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
