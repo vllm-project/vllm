@@ -121,7 +121,7 @@ def test_measured_zero_tokens_are_distinct_from_unmeasured_tokens():
             RequestFuncOutput(
                 success=True,
                 generated_text="hello",
-                output_tokens=0,
+                output_tokens=None,
                 latency=1.0,
             )
         ],

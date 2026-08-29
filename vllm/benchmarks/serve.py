@@ -602,7 +602,7 @@ def calculate_metrics(
             output_len = outputs[i].output_tokens
             generated_text = outputs[i].generated_text or ""
             total_output_chars += sum(not char.isspace() for char in generated_text)
-            output_tokens_measured = output_len > 0
+            output_tokens_measured = bool(output_len and output_len > 0)
 
             if not output_len:
                 if tokenizer is None:
