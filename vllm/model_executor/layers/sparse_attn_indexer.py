@@ -9,7 +9,12 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import (
+    get_dcp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_rank,
+    get_tp_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -446,6 +451,18 @@ def sparse_attn_indexer(
             values_spec,
             scales_spec,
         )
+        num_prefill_tokens = attn_metadata_narrowed.num_prefill_tokens
+        # Contiguous window of prefill rows this rank scores. The builder emits
+        # row_shard_sizes from replicated scheduler metadata, so every TP rank
+        # agrees on whether the exchange below runs.
+        shard_sizes = prefill_metadata.row_shard_sizes
+        shard_start = shard_stop = 0
+        if shard_sizes is not None:
+            assert dcp_world_size == 1 and not use_pcp
+            assert forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
+            shard_stop = shard_start + shard_sizes[tp_rank]
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -461,15 +478,23 @@ def sparse_attn_indexer(
                     chunk.local_cu_seq_lens,
                 )
 
-            q_slice = q_quant[chunk.token_start : chunk.token_end]
-            q_scale_slice = (
-                q_scale[chunk.token_start : chunk.token_end]
-                if q_scale is not None
-                else None
-            )
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
+            # Narrow the scoring to this rank's rows. The gather above stays
+            # unconditional: later chunks of the same request reuse that
+            # workspace via `skip_kv_gather`, so every rank must fill it.
+            row_start, row_end = chunk.token_start, chunk.token_end
+            if shard_sizes is not None:
+                row_start = max(row_start, shard_start)
+                row_end = min(row_end, shard_stop)
+                if row_start >= row_end:
+                    continue
+                lo = row_start - chunk.token_start
+                hi = row_end - chunk.token_start
+                cu_seqlen_ks = cu_seqlen_ks[lo:hi]
+                cu_seqlen_ke = cu_seqlen_ke[lo:hi]
+
+            q_slice = q_quant[row_start:row_end]
+            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
+            topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
             if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
@@ -492,7 +517,7 @@ def sparse_attn_indexer(
                         q_slice_cast,
                         k_quant_cast,
                         k_scale_cast,
-                        weights[chunk.token_start : chunk.token_end],
+                        weights[row_start:row_end],
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                     )
@@ -500,7 +525,7 @@ def sparse_attn_indexer(
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
                         (k_quant_cast, k_scale_cast),
-                        weights[chunk.token_start : chunk.token_end],
+                        weights[row_start:row_end],
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                         clean_logits=False,
@@ -524,7 +549,22 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
-                row_starts=chunk.cu_seqlen_ks,
+                row_starts=cu_seqlen_ks,
+            )
+
+        if shard_sizes is not None:
+            # Every row was scored and ranked end to end by one rank, so this is
+            # a layout-preserving concatenation, not a top-k merge. all_gatherv
+            # allocates its output, so the source may alias the destination.
+            prefill_end = num_decode_tokens + num_prefill_tokens
+            topk_indices_buffer[num_decode_tokens:prefill_end, :topk_tokens] = (
+                get_tp_group().all_gatherv(
+                    topk_indices_buffer[
+                        shard_start:shard_stop, :topk_tokens
+                    ].contiguous(),
+                    dim=0,
+                    sizes=shard_sizes,
+                )
             )
 
     if has_decode:
