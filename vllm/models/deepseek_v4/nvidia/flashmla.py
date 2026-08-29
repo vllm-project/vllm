@@ -10,8 +10,11 @@ from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
+    compute_gather_lens,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    fill_c128_topk,
+    zero_invalid_lens,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
@@ -64,25 +67,6 @@ def _batch_invariant_prefill_chunk_plan(
             int(compressed_values[request_index] + gather_values[request_index]),
         )
         for request_index in range(metadata.num_prefills)
-    ]
-
-
-def _batch_invariant_decode_request_ranges(
-    query_start_loc_cpu: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
-    num_decodes: int,
-    compress_ratio: int,
-    window_size: int,
-) -> list[tuple[int, int, int, int]]:
-    query_offsets = query_start_loc_cpu.numpy()
-    return [
-        (
-            request_index,
-            int(query_offsets[request_index]),
-            1,
-            int(query_offsets[request_index + 1] - query_offsets[request_index]),
-        )
-        for request_index in range(num_decodes)
     ]
 
 
@@ -157,10 +141,19 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 assert self.topk_indices_buffer is not None
                 top_k = self.topk_indices_buffer.shape[-1]
             combined_topk = round_up(top_k + self.window_size, 128)
-            current_workspace_manager().get_simultaneous(
+            warmup_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
                 ((self.max_num_batched_tokens,), torch.int32),
+            ]
+            if not swa_only and self.compress_ratio == 128:
+                # Reserve the same C128 decode buffer used by the real path so
+                # workspace locking cannot be tripped by the first replay.
+                warmup_specs.append(
+                    ((self.max_num_batched_tokens, top_k), torch.int32)
+                )
+            current_workspace_manager().get_simultaneous(
+                *warmup_specs,
             )
             output.zero_()
             return
@@ -358,35 +351,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         ):
             raise RuntimeError("decode-sparse requires finalized scheduler metadata")
 
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and request_count is None
-            and num_decodes > 1
-        ):
-            request_ranges = _batch_invariant_decode_request_ranges(
-                swa_metadata.query_start_loc_cpu,
-                swa_metadata.seq_lens_cpu,
-                num_decodes,
-                self.compress_ratio,
-                self.window_size,
-            )
-            if len(request_ranges) > num_decodes:
-                raise RuntimeError("decode-sparse BI launch count exceeded request count")
-            for request_index, begin, request_count_, token_count in request_ranges:
-                self._forward_decode_sparse(
-                    q[begin : begin + token_count],
-                    compressed_k_cache,
-                    swa_k_cache,
-                    swa_metadata,
-                    attn_metadata,
-                    swa_only,
-                    output[begin : begin + token_count],
-                    request_start=request_index,
-                    token_start=begin,
-                    request_count=request_count_,
-                )
-            return
-
         request_end = request_start + num_decodes
         token_end = token_start + num_decode_tokens
         seq_lens = swa_metadata.seq_lens[request_start:request_end]
@@ -404,10 +368,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         gather_lens_cpu = query_lens_cpu + torch.clamp(
             prefix_lens_cpu, min=0, max=self.window_size - 1
         )
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
-        prefix_lens = seq_lens - query_lens
-        gather_lens = query_lens + torch.clamp(
-            prefix_lens, min=0, max=self.window_size - 1
+        # Fuse query-length subtraction, prefix clamp, and addition into one
+        # graph-safe kernel; the CPU copy above remains the source for sizing.
+        gather_lens = torch.empty_like(seq_lens)
+        compute_gather_lens(
+            seq_lens,
+            query_start_loc,
+            gather_lens,
+            self.window_size,
         )
 
         query_lens_values = query_lens_cpu.numpy()
@@ -485,25 +453,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         if not swa_only and self.compress_ratio == 128:
             local_topk = workspace[3]
-            torch.arange(
-                top_k,
-                dtype=torch.int32,
-                device=q.device,
-                out=local_topk[0],
-            )
-            if num_decode_tokens > 1:
-                local_topk[1:].copy_(local_topk[0])
-            # ``top_k`` is the graph-stable padded C128 width, not the number
-            # of compressed rows currently visible to each token.  Leaving
-            # the padded tail as arange values makes BI canonicalization sort
-            # an invalid high index into the valid prefix at the first C128
-            # boundary (for example 127 instead of 0 when the true length is
-            # one).  Prefill metadata already represents this tail as -1.
             assert attn_metadata.c128a_decode_topk_lens is not None
-            local_topk.masked_fill_(
-                local_topk
-                >= attn_metadata.c128a_decode_topk_lens[token_start:token_end, None],
-                -1,
+            fill_c128_topk(
+                local_topk,
+                attn_metadata.c128a_decode_topk_lens[token_start:token_end],
             )
         assert local_topk is not None
         combined_indices, combined_lens = combine_topk_swa_indices(
@@ -518,8 +471,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             max_compressed,
             out=(combined_indices_out, combined_lens_out),
         )
-        combined_lens.masked_fill_(
-            ~swa_metadata.is_valid_token[token_start:token_end], 0
+        zero_invalid_lens(
+            combined_lens,
+            swa_metadata.is_valid_token[token_start:token_end],
         )
         flash_mla_sparse_fwd(
             q=q,

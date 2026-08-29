@@ -45,6 +45,28 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+DS4_BI_TOPK_MAX_COLUMNS = 4096
+
+
+def _top_k_per_row_prefill_wide_fallback(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    """GPU fallback for packed rows beyond the DS4 extension column limit."""
+    # The regular vLLM kernel supports arbitrary packed widths and remains
+    # graph-safe.  The caller canonicalizes the selected indices afterward when
+    # BI is enabled, so this path does not expose an implementation-dependent
+    # permutation to FlashMLA.
+    # Call the underlying stable C++ op directly: the Python convenience
+    # wrapper is itself redirected to ds4_bi when BI is enabled.
+    torch.ops._C.top_k_per_row_prefill(
+        logits, row_starts, row_ends, indices, num_rows,
+        logits.stride(0), logits.stride(1), top_k
+    )
 
 
 def _top_k_per_row_prefill(
@@ -58,6 +80,14 @@ def _top_k_per_row_prefill(
     top_k: int,
 ) -> None:
     if envs.VLLM_BATCH_INVARIANT:
+        # The extension limit is on the packed logits width.  Use the static
+        # tensor shape rather than a device-side reduction plus ``.item()``;
+        # this avoids a host synchronization on every prefill invocation.
+        if logits.shape[1] >= DS4_BI_TOPK_MAX_COLUMNS:
+            _top_k_per_row_prefill_wide_fallback(
+                logits, row_starts, row_ends, indices, num_rows, top_k
+            )
+            return
         if not hasattr(torch.ops.ds4_bi, "top_k_per_row_prefill"):
             library = os.environ.get("DS4_BI_TOPK_LIB")
             if library:
@@ -675,9 +705,7 @@ def sparse_attn_indexer(
             # At C128 position 2051 there are 513 candidates for top-512, so
             # score/selection differences that were hidden on shorter rows
             # become observable in the chosen KV set.
-            row_starts = torch.zeros(
-                num_rows, dtype=torch.int32, device=logits.device
-            )
+            row_starts = decode_metadata.row_starts[:num_rows]
             row_ends = seq_lens.reshape(-1)[:num_rows].contiguous()
             _top_k_per_row_prefill(
                 logits,

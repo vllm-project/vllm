@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
+import os
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -423,7 +422,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         estimate = min(max_tokens_per_expert, estimate)
         return estimate
 
-    @eager_break_during_capture
     def apply(
         self,
         output: torch.Tensor,
@@ -469,7 +467,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         # real masked M and select an invalid DeepGEMM launch shape. Preserve
         # the estimate for tuning, but never let it understate live expert
         # rows.
-        expected_m = _expected_m_with_actual_floor(expected_m, expert_num_tokens)
+        if os.environ.get("VLLM_DS4_SKIP_ACTUAL_M_FLOOR") == "1":
+            expected_m = max_num_tokens
+        else:
+            expected_m = _expected_m_with_actual_floor(
+                expected_m, expert_num_tokens
+            )
         fp8_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
             (w1, self.w1_scale),

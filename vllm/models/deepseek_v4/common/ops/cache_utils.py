@@ -458,6 +458,19 @@ def compute_global_topk_indices_and_lens(
         global_topk_indices, topk_lens = output_buffers
         assert global_topk_indices.shape == topk_indices.shape
         assert topk_lens.shape == (num_tokens,)
+    # Avoid launching a 1024-element tile for the common C4A top-k=512 case.
+    # The kernel is otherwise identical; selecting the tile from the static
+    # top-k width keeps graph shapes deterministic and removes masked loads,
+    # address arithmetic, and reductions for the unused half of the tile.
+    topk_width = topk_indices.shape[-1]
+    if topk_width <= 128:
+        triton_block_size = 128
+    elif topk_width <= 256:
+        triton_block_size = 256
+    elif topk_width <= 512:
+        triton_block_size = 512
+    else:
+        triton_block_size = 1024
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
         global_topk_indices,
         global_topk_indices.stride(0),
@@ -470,7 +483,7 @@ def compute_global_topk_indices_and_lens(
         block_table.stride(0),
         block_size,
         is_valid_token,
-        TRITON_BLOCK_SIZE=1024,
+        TRITON_BLOCK_SIZE=triton_block_size,
     )
     return global_topk_indices, topk_lens
 
@@ -540,7 +553,16 @@ def _canonicalize_sparse_topk_indices(
     """Give an unordered sparse top-k set one deterministic reduction order."""
 
     # Descending order keeps the -1 sentinel behind every valid index.
-    return torch.sort(topk_indices, dim=-1, descending=True).values
+    permutation = torch.empty(
+        topk_indices.shape, dtype=torch.int64, device=topk_indices.device
+    )
+    torch.sort(
+        topk_indices,
+        dim=-1,
+        descending=True,
+        out=(topk_indices, permutation),
+    )
+    return topk_indices
 
 
 def combine_topk_swa_indices(
@@ -597,6 +619,124 @@ def combine_topk_swa_indices(
 
 
 _COMBINE_TOPK_SWA_NUM_WORKERS = 128
+
+
+@triton.jit
+def _fill_c128_topk_kernel(
+    output_ptr,
+    lens_ptr,
+    output_stride_0,
+    output_stride_1,
+    TOP_K: tl.constexpr,
+):
+    """Materialize graph-stable C128 indices and their invalid tail in one pass."""
+    row = tl.program_id(0)
+    offsets = tl.arange(0, TOP_K)
+    length = tl.load(lens_ptr + row)
+    values = tl.where(offsets < length, offsets, -1)
+    tl.store(
+        output_ptr + row * output_stride_0 + offsets * output_stride_1, values
+    )
+
+
+def fill_c128_topk(output: torch.Tensor, lengths: torch.Tensor) -> None:
+    """Fill C128 local Top-K indices, using -1 for padded entries."""
+    assert output.ndim == 2 and output.dtype == torch.int32
+    assert lengths.ndim == 1 and lengths.dtype == torch.int32
+    assert output.shape[0] == lengths.shape[0]
+    top_k = output.shape[1]
+    if top_k == 0 or top_k & (top_k - 1):
+        raise ValueError(
+            f"C128 top-k width must be a positive power of two, got {top_k}"
+        )
+    _fill_c128_topk_kernel[(output.shape[0],)](
+        output,
+        lengths,
+        output.stride(0),
+        output.stride(1),
+        TOP_K=top_k,
+        num_warps=4 if top_k <= 1024 else 8,
+    )
+
+
+@triton.jit
+def _zero_invalid_lens_kernel(
+    lens_ptr, lens_stride, valid_ptr, valid_stride, n_elements
+):
+    row = tl.program_id(0)
+    if row < n_elements:
+        value = tl.load(lens_ptr + row * lens_stride)
+        is_valid = tl.load(valid_ptr + row * valid_stride)
+        tl.store(lens_ptr + row * lens_stride, tl.where(is_valid, value, 0))
+
+
+def zero_invalid_lens(lens: torch.Tensor, is_valid: torch.Tensor) -> None:
+    """Set lengths for invalid tokens to zero without a generic elementwise op."""
+    assert lens.ndim == 1 and lens.dtype == torch.int32
+    assert is_valid.ndim == 1 and is_valid.dtype == torch.bool
+    assert lens.shape == is_valid.shape
+    if not lens.is_cuda:
+        lens.masked_fill_(~is_valid, 0)
+        return
+    _zero_invalid_lens_kernel[(lens.shape[0],)](
+        lens,
+        lens.stride(0),
+        is_valid,
+        is_valid.stride(0),
+        lens.shape[0],
+        num_warps=1,
+    )
+
+
+@triton.jit
+def _compute_gather_lens_kernel(
+    seq_lens_ptr,
+    seq_lens_stride,
+    query_start_ptr,
+    query_start_stride,
+    output_ptr,
+    output_stride,
+    n_rows,
+    window_size: tl.constexpr,
+):
+    """Compute decode gather lengths without intermediate elementwise tensors."""
+    row = tl.program_id(0)
+    if row >= n_rows:
+        return
+    query_len = tl.load(
+        query_start_ptr + (row + 1) * query_start_stride
+    ) - tl.load(query_start_ptr + row * query_start_stride)
+    seq_len = tl.load(seq_lens_ptr + row * seq_lens_stride)
+    prefix_len = tl.minimum(tl.maximum(seq_len - query_len, 0), window_size - 1)
+    tl.store(output_ptr + row * output_stride, query_len + prefix_len)
+
+
+def compute_gather_lens(
+    seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    output: torch.Tensor,
+    window_size: int,
+) -> None:
+    """Fuse decode query-length, clamp, and gather-length elementwise ops."""
+    assert seq_lens.ndim == query_start_loc.ndim == output.ndim == 1
+    assert seq_lens.dtype == query_start_loc.dtype == output.dtype == torch.int32
+    assert seq_lens.shape[0] == output.shape[0]
+    assert query_start_loc.shape[0] == seq_lens.shape[0] + 1
+    if not seq_lens.is_cuda:
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        output.copy_(query_lens + (seq_lens - query_lens).clamp(0, window_size - 1))
+        return
+    _compute_gather_lens_kernel[(seq_lens.shape[0],)](
+        seq_lens,
+        seq_lens.stride(0),
+        query_start_loc,
+        query_start_loc.stride(0),
+        output,
+        output.stride(0),
+        seq_lens.shape[0],
+        window_size=window_size,
+        num_warps=1,
+    )
 
 
 # Representative pointer alignment variants for Triton pointer specialization.
@@ -812,7 +952,11 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
+        # Each worker owns disjoint tokens; reducing workers for tiny decode
+        # batches removes idle program launches without changing write order or
+        # numerical results.  Keep the historical cap for larger batches.
+        num_workers = max(1, min(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS))
+        self.kernel[(num_reqs, num_workers)](
             combined_indices,
             combined_indices.stride(0),
             combined_lens,
