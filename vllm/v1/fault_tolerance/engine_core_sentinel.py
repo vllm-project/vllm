@@ -102,9 +102,9 @@ class EngineCoreSentinel:
             timestamp = time.monotonic()
             while engine.scheduler.running:
                 request = engine.scheduler.running.pop()
-                engine.scheduler._preempt_request(
-                    request, timestamp, drop_stale_output=True
-                )
+                engine.scheduler._preempt_request(request, timestamp)
+                request.num_stale_output_tokens = 0
+                request.num_in_flight_tokens = 0
             engine.scheduler.prev_step_scheduled_req_ids.clear()
         else:
             aborted = engine.scheduler.finish_requests(
