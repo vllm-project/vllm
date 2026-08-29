@@ -371,16 +371,26 @@ class MmapPleTable:
         self._shard_fds: list[int | None] = [None] * n_slots
         if self.readahead > 0:
             self._open_readahead_fds(shards)
-            # No layer_idx here: info_once dedups on (msg, *args), so a
-            # per-layer argument would re-log for every PLE layer.
-            logger.info_once(
-                "PLE mmap: readahead pre-pass active (posix_fadvise WILLNEED), "
-                "bounded at %d coalesced runs per gather",
-                self.readahead,
-            )
+            covered_files = len(self._fds)
+            if covered_files > 0:
+                total_files = len({path for path, _offset, _rows in shards.values()})
+                # No layer_idx here: info_once dedups on (msg, *args), so a
+                # per-layer argument would re-log for every PLE layer. The
+                # covered/total counts are fixed per table, so a different
+                # table logging a different pair is expected and
+                # informative, not a dedup failure.
+                logger.info_once(
+                    "PLE mmap: readahead pre-pass active (posix_fadvise "
+                    "WILLNEED), %d/%d shard files opened, bounded at %d "
+                    "coalesced runs per gather",
+                    covered_files,
+                    total_files,
+                    self.readahead,
+                )
         self.pool = ThreadPoolExecutor(max_workers=self.workers)
         self._pending = 0
         self._errors = 0
+        self._bound_warned = False
         self._rows_since_log = 0
         # (elapsed_ms, populate_ms, copy_ms, coalesced runs) per gather.
         self._latencies_ms: list[tuple[float, float, float, int]] = []
@@ -434,12 +444,19 @@ class MmapPleTable:
         monotonic in ``uniq``, so every shard owns exactly one contiguous
         segment and this pre-pass covers precisely the rows the copy tasks do.
 
+        Two passes: a numpy count-only pass decides whether the bound
+        (``self.readahead``) is exceeded before anything is materialized, so
+        a bound-skipped gather pays only that count, not the (fd, offset,
+        length) Python-level run list the active path builds. Only once the
+        count clears the bound does a second pass build that list and issue
+        the ``posix_fadvise`` calls.
+
         Returns:
             The coalesced run count, reported even when it exceeds the bound
             and nothing was issued — a silent skip would be indistinguishable
             from readahead being off.
         """
-        runs: list[tuple[int, int, int]] = []
+        total_runs = 0
         for s, e in zip(seg_starts, seg_ends):
             si = int(shard[s])
             mm = self.mm[si]
@@ -449,19 +466,37 @@ class MmapPleTable:
             if mm is None or fd is None:
                 continue
             offsets = mm.offset + local[s:e] * self.row_bytes
+            total_runs += (
+                int(np.count_nonzero(offsets[1:] != offsets[:-1] + self.row_bytes)) + 1
+            )
+
+        if total_runs > self.readahead:
+            # Latched per table, not warning_once's process-wide (msg, *args)
+            # cache: the run count varies almost every gather, which would
+            # otherwise thrash that cache into re-logging on nearly every
+            # bound-exceeded call instead of deduping anything.
+            if not self._bound_warned:
+                self._bound_warned = True
+                logger.warning(
+                    "PLE mmap: readahead skipped, %d coalesced runs exceed "
+                    "VLLM_PLE_MMAP_READAHEAD=%d",
+                    total_runs,
+                    self.readahead,
+                )
+            return total_runs
+
+        runs: list[tuple[int, int, int]] = []
+        for s, e in zip(seg_starts, seg_ends):
+            si = int(shard[s])
+            mm = self.mm[si]
+            fd = self._shard_fds[si]
+            if mm is None or fd is None:
+                continue
+            offsets = mm.offset + local[s:e] * self.row_bytes
             runs.extend(
                 (fd, offset, length)
                 for offset, length in _coalesce_runs(offsets, self.row_bytes)
             )
-
-        if len(runs) > self.readahead:
-            logger.warning_once(
-                "PLE mmap: readahead skipped, %d coalesced runs exceed "
-                "VLLM_PLE_MMAP_READAHEAD=%d",
-                len(runs),
-                self.readahead,
-            )
-            return len(runs)
 
         for fd, offset, length in runs:
             try:
@@ -472,7 +507,13 @@ class MmapPleTable:
                     "serves every row, just colder",
                     exc.strerror,
                 )
-        return len(runs)
+                # This fd is bad for every shard it backs (shards commonly
+                # share a file) — latch every matching slot so future
+                # gathers stop paying for a call that will only fail again.
+                for idx, shard_fd in enumerate(self._shard_fds):
+                    if shard_fd == fd:
+                        self._shard_fds[idx] = None
+        return total_runs
 
     def gather(self, ids: np.ndarray) -> np.ndarray:
         """Gather table rows for a batch of global row ids.
@@ -660,6 +701,9 @@ class MmapPleTable:
             os.close(fd)
         self._fds.clear()
         self._shard_fds = [None] * len(self._shard_fds)
+
+    def __del__(self) -> None:
+        self.close()
 
 
 def _mem_available_bytes(path: str = "/proc/meminfo") -> int:
@@ -1108,30 +1152,39 @@ def _attach_table(
         embedding.table = None
 
     row_bytes = layer_shards.cols * _itemsize(layer_shards.dtype_str)
-    table = MmapPleTable(
-        layer_shards.shards,
-        shard_size,
-        row_bytes,
-        _FP8_DTYPES[layer_shards.dtype_str],
-        workers=envs.VLLM_PLE_MMAP_WORKERS,
-        chunk=envs.VLLM_PLE_MMAP_CHUNK,
-        model_path=model_path,
-        readahead=envs.VLLM_PLE_MMAP_READAHEAD,
-    )
-    embedding.torch_dtype = table.torch_dtype
-    table_bytes = table.rows_total * row_bytes
-
-    if envs.VLLM_PLE_MMAP_PREWARM:
-        bound = compute_prewarm_bound(table_bytes, _mem_available_bytes())
-        read = table.prewarm(bound)
-        logger.info(
-            "PLE mmap: layer %d prewarm read %.2f GiB (budget %.2f GiB)",
-            layer_idx,
-            read / (1 << 30),
-            bound / (1 << 30),
+    table: MmapPleTable | None = None
+    try:
+        table = MmapPleTable(
+            layer_shards.shards,
+            shard_size,
+            row_bytes,
+            _FP8_DTYPES[layer_shards.dtype_str],
+            workers=envs.VLLM_PLE_MMAP_WORKERS,
+            chunk=envs.VLLM_PLE_MMAP_CHUNK,
+            model_path=model_path,
+            readahead=envs.VLLM_PLE_MMAP_READAHEAD,
         )
+        embedding.torch_dtype = table.torch_dtype
+        table_bytes = table.rows_total * row_bytes
 
-    embedding.table = table
+        if envs.VLLM_PLE_MMAP_PREWARM:
+            bound = compute_prewarm_bound(table_bytes, _mem_available_bytes())
+            read = table.prewarm(bound)
+            logger.info(
+                "PLE mmap: layer %d prewarm read %.2f GiB (budget %.2f GiB)",
+                layer_idx,
+                read / (1 << 30),
+                bound / (1 << 30),
+            )
+
+        embedding.table = table
+    except Exception:
+        # Nothing between construction and the attach above may raise and
+        # leak the table's memmaps, readahead fds, or thread pool — close
+        # whatever construction already opened before this propagates.
+        if table is not None:
+            table.close()
+        raise
     logger.info(
         "PLE mmap: layer %d attached, %d shards, %d rows x %d B "
         "(%.2f GiB on disk), %d workers",

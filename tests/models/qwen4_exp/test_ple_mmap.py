@@ -10,6 +10,7 @@ exercised through its CPU dispatch key.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -595,7 +596,14 @@ def test_readahead_bound_skips_the_pre_pass_but_still_reports_the_run_count(
     table = _readahead_table(tmp_path, readahead=2)
     advised: list[tuple[object, ...]] = []
     monkeypatch.setattr(os, "posix_fadvise", lambda *args: advised.append(args))
-    warnings = _record_warnings(monkeypatch)
+    # The bound-exceeded warning is a per-table latch (logger.warning), not
+    # warning_once: _record_warnings only intercepts warning_once.
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        ple_mmap.logger,
+        "warning",
+        lambda msg, *args: warnings.append((msg, args)),
+    )
 
     ids = np.array([0, 5, 12, 20, 31, 39], dtype=np.int64)
     got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
@@ -605,6 +613,104 @@ def test_readahead_bound_skips_the_pre_pass_but_still_reports_the_run_count(
     assert table._latencies_ms[-1][3] == 6
     assert len(warnings) == 1
     assert warnings[0][1] == (6, 2)
+    table.close()
+
+
+def test_bound_exceeded_warns_exactly_once_per_table_across_varying_run_counts(
+    tmp_path: Path,
+) -> None:
+    """warning_once dedups on (msg, *args), and the observed run count is
+    part of args and varies almost every gather — that would defeat the
+    process-wide lru cache and re-log on nearly every over-bound call. The
+    per-table latch (a plain instance flag) must warn exactly once
+    regardless of how many distinct run counts are observed, verified
+    against a real logging.Handler rather than a monkeypatched recorder.
+    """
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    table = _readahead_table(tmp_path, readahead=1)  # any gather here exceeds 1 run
+
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    ple_mmap.logger.addHandler(handler)
+    try:
+        for ids in (
+            np.array([0, 39], dtype=np.int64),  # 2 shards -> 2 runs
+            np.array([0, 5, 39], dtype=np.int64),  # a different run count
+            np.array([0, 5, 12, 39], dtype=np.int64),  # a different run count again
+        ):
+            table.gather(ids)
+    finally:
+        ple_mmap.logger.removeHandler(handler)
+        table.close()
+
+    bound_records = [r for r in records if "readahead skipped" in r.getMessage()]
+    assert len(bound_records) == 1
+
+
+def test_readahead_bound_skip_avoids_materializing_the_run_list(
+    tmp_path: Path,
+) -> None:
+    """The count-only pre-pass must stay cheap even when the gather is large
+    enough that materializing the (fd, offset, length) run list would be
+    measurable: a bound-skipped gather's populate cost must stay close to
+    the readahead=0 arm's (always exactly 0 — the pre-pass never even
+    runs), not scale with row count the way the materializing path does.
+    """
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    n_shards, rows_per_shard, cols = 128, 4, 4
+    vocab = n_shards * rows_per_shard
+    full = _synthetic_weight(vocab, cols)
+    tensors: dict[str, torch.Tensor] = {
+        f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16)
+    }
+    for shard_idx in range(n_shards):
+        start = shard_idx * rows_per_shard
+        tensors[f"{prefix}.shard_{shard_idx}.weight"] = full[
+            start : start + rows_per_shard
+        ]
+    safetensors.torch.save_file(
+        tensors, str(tmp_path / "model-ple-0-00000.safetensors")
+    )
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    # One (non-adjacent) row from every shard: each segment coalesces to
+    # exactly one run, so the run list genuinely has n_shards entries.
+    ids = np.array(
+        [shard_idx * rows_per_shard for shard_idx in range(n_shards)], dtype=np.int64
+    )
+
+    def _table(readahead: int) -> ple_mmap.MmapPleTable:
+        return ple_mmap.MmapPleTable(
+            layer_shards.shards,
+            rows_per_shard,
+            cols,
+            torch.float8_e4m3fn,
+            workers=1,
+            chunk=8,
+            model_path=str(tmp_path),
+            readahead=readahead,
+        )
+
+    active = _table(n_shards)  # never exceeds the bound: materializes + advises
+    skipped = _table(1)  # exceeds on every gather: count-only path only
+    try:
+        for _ in range(5):
+            active.gather(ids)
+            skipped.gather(ids)
+        # min(), not mean(): isolates the cost this test cares about from
+        # scheduler noise, which only ever pushes a sample up.
+        active_populate = min(sample[1] for sample in active._latencies_ms)
+        skipped_populate = min(sample[1] for sample in skipped._latencies_ms)
+
+        # Measured ratio is a stable ~0.27 across 128-1024 shards (the
+        # per-segment numpy count survives; only the coalesced (fd, offset,
+        # length) list and the posix_fadvise calls are skipped) — half that
+        # leaves comfortable margin against box-to-box noise without being
+        # so loose the assertion stops meaning anything.
+        assert skipped_populate < 0.5 * active_populate
+    finally:
+        active.close()
+        skipped.close()
 
 
 def test_readahead_survives_an_oserror_from_every_call(
@@ -629,6 +735,7 @@ def test_readahead_survives_an_oserror_from_every_call(
     assert torch.equal(got, full[ids])
     assert len(warnings) == 6
     assert len(set(warnings)) == 1
+    table.close()
 
 
 def test_gather_survives_a_pre_pass_that_raises_valueerror(
@@ -652,6 +759,69 @@ def test_gather_survives_a_pre_pass_that_raises_valueerror(
 
     assert torch.equal(got, full[ids])
     assert warnings[0][1] == ("ValueError",)
+    table.close()
+
+
+def test_readahead_advises_file_absolute_offsets_across_unaligned_shard_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-pass computes ``mm.offset + local * row_bytes`` — the FILE
+    offset a shard's rows live at, not a row-relative one. Shards sharing
+    one safetensors file (as here) start at non-zero, non-page-aligned byte
+    offsets within it, so a dropped ``mm.offset +`` would advise the wrong
+    bytes: reading each advised (offset, length) range straight off disk
+    and comparing to the logical table catches that class of regression
+    directly, independent of gather()'s own correctness.
+    """
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    full = _synthetic_weight(9, 3)
+    path = tmp_path / "model-ple-0-00000.safetensors"
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.shard_0.weight": full[0:3],
+            f"{prefix}.shard_1.weight": full[3:6],
+            f"{prefix}.shard_2.weight": full[6:9],
+            f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16),
+        },
+        str(path),
+    )
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    # Sanity: shard 1/2 must NOT start at a page boundary, else this test
+    # would still pass even with `mm.offset +` dropped from the pre-pass.
+    for shard_idx in (1, 2):
+        _path_, offset, _rows = layer_shards.shards[shard_idx]
+        assert offset % 4096 != 0
+
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        3,
+        3,
+        torch.float8_e4m3fn,
+        workers=1,
+        chunk=8,
+        model_path=str(tmp_path),
+        readahead=64,
+    )
+    advised: list[tuple[int, int, int, int]] = []
+    monkeypatch.setattr(
+        os,
+        "posix_fadvise",
+        lambda fd, offset, length, advice: advised.append((fd, offset, length, advice)),
+    )
+
+    ids = np.array([0, 4, 8], dtype=np.int64)  # one row per shard
+    table.gather(ids)
+    table.close()
+
+    assert advised
+    with open(path, "rb") as f:
+        pieces = []
+        for _fd, offset, length, _advice in sorted(advised, key=lambda a: a[1]):
+            f.seek(offset)
+            pieces.append(f.read(length))
+    got = np.frombuffer(b"".join(pieces), dtype=np.uint8).reshape(-1, 3)
+    expected = full[np.unique(ids)].view(torch.uint8).numpy().reshape(-1, 3)
+    assert np.array_equal(got, expected)
 
 
 def test_readahead_holds_one_fd_per_distinct_shard_file(tmp_path: Path) -> None:
@@ -688,12 +858,13 @@ def test_readahead_holds_one_fd_per_distinct_shard_file(tmp_path: Path) -> None:
     got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
     assert torch.equal(got, full[ids])
 
-    (fd,) = table._fds.values()
     table.close()
 
+    # Not os.fstat(fd) after close: the OS is free to reuse a released fd
+    # number for something unrelated before this assertion runs, which
+    # would make an "fstat still raises" check flaky rather than wrong.
     assert not table._fds
-    with pytest.raises(OSError):
-        os.fstat(fd)
+    assert all(shard_fd is None for shard_fd in table._shard_fds)
 
 
 def test_readahead_defaults_to_off_and_opens_no_fds(tmp_path: Path) -> None:
@@ -715,6 +886,33 @@ def test_readahead_defaults_to_off_and_opens_no_fds(tmp_path: Path) -> None:
     assert envs.VLLM_PLE_MMAP_READAHEAD == 0
     assert table.readahead == 0
     assert table._fds == {}
+
+
+def test_readahead_table_close_is_idempotent_with_fds_open(tmp_path: Path) -> None:
+    """close() must guard its fd release too: with readahead fds actually
+    open (unlike the plain close-idempotency test, which has none to
+    release), a second call must stay a no-op rather than double
+    os.close()-ing an fd number the OS is free to reuse.
+    """
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=1.0)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        3,
+        2,
+        torch.float8_e4m3fn,
+        workers=1,
+        chunk=8,
+        model_path=str(tmp_path),
+        readahead=64,
+    )
+    assert table._fds
+
+    table.close()
+    table.close()  # idempotent: must not raise (e.g. a double os.close())
+
+    assert not table._fds
+    assert all(mm is None for mm in table.mm)
 
 
 # --------------------------------------------------------------------------- #
@@ -1815,6 +2013,48 @@ def test_attach_table_closes_a_stale_table_before_building_the_new_one(
     assert stale_table.pool._shutdown  # the old ThreadPool was shut down
     ids = torch.tensor([0, 8], dtype=torch.long)
     assert torch.equal(embedding(ids), full[ids])  # the new table still works
+
+
+def test_attach_table_closes_the_table_when_the_attach_window_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure anywhere between constructing the table and handing it to
+    the placeholder (here: prewarm) must not leak the table's ThreadPool,
+    memmaps, or readahead fds — _attach_table must close what construction
+    already opened before the exception propagates.
+    """
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=10, parts=3, cols=2, scale=0.25)
+    emb = _loaded_placeholder(10, 2, 0.25)
+    cc = SimpleNamespace(static_forward_context={"a.ple": _fake_ple_layer(0, emb, 3)})
+    model_config = _model_config(tmp_path)
+    monkeypatch.setenv("VLLM_PLE_MMAP_PREWARM", "1")
+    monkeypatch.setenv("VLLM_PLE_MMAP_READAHEAD", "8")
+
+    built: list[ple_mmap.MmapPleTable] = []
+    real_init = ple_mmap.MmapPleTable.__init__
+
+    def spying_init(
+        self: ple_mmap.MmapPleTable, *args: object, **kwargs: object
+    ) -> None:
+        real_init(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(ple_mmap.MmapPleTable, "__init__", spying_init)
+
+    def _raise_prewarm(self: ple_mmap.MmapPleTable, max_bytes: int) -> int:
+        raise RuntimeError("synthetic prewarm failure")
+
+    monkeypatch.setattr(ple_mmap.MmapPleTable, "prewarm", _raise_prewarm)
+
+    with pytest.raises(RuntimeError, match="synthetic prewarm failure"):
+        ple_mmap.build_tables(model_config, cc)
+
+    assert emb.table is None
+    assert len(built) == 1
+    leaked = built[0]
+    assert all(mm is None for mm in leaked.mm)
+    assert leaked.pool._shutdown
+    assert not leaked._fds
 
 
 # --------------------------------------------------------------------------- #
