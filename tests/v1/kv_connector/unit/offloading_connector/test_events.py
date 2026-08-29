@@ -539,9 +539,7 @@ def test_secondary_stored_event_does_not_mutate_cpu_metadata():
     expected_metadata = dict(tracker._pending_event_metadata)
 
     stored = list(
-        tracker.take_events(
-            [_stored_event([key], Medium.STORAGE, ownership="custom")]
-        )
+        tracker.take_events([_stored_event([key], Medium.STORAGE, ownership="custom")])
     )
 
     assert stored[0].token_ids == [1, 2, 3, 4]
