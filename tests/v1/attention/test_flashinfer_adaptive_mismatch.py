@@ -256,25 +256,27 @@ def _make_builder(*, finalize: bool = True):
 
 def test_finalize_role_gating():
     """Target-layer role gates the mode: arms only for is_target=True."""
-    b = _make_builder()  # internal finalize(is_target=True)
-    assert b.adaptive_xqa_mismatch_mode is True
+    with _ctx(_cfg()):
+        b = _make_builder()  # internal finalize(is_target=True)
+        assert b.adaptive_xqa_mismatch_mode is True
 
-    b2 = _make_builder(finalize=False)
-    b2._finalize_adaptive_decode(8, is_target=False)
-    assert b2.adaptive_xqa_mismatch_mode is False
+        b2 = _make_builder(finalize=False)
+        b2._finalize_adaptive_decode(8, is_target=False)
+        assert b2.adaptive_xqa_mismatch_mode is False
 
-    b3 = _make_builder(finalize=False)
-    b3._finalize_adaptive_decode(8, is_target=None)
-    assert b3.adaptive_xqa_mismatch_mode is False
+        b3 = _make_builder(finalize=False)
+        b3._finalize_adaptive_decode(8, is_target=None)
+        assert b3.adaptive_xqa_mismatch_mode is False
 
 
 def test_finalize_xqa_incapable_target_fails():
     """A target builder without device-ragged kernel capability must fail
     closed rather than silently degrade (invariant: target-intersecting
     builder must be XQA-capable)."""
-    b = _make_builder(finalize=False)
-    b.use_dedicated_xqa = False
-    b.supports_device_ragged_decode = False
-    with pytest.raises(ValueError, match="device-ragged"):
-        b._finalize_adaptive_decode(8, is_target=True)
-    assert b.adaptive_xqa_mismatch_mode is False
+    with _ctx(_cfg()):
+        b = _make_builder(finalize=False)
+        b.use_dedicated_xqa = False
+        b.supports_device_ragged_decode = False
+        with pytest.raises(ValueError, match="device-ragged"):
+            b._finalize_adaptive_decode(8, is_target=True)
+        assert b.adaptive_xqa_mismatch_mode is False
