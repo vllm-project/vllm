@@ -232,18 +232,41 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             # specialize (MLP and both layernorms are identical to the
             # target's -- Orthrus only adds *_diff attention parameters on
             # top of a frozen backbone). Dropping the draft's duplicate
-            # copies frees most of its redundant weight memory; the AR
-            # attention projections it also never uses are left in place
-            # since they are comparatively small.
+            # copies frees most of its redundant weight memory. The AR
+            # attention projections (qkv_proj/o_proj) are never called by
+            # the diffusion forward either -- forward_diffusion_paged only
+            # reaches qkv_proj_diff/o_proj_diff/attn_diff -- so they are
+            # re-pointed at the target's the same way.
             if idx < len(target_layers):
                 target_layer = target_layers[idx]
                 layer.mlp = target_layer.mlp
                 layer.input_layernorm = target_layer.input_layernorm
                 layer.post_attention_layernorm = target_layer.post_attention_layernorm
+                target_self_attn = target_layer.self_attn
+                if hasattr(layer.self_attn, "qkv_proj") and hasattr(
+                    target_self_attn, "qkv_proj"
+                ):
+                    layer.self_attn.qkv_proj = target_self_attn.qkv_proj
+                if hasattr(layer.self_attn, "o_proj") and hasattr(
+                    target_self_attn, "o_proj"
+                ):
+                    layer.self_attn.o_proj = target_self_attn.o_proj
+
+        # embed_tokens/lm_head are also never specialized by the diffusion
+        # path (embed_input_ids and compute_logits both go through the same
+        # weights as the target) -- share them too instead of keeping the
+        # draft's own duplicate copies from checkpoint load.
+        if hasattr(self.model.model, "embed_tokens") and hasattr(
+            target_model.model, "embed_tokens"
+        ):
+            self.model.model.embed_tokens = target_model.model.embed_tokens
+        if hasattr(self.model, "lm_head") and hasattr(target_model, "lm_head"):
+            self.model.lm_head = target_model.lm_head
 
         logger.info(
             "OrthrusProposer: wired %d draft layers to KV-share with the "
-            "target and share its MLP/layernorm weights.",
+            "target and share its MLP/layernorm/AR-projection/embedding "
+            "weights.",
             len(self.model.model.layers),
         )
 
