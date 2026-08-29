@@ -581,7 +581,13 @@ class HiSparseCoordinator:
                 for manager in self.resident_managers
             ):
                 for manager in self.hot_managers:
-                    manager.activate_hot(request_id)
+                    # Do not allocate the fixed hot region from this
+                    # asynchronous completion path. At high occupancy that
+                    # bypasses KVCacheManager's per-pool capacity check and
+                    # can raise from BlockPool.get_new_blocks(). Mark it as
+                    # required so the next normal scheduling pass accounts
+                    # for and allocates the region, or defers the request.
+                    manager.require_hot(request_id)
                 self.block_table_updates.add(request_id)
 
     def _apply_enqueued_spill(self, pending: _PendingSpill) -> None:
