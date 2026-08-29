@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -34,6 +35,10 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -46,6 +51,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.block_table import (
+    MultiGroupBlockTable,
+    SlotMappingMode,
+    get_block_table_width,
+)
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -56,6 +66,16 @@ from vllm.v1.worker.utils import select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_dtype():
+    """Several tests here set the process-wide default dtype to float16 and
+    previously leaked it, corrupting later float-sensitive tests in the same
+    pytest process (torch.randn silently produced fp16)."""
+    old = torch.get_default_dtype()
+    yield
+    torch.set_default_dtype(old)
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -72,7 +92,12 @@ def initialize_kv_cache(runner: GPUModelRunner):
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            KVCacheTensor(
+                size=tensor_size,
+                layers=["layer.0"],
+                layer_stride=tensor_size,
+                block_stride=attn_spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
@@ -111,6 +136,7 @@ def get_vllm_config():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
         model_config=model_config,
@@ -119,6 +145,34 @@ def get_vllm_config():
         parallel_config=parallel_config,
     )
     return vllm_config
+
+
+@pytest.mark.parametrize("gc_initially_enabled", [True, False])
+def test_freeze_gc_disables_and_restores_automatic_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    gc_initially_enabled: bool,
+):
+    monkeypatch.setenv("VLLM_ENABLE_CUDAGRAPH_GC", "0")
+    original_gc_state = gc.isenabled()
+    try:
+        if gc_initially_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            GPUModelRunner._freeze_gc(),
+        ):
+            assert not gc.isenabled()
+            raise RuntimeError("capture failed")
+
+        assert gc.isenabled() is gc_initially_enabled
+    finally:
+        if original_gc_state:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 @pytest.fixture
@@ -257,6 +311,16 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    selected_size = select_common_block_size(
+        16,
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+    )
+    assert selected_size == 16
+
+
 def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
     dist_init,
 ):
@@ -346,9 +410,13 @@ def test_select_common_block_size_no_valid_option():
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
-    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
     model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
-    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
 
     lora_manager = Mock()
     lora_manager.supports_tower_connector_lora.return_value = True
@@ -519,7 +587,8 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(model_runner, dist_init):
+def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
+    monkeypatch.setattr(gpu_model_runner_module.envs, "VLLM_RAISE_ON_LOGIT_NANS", False)
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
@@ -776,56 +845,6 @@ def test_update_states_pp_async_multi_request_keeps_rank_state_consistent(
         )
 
 
-def test_kv_cache_stride_order(monkeypatch, model_runner):
-    # This test checks if GPUModelRunner initializes correctly when an attention
-    # backend enforces a non-default KV cache stride order.
-    n_heads = model_runner.model_config.get_num_kv_heads(model_runner.parallel_config)
-    head_size = model_runner.model_config.get_head_size()
-
-    # Get the expected shape from the backend's get_kv_cache_shape method
-    # to ensure compatibility with different backends (triton vs flexattention)
-    attn_backend = None
-    for attn_group in model_runner._attn_group_iterator():
-        attn_backend = attn_group.backend
-        break
-
-    assert attn_backend is not None, "No attention backend found"
-    expected_kv_cache_shape = list(
-        attn_backend.get_kv_cache_shape(NUM_BLOCKS, BLOCK_SIZE, n_heads, head_size)
-    )
-
-    # TODO mla test
-    default_stride = tuple(range(len(expected_kv_cache_shape)))
-    non_default_stride = (*default_stride[1:], default_stride[0])
-    # Permutation that gets you back to expected kv shape
-    for test_stride in (non_default_stride, default_stride):
-
-        def rnd_stride_order(
-            include_num_layers_dimension: bool = False, test_stride=test_stride
-        ):
-            assert not include_num_layers_dimension
-            return test_stride
-
-        # Patch the attention backend class and re-trigger the KV cache creation
-        for attn_group in model_runner._attn_group_iterator():
-            attn_backend = attn_group.backend
-            monkeypatch.setattr(
-                attn_backend, "get_kv_cache_stride_order", rnd_stride_order
-            )
-
-        model_runner.attn_groups = []
-        model_runner.kv_caches = []
-        model_runner.initialize_kv_cache(model_runner.kv_cache_config)
-
-        # Shape is unchanged, but layout may differ
-        kv_cache_shape = model_runner.kv_caches[0].shape
-        assert list(kv_cache_shape) == expected_kv_cache_shape
-        if default_stride == test_stride:
-            assert all(kv.is_contiguous() for kv in model_runner.kv_caches)
-        else:
-            assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
-
-
 def test_update_config(model_runner):
     # Simple update
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
@@ -888,6 +907,37 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
         dim=0,
     )
     assert torch.equal(passed_draft_probs, expected_draft_probs)
+
+
+def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "processed_logprobs"
+    runner.speculative_config = SimpleNamespace(
+        rejection_sample_method="standard",
+        draft_sample_method="greedy",
+    )
+    runner.rejection_sampler = Mock()
+    synchronize = Mock()
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    output = GPUModelRunner._dummy_sampler_run(runner, torch.randn(3, 4))
+
+    assert output == "sampler_output"
+    assert runner.rejection_sampler.call_count == 2
+    mixed_metadata = runner.rejection_sampler.call_args_list[0].args[3]
+    all_greedy_metadata = runner.rejection_sampler.call_args_list[1].args[3]
+    assert not mixed_metadata.all_greedy
+    assert mixed_metadata.temperature is not None
+    assert all_greedy_metadata.all_greedy
+    assert not all_greedy_metadata.all_random
+    assert all_greedy_metadata.temperature is None
+    synchronize.assert_called_once_with()
 
 
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():
@@ -1030,21 +1080,22 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
         vllm_config, [kv_cache_spec], [available_memory]
     )[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.kv_cache_tensors) == 2
-    assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
-    assert kv_cache_config.kv_cache_tensors[1].size == available_memory // 2
+    assert len(kv_cache_config.kv_cache_tensors) == 1
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
     # important: override tensor size to prevent large mem alloc during test
-    # this will only allocate 2 block worth of memory (2 * 32kb)
+    # this will only allocate 1 block worth of memory per layer (2 layers * 32kb)
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        kv_cache_tensor.size = kv_cache_spec[
-            kv_cache_tensor.shared_by[0]
-        ].page_size_bytes
+        page_size = kv_cache_spec[kv_cache_tensor.layers[0]].page_size_bytes
+        kv_cache_tensor.size = page_size * len(kv_cache_tensor.layers)
+        # One block per layer: a layer's region is exactly one page.
+        kv_cache_tensor.layer_stride = page_size
+        kv_cache_tensor.block_stride = page_size
 
     runner.initialize_kv_cache(kv_cache_config)
 
@@ -1113,7 +1164,9 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
     kv_cache_config.num_blocks = 1
-    kv_cache_config.kv_cache_tensors[0].size = kv_cache_spec[layer_0].page_size_bytes
+    page_size = kv_cache_spec[layer_0].page_size_bytes
+    kv_cache_config.kv_cache_tensors[0].size = page_size
+    kv_cache_config.kv_cache_tensors[0].layer_stride = page_size
 
     runner.initialize_kv_cache(kv_cache_config)
     kv_cache_config_after_init = runner.kv_cache_config
@@ -1138,7 +1191,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
     """
     The GPU model runner creates different views into the
     KVCacheTensors for the attention and mamba layers
-    (via _reshape_kv_cache_tensors function). This test verifies
+    (via _allocate_kv_caches). This test verifies
     that the views are compatible: writing a mamba block
     will not corrupt an attention block and vice versa
     """
@@ -1176,6 +1229,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
     vllm_config = VllmConfig(
@@ -1380,6 +1434,29 @@ def test_hybrid_block_table_initialization():
     )
 
 
+def test_get_block_table_width_aligns_to_128_tokens():
+    assert get_block_table_width(1875, 64) == 1876
+
+
+def test_get_block_table_width_splits_virtual_blocks():
+    assert get_block_table_width(235, 256, 64) == 940
+
+
+def test_mamba_state_table_width_is_not_aligned():
+    block_tables = MultiGroupBlockTable(
+        max_num_reqs=1,
+        max_num_batched_tokens=1,
+        pin_memory=False,
+        device=torch.device("cpu"),
+        block_sizes=[39664],
+        kernel_block_sizes=[39664],
+        max_num_blocks=[1],
+        slot_mapping_modes=[SlotMappingMode.NONE],
+    )
+
+    assert block_tables[0].max_num_blocks_per_req == 1
+
+
 def test_input_batch_with_kernel_block_sizes():
     """Test InputBatch initialization with kernel_block_sizes parameter."""
     max_num_reqs = 10
@@ -1444,7 +1521,12 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            KVCacheTensor(
+                size=tensor_size,
+                layers=["layer.0"],
+                layer_stride=tensor_size,
+                block_stride=attn_spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
@@ -1609,6 +1691,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
     vllm_config = VllmConfig(

@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -126,7 +126,12 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 "Please install flashinfer (>= 0.6.4): "
                 "pip install flashinfer-python"
             ) from e
+        logger.info_once("Using FlashInfer Mamba SSU algorithm: %s", self._algorithm)
         self._kernel = _fi_ssu
+
+    @property
+    def _algorithm(self) -> MambaSSUAlgorithm:
+        return self._mamba_config.ssu_algorithm or "auto"
 
     @property
     def name(self) -> str:
@@ -157,7 +162,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
             if self._mamba_config.enable_stochastic_rounding
             else None
         )
-
         self._kernel(
             state,
             x,
@@ -180,6 +184,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
             out=out,
             rand_seed=rand_seed,
             philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
+            algorithm=self._algorithm,
         )
 
 

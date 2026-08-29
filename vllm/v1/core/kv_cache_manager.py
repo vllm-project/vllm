@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -124,6 +125,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -160,6 +162,7 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -236,7 +239,7 @@ class KVCacheManager:
                 - ``shared_prefix_boundary``: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
-                  Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
+                  Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
         """
         # We skip finding the prefix cache hit when prefix caching is
@@ -760,6 +763,31 @@ class KVCacheManager:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
 
+    def truncate_computed_blocks(
+        self, blocks: KVCacheBlocks, num_computed_tokens: int
+    ) -> KVCacheBlocks:
+        """Return a lookup-result view truncated at an aligned token endpoint.
+
+        An external hit can supply the final Mamba state even when the local
+        Mamba group ends before this endpoint. Other groups must cover it.
+        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        """
+        truncated: list[list[KVCacheBlock]] = []
+        for group_blocks, manager, group in zip(
+            blocks.blocks,
+            self.coordinator.single_type_managers,
+            self.kv_cache_config.kv_cache_groups,
+            strict=True,
+        ):
+            assert num_computed_tokens % manager.block_size == 0
+            num_blocks = num_computed_tokens // manager.block_size
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                num_blocks = min(num_blocks, len(group_blocks))
+            else:
+                assert num_blocks <= len(group_blocks)
+            truncated.append(list(group_blocks[:num_blocks]))
+        return self.create_kv_cache_blocks(tuple(truncated))
+
     def take_new_block_ids(self) -> list[int]:
         """Drain and return new attention block IDs for zeroing."""
         ids: list[int] = []
@@ -811,6 +839,32 @@ class KVCacheManager:
         ]
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
+
+    def take_boundary_state_offloads(
+        self,
+    ) -> dict[str, list[tuple[int, int, int]]]:
+        """Drain this step's boundary-state hand-offs for a KV connector.
+
+        Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
+        for mamba "align" boundary states: the
+        request's committed boundary-state snapshots and, on a sub-block partial
+        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
+        groups contribute; empty otherwise. A connector reads the referenced
+        blocks — never resolving them positionally — and offloads them so a
+        later request can hit that prefix.
+        """
+        offloads: dict[str, list[tuple[int, int, int]]] = {}
+        for mgr in self.coordinator.single_type_managers:
+            for (
+                req_id,
+                group_id,
+                block,
+                boundary_tokens,
+            ) in mgr.take_pending_boundary_state_offloads():
+                offloads.setdefault(req_id, []).append(
+                    (group_id, block.block_id, boundary_tokens)
+                )
+        return offloads
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""

@@ -19,6 +19,8 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -77,7 +79,7 @@ def get_fake_sample_fn() -> SamplerOutput:
             first_token_id_index = num_computed_tokens + 1
         if spec_decode_metadata is None:
             return SamplerOutput(
-                sampled_token_ids=torch.tensor(
+                sampled_token_ids=async_tensor_h2d(
                     [[prompt_token_ids[first_token_id_index]]],
                     device=DEVICE_TYPE,
                     dtype=torch.int32,
@@ -90,7 +92,7 @@ def get_fake_sample_fn() -> SamplerOutput:
         ]
         sampled_token_ids = accepted_tokens
         return SamplerOutput(
-            sampled_token_ids=torch.tensor(
+            sampled_token_ids=async_tensor_h2d(
                 [sampled_token_ids],
                 device=DEVICE_TYPE,
                 dtype=torch.int32,
@@ -132,7 +134,7 @@ def get_fake_propose_draft_token_ids_fn():
             ]
         ]
 
-        next_token_ids = torch.tensor(
+        next_token_ids = async_tensor_h2d(
             prompt_token_ids[
                 first_token_id_index - 1 : first_token_id_index
                 - 1
@@ -142,7 +144,7 @@ def get_fake_propose_draft_token_ids_fn():
             dtype=torch.int32,
         )
 
-        valid_sampled_tokens_count = torch.tensor(
+        valid_sampled_tokens_count = async_tensor_h2d(
             [num_accepted_tokens],
             device=DEVICE_TYPE,
             dtype=torch.int32,
@@ -150,7 +152,7 @@ def get_fake_propose_draft_token_ids_fn():
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
-        return torch.tensor(
+        return async_tensor_h2d(
             proposed_draft_token_ids,
             device=DEVICE_TYPE,
             dtype=torch.int32,
@@ -338,6 +340,30 @@ def get_fake_process_mamba_fn(
             assert copy_info[0][-1] == expected_temporal_src
             assert copy_info[1][-1] == expected_temporal_dest
 
+    def check_fused_copy_info(
+        action: tuple[int, int],
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext,
+    ):
+        # Align + spec-decode on a hybrid model routes the pre-copy through the
+        # fused kernel (preprocess_mamba -> run_fused_precopy) instead of
+        # do_mamba_copy_block, so copy_info is never populated. Verify from the
+        # fused buffers (req-0 scope, mirroring check_copy_info):
+        #   - the copy DECISION: src_col is -1 iff no pre-copy is scheduled;
+        #   - the DESTINATION column: state_idx == action[1] (curr_state_idx;
+        #     maps directly through block_ids, exactly as check_copy_info's dst).
+        # The source column is NOT asserted here: on the scalar path the source
+        # address is produced by the per-state copy func with an accept-token
+        # bias offset (collect_mamba_copy_meta), so prev_state_idx does not map
+        # to action[0] by plain equality. Source block-level exactness (incl.
+        # the accept-bias) is covered by test_precopy_mamba_align.py.
+        src_col = int(align_ctx.precopy_src_col_buf.np[0])
+        state_idx = int(align_ctx.mamba_state_idx_buf.np[0])
+        if action == (-1, -1):
+            assert src_col == -1
+        else:
+            assert src_col != -1
+            assert state_idx == action[1]
+
     def fake_preprocess_mamba_fn(
         scheduler_output: SchedulerOutput,
         kv_cache_config: KVCacheConfig,
@@ -348,6 +374,7 @@ def get_fake_process_mamba_fn(
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         copy_bufs: mamba_utils.MambaCopyBuffers,
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext | None = None,
     ):
         nonlocal copy_info
         copy_info = None
@@ -361,14 +388,21 @@ def get_fake_process_mamba_fn(
             forward_context,
             mamba_state_copy_funcs,
             copy_bufs,
+            align_ctx,
         )
         if cur_step_action is not None:
-            check_copy_info(
-                cur_step_action.preprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
-            )
+            if align_ctx is not None:
+                check_fused_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    align_ctx,
+                )
+            else:
+                check_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    kv_cache_config,
+                    forward_context,
+                    input_batch,
+                )
         return ret
 
     def fake_copy_fn(copy_bufs: mamba_utils.MambaCopyBuffers):
@@ -840,6 +874,10 @@ def get_mamba_prefix_cache_step_configs(
 def _run_mamba_prefix_cache_mrv1(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
+    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
+    # models like Qwen3-Next now default to the V2 runner.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
@@ -944,7 +982,10 @@ def _run_mamba_prefix_cache_mrv2(
                 yield forward_context[layer_name].kv_cache[-1], block_table
 
     def temporal_block(temporal_state, block_table, col):
-        return temporal_state[int(block_table[0, col].item())]
+        # Resolving the block id for assertions is a deliberate D2H.
+        with gpu_sync_allowed():
+            block_id = int(block_table[0, col].item())
+        return temporal_state[block_id]
 
     def wrapped_preprocess_state(
         self: MambaHybridModelState,
@@ -968,19 +1009,24 @@ def _run_mamba_prefix_cache_mrv2(
             self, input_batch, block_tables, kv_cache_config, num_computed_tokens
         )
         if cur_step_action is not None:
-            req_idx = int(input_batch.idx_mapping[0].item())
-            src_col = int(self._mamba_src_col_gpu[req_idx].item())
-            off = int(self._mamba_src_off_gpu[req_idx].item())
-            dst = int(self._mamba_state_idx_gpu[req_idx].item())
+            # Reading the GPU-side copy state back to assert on it is a
+            # deliberate D2H.
+            with gpu_sync_allowed():
+                req_idx = int(input_batch.idx_mapping[0].item())
+                src_col = int(self._mamba_src_col_gpu[req_idx].item())
+                off = int(self._mamba_src_off_gpu[req_idx].item())
+                dst = int(self._mamba_state_idx_gpu[req_idx].item())
             actual = (-1, -1) if src_col < 0 or src_col == dst else (src_col + off, dst)
             assert actual == expected, (
                 f"V2 align preprocess copy: expected={expected}, "
                 f"actual={actual}, {cur_step_action=}"
             )
-            for temporal, bt, src_state in snapshots:
-                torch.testing.assert_close(
-                    temporal_block(temporal, bt, expected[1]), src_state
-                )
+            # Comparing device tensors for the assertion is a deliberate D2H.
+            with gpu_sync_allowed():
+                for temporal, bt, src_state in snapshots:
+                    torch.testing.assert_close(
+                        temporal_block(temporal, bt, expected[1]), src_state
+                    )
         return ret
 
     def wrapped_postprocess_state(
@@ -1011,10 +1057,12 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_postprocess_state(
             self, idx_mapping, num_sampled, num_computed_tokens
         )
-        for temporal, bt, src_state in snapshots:
-            torch.testing.assert_close(
-                temporal_block(temporal, bt, expected[1]), src_state
-            )
+        # Comparing device tensors for the assertion is a deliberate D2H.
+        with gpu_sync_allowed():
+            for temporal, bt, src_state in snapshots:
+                torch.testing.assert_close(
+                    temporal_block(temporal, bt, expected[1]), src_state
+                )
         return ret
 
     def wrapped_execute_model(
@@ -1035,10 +1083,10 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_execute_model(self, scheduler_output, *args, **kwargs)
         if cur_step_action is not None and self.execute_model_state is not None:
             input_batch = self.execute_model_state.input_batch
-            assert (
-                cur_step_action.num_computed_tokens_start
-                == input_batch.positions[input_batch.query_start_loc[0]].item()
-            )
+            # Reading positions back to assert on them is a deliberate D2H.
+            with gpu_sync_allowed():
+                start_pos = input_batch.positions[input_batch.query_start_loc[0]].item()
+            assert cur_step_action.num_computed_tokens_start == start_pos
         return ret
 
     def fake_sample(
@@ -1056,11 +1104,10 @@ def _run_mamba_prefix_cache_mrv2(
             device=hidden_states.device,
             dtype=torch.int64,
         )
-        num_logits = torch.tensor(
+        num_logits = async_tensor_h2d(
             input_batch.cu_num_logits_np[1 : num_reqs + 1]
             - input_batch.cu_num_logits_np[:num_reqs],
             device=hidden_states.device,
-            dtype=torch.int32,
         )
         accepted = torch.full_like(num_logits, num_accepted_tokens)
         num_sampled = torch.minimum(accepted, num_logits)

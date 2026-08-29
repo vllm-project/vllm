@@ -78,6 +78,7 @@ class EngineClient(ABC):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -267,6 +268,14 @@ class EngineClient(ABC):
         """Batched weight update for RL training."""
         raise NotImplementedError
 
-    async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
+        raise NotImplementedError
+
+    async def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        raise NotImplementedError
+
+    async def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
         raise NotImplementedError

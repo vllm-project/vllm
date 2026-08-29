@@ -9,6 +9,9 @@ from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -35,7 +38,9 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
 
     def __init__(self):
         self.group_size = 32
-        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel = init_mxfp4_linear_kernel(
+            activation_quant_key=kMxfp4Dynamic,
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:

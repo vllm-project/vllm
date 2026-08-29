@@ -86,10 +86,17 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 )
             image = normalize_image(image)
             image.load()
-            image = self._convert_image_mode(image)
+            converted = self._convert_image_mode(image)
         except (OSError, Image.UnidentifiedImageError) as e:
             raise ValueError(f"Failed to load image: {e}") from e
-        return MediaWithBytes(image, data)
+
+        io_config = None
+        if converted is not image:
+            io_config = {
+                "image_mode": self.image_mode,
+                "rgba_background_color": self.rgba_background_color,
+            }
+        return MediaWithBytes(converted, data, io_config)
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))

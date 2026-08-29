@@ -84,6 +84,7 @@ def _args(dataset_path: str) -> argparse.Namespace:
         request_rate=16.0,
         burstiness=1.0,
         max_concurrency=None,
+        probe_request_rate=0.0,
         # misc serve args that main_async reads before reaching get_samples
         plot_timeline=False,
         plot_dataset_stats=False,

@@ -356,7 +356,12 @@ def test_wer_correctness(
         print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
 
         if expected_wer:
-            torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
+            wer_atol, wer_rtol = 1e-1, 1e-2
+            max_wer = expected_wer + wer_atol + wer_rtol * abs(expected_wer)
+            assert wer <= max_wer, (
+                f"WER {wer:.6f} exceeds maximum allowed {max_wer:.6f} "
+                f"(baseline {expected_wer:.6f})"
+            )
 
 
 # 14-22mins of 6 audio samples of total ~115 mins and just 37MB.

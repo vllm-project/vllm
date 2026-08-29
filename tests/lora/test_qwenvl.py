@@ -186,6 +186,18 @@ QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 
 
+def _enable_deterministic_lora_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests assert exact greedy outputs. Force the Triton LoRA shrink
+    # kernel to use SPLIT_K=1 so it stores the complete reduction directly
+    # instead of accumulating split-K partial results with atomic_add. This
+    # targets reduction determinism, not full batch invariance.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # The kernel configuration reads VLLM_BATCH_INVARIANT at import time.
+    # Spawn the engine process so it observes this setting even if the LoRA
+    # Triton utilities were already imported during test collection.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+
 def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
@@ -250,7 +262,12 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
             )
 
 
-def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
+def test_qwen3vl_vision_lora(
+    qwen3vl_vision_lora_files,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_deterministic_lora_shrink(monkeypatch)
+
     config = TestConfig(
         model_path=QWEN3VL_MODEL_PATH,
         lora_path=qwen3vl_vision_lora_files,
@@ -273,6 +290,7 @@ def test_qwen2vl_multiple_lora_types(
     qwen2vl_language_lora_files,
     qwen2vl_vision_tower_connector_lora_files,
     qwen2vl_vision_tower_lora_files,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """
     Test multiple LoRA adapter types (language, vision tower + connector,
@@ -283,6 +301,8 @@ def test_qwen2vl_multiple_lora_types(
     the multimodal encoder cache correctly manages state transitions between
     language-only and vision-enabled LoRA adapters.
     """
+    _enable_deterministic_lora_shrink(monkeypatch)
+
     config = TestConfig(
         model_path=QWEN2VL_MODEL_PATH,
         # We'll override the lora_path for each specific test, but need to provide

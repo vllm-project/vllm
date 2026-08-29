@@ -60,7 +60,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -220,6 +220,14 @@ class ResponsesRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
         default=None,
         description=(
@@ -243,6 +251,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -272,7 +281,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -337,6 +346,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            tool_choice=self.tool_choice if self.tools else None,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -457,6 +467,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
         if not data.get("background"):
             return data
         if not data.get("store", True):
@@ -469,21 +481,11 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("prompt") is not None:
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
             )
         return data
 
@@ -501,6 +503,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
         Invalid structures are left for Pydantic to reject.
         """
+        if not isinstance(data, dict):
+            return data
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
@@ -618,8 +622,15 @@ class ResponsesRequest(OpenAIBaseModel):
                 if isinstance(tool, dict):
                     if tool.get("type") == "namespace":
                         namespace = tool.get("name")
-                        for namespaced_tool in tool.get("tools", []):
-                            namespaced_name = namespaced_tool.get("name")
+                        namespaced_tools = tool.get("tools")
+                        if not isinstance(namespaced_tools, list):
+                            return data
+                        for namespaced_tool in namespaced_tools:
+                            namespaced_name = (
+                                namespaced_tool.get("name")
+                                if isinstance(namespaced_tool, dict)
+                                else getattr(namespaced_tool, "name", None)
+                            )
                             tool_names.add(namespaced_name)
                             tool_names.add(f"{namespace}__{namespaced_name}")
                     else:
