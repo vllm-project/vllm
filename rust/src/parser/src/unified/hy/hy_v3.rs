@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::DynTokenizer;
 
-use super::{CombinedParser, Result, UnifiedParser, UnifiedParserOutput, token_id};
-use crate::reasoning::HyV3ReasoningParser;
-use crate::tool::{HyV3ToolMarkers, HyV3ToolParser, StructuralTagBuilder, Tool};
-
-const HY_V3_MARKER_STEMS: &[&str] = &[
-    "think",
-    "tool_calls",
-    "tool_call",
-    "tool_sep",
-    "arg_key",
-    "arg_value",
-];
+use super::detect_hy_token_suffix;
+use crate::reasoning::HyReasoningParser;
+use crate::tool::{HyDialect, HyToolMarkers, HyToolParser, StructuralTagBuilder, Tool};
+use crate::unified::{CombinedParser, Result, UnifiedParser, UnifiedParserOutput, token_id};
 
 /// Unified reasoning and tool parser for HY3 output.
 pub struct HyV3UnifiedParser {
@@ -24,14 +16,14 @@ pub struct HyV3UnifiedParser {
 impl HyV3UnifiedParser {
     /// Create a HY3 parser using the suffix encoded in tokenizer added tokens.
     pub fn new(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
-        let suffix = detect_token_suffix(tokenizer.as_ref());
-        let markers = HyV3ToolMarkers::new(&suffix);
+        let suffix = detect_hy_token_suffix(tokenizer.as_ref());
+        let markers = HyToolMarkers::new(&suffix, HyDialect::V3);
         for marker in markers.iter() {
             token_id(tokenizer.as_ref(), marker)?;
         }
 
-        let reasoning = HyV3ReasoningParser::new(tokenizer, &suffix)?;
-        let tool = HyV3ToolParser::new(tools, &suffix);
+        let reasoning = HyReasoningParser::new(tokenizer, &suffix)?;
+        let tool = HyToolParser::new(tools, &suffix, HyDialect::V3);
         Ok(Self {
             inner: CombinedParser::new(Some(Box::new(reasoning)), Some(Box::new(tool))),
         })
@@ -73,28 +65,6 @@ impl UnifiedParser for HyV3UnifiedParser {
     fn reset(&mut self) -> String {
         self.inner.reset()
     }
-}
-
-/// Detect the HY3 structural-token suffix from tokenizer added vocabulary.
-fn detect_token_suffix(tokenizer: &dyn Tokenizer) -> String {
-    tokenizer
-        .added_vocab()
-        .iter()
-        .filter_map(|(token, id)| marker_suffix(token).map(|suffix| (*id, suffix)))
-        .min_by_key(|(id, _)| *id)
-        .map(|(_, suffix)| suffix.to_string())
-        .unwrap_or_default()
-}
-
-/// Extract the suffix from one opening or closing HY3 structural token.
-fn marker_suffix(token: &str) -> Option<&str> {
-    let body = token.strip_prefix('<')?.strip_suffix('>')?;
-    let body = body.strip_prefix('/').unwrap_or(body);
-
-    HY_V3_MARKER_STEMS.iter().find_map(|stem| {
-        let suffix = body.strip_prefix(stem)?;
-        (suffix.is_empty() || suffix.starts_with(':')).then_some(suffix)
-    })
 }
 
 #[cfg(test)]

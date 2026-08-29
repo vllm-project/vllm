@@ -30,6 +30,19 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
+    """Whether the target replaces the drafter's input with its HC residual.
+
+    Keyed on the same hook the model runner calls to perform that swap. It is
+    resolved from the target model class because speculators are built before
+    the target model is instantiated.
+    """
+    from vllm.model_executor.model_loader.utils import get_model_cls
+
+    target_cls = get_model_cls(vllm_config.model_config)
+    return hasattr(target_cls, "get_mtp_target_hidden_states")
+
+
 class BaseSpeculator(ABC):
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -90,11 +103,16 @@ class DraftModelSpeculator(BaseSpeculator):
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
-        # Widen for HC-multiplexed residuals (e.g. DeepSeek V4 feeds the MTP
-        # draft the target's pre-hc_head (T, hc_mult * hidden_size) residual).
-        # Non-HC models default to hc_mult=1 and are unaffected.
-        hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
-        self.hidden_size = self.hidden_size * hc_mult
+        # Widen for HC-multiplexed residuals: a target that implements
+        # get_mtp_target_hidden_states() (e.g. DeepSeek V4) hands the drafter
+        # its pre-hc_head (T, hc_mult * hidden_size) residual in place of the
+        # collapsed hidden states, so the drafter's buffers must match. Key off
+        # that hook rather than hc_mult alone -- HY V4 runs iHC in its backbone
+        # (hc_mult=4) but its MTP head consumes the collapsed states, so
+        # widening it feeds propose() a 4x-too-wide buffer.
+        if _target_feeds_hc_residual(vllm_config):
+            hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
+            self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
