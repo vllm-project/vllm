@@ -316,7 +316,8 @@ def test_fp8_index_cache_insert_clamps_out_of_range():
     """bf16 index keys above the e4m3 max must saturate, not become NaN/inf."""
     from vllm.models.minimax_m3.amd.ops.sparse_pa import minimax_m3_insert_index_cache
 
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_min, fp8_max = finfo.min, finfo.max
     index_k = torch.tensor(
         [[1e4] * HEAD_DIM, [-1e4] * HEAD_DIM, [1.5] * HEAD_DIM],
         device=DEV,
@@ -330,5 +331,5 @@ def test_fp8_index_cache_insert_clamps_out_of_range():
     got = cache[0, :3].float()
     assert torch.isfinite(got).all(), "e4m3 convert produced NaN/inf"
     assert torch.allclose(got[0], torch.full_like(got[0], fp8_max))
-    assert torch.allclose(got[1], torch.full_like(got[1], -fp8_max))
+    assert torch.allclose(got[1], torch.full_like(got[1], fp8_min))
     assert torch.allclose(got[2], torch.full_like(got[2], 1.5))

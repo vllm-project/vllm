@@ -27,7 +27,7 @@ from vllm.utils.math_utils import round_up
 SPARSE_BLOCK_SIZE = 128
 
 # The fp8 index cache is implemented and measured on gfx950 only.
-SUPPORTED_INDEXER_KV_DTYPES = ("bf16", "fp8", "fp8_e4m3") if on_gfx950() else ("bf16",)
+TRITON_INDEXER_KV_DTYPES = ("bf16", "fp8", "fp8_e4m3") if on_gfx950() else ("bf16",)
 
 # Query rows per program in the prefill scorer. 128 is swept on gfx950; other
 # archs keep the original 64 until they are (cf. _SPARSE_ATTN_SUB_K in

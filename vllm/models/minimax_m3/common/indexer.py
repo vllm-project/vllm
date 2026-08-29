@@ -31,14 +31,14 @@ from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
     from vllm.models.minimax_m3.amd.ops.index_topk import (
-        SUPPORTED_INDEXER_KV_DTYPES,
+        TRITON_INDEXER_KV_DTYPES,
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
 else:
     from vllm.models.minimax_m3.common.ops.index_topk import (
-        SUPPORTED_INDEXER_KV_DTYPES,
+        TRITON_INDEXER_KV_DTYPES,
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
@@ -500,10 +500,10 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype not in SUPPORTED_INDEXER_KV_DTYPES:
+    if indexer_kv_dtype not in TRITON_INDEXER_KV_DTYPES:
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
-            f"Triton indexer impl (supported: {SUPPORTED_INDEXER_KV_DTYPES})."
+            f"Triton indexer impl (supported: {TRITON_INDEXER_KV_DTYPES})."
         )
     logger.info_once(
         "MiniMax M3 indexer: selected Triton (no fmha_sm100) "

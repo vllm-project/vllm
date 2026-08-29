@@ -259,6 +259,7 @@ def _insert_index_cache_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
     FP8_OUT: tl.constexpr,
+    FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
@@ -279,7 +280,7 @@ def _insert_index_cache_kernel(
     if FP8_OUT:
         # e4m3 has no infinity, so an out-of-range convert is undefined; clamp
         # explicitly, matching the fused CUDA writer.
-        value = tl.clamp(value.to(tl.float32), -FP8_MAX, FP8_MAX)
+        value = tl.clamp(value.to(tl.float32), FP8_MIN, FP8_MAX)
     tl.store(dst, value.to(dst.dtype.element_ty), mask=mask)
 
 
@@ -303,7 +304,10 @@ def minimax_m3_insert_index_cache(
 
     head_dim = index_k.shape[1]
     fp8_out = index_cache.element_size() == 1
-    fp8_max = torch.finfo(index_cache.dtype).max if fp8_out else 0.0
+    # Bounds from the buffer, not the platform: the cache dtype is pinned to
+    # e4m3fn, so a platform-derived range would disagree on fnuz parts.
+    finfo = torch.finfo(index_cache.dtype)
+    fp8_min, fp8_max = (finfo.min, finfo.max) if fp8_out else (0.0, 0.0)
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
         index_cache,
@@ -318,6 +322,7 @@ def minimax_m3_insert_index_cache(
         HEAD_DIM=head_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
         FP8_OUT=fp8_out,
+        FP8_MIN=fp8_min,
         FP8_MAX=fp8_max,
         num_warps=4,
     )

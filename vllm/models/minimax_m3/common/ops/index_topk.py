@@ -24,7 +24,7 @@ from vllm.utils.math_utils import round_up
 SPARSE_BLOCK_SIZE = 128
 
 # The common Triton kernels read a bf16 index cache only.
-SUPPORTED_INDEXER_KV_DTYPES = ("bf16",)
+TRITON_INDEXER_KV_DTYPES = ("bf16",)
 
 
 # ---------------------------------------------------------------------------
