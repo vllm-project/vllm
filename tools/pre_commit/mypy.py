@@ -112,9 +112,6 @@ SEPARATE_GROUPS = [
 ]
 
 EXCLUDE = [
-    r"vllm/model_executor/models/[gG]",
-    r"vllm/model_executor/models/[hH]",
-    r"vllm/model_executor/models/[iI]",
     r"vllm/model_executor/models/[jJ]",
     r"vllm/model_executor/models/[kK]",
     r"vllm/model_executor/models/[lL]",
@@ -125,7 +122,7 @@ EXCLUDE = [
     r"vllm/model_executor/models/[qQ]",
     r"vllm/model_executor/models/[rR]",
     r"vllm/model_executor/models/[sS]",
-    r"vllm/model_executor/models/[tT]",
+    r"vllm/model_executor/models/transformers",
     r"vllm/model_executor/models/[uU]",
     r"vllm/model_executor/models/[vV]",
     r"vllm/model_executor/models/[wW]",

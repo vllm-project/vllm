@@ -39,6 +39,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
@@ -75,25 +76,19 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
-    def forward(
+    def get_position_ids(
         self,
-        pixel_values: torch.FloatTensor,
         patch_attention_mask: torch.BoolTensor,
         tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
-        batch_size, _, max_im_h, max_im_w = pixel_values.shape
-        target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)
-        max_nb_patches_h, max_nb_patches_w = (
-            max_im_h // self.patch_size,
-            max_im_w // self.patch_size,
-        )
+        batch_size, max_nb_patches_h, max_nb_patches_w = patch_attention_mask.shape
         boundaries = torch.arange(
             1 / self.num_patches_per_side, 1.0, 1 / self.num_patches_per_side
         )
         position_ids = torch.full(
-            size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
+            size=(batch_size, max_nb_patches_h * max_nb_patches_w),
+            fill_value=0,
+            pin_memory=PIN_MEMORY,
         )
 
         with gpu_sync_allowed():
@@ -119,9 +114,21 @@ class Idefics2VisionEmbeddings(nn.Module):
                 bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
             ).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1)] = pos_ids
-        position_ids = position_ids.to(
-            self.position_embedding.weight.device, non_blocking=True
-        )
+
+        return position_ids.to(self.position_embedding.weight.device, non_blocking=True)
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
+        tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        if position_ids is None:
+            position_ids = self.get_position_ids(patch_attention_mask, tgt_sizes)
         embeddings += self.position_embedding(position_ids)
         return embeddings
 
@@ -423,6 +430,7 @@ class Idefics2VisionTransformer(nn.Module):
         pixel_values,
         patch_attention_mask: torch.BoolTensor | None = None,
         tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
@@ -446,6 +454,7 @@ class Idefics2VisionTransformer(nn.Module):
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
             tgt_sizes=tgt_sizes,
+            position_ids=position_ids,
         )
 
         # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:

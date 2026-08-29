@@ -81,6 +81,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -93,6 +94,7 @@ from vllm.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -464,8 +466,8 @@ class Qwen3ASRForConditionalGeneration(
         input_features = audio_input["input_features"]
         # audio_feature_lengths is keep_on_cpu; the audio tower derives
         # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
-            input_features.device, non_blocking=True
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
         )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
@@ -691,7 +693,7 @@ class Qwen3ASRForConditionalGeneration(
             full_lang_name = cls.supported_languages.get(lang_code, lang_code)
             prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
-        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_token_ids = cached_encode(tokenizer, prompt)
 
         return TokensPrompt(
             prompt_token_ids=prompt_token_ids,
