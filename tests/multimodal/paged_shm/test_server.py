@@ -396,7 +396,9 @@ class TestErrors:
         free_blocks = client.get_manager_states()["free_blocks_count"]
         too_large = bytes((free_blocks + 1) * block_size)
         state_before = client.get_manager_states()
-        with pytest.raises(RuntimeError, match="Server error"):
+        with pytest.raises(
+            MemoryError, match="Requested.*bytes exceeds total storage size"
+        ):
             client.write(uuid, too_large)
         state_after = client.get_manager_states()
         assert state_after["free_blocks_count"] == state_before["free_blocks_count"]
@@ -682,7 +684,7 @@ class TestTimeout:
     def test_open_write_timeout_zero_raises_memory_error(self, client):
         filler_uuid = _fill_memory_with_writing(client)
         try:
-            with pytest.raises(RuntimeError, match="Server error"):
+            with pytest.raises(MemoryError, match="Not enough blocks"):
                 client.open_write(
                     [ShmWriteRequest(uuid=_unique_uuid(), size=100, use_cache=True)],
                     timeout=0.0,
@@ -838,7 +840,7 @@ class TestTimeout:
         filler_uuid = _fill_memory_with_writing(client)
         small_uuid = _unique_uuid()
         start = time.perf_counter()
-        with pytest.raises(RuntimeError, match="Server error"):
+        with pytest.raises(TimeoutError, match="memory allocation timed out"):
             client.open_write(
                 [ShmWriteRequest(uuid=small_uuid, size=100, use_cache=True)],
                 timeout=0.5,
@@ -854,7 +856,7 @@ class TestTimeout:
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
         )
         start = time.perf_counter()
-        with pytest.raises(RuntimeError, match="Server error"):
+        with pytest.raises(TimeoutError, match="open_read timed out"):
             client.open_read(uuid, timeout=0.5)
         elapsed = time.perf_counter() - start
         assert elapsed >= 0.4, f"Timeout should be ~0.5s, got {elapsed:.2f}s"
@@ -868,7 +870,7 @@ class TestTimeout:
             [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
         )
         start = time.perf_counter()
-        with pytest.raises(RuntimeError, match="Server error"):
+        with pytest.raises(TimeoutError, match="wait_for_readable timed out"):
             client.wait_for_readable(uuid, timeout=0.5)
         elapsed = time.perf_counter() - start
         assert elapsed >= 0.4
@@ -1462,3 +1464,418 @@ class TestDeleteWithWaiters:
         assert not t.is_alive()
         assert "err" in err_holder
         assert "deleted" in str(err_holder["err"]).lower()
+
+
+# ---------------------------------------------------------------------------
+# open_write_or_read tests
+# ---------------------------------------------------------------------------
+
+
+class TestOpenWriteOrRead:
+    def test_basic_new_items(self, client):
+        """All items are new: should allocate and return is_new=True."""
+        uuids = [_unique_uuid() for _ in range(2)]
+        sizes = [100, 200]
+        items = [
+            ShmWriteRequest(uuid=u, size=s, use_cache=True, generate_read_token=True)
+            for u, s in zip(uuids, sizes)
+        ]
+        state_before = client.get_manager_states()
+
+        allocs = client.open_write_or_read(items, timeout=0.0)
+        assert len(allocs) == 2
+        for alloc, size in zip(allocs, sizes):
+            assert alloc.uuid in uuids
+            assert alloc.is_new
+            assert alloc.size == size
+            assert alloc.blocks
+            assert alloc.read_token is not None
+
+        state_after = client.get_manager_states()
+        assert (
+            state_after["writing_items_count"]
+            == state_before["writing_items_count"] + 2
+        )
+
+        for alloc in allocs:
+            data = b"data".ljust(alloc.size, b"\x00")
+            client._storage.write(data, alloc.blocks)
+            client.close_write(alloc.uuid)
+
+        for alloc in allocs:
+            result = client.read(alloc.uuid)
+            assert result.tobytes().startswith(b"data")
+            client.close_read(alloc.read_token)
+            client.delete(alloc.uuid)
+
+    def test_basic_existing_items(self, client):
+        """All items already exist and are readable: should return is_new=False."""
+        uuids = [_unique_uuid() for _ in range(2)]
+        data = b"existing"
+        for u in uuids:
+            client.write(u, data)
+
+        state_before = client.get_manager_states()
+        items = [
+            ShmWriteRequest(
+                uuid=u, size=len(data), use_cache=True, generate_read_token=True
+            )
+            for u in uuids
+        ]
+        allocs = client.open_write_or_read(items, timeout=0.0)
+        assert len(allocs) == 2
+        for alloc in allocs:
+            assert alloc.uuid in uuids
+            assert not alloc.is_new
+            assert alloc.size == len(data)
+            assert alloc.blocks
+            assert alloc.read_token is not None
+
+        state_after = client.get_manager_states()
+        assert (
+            state_after["reading_items_count"]
+            == state_before["reading_items_count"] + 2
+        )
+
+        for alloc in allocs:
+            result = client._storage.read_to_numpy(alloc.size, alloc.blocks)
+            assert result.tobytes() == data
+            client.close_read(alloc.read_token)
+
+        for u in uuids:
+            client.delete(u)
+
+    def test_mixed_new_and_existing(self, client):
+        existing_uuid = _unique_uuid()
+        new_uuid = _unique_uuid()
+        data = b"existing"
+        client.write(existing_uuid, data)
+
+        items = [
+            ShmWriteRequest(
+                uuid=existing_uuid,
+                size=len(data),
+                use_cache=True,
+                generate_read_token=True,
+            ),
+            ShmWriteRequest(
+                uuid=new_uuid, size=50, use_cache=True, generate_read_token=True
+            ),
+        ]
+        allocs = client.open_write_or_read(items, timeout=0.0)
+        assert len(allocs) == 2
+        for alloc in allocs:
+            if alloc.uuid == existing_uuid:
+                assert not alloc.is_new
+                assert alloc.size == len(data)
+                assert alloc.blocks
+            else:
+                assert alloc.uuid == new_uuid
+                assert alloc.is_new
+                assert alloc.size == 50
+                assert alloc.blocks
+
+        new_alloc = [a for a in allocs if a.is_new][0]
+        new_data = b"newdata".ljust(50, b"\x00")
+        client._storage.write(new_data, new_alloc.blocks)
+        client.close_write(new_alloc.uuid)
+
+        for alloc in allocs:
+            if not alloc.is_new:
+                client.close_read(alloc.read_token)
+
+        result = client.read(new_uuid)
+        assert result.tobytes().startswith(b"newdata")
+        client.close_read(new_alloc.read_token)
+        client.delete(new_uuid)
+        client.delete(existing_uuid)
+
+    def test_pending_writes_immediate_return(self, client):
+        """
+        When UUID is being written, open_write_or_read returns immediately with
+        a token (blocks empty). We store the original blocks from the first
+        open_write, then after getting the token, we write data using those
+        blocks and close_write. Then we verify via token.
+        """
+        writing_uuid = _unique_uuid()
+        # First, open_write to put it in writing state, and save the allocation
+        write_alloc = client.open_write(
+            [ShmWriteRequest(uuid=writing_uuid, size=100, use_cache=True)], timeout=0.0
+        )[0]
+        saved_blocks = write_alloc.blocks
+
+        new_uuid = _unique_uuid()
+        items = [
+            ShmWriteRequest(
+                uuid=writing_uuid, size=100, use_cache=True, generate_read_token=True
+            ),
+            ShmWriteRequest(
+                uuid=new_uuid, size=50, use_cache=True, generate_read_token=True
+            ),
+        ]
+        start = time.perf_counter()
+        allocs = client.open_write_or_read(items, timeout=0.0)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.1, "Should return immediately"
+
+        assert len(allocs) == 2
+        pending_alloc = None
+        new_alloc = None
+        for alloc in allocs:
+            if alloc.uuid == writing_uuid:
+                assert not alloc.is_new
+                assert alloc.blocks == []  # empty because not readable yet
+                assert alloc.read_token is not None
+                pending_alloc = alloc
+            else:
+                assert alloc.uuid == new_uuid
+                assert alloc.is_new
+                assert alloc.blocks
+                assert alloc.read_token is not None
+                new_alloc = alloc
+
+        # Write data to the new item and commit
+        new_data = b"new".ljust(50, b"\x00")
+        client._storage.write(new_data, new_alloc.blocks)
+        client.close_write(new_uuid)
+
+        # Now write data to the pending item using the saved_blocks
+        data_pending = b"pending".ljust(100, b"\x00")
+        client._storage.write(data_pending, saved_blocks)
+        client.close_write(writing_uuid)
+
+        # Now we can open_read via the token and verify data
+        alloc_read = client.open_read(pending_alloc.read_token)
+        assert alloc_read.size == 100
+        result = client._storage.read_to_numpy(alloc_read.size, alloc_read.blocks)
+        assert result.tobytes().startswith(b"pending")
+        client.close_read(pending_alloc.read_token)
+
+        # Verify new item
+        result = client.read(new_uuid)
+        assert result.tobytes().startswith(b"new")
+        client.close_read(new_alloc.read_token)
+
+        # Clean up
+        client.delete(new_uuid)
+        client.delete(writing_uuid)
+
+    def test_pending_writes_with_wait_and_read(self, client):
+        """
+        Test wait_for_readable on token from open_write_or_read.
+        """
+        writing_uuid = _unique_uuid()
+        write_alloc = client.open_write(
+            [ShmWriteRequest(uuid=writing_uuid, size=100, use_cache=True)], timeout=0.0
+        )[0]
+        saved_blocks = write_alloc.blocks
+
+        items = [
+            ShmWriteRequest(
+                uuid=writing_uuid, size=100, use_cache=True, generate_read_token=True
+            ),
+        ]
+        allocs = client.open_write_or_read(items, timeout=0.0)
+        token = allocs[0].read_token
+        assert token is not None
+        assert allocs[0].blocks == []
+
+        # Write data in background using saved_blocks
+        def _write_and_close():
+            time.sleep(0.2)
+            data = b"hello".ljust(100, b"\x00")
+            client._storage.write(data, saved_blocks)
+            client.close_write(writing_uuid)
+
+        t = threading.Thread(target=_write_and_close)
+        t.start()
+
+        client.wait_for_readable(token, timeout=5.0)
+        t.join()
+
+        # Now read via token
+        alloc = client.open_read(token)
+        assert alloc.size == 100
+        result = client._storage.read_to_numpy(alloc.size, alloc.blocks)
+        assert result.tobytes().startswith(b"hello")
+        client.close_read(token)
+        client.delete(writing_uuid)
+
+    def test_memory_insufficient_timeout_zero_raises(self, client):
+        filler_uuid = _fill_memory_with_writing(client)
+        try:
+            new_uuid = _unique_uuid()
+            items = [ShmWriteRequest(uuid=new_uuid, size=100, use_cache=True)]
+            with pytest.raises(MemoryError, match="Not enough blocks"):
+                client.open_write_or_read(items, timeout=0.0)
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.read(new_uuid)
+        finally:
+            client.delete(filler_uuid)
+
+    def test_memory_insufficient_timeout_positive_queues_and_succeeds(self, client):
+        filler_uuid = _fill_memory_with_writing(client)
+        new_uuid = _unique_uuid()
+        result_holder = {}
+        err_holder = {}
+
+        def _do_request():
+            try:
+                allocs = client.open_write_or_read(
+                    [
+                        ShmWriteRequest(
+                            uuid=new_uuid,
+                            size=100,
+                            use_cache=True,
+                            generate_read_token=True,
+                        )
+                    ],
+                    timeout=5.0,
+                )
+                result_holder["allocs"] = allocs
+            except Exception as e:
+                err_holder["err"] = e
+
+        t = threading.Thread(target=_do_request)
+        t.start()
+
+        time.sleep(0.2)
+        assert t.is_alive()
+
+        client.delete(filler_uuid)
+
+        t.join(timeout=10.0)
+        assert not t.is_alive()
+        assert "err" not in err_holder, f"Request failed: {err_holder.get('err')}"
+        allocs = result_holder["allocs"]
+        assert len(allocs) == 1
+        assert allocs[0].is_new
+        assert allocs[0].blocks
+
+        data = b"after memory".ljust(100, b"\x00")
+        client._storage.write(data, allocs[0].blocks)
+        client.close_write(new_uuid)
+        result = client.read(new_uuid)
+        assert result.tobytes().startswith(b"after memory")
+        client.close_read(allocs[0].read_token)
+        client.delete(new_uuid)
+
+    def test_memory_insufficient_timeout_expires(self, client):
+        filler_uuid = _fill_memory_with_writing(client)
+        new_uuid = _unique_uuid()
+        start = time.perf_counter()
+        with pytest.raises(TimeoutError, match="memory allocation timed out"):
+            client.open_write_or_read(
+                [ShmWriteRequest(uuid=new_uuid, size=100, use_cache=True)], timeout=0.5
+            )
+        elapsed = time.perf_counter() - start
+        assert elapsed >= 0.4
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.read(new_uuid)
+        client.delete(filler_uuid)
+
+    def test_atomicity_on_memory_error(self, client):
+        existing_uuid = _unique_uuid()
+        client.write(existing_uuid, b"existing")
+        filler_uuid = _fill_memory_with_writing(client)
+        try:
+            new_uuid1 = _unique_uuid()
+            new_uuid2 = _unique_uuid()
+            items = [
+                ShmWriteRequest(uuid=existing_uuid, size=10, use_cache=True),
+                ShmWriteRequest(uuid=new_uuid1, size=100, use_cache=True),
+                ShmWriteRequest(uuid=new_uuid2, size=100, use_cache=True),
+            ]
+            with pytest.raises(MemoryError, match="Not enough blocks"):
+                client.open_write_or_read(items, timeout=0.0)
+            result = client.read(existing_uuid)
+            assert result.tobytes() == b"existing"
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.read(new_uuid1)
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.read(new_uuid2)
+        finally:
+            client.delete(filler_uuid)
+            client.delete(existing_uuid)
+
+
+# ---------------------------------------------------------------------------
+# WriteOrReadContext tests
+# ---------------------------------------------------------------------------
+
+
+class TestWriteOrReadContext:
+    def test_context_new_items(self, client):
+        uuids = [_unique_uuid() for _ in range(2)]
+        items = [
+            ShmWriteRequest(uuid=u, size=100, use_cache=True, generate_read_token=True)
+            for u in uuids
+        ]
+        state_before = client.get_manager_states()
+
+        with client.write_or_read_context(items) as ctx:
+            for alloc in ctx.allocations:
+                data = b"data".ljust(100, b"\x00")
+                client._storage.write(data, alloc.blocks)
+
+        for alloc in ctx.allocations:
+            client.close_read(alloc.read_token)
+
+        state_after = client.get_manager_states()
+        assert (
+            state_after["cached_items_count"] == state_before["cached_items_count"] + 2
+        )
+
+        for u in uuids:
+            result = client.read(u)
+            assert result.tobytes().startswith(b"data")
+
+        for alloc in ctx.allocations:
+            client.delete(alloc.uuid)
+
+    def test_context_mixed_new_and_existing(self, client):
+        existing_uuid = _unique_uuid()
+        new_uuid = _unique_uuid()
+        client.write(existing_uuid, b"existing")
+
+        items = [
+            ShmWriteRequest(
+                uuid=existing_uuid, size=10, use_cache=True, generate_read_token=True
+            ),
+            ShmWriteRequest(
+                uuid=new_uuid, size=50, use_cache=True, generate_read_token=True
+            ),
+        ]
+        with client.write_or_read_context(items) as ctx:
+            new_alloc = [a for a in ctx.allocations if a.is_new][0]
+            data = b"newdata".ljust(50, b"\x00")
+            client._storage.write(data, new_alloc.blocks)
+
+        existing_alloc = [a for a in ctx.allocations if not a.is_new][0]
+        client.close_read(existing_alloc.read_token)
+
+        result = client.read(new_uuid)
+        assert result.tobytes().startswith(b"newdata")
+        client.close_read(new_alloc.read_token)
+        client.delete(new_uuid)
+        client.delete(existing_uuid)
+
+    def test_context_rollback_on_error(self, client):
+        uuids = [_unique_uuid() for _ in range(2)]
+        items = [ShmWriteRequest(uuid=u, size=100, use_cache=True) for u in uuids]
+        state_before = client.get_manager_states()
+
+        class TestException(Exception):
+            pass
+
+        with pytest.raises(TestException):  # noqa: SIM117
+            with client.write_or_read_context(items) as ctx:
+                for alloc in ctx.allocations:
+                    client._storage.write(b"data".ljust(100, b"\x00"), alloc.blocks)
+                raise TestException("rollback")
+
+        state_after = client.get_manager_states()
+        assert state_after["cached_items_count"] == state_before["cached_items_count"]
+        for u in uuids:
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.read(u)

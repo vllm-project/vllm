@@ -32,6 +32,7 @@ from .constants import (
     OK,
     OPEN_READ,
     OPEN_WRITE,
+    OPEN_WRITE_OR_READ,
     POLL_INTERVAL,
     SHUTDOWN,
     WAIT_FOR_READABLE,
@@ -76,9 +77,14 @@ class PagedShmServer:
         # Debug mode flag
         self.debug = debug
 
-        # Priority queue for pending open_write requests.
-        # Elements: (deadline, identity, list_of_ShmItem)
-        self.wait_for_open_write: PriorityQueue = PriorityQueue()
+        # Unified priority queue for pending requests that are waiting for memory.
+        # Elements: (deadline, identity, request_type, payload)
+        # request_type:
+        #     "write" (for open_write) or "write_or_read" (for open_write_or_read)
+        # payload:
+        #     list[ShmWriteRequest] for "write",
+        #     or items_data (list[dict]) for "write_or_read"
+        self.wait_for_memory: PriorityQueue = PriorityQueue()
 
         # Per‑uuid priority queues for pending open_read requests.
         # Keys are item UUIDs; values are PriorityQueues with elements
@@ -133,12 +139,12 @@ class PagedShmServer:
     # ------------------------------------------------------------------
     # Expiration cleanup methods
     # ------------------------------------------------------------------
-    def clean_expired_open_write(self, socket: zmq.Socket) -> None:
-        """Clean expired open_write waiters."""
+    def _clean_expired_memory_waiters(self, socket: zmq.Socket) -> None:
+        """Clean expired entries from the unified memory wait queue."""
         self._clean_expired_queue(
-            self.wait_for_open_write,
+            self.wait_for_memory,
             socket,
-            "TimeoutError: open_write timed out",
+            "TimeoutError: memory allocation timed out",
         )
 
     def clean_expired_open_read(
@@ -216,10 +222,10 @@ class PagedShmServer:
         Perform periodic cleanup and attempt to satisfy deferred open_write requests.
         Called at fixed intervals (every CLEANUP_INTERVAL seconds).
         """
-        self.clean_expired_open_write(socket)
+        self._clean_expired_memory_waiters(socket)
         self.clean_expired_open_read(socket)
         self.clean_expired_wait_readable(socket)
-        self.defer_open_write(socket)
+        self._defer_memory_requests(socket)
 
     # ------------------------------------------------------------------
     # Debug-only cleanup – forcibly cleans all pending queues and purges
@@ -230,9 +236,9 @@ class PagedShmServer:
         if not self.debug:
             raise RuntimeError("debug_cleanup called but debug mode is disabled")
 
-        # 1. Clean all pending open_write waiters
-        while not self.wait_for_open_write.empty():
-            _, identity, _ = self.wait_for_open_write.get()
+        # 1. Clean all pending memory waiters (both write and write_or_read)
+        while not self.wait_for_memory.empty():
+            _, identity, _, _ = self.wait_for_memory.get()
             self._send_response(socket, identity, ERROR, "Cleaned by debug_cleanup")
 
         # 2. Clean all pending open_read waiters
@@ -272,6 +278,120 @@ class PagedShmServer:
         logger.info("debug_cleanup completed")
 
     # ------------------------------------------------------------------
+    # Core logic for open_write_or_read
+    # ------------------------------------------------------------------
+    def _core_write_or_read(self, items_data: list[dict]) -> str:
+        """
+        Core logic for open_write_or_read.
+        Performs atomic allocation of missing items and reads existing ones.
+        Returns JSON response string.
+        Raises MemoryError if allocation fails.
+        """
+        # Classify items
+        to_allocate = []
+        to_read = []
+        pending_writes = []
+
+        for item in items_data:
+            uuid = item["uuid"]
+            try:
+                info = self.manager.get_info(uuid)
+                if info["ref_count"] == -1:
+                    pending_writes.append(item)
+                else:
+                    to_read.append(item)
+            except ValueError:
+                to_allocate.append(item)
+
+        # Allocate missing items
+        allocated_slots = []
+        if to_allocate:
+            write_requests = [
+                ShmWriteRequest(
+                    uuid=item["uuid"],
+                    size=item["size"],
+                    use_cache=item.get("use_cache", True),
+                    generate_read_token=item.get("generate_read_token", False),
+                )
+                for item in to_allocate
+            ]
+            allocated_slots = self.manager.open_write(write_requests)
+
+        # Build result map
+        result_map = {}
+
+        # New items
+        for slot, req_item in zip(allocated_slots, to_allocate):
+            token = None
+            if req_item.get("generate_read_token", False):
+                token = random_uuid()
+                self._read_tokens[token] = slot.uuid
+                self._item_to_read_tokens.setdefault(slot.uuid, set()).add(token)
+            result_map[slot.uuid] = {
+                "uuid": slot.uuid,
+                "size": slot.size,
+                "blocks": slot.blocks,
+                "use_cache": slot.use_cache,
+                "read_token": token,
+                "is_new": True,
+            }
+
+        # Existing readable items
+        for item in to_read:
+            uuid = item["uuid"]
+            slot = self.manager.open_read(uuid)
+            token = None
+            if item.get("generate_read_token", False):
+                token = random_uuid()
+                self._read_tokens[token] = uuid
+                self._item_to_read_tokens.setdefault(uuid, set()).add(token)
+            result_map[uuid] = {
+                "uuid": uuid,
+                "size": slot.size,
+                "blocks": slot.blocks,
+                "use_cache": slot.use_cache,
+                "read_token": token,
+                "is_new": False,
+            }
+
+        # Pending writes (ref_count == -1)
+        for item in pending_writes:
+            uuid = item["uuid"]
+            token = None
+            if item.get("generate_read_token", False):
+                token = random_uuid()
+                self._read_tokens[token] = uuid
+                self._item_to_read_tokens.setdefault(uuid, set()).add(token)
+            result_map[uuid] = {
+                "uuid": uuid,
+                "size": item["size"],
+                "blocks": [],  # not yet available
+                "use_cache": item.get("use_cache", True),
+                "read_token": token,
+                "is_new": False,
+            }
+
+        # Ensure all UUIDs are present in result_map (defensive)
+        for item in items_data:
+            uuid = item["uuid"]
+            if uuid not in result_map:
+                logger.warning(
+                    "UUID %s not found in result_map, adding placeholder", uuid
+                )
+                result_map[uuid] = {
+                    "uuid": uuid,
+                    "size": item.get("size", 0),
+                    "blocks": [],
+                    "use_cache": item.get("use_cache", True),
+                    "read_token": None,
+                    "is_new": False,
+                }
+
+        # Assemble response in input order
+        all_data = [result_map[item["uuid"]] for item in items_data]
+        return json.dumps({"status": "ok", "data": all_data})
+
+    # ------------------------------------------------------------------
     # Request handlers
     # ------------------------------------------------------------------
     def open_write(self, data: bytes, identity: bytes) -> str | None:
@@ -304,7 +424,8 @@ class PagedShmServer:
             if timeout < 0:
                 timeout = self.max_timeout
             deadline = time.monotonic() + timeout
-            self.wait_for_open_write.put((deadline, identity, item_objs))
+            # Queue the request in the unified memory wait queue
+            self.wait_for_memory.put((deadline, identity, "write", item_objs))
             return None
 
         return self._build_write_response(allocated, item_objs)
@@ -356,6 +477,7 @@ class PagedShmServer:
                 blocks=blocks,
                 use_cache=True,
                 read_token=uuid_or_token,
+                is_new=False,
             )
             return json.dumps({"status": "ok", "data": asdict(resp)})
         else:
@@ -385,8 +507,46 @@ class PagedShmServer:
                 blocks=item.blocks,
                 use_cache=item.use_cache,
                 read_token=token,
+                is_new=False,
             )
             return json.dumps({"status": "ok", "data": asdict(resp)})
+
+    def open_write_or_read(self, data: bytes, identity: bytes) -> str | None:
+        """
+        Atomically open for reading or writing a batch of items.
+
+        For each item:
+          - If the UUID does not exist, it is allocated for writing.
+          - If the UUID exists and is readable, it is opened for reading.
+          - If the UUID exists but is being written, a read token is generated
+            immediately without waiting; the token will be counted in close_write.
+
+        If memory is insufficient for allocating new items, the request is queued
+        (if timeout > 0) and retried when space becomes available.
+
+        Returns:
+            JSON response immediately if memory is available.
+            None if the request is queued (timeout > 0 and MemoryError).
+        Raises:
+            MemoryError: if timeout=0 and not enough memory.
+            ValueError: on invalid parameters.
+        """
+        req = json.loads(data)
+        items_data = req["items"]
+        timeout = float(req.get("timeout", 0.0))
+
+        if timeout < 0:
+            timeout = self.max_timeout
+
+        try:
+            response = self._core_write_or_read(items_data)
+            return response
+        except MemoryError:
+            if timeout == 0.0:
+                raise
+            deadline = time.monotonic() + timeout
+            self.wait_for_memory.put((deadline, identity, "write_or_read", items_data))
+            return None
 
     def wait_for_readable(self, data: bytes, identity: bytes) -> str | None:
         """
@@ -422,37 +582,57 @@ class PagedShmServer:
     # ------------------------------------------------------------------
     # Deferred request processing (FCFS)
     # ------------------------------------------------------------------
-    def defer_open_write(self, socket: zmq.Socket) -> None:
+    def _defer_memory_requests(self, socket: zmq.Socket) -> None:
         """
-        Attempt to satisfy the first pending open_write request (FCFS).
-        If it fails due to MemoryError, leave it for the next iteration.
+        Attempt to satisfy the first pending request in the memory wait queue (FCFS).
+        Supports both "write" and "write_or_read" request types.
+        If the request still fails due to MemoryError, re‑queue it (if not expired).
         """
-        if self.wait_for_open_write.empty():
+        if self.wait_for_memory.empty():
             return
 
-        # Check head without popping using get/put
-        item = self.wait_for_open_write.get()
-        deadline, identity, item_objs = item
+        item = self.wait_for_memory.get()
+        deadline, identity, req_type, payload = item
         now = time.monotonic()
         if deadline <= now:
-            # Expired – send error (should have been cleaned, but handle defensively)
             self._send_response(
-                socket, identity, ERROR, "TimeoutError: open_write timed out"
+                socket,
+                identity,
+                ERROR,
+                "TimeoutError: memory allocation timed out",
             )
             return
 
         try:
-            allocated = self.manager.open_write(item_objs)
-            # Success: respond and discard item
-            response = self._build_write_response(allocated, item_objs)
-            self._send_response(socket, identity, OK, response)
+            if req_type == "write":
+                # payload is list[ShmWriteRequest]
+                allocated = self.manager.open_write(payload)
+                response = self._build_write_response(allocated, payload)
+                self._send_response(socket, identity, OK, response)
+            elif req_type == "write_or_read":
+                # payload is items_data (list[dict])
+                response = self._execute_open_write_or_read(payload, identity)
+                self._send_response(socket, identity, OK, response)
+            else:
+                # Should never happen
+                raise ValueError(f"Unknown request type in memory queue: {req_type}")
         except MemoryError:
-            # Not enough space – re-put the item and try later
-            self.wait_for_open_write.put(item)
+            # Still not enough memory – re‑queue with the same deadline
+            self.wait_for_memory.put(item)
         except Exception as e:
             # Other errors – pop and report
             self._send_response(socket, identity, ERROR, f"{type(e).__name__}: {e}")
-            logger.warning("open_write deferred request failed: %s", e)
+            logger.warning("Deferred memory request failed: %s", e)
+
+    def _execute_open_write_or_read(
+        self, items_data: list[dict], identity: bytes
+    ) -> str:
+        """
+        Internal helper to execute the open_write_or_read logic without queuing.
+        Used for retrying deferred requests.
+        Raises MemoryError if allocation fails.
+        """
+        return self._core_write_or_read(items_data)
 
     def defer_open_read(self, socket: zmq.Socket, uuid: str) -> None:
         """
@@ -473,7 +653,6 @@ class PagedShmServer:
         try:
             info = self.manager.get_info(uuid)
         except ValueError:
-            # Item disappeared – send error to all waiters
             while not q.empty():
                 _, ident, original_id = q.get()
                 self._send_response(socket, ident, ERROR, "UUID not found")
@@ -482,10 +661,8 @@ class PagedShmServer:
             return
 
         if info["ref_count"] >= 0:
-            # Satisfy all waiters
             while not q.empty():
                 _, identity, original_id = q.get()
-                # Determine if original_id is a token
                 if original_id in self._read_tokens:
                     # Token path: no ref_count change
                     try:
@@ -496,6 +673,7 @@ class PagedShmServer:
                             blocks=blocks,
                             use_cache=True,
                             read_token=original_id,
+                            is_new=False,
                         )
                         self._send_response(
                             socket,
@@ -508,7 +686,6 @@ class PagedShmServer:
                             socket, identity, ERROR, f"{type(e).__name__}: {e}"
                         )
                 else:
-                    # UUID path: create token and increment ref_count
                     try:
                         token = random_uuid()
                         self._read_tokens[token] = uuid
@@ -520,6 +697,7 @@ class PagedShmServer:
                             blocks=item.blocks,
                             use_cache=item.use_cache,
                             read_token=token,
+                            is_new=False,
                         )
                         self._send_response(
                             socket,
@@ -533,7 +711,6 @@ class PagedShmServer:
                         )
             self.wait_for_open_read.pop(uuid, None)
             self._open_read_pending.discard(uuid)
-        # else still being written – keep queue
 
     def defer_wait_readable(self, socket: zmq.Socket, uuid: str) -> None:
         """
@@ -560,7 +737,6 @@ class PagedShmServer:
                 self._send_response(socket, identity, OK, _OK_RESPONSE)
             self.wait_for_readable_completion.pop(uuid, None)
             self._wait_readable_pending.discard(uuid)
-        # else still being written
 
     # ------------------------------------------------------------------
     # Helpers for token resolution and management
@@ -603,6 +779,7 @@ class PagedShmServer:
                         blocks=a.blocks,
                         use_cache=a.use_cache,
                         read_token=token,
+                        is_new=True,  # Always new for open_write
                     )
                 )
             )
@@ -634,26 +811,20 @@ class PagedShmServer:
         """
         real_uuid, is_token = self._resolve_read_token(uuid)
         if not is_token:
-            # Check if it's a real UUID that exists in the manager
             try:
                 self.manager.get_info(uuid)
             except ValueError:
-                # Not a valid UUID, so it's an invalid/expired token
                 raise ValueError(f"Read token '{uuid}' not found") from None
             else:
-                # It is a valid UUID but not a token
                 raise ValueError(
                     f"close_read only accepts read tokens, got UUID '{uuid}'"
                 )
 
-        # Decrement ref_count if the item still exists and has a positive ref_count
         try:
             info = self.manager.get_info(real_uuid)
             if info["ref_count"] > 0:
                 self.manager.close_read(real_uuid)
-            # else ref_count == 0, do not call close_read to avoid error
         except ValueError:
-            # Item may have been deleted; just destroy token
             pass
         self._destroy_token(uuid)
         return _OK_RESPONSE
@@ -741,7 +912,6 @@ def _zmq_server(
 
         logger.info("PagedShmServer started at %s", address)
 
-        # For periodic maintenance
         next_cleanup_time = time.monotonic() + CLEANUP_INTERVAL
 
         while True:
@@ -750,7 +920,6 @@ def _zmq_server(
             except (zmq.ZMQError, KeyboardInterrupt, EOFError):
                 break
 
-            # Perform maintenance at fixed intervals
             now = time.monotonic()
             if now >= next_cleanup_time:
                 server._perform_maintenance(socket)
@@ -759,7 +928,6 @@ def _zmq_server(
             if socket not in socks or socks[socket] != zmq.POLLIN:
                 continue
 
-            # Receive request
             try:
                 frames = socket.recv_multipart()
             except zmq.ZMQError as e:
@@ -785,7 +953,7 @@ def _zmq_server(
                 server._send_response(socket, identity, OK, "shutting down")
                 break
 
-            # DEBUG_CLEAN – only if debug mode is enabled
+            # DEBUG_CLEAN
             if command == DEBUG_CLEAN:
                 if not server.debug:
                     server._send_response(
@@ -835,6 +1003,22 @@ def _zmq_server(
                     )
                 continue
 
+            if command == OPEN_WRITE_OR_READ:
+                try:
+                    result = server.open_write_or_read(payloads[0].decode(), identity)
+                    if result is not None:
+                        server._send_response(socket, identity, OK, result)
+                except (ValueError, MemoryError) as e:
+                    server._send_response(
+                        socket, identity, ERROR, f"{type(e).__name__}: {e}"
+                    )
+                except Exception as e:
+                    logger.exception("Unexpected error in OPEN_WRITE_OR_READ")
+                    server._send_response(
+                        socket, identity, ERROR, f"Internal error: {e}"
+                    )
+                continue
+
             if command == WAIT_FOR_READABLE:
                 try:
                     result = server.wait_for_readable(payloads[0].decode(), identity)
@@ -853,8 +1037,7 @@ def _zmq_server(
 
             if command == DELETE:
                 uuid = payloads[0].decode()
-                # 1. Clear pending wait queues for this UUID before deletion
-                # Open read waiters
+                # Clear pending wait queues for this UUID before deletion
                 q = server.wait_for_open_read.pop(uuid, None)
                 if q is not None:
                     while not q.empty():
@@ -863,7 +1046,6 @@ def _zmq_server(
                             socket, ident, ERROR, "Item deleted while waiting"
                         )
                     server._open_read_pending.discard(uuid)
-                # Wait_for_readable waiters
                 q = server.wait_for_readable_completion.pop(uuid, None)
                 if q is not None:
                     while not q.empty():
@@ -873,11 +1055,11 @@ def _zmq_server(
                         )
                     server._wait_readable_pending.discard(uuid)
 
-                # 2. Now perform deletion
                 try:
                     server.delete(uuid)
                     server._send_response(socket, identity, OK, _OK_RESPONSE)
-                    server.defer_open_write(socket)
+                    # After deletion, try to satisfy any pending memory requests
+                    server._defer_memory_requests(socket)
                 except ValueError as e:
                     server._send_response(socket, identity, ERROR, f"ValueError: {e}")
                 except Exception as e:
@@ -915,8 +1097,8 @@ def _zmq_server(
                 logger.exception("Unexpected error in command %s", command)
                 server._send_response(socket, identity, ERROR, f"Internal error: {e}")
 
-            # After CLOSE_WRITE,
-            # wake up waiting readers and wait_for_readable waiters for that UUID
+            # After CLOSE_WRITE, wake up waiting readers, wait_for_readable waiters,
+            # and any pending memory requests (now memory may be freed)
             if command == CLOSE_WRITE:
                 try:
                     close_req = json.loads(payloads[0].decode())
@@ -926,18 +1108,34 @@ def _zmq_server(
                         server.clean_expired_wait_readable(socket, uuid)
                         server.defer_open_read(socket, uuid)
                         server.defer_wait_readable(socket, uuid)
+                        # Also attempt to satisfy pending memory requests
+                        server._defer_memory_requests(socket)
                 except Exception:
-                    # Fall back to global cleanup (already done at top of loop)
                     pass
 
-            # After CLOSE_READ, try to satisfy deferred writes immediately
+            # After CLOSE_READ, try to satisfy deferred memory requests
             if command == CLOSE_READ:
-                server.defer_open_write(socket)
+                if not payloads:
+                    server._send_response(
+                        socket, identity, ERROR, "Missing token for close_read"
+                    )
+                    continue
+                param = payloads[0].decode()
+                try:
+                    result = server.close_read(param)
+                    server._send_response(socket, identity, OK, result)
+                except ValueError as e:
+                    server._send_response(socket, identity, ERROR, f"ValueError: {e}")
+                except Exception as e:
+                    logger.exception("Unexpected error in CLOSE_READ")
+                    server._send_response(
+                        socket, identity, ERROR, f"Internal error: {e}"
+                    )
+                continue
 
     except Exception as e:
         logger.exception("Fatal error in zmq_server: %s", e)
     finally:
-        # Resource release order: socket, context, then server storage
         if socket is not None:
             with contextlib.suppress(Exception):
                 socket.close()

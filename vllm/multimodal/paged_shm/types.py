@@ -23,6 +23,7 @@ class ShmAllocation:
     blocks: list[int]
     use_cache: bool = True
     read_token: str | None = None
+    is_new: bool = False
 
 
 @dataclass
