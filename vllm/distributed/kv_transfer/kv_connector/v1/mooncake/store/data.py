@@ -300,6 +300,39 @@ class ChunkedTokenDatabase:
             yield start_idx, end_idx, h
 
 
+@dataclass(frozen=True)
+class TailKeyBoundary:
+    """Hash boundary used to key a group's tail block in the store.
+
+    Attributes:
+        group_id: KV-cache group containing the tail block.
+        num_tokens: Token boundary whose prefix hash identifies the matched
+            stored block. The loader uses
+            ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
+            hash implied by ``MooncakeLookupResult.hit_length``. This changes
+            only the load key, not the reusable prefix.
+    """
+
+    group_id: int
+    num_tokens: int
+
+
+@dataclass
+class MooncakeLookupResult:
+    """Lookup result used to build the subsequent load request.
+
+    Attributes:
+        hit_length: Longest prefix that every KV-cache group can reuse after
+            their individual cache hits converge.
+        tail_key_boundaries: Hash boundary used to store each cache group's
+            tail block when ``hit_length`` does not identify its store key.
+            There is one entry per group for every nonzero hit.
+    """
+
+    hit_length: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+
 @dataclass
 class LoadSpec:
     """Specification for loading KV cache from external store."""
@@ -308,6 +341,7 @@ class LoadSpec:
     kvpool_cached_tokens: int
     can_load: bool
     token_len: int = 0
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass

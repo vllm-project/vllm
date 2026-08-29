@@ -7,6 +7,7 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
+    MooncakeLookupResult,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
@@ -702,9 +703,9 @@ class _StubLookupClient:
         num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
-    ) -> int:
+    ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
-        return self._hit_tokens
+        return MooncakeLookupResult(self._hit_tokens)
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
