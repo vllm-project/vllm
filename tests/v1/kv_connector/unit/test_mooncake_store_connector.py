@@ -5,6 +5,9 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -31,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -60,6 +64,30 @@ def _make_kv_cache_config() -> KVCacheConfig:
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
     )
+
+
+def test_scheduler_requires_align_mode_for_mamba():
+    vllm_config = _make_vllm_config()
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], mamba_spec)],
+    )
+
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ),
+        pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
+    ):
+        scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
 
 
 def _make_block_stored() -> BlockStored:
@@ -97,6 +125,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_worker.assert_not_called()
     assert connector.connector_scheduler is mock_scheduler.return_value
     assert connector.connector_worker is None
+    block_pool = MagicMock()
+
+    connector.bind_gpu_block_pool(block_pool)
+    mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
 def test_worker_methods_delegate_to_store_worker():
@@ -241,9 +273,13 @@ def test_update_connector_output_and_take_events():
 
     kv_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
     kv_events.add_events([event])
-    connector.update_connector_output(KVConnectorOutput(kv_cache_events=kv_events))
+    output = KVConnectorOutput(kv_cache_events=kv_events)
+    connector.update_connector_output(output)
 
     assert connector._kv_cache_events is kv_events
+    connector.connector_scheduler.update_connector_output.assert_called_once_with(
+        output
+    )
     assert list(connector.take_events()) == [event]
     assert connector._kv_cache_events is None
 
