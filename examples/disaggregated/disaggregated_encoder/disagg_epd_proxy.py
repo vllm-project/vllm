@@ -42,9 +42,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # FastAPI app & global state
 ###############################################################################
 
-logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("proxy")
 
 app = FastAPI()
@@ -422,7 +420,6 @@ async def process_prefill_stage(
 ###############################################################################
 
 
-@app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Middleware to log all incoming requests and responses"""
     req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
@@ -844,6 +841,14 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
+        "--log-requests",
+        action="store_true",
+        help=(
+            "Log every request in and out, and raise the log level to DEBUG. "
+            "Off by default: the proxy is on the request path."
+        ),
+    )
+    parser.add_argument(
         "--no-rewrite",
         action="store_true",
         help="Forward images to the decoder unchanged (for stage-timing A/B).",
@@ -898,6 +903,9 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.log_requests:
+        logging.getLogger().setLevel(logging.DEBUG)
+        app.middleware("http")(log_requests)
     NO_REWRITE = args.no_rewrite
     DECODE_RETRIES = max(0, args.decode_retries)
     app.state.e_urls = [
