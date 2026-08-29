@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import cp_local_slot, prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -291,16 +291,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         if not self.draft_attn_layer_names:
             return None
         assert num_query_per_req is None  # Omitted for DFlash, read from self instead
-        if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
-            prepare_dcp_local_seq_lens(
-                self.input_buffers.dcp_local_seq_lens,
-                self.input_buffers.seq_lens,
-                num_reqs,
-                self.block_tables.cp_size,
-                self.block_tables.cp_rank,
-                self.block_tables.cp_interleave,
-            )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens
         return super()._build_draft_attn_metadata(
             num_reqs,
             num_reqs_padded,
