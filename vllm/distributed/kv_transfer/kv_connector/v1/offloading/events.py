@@ -227,6 +227,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
+            active_residencies={(Medium.CPU, None)},
         )
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
