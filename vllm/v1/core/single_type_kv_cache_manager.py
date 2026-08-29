@@ -1059,6 +1059,16 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
                     pages.add((request_id, block_idx))
         return pages
 
+    def adopt_resident_page(
+        self, request_id: str, block_idx: int, block: KVCacheBlock
+    ) -> bool:
+        """Point a null prefix page at a pinned GPU copy of its contents."""
+        blocks = self.req_to_blocks.get(request_id)
+        if blocks is None or block_idx >= len(blocks) or not blocks[block_idx].is_null:
+            return False
+        blocks[block_idx] = block
+        return True
+
     def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
         if blocks is None or block_idx >= len(blocks):

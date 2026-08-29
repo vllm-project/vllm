@@ -272,7 +272,9 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    assert all(block.is_null for block in resident[:2])
+    # The local prefix is adopted from shadow pages (GPU-resident), while the
+    # externally imported page stays host-backed until its tail allocation.
+    assert not any(block.is_null for block in resident[:2])
 
 
 def allocate_external_prefix(
@@ -501,6 +503,86 @@ def test_hisparse_capacity_query_does_not_require_hot_blocks():
         "query-only" not in hot_manager.hot_required
         for hot_manager in coordinator.hot_managers
     )
+
+
+def _publish_hisparse_pages(manager: KVCacheManager) -> None:
+    """Ack all planned spills so host pages publish to the prefix cache."""
+    command = manager.hisparse_coordinator.build_offload_command()
+    counts = {spill.transfer_id: 1 for spill in command.page_transfers}
+    manager.hisparse_coordinator.update_spills(counts, counts)
+
+
+def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
+    """A host prefix hit must come back GPU-resident while shadows survive."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    original_resident_ids = [
+        block.block_id for block in manager.get_blocks("original").blocks[2]
+    ]
+    manager.free(original)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+    assert manager.allocate_slots(
+        resumed,
+        num_new_tokens=len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    resident_blocks = manager.get_blocks("resumed").blocks[2]
+    assert [block.block_id for block in resident_blocks[:3]] == (
+        original_resident_ids[:3]
+    )
+    assert not any(block.is_null for block in resident_blocks[:3])
+
+
+def test_hisparse_shadow_pages_free_under_pool_pressure():
+    """Shadow-pinned blocks must be the first, copy-free reclaim tier."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    manager.free(original)
+
+    coordinator = manager.hisparse_coordinator
+    assert coordinator.shadow_pages
+    pool = manager.block_pools[0]
+    free_before = pool.get_num_free_blocks()
+    reclaimed = coordinator.reclaim_resident_blocks(0, 2)
+    assert reclaimed >= 2
+    assert pool.get_num_free_blocks() == free_before + reclaimed
+    assert not coordinator.spills_to_send
+
+
+def test_hisparse_stale_shadow_entry_is_ignored():
+    """A recycled host block id must not resurrect another request's pages."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    manager.free(original)
+
+    coordinator = manager.hisparse_coordinator
+    for entry in coordinator.shadow_pages.values():
+        entry.host_hash = "stale"
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+    assert manager.allocate_slots(
+        resumed,
+        num_new_tokens=len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    resident_blocks = manager.get_blocks("resumed").blocks[2]
+    assert all(block.is_null for block in resident_blocks[:3])
 
 
 def test_hisparse_recomputes_capacity_after_reclaim_requires_hot(monkeypatch):
