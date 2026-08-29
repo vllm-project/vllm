@@ -797,9 +797,11 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                 # Create the breakable runner before the wrapper pool swap so
                 # its pool is covered as well.
                 manager.init_breakable_cg_runner(runner.model)
-            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-                BreakableCUDAGraphWrapper._all_instances
-            )
+            # Only touch wrappers belonging to this engine; other engines may
+            # coexist in the same process (e.g. in-process engines in tests).
+            wrappers: list[Any] = list(CUDAGraphWrapper._all_instances)
+            wrappers.extend(BreakableCUDAGraphWrapper._all_instances)
+            all_wrappers = [w for w in wrappers if w.vllm_config is runner.vllm_config]
             for wrapper in all_wrappers:
                 original_pools[id(wrapper)] = wrapper.graph_pool
                 wrapper.graph_pool = throwaway_pool
@@ -826,8 +828,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         finally:
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
             compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs(runner.vllm_config)
+            BreakableCUDAGraphWrapper.clear_all_graphs(runner.vllm_config)
             for wrapper in all_wrappers:
                 if id(wrapper) in original_pools:
                     wrapper.graph_pool = original_pools[id(wrapper)]

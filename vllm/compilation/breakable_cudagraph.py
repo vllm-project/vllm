@@ -163,8 +163,10 @@ class BreakableCUDAGraphCapture:
     def __enter__(self) -> BreakableCUDAGraphCapture:
         if getattr(BreakableCUDAGraphCapture._tls, "active", None) is not None:
             raise RuntimeError("Nested BreakableCUDAGraphCapture is not supported.")
-        BreakableCUDAGraphCapture._tls.active = self
+        # Begin the first segment before publishing to the thread-local so a
+        # capture_begin failure does not leave a dangling "active" capture.
         self._begin_segment()
+        BreakableCUDAGraphCapture._tls.active = self
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -265,9 +267,15 @@ class BreakableCUDAGraphWrapper:
     )
 
     @classmethod
-    def clear_all_graphs(cls) -> None:
+    def clear_all_graphs(cls, vllm_config: VllmConfig | None = None) -> None:
+        """Clear captured graphs, optionally scoped to one engine's config.
+
+        Multiple engines may coexist in one process; clearing across engines
+        invalidates another engine's already-captured graphs.
+        """
         for instance in list(cls._all_instances):
-            instance.clear_graphs()
+            if vllm_config is None or instance.vllm_config is vllm_config:
+                instance.clear_graphs()
 
     def __init__(
         self,

@@ -6648,8 +6648,8 @@ class GPUModelRunner(
         if current_platform.is_rocm():
             # Drop captured graphs before distributed teardown. On ROCm, delayed
             # graph destruction can surface HSA faults in the next engine startup.
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs(self.vllm_config)
+            BreakableCUDAGraphWrapper.clear_all_graphs(self.vllm_config)
             self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
@@ -6771,9 +6771,15 @@ class GPUModelRunner(
         profiling_pool = current_platform.graph_pool_handle()
         encoder_profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-            BreakableCUDAGraphWrapper._all_instances
-        )
+        # Only touch wrappers belonging to this engine; other engines may
+        # coexist in the same process (e.g. in-process engines in tests).
+        wrapper_instances: list[Any] = list(CUDAGraphWrapper._all_instances)
+        wrapper_instances.extend(BreakableCUDAGraphWrapper._all_instances)
+        all_wrappers = [
+            instance
+            for instance in wrapper_instances
+            if instance.vllm_config is self.vllm_config
+        ]
         for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
@@ -6864,13 +6870,10 @@ class GPUModelRunner(
                     )
         finally:
             set_cudagraph_capturing_enabled(False)
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs(self.vllm_config)
+            BreakableCUDAGraphWrapper.clear_all_graphs(self.vllm_config)
             if encoder_cudagraph_manager is not None:
                 encoder_cudagraph_manager.clear()
-            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-                BreakableCUDAGraphWrapper._all_instances
-            )
             for instance in all_wrappers:
                 if id(instance) in original_pools:
                     instance.graph_pool = original_pools[id(instance)]

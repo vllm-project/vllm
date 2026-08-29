@@ -170,10 +170,17 @@ class CUDAGraphWrapper:
     _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
 
     @classmethod
-    def clear_all_graphs(cls) -> None:
-        """Clear captured graphs from all CUDAGraphWrapper instances."""
+    def clear_all_graphs(cls, vllm_config: VllmConfig | None = None) -> None:
+        """Clear captured graphs from all CUDAGraphWrapper instances.
+
+        When ``vllm_config`` is given, only instances belonging to that engine
+        are cleared -- multiple engines may coexist in one process (e.g.
+        in-process engines in tests), and clearing across engines invalidates
+        another engine's already-captured graphs.
+        """
         for instance in list(cls._all_instances):
-            instance.clear_graphs()
+            if vllm_config is None or instance.vllm_config is vllm_config:
+                instance.clear_graphs()
 
     def __init__(
         self,
