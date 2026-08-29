@@ -85,7 +85,7 @@ prompt and KV-cache telemetry:
 
 | Field | Description |
 | --- | --- |
-| `num_computed_tokens` | Logical prompt tokens assigned to local model computation at first admission. Recomputation after preemption is not double-counted. |
+| `num_computed_tokens` | Logical prompt tokens assigned to local model computation when each input chunk is admitted. Recomputation after preemption is not double-counted. |
 | `num_cached_tokens` | Prompt tokens skipped during local computation (`num_local_cached_tokens + num_external_cached_tokens`). |
 | `num_local_cached_tokens` | Prompt tokens supplied by the local prefix cache. |
 | `num_external_cached_tokens` | Prompt tokens supplied through an external KV transfer. This describes the scheduler source, not whether every transferred block was a cache hit in an upstream deployment. |
@@ -100,6 +100,14 @@ Block counts are physical counts summed across KV cache groups. Consequently,
 one logical token block can contribute more than one physical block on hybrid
 models. The response's top-level `id` correlates the telemetry with the request;
 the same ID is present on the final streaming chunk.
+
+For streaming-input sessions, prefix-cache telemetry is cumulative across all
+admitted input chunks. Each continuation is measured independently inside the
+scheduler and then added to the prior chunks. Generated tokens retained as the
+next chunk's context are not counted again as prompt input or cache creation;
+physical block activity and prefill-chunk counts still include work attributable
+to every input chunk. Previously emitted `RequestOutput` snapshots remain
+unchanged when a later chunk completes.
 
 These engine-level fields intentionally live under `metrics`, rather than
 OpenAI `usage`: block allocation and eviction are implementation details, and

@@ -210,6 +210,10 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
+        # Cached-token estimate at the beginning of the active input chunk.
+        # Streaming continuations retain prior KV, so finalization must use the
+        # increase from this baseline rather than the session-wide total.
+        self.prefill_stats_cache_baseline = 0
 
         # Per-request speculative-decoding acceptance accumulator. Populated by
         # the scheduler when --per-request-spec-decode-metrics is set (eagerly on

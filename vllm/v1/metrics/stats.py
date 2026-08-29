@@ -258,7 +258,12 @@ class FinishedRequestStats:
 
 @dataclass
 class PrefillStats:
-    """Breakdown of a scheduled prefill computation.
+    """Breakdown of one admitted prompt chunk's prefill computation.
+
+    Streaming-input continuations produce one snapshot per admitted input
+    chunk. The output processor combines those snapshots into a
+    session-cumulative value without counting retained generated tokens as new
+    prompt input.
 
     Fields:
         num_prompt_tokens: Total number of tokens to be prefilled.
@@ -320,6 +325,29 @@ class PrefillStats:
         self.num_block_allocations += num_block_allocations
         self.num_block_evictions += num_block_evictions
         self.num_new_full_blocks += num_new_full_blocks
+
+    def merged(self, other: "PrefillStats") -> "PrefillStats":
+        """Return a cumulative snapshot without mutating either operand."""
+        return PrefillStats(
+            num_prompt_tokens=self.num_prompt_tokens + other.num_prompt_tokens,
+            num_computed_tokens=(self.num_computed_tokens + other.num_computed_tokens),
+            num_cached_tokens=self.num_cached_tokens + other.num_cached_tokens,
+            num_local_cached_tokens=(
+                self.num_local_cached_tokens + other.num_local_cached_tokens
+            ),
+            num_external_cached_tokens=(
+                self.num_external_cached_tokens + other.num_external_cached_tokens
+            ),
+            num_cache_creation_tokens=(
+                self.num_cache_creation_tokens + other.num_cache_creation_tokens
+            ),
+            num_new_full_blocks=(self.num_new_full_blocks + other.num_new_full_blocks),
+            num_block_allocations=(
+                self.num_block_allocations + other.num_block_allocations
+            ),
+            num_block_evictions=(self.num_block_evictions + other.num_block_evictions),
+            num_prefill_chunks=self.num_prefill_chunks + other.num_prefill_chunks,
+        )
 
 
 @dataclass

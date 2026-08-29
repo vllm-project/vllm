@@ -662,12 +662,17 @@ class OutputProcessor:
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
-                    req_state.prefill_stats = engine_core_output.prefill_stats
+                    if req_state.prefill_stats is None:
+                        req_state.prefill_stats = engine_core_output.prefill_stats
+                    else:
+                        req_state.prefill_stats = req_state.prefill_stats.merged(
+                            engine_core_output.prefill_stats
+                        )
                     req_state.num_cached_tokens = (
-                        engine_core_output.prefill_stats.num_cached_tokens
+                        req_state.prefill_stats.num_cached_tokens
                     )
                     req_state.num_cache_creation_tokens = (
-                        engine_core_output.prefill_stats.num_cache_creation_tokens
+                        req_state.prefill_stats.num_cache_creation_tokens
                     )
                 req_state.is_prefilling = False
 

@@ -131,7 +131,9 @@ class RequestOutput:
         num_cache_creation_tokens: Prompt tokens currently counted as local
             prefix-cache writes for this request.
         prefill_stats: Per-request prompt/KV telemetry emitted when prefill
-            completes.
+            completes. For streaming input, the latest value is cumulative
+            across admitted input chunks in the same session; retained generated
+            tokens are not counted again as prompt input.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
     """
@@ -184,7 +186,7 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
-        if self.prefill_stats is None:
+        if next_output.prefill_stats is not None:
             self.prefill_stats = next_output.prefill_stats
 
         for next_completion in next_output.outputs:
