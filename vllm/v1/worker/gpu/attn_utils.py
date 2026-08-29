@@ -15,7 +15,11 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.core.kv_cache_utils import HISPARSE_HOT_SUFFIX, HISPARSE_RESIDENT_SUFFIX
+from vllm.v1.core.kv_cache_utils import (
+    HISPARSE_HOT_SUFFIX,
+    HISPARSE_RESIDENT_SUFFIX,
+    get_unique_kv_cache_group_id,
+)
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     allocate_pinned_host_pool,
@@ -27,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
@@ -410,6 +415,12 @@ def _bind_hisparse_kv_caches(
     )
     for cache_handle in cache_handles:
         cache_handle.runtime.request_state_indices = request_state_indices
+    source_group_id = get_unique_kv_cache_group_id(
+        kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
+    )
+    source_slot_mapping = block_tables.slot_mappings[source_group_id]
+    for cache_handle in cache_handles:
+        cache_handle.mirror_slot_mapping = source_slot_mapping
 
 
 def init_kv_cache(

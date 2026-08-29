@@ -745,8 +745,11 @@ class HiSparseCacheHandle:
         self.slot_mapping: torch.Tensor | None = None
         self.runtime = runtime
         self.decode_batch = False
+        self.num_actual_tokens = 0
         self.num_decode_tokens = 0
         self.req_id_per_token: torch.Tensor | None = None
+        self.defer_host_mirror = False
+        self.mirror_slot_mapping: torch.Tensor | None = None
 
     def bind_cache(
         self,
@@ -798,11 +801,14 @@ class HiSparseCacheHandle:
             scale=k_scale,
         )
         if mirror_to_host or self.runtime.eager_host_mirror:
-            mirrored_slots = (
-                host_slots[:num_rows]
-                .to(device=self.runtime.device, dtype=torch.int64)
-                .contiguous()
+            mirrored_slots = host_slots[:num_rows].to(
+                device=self.runtime.device, dtype=torch.int64
             )
+            if self.defer_host_mirror:
+                if self.mirror_slot_mapping is None:
+                    self.mirror_slot_mapping = mirrored_slots
+                return
+            mirrored_slots = mirrored_slots.contiguous()
             self.runtime.backup_rows(
                 self.view.cache,
                 resident_slots,
