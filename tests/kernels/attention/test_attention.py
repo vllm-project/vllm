@@ -191,6 +191,7 @@ def test_paged_attention(
     if kv_cache_dtype == "fp8":
         # Fill unused slots in referenced blocks with FP8 E4M3 NaNs. The
         # attention result must not depend on values beyond each sequence.
+        fp8_nan = 0x80 if current_platform.is_fp8_fnuz() else 0x7F
         valid_offsets_by_block: dict[int, set[int]] = {}
         for seq_idx, seq_len in enumerate(seq_lens.tolist()):
             for token_idx in range(seq_len):
@@ -203,7 +204,7 @@ def test_paged_attention(
                 offset for offset in range(block_size) if offset not in valid_offsets
             ]
             if padding_offsets:
-                value_cache[block_idx, :, :, padding_offsets] = 0x7F
+                value_cache[block_idx, :, :, padding_offsets] = fp8_nan
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
