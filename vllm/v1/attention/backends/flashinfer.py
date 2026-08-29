@@ -1808,7 +1808,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         workspace_sizes = self._get_decode_workspace_size(
             decode_wrapper=decode_wrapper,
             indptr_cpu=indptr_cpu,
-            indices=self.paged_kv_indices.gpu,
+            indices=self.paged_kv_indices,
             last_page_len_cpu=last_page_len_cpu,
             fixed_split_size=self.decode_fixed_split_size,
             disable_split_kv=self.disable_split_kv,
@@ -1867,7 +1867,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             prefill_wrapper=prefill_wrapper,
                             qo_indptr_cpu=qo_indptr_cpu,
                             paged_kv_indptr_cpu=paged_kv_indptr_cpu,
-                            paged_kv_indices=self.paged_kv_indices.gpu,
+                            paged_kv_indices=self.paged_kv_indices,
                             paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
                             causal=True,
                             window_left=self.window_left,
