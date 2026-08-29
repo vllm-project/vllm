@@ -363,6 +363,14 @@ def disable_compile_cache() -> bool:
     return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
 
 
+def get_v1_output_proc_chunk_size() -> int:
+    env_name = "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE"
+    value = int(os.getenv(env_name, "128"))
+    if value <= 0:
+        raise ValueError(f"{env_name} must be greater than 0, got {value}")
+    return value
+
+
 def use_aot_compile() -> bool:
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -1414,9 +1422,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Setting this too high can result in a higher variance of
     # inter-message latencies. Setting it too low can negatively impact
     # TTFT and overall throughput.
-    "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE": lambda: int(
-        os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")
-    ),
+    "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE": get_v1_output_proc_chunk_size,
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
     # If set, vLLM will pick up the provided Flash Attention MLA
