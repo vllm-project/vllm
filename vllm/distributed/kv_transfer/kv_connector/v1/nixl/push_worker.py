@@ -341,7 +341,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
-                self._handle_failed_transfer(rid, None)
+                self._handle_failed_transfer(rid, None, failure="handshake")
                 return
             # Re-queue for the writer to send now that the handshake is done.
             self._reg_send_inbox.put((rid, rd))
@@ -375,6 +375,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                self.xfer_stats.record_failed_notification()
+                self._handle_failed_transfer(req_id, None, failure=None)
+                return
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )
@@ -459,6 +462,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self._log_failure(
                         failure_type="push_handshake_failed", req_id=rid, error=e
                     )
+                    self.xfer_stats.record_failed_handshake()
                     return
                 self._deferred_push_inbox.put((rid, blocks, rd))
                 self._push_writer_wake.set()
