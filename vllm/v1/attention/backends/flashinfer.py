@@ -5,7 +5,7 @@
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -28,7 +28,6 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config_or_none,
-    get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
@@ -36,7 +35,6 @@ from vllm.distributed.parallel_state import (
     get_dcp_world_size_and_rank,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -1443,67 +1441,43 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             q_lens,
         )
 
-    def _finalize_adaptive_decode(self, decode_query_len: int) -> None:
-        """Resolve conditional mismatch mode after runner init .
+    def _finalize_adaptive_decode(
+        self, decode_query_len: int, is_target: bool | None = None
+    ) -> None:
+        """Resolve conditional mismatch mode after runner init.
 
         Called by ``init_attn_backend`` with the runner-resolved decode
         width (``num_speculative_steps + num_new_sampled_tokens_per_step`` —
         the authoritative per-request verify width; ``num_new_sampled…`` is
         model-state data that ``SpeculativeConfig`` does not expose, so it
-        must be threaded from the runner, never guessed from config fields).
-        The group's model role comes from the layers' construction-time
-        ``_vllm_model_tag`` attribute, which survives past
-        ``set_model_tag``'s restore; the transient compilation global does
-        not. Fail-closed: any unresolvable precondition leaves the mode off
-        or raises.
+        must be threaded from the runner, never guessed from config fields)
+        and the group's target-layer role: ``True`` when the group's layer
+        names intersect the runner-derived target set (the #52783
+        derivation: all KV-cache attention layers minus the speculator's
+        draft layers), ``False`` for draft-scoped groups, ``None`` when
+        the call carries no target scoping. Fail-closed: any unresolvable
+        precondition leaves the mode off or raises.
         """
         if not _adaptive_xqa_mismatch_safe(self.vllm_config):
             return  # configuration cannot reach the device-ragged XQA path
-        layer_type = cast(type[Any], AttentionLayerBase)
-        layers = get_layers_from_vllm_config(
-            self.vllm_config, layer_type, self.layer_names
-        )
-        if not layers:
-            raise ValueError(
-                f"Attention group {self.layer_names[:3]}… has no registered "
-                "attention layers; cannot resolve the model role required "
-                "for conditional mismatch support."
-            )
-        missing = [
-            name
-            for name, layer in layers.items()
-            if not hasattr(layer, "_vllm_model_tag")
-        ]
-        if missing:
-            raise ValueError(
-                f"Attention layer(s) {missing[:3]} lack a recorded "
-                "_vllm_model_tag; cannot safely classify the group's model "
-                "role for conditional mismatch support. All attention "
-                "layers must be constructed under a set_model_tag context."
-            )
-        tags = {layer._vllm_model_tag for layer in layers.values()}
-        if len(tags) > 1:
-            raise ValueError(
-                f"Attention group {self.layer_names[:3]}… mixes model roles "
-                f"{sorted(tags)}; conditional mismatch support requires a "
-                "single role per group."
-            )
-        model_role = next(iter(tags))
-        if model_role == "dspark_head":
-            # The drafter always runs full-length blocks; only the verifier
-            # sees device-trimmed query lengths (selector contract).
+        if is_target is not True:
+            # Draft-scoped groups (and unscoped calls) keep full-length
+            # blocks: only the verifier sees device-trimmed query lengths
+            # (selector contract).
             logger.info(
-                "FlashInfer adaptive-mismatch mode: OFF for dspark_head "
-                "group (drafter keeps full-length blocks)."
+                "FlashInfer adaptive-mismatch mode: OFF for %s group "
+                "(is_target=%r; drafter/unscoped keeps full-length blocks).",
+                self.layer_names[:1],
+                is_target,
             )
             return
         if not self.use_dedicated_xqa:
             raise ValueError(
                 "Adaptive verification selected the FlashInfer backend "
-                "for its device-ragged XQA decode path, but this builder "
-                f"(role={model_role}) resolved use_dedicated_xqa=False "
-                "(native/uniform decode only). Use another attention "
-                "backend or disable adaptive verification."
+                "for its device-ragged XQA decode path, but this target "
+                "builder resolved use_dedicated_xqa=False (native/uniform "
+                "decode only). Use another attention backend or disable "
+                "adaptive verification."
             )
         if decode_query_len is None or decode_query_len <= 1:
             raise ValueError(
@@ -1563,14 +1537,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         logger.info(
             "FlashInfer adaptive-mismatch mode: decode_kernel=%s "
             "use_dedicated_xqa=%s cg_support=%s dcp=%s max_decode_width=%s "
-            "(runner decode_query_len) mask_rows=%s model_role=%s",
+            "(runner decode_query_len) mask_rows=%s is_target=%s",
             self.flashinfer_trtllm_api_decode_kernel,
             self.use_dedicated_xqa,
             AttentionCGSupport.VARLEN_DECODE,
             self.vllm_config.parallel_config.decode_context_parallel_size,
             self.adaptive_max_decode_width,
             self._adaptive_mask_buffer.shape[0],
-            model_role,
+            is_target,
         )
 
     def _fill_adaptive_decode_mask(

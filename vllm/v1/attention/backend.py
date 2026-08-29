@@ -628,6 +628,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+<<<<<<< HEAD
     @classmethod
     def get_varlen_cudagraph_max_query_len(
         cls: type["AttentionMetadataBuilder"],
@@ -656,6 +657,18 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 
         Default no-op; backends with device-ragged decode capability
         override this to resolve their conditional mismatch mode.
+=======
+    def _finalize_adaptive_decode(
+        self, decode_query_len: int, is_target: bool | None = None
+    ) -> None:
+        """Receive the runner-resolved decode width and group role after
+        runner init. ``is_target`` is True/False for groups in a
+        target-scoped initialization (layer names intersect the target
+        set / not), and None when the call carries no target scoping
+        (draft-scoped speculator init, or a non-adaptive boot); backends
+        with device-ragged decode capability override this to resolve
+        their conditional mismatch mode.
+>>>>>>> 4a42b315b4 (refactor: replace construction-time model tags with target-layer-scoped finalize role)
         """
         return None
 

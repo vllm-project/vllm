@@ -202,6 +202,7 @@ def init_attn_backend(
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
     decode_query_len: int | None = None,
+    target_attn_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -285,6 +286,19 @@ def init_attn_backend(
                         repr(attn_group.kv_cache_spec),
                     )
     # Phase 3: create metadata builders and determine cudagraph support.
+    _adaptive_on = (
+        vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.enable_adaptive_verification
+    )
+    if _adaptive_on and decode_query_len is not None and target_attn_layer_names is None:
+        raise ValueError(
+            "Adaptive verification requires target-layer scoping for "
+            "attention finalization, but no target layer names were "
+            "supplied. This is an init_attn_backend caller contract "
+            "violation (the GPUModelRunner derives them alongside "
+            "#52783's target-scoped checks)."
+        )
+    num_target_builders = 0
     attn_backend_workspace: torch.Tensor | None = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size: int | None = None
@@ -300,15 +314,22 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
-            # Deferred adaptive-mismatch finalization (flashinfer-adaptive-
-            # mismatch W1 revision): every builder of the group receives the
-            # runner-resolved decode width and resolves its model role from
-            # the layers' construction-time tags. Builders without the hook
-            # are unaffected.
+            builder = group.get_metadata_builder(0)
+            # Deferred adaptive-mismatch finalization: every builder of the
+            # group receives the runner-resolved decode width and the
+            # group's target-layer role. (This path currently hard-codes
+            # one builder per group; the loop keeps that invariant correct
+            # if ubatching raises it.)
             if decode_query_len is not None:
+                is_target = (
+                    None
+                    if target_attn_layer_names is None
+                    else not target_attn_layer_names.isdisjoint(group.layer_names)
+                )
+                if is_target:
+                    num_target_builders += 1
                 for group_builder in group.metadata_builders:
-                    if hasattr(group_builder, "_finalize_adaptive_decode"):
-                        group_builder._finalize_adaptive_decode(decode_query_len)
+                    group_builder._finalize_adaptive_decode(decode_query_len, is_target)
             # The microbatches' builders share the workspace: they all issue
             # attention on the one compute stream the threads hand off, so the
             # buffer is written serially, as it already is across steps.
@@ -318,6 +339,12 @@ def init_attn_backend(
                         attn_backend_workspace = builder._get_workspace_buffer()
                 elif hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
+    if _adaptive_on and target_attn_layer_names is not None and num_target_builders == 0:
+        raise ValueError(
+            "Target-scoped attention initialization classified zero "
+            "target builders; the target layer names are inconsistent "
+            "with the discovered attention groups."
+        )
     attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 

@@ -262,17 +262,6 @@ class Attention(nn.Module, AttentionLayerBase):
         `self.kv_cache`.
         """
         super().__init__()
-        # Persist the compilation model role at construction time. The
-        # model_tag global is only meaningful inside get_model() (set_model_tag
-        # restores "backbone" afterward), while attention metadata builders
-        # are created later by init_attn_backend; they read this attribute to
-        # keep the dspark-head/target distinction alive past construction
-        # (flashinfer-adaptive-mismatch W1 revision). No fallback: a layer
-        # without a recorded role must fail closed at finalization, not be
-        # silently classified as target.
-        from vllm.compilation.backends import model_tag as _model_tag
-
-        self._vllm_model_tag = _model_tag
         sliding_window: int | None
         if per_layer_sliding_window is not None:
             # per-layer sliding window
