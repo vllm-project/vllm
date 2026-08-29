@@ -1596,6 +1596,83 @@ def test_kv_connector_stats_aggregation():
     assert cli_stats["Avg number of descriptors"] == 1.5
 
 
+def test_kv_connector_stats_failure_grouping():
+    """Transfer, handshake and notification failures are reported as one
+    transport-failure count, while KV expiry is reported separately: the
+    former are sporadic lower-transport-layer events, the latter an
+    autoscaler signal."""
+    stats = NixlKVConnectorStats()
+    assert stats.is_empty()
+
+    stats.record_failed_transfer()
+    stats.record_failed_handshake()
+    stats.record_failed_notification()
+    stats.record_kv_expired_req()
+    assert not stats.is_empty()
+
+    # No successful transfers: latency stats are zero but the failure
+    # counts still surface.
+    reduced = stats.reduce()
+    assert reduced["Num successful transfers"] == 0
+    assert reduced["Num failed transfers"] == 3
+    assert reduced["Num KV expired reqs"] == 1
+
+
+def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
+    """vllm:nixl_num_failed_transfers counts handshake and notification
+    failures too, while vllm:nixl_num_kv_expired_reqs stays a separate
+    counter."""
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+        NixlPromMetrics,
+    )
+
+    registry = CollectorRegistry()
+
+    class RegistryGauge(Gauge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    class RegistryCounter(Counter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    class RegistryHistogram(Histogram):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    vllm_config = create_vllm_config()
+    metric_types = {
+        Gauge: RegistryGauge,
+        Counter: RegistryCounter,
+        Histogram: RegistryHistogram,
+    }
+    prom = NixlPromMetrics(
+        vllm_config,
+        metric_types,
+        labelnames=["engine"],
+        per_engine_labelvalues={0: ["engine-0"]},
+    )
+
+    stats = NixlKVConnectorStats()
+    stats.record_failed_transfer()
+    stats.record_failed_handshake()
+    stats.record_failed_notification()
+    stats.record_kv_expired_req()
+    prom.observe(stats.data, engine_idx=0)
+
+    def counter_value(name: str) -> float:
+        for metric in registry.collect():
+            for sample in metric.samples:
+                if sample.name == name:
+                    return sample.value
+        raise AssertionError(f"metric {name} not found in registry")
+
+    assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
+    assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
+
+
 def test_multi_kv_connector_stats_aggregation():
     """
     Test MultiKVConnectorStats aggregation across TP ranks using
@@ -2823,6 +2900,11 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     # Check that request appears in get_finished
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
+
+    # Handshake failures are recorded as transport failures, separately
+    # from KV expiry.
+    assert connector.connector_worker.xfer_stats.data["num_failed_handshakes"]
+    assert connector.connector_worker.xfer_stats.data["num_failed_transfers"] == []
 
 
 @patch(

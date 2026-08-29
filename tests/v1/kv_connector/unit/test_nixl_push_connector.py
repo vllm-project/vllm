@@ -40,6 +40,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+    NixlKVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
@@ -348,6 +351,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._recving_transfers = defaultdict(list)
+        w.xfer_stats = NixlKVConnectorStats()
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
@@ -630,6 +634,10 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
     assert xfer_calls == []
     assert len(failures) == 1
     assert failures[0]["failure_type"] == "push_handshake_failed"
+    # Handshake failures are recorded as transport failures, separately
+    # from KV expiry.
+    assert w.xfer_stats.data["num_failed_handshakes"] == [1]
+    assert w.xfer_stats.data["num_failed_transfers"] == []
 
 
 def test_writer_loop_drains_deferred_push_inbox():

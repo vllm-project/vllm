@@ -418,12 +418,13 @@ activity for the last reporting interval. Example output:
 ```text
 KV Transfer metrics: Num successful transfers=4, Avg xfer time (ms)=1.381,
 P90 xfer time (ms)=2.601, Avg post time (ms)=0.672, P90 post time (ms)=0.801,
-Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0
+Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0,
+Num failed transfers=0, Num KV expired reqs=0
 ```
 
 The table below describes each field. All timing values cover only the
-successful transfers recorded in the current interval; failed transfers are
-counted separately via Prometheus (see
+successful transfers recorded in the current interval; failures are reported
+as interval counts in the same line and via Prometheus (see
 [Prometheus metrics](#prometheus-metrics) below).
 
 | Metric | Unit | Description |
@@ -436,6 +437,8 @@ counted separately via Prometheus (see
 | `Avg MB per transfer` | MB | Mean payload size per transfer, computed as `total bytes transferred / number of transfers`. Reflects the average KV cache footprint of a single request (sequence length × layers × head dimension × dtype bytes). |
 | `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
+| `Num failed transfers` | count | Failed NIXL transfers, handshakes, and completion notifications (`send_notif`) in the interval, grouped because all are sporadic lower-transport-layer events. |
+| `Num KV expired reqs` | count | Requests whose KV blocks expired before being read. Reported separately from the failure counts above because it is an autoscaler/lease-tuning signal rather than a transport issue. |
 
 ### Prometheus metrics
 
@@ -448,9 +451,8 @@ exported when NixlConnector is active:
 | `vllm:nixl_post_time_seconds` | Histogram | Time to submit the transfer request to the RDMA backend (seconds). |
 | `vllm:nixl_bytes_transferred` | Histogram | Bytes moved per transfer. |
 | `vllm:nixl_num_descriptors` | Histogram | Descriptor count per transfer. |
-| `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers. |
-| `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed completion notifications (`send_notif`). |
-| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+| `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers, including handshake and notification (`send_notif`) failures. These are grouped because all are sporadic lower-transport-layer events. |
+| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease
