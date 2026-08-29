@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import torch
 
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
+from vllm.config import KVTransferConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
@@ -199,6 +200,46 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert second_follower.runtime.index_group is second_leader.runtime.index_group
     assert first_leader.runtime.index_group is not second_leader.runtime.index_group
     assert len(plans) == len(streams) == 2
+
+
+def test_hisparse_cache_does_not_mirror_for_local_kv_offload(monkeypatch):
+    """Local indexer offload must not add sparse-KV host writes to decode."""
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=2,
+        ),
+        speculative_config=None,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector", kv_role="kv_both"
+        ),
+    )
+    resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
+        top_k=4,
+        device_buffer_size=8,
+        host_pool_gib=1.0,
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module.ResolvedHiSparseConfig,
+        "from_vllm_config",
+        classmethod(lambda cls, vllm_config, model_top_k: resolved),
+    )
+    runtime = SimpleNamespace(index_group=object(), eager_host_mirror=False)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "HiSparseRuntime", lambda **kwargs: runtime
+    )
+
+    cache_handle = hisparse_runtime_module.create_hisparse_cache_handle(
+        config,
+        model_top_k=4,
+        is_index_group_leader=True,
+        row_width=8,
+        kv_dtype=torch.float32,
+        device="cpu",
+    )
+
+    assert cache_handle is not None
+    assert not cache_handle.runtime.eager_host_mirror
 
 
 class _TestReplaySSMMixer(MambaMixer2):

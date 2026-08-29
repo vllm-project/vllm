@@ -900,9 +900,14 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group_builder is not None:
         index_group_builder.current_group = runtime.index_group
     kv_transfer_config = vllm_config.kv_transfer_config
-    runtime.eager_host_mirror = bool(
-        kv_transfer_config is not None and kv_transfer_config.is_kv_producer
-    )
+    if kv_transfer_config is not None:
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        runtime.eager_host_mirror = KVConnectorFactory.requires_hisparse_host_mirroring(
+            kv_transfer_config
+        )
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
         "device_buffer_size=%d (%d LRU rows), host_pool_gib=%s, "
