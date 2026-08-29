@@ -12,6 +12,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -1948,7 +1949,7 @@ def gdn_attention_core_fake(
 
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
-    op_func=qwen_gdn_attention_core,
+    op_func=eager_break_during_capture(qwen_gdn_attention_core),
     mutates_args=["a_or_z_out", "core_attn_out"],
     fake_impl=gdn_attention_core_fake,
 )
@@ -1981,7 +1982,7 @@ def gdn_attention_core_fused_norm_packed_fake(
 
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
-    op_func=qwen_gdn_attention_core_fused_norm_packed,
+    op_func=eager_break_during_capture(qwen_gdn_attention_core_fused_norm_packed),
     mutates_args=["core_attn_out"],
     fake_impl=gdn_attention_core_fused_norm_packed_fake,
 )
