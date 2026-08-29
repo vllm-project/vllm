@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer conditional device/CPU query-lens mismatch support (SM120 XQA).
 
-Covers the W1-W7 invariant matrix from the flashinfer-adaptive-mismatch
-campaign: the shared capability predicate, deferred finalize (role tag,
+Covers the invariant matrix for conditional FlashInfer XQA mismatch
+support: the shared capability predicate, deferred finalize (role tag,
 runner bound, transactional init), mismatch-safe classification (device
 offsets pass through, fixed bound, prefill routing above the bound),
 the persistent device-built packed mask, cascade/fallback exclusions,
@@ -30,7 +30,6 @@ from vllm.v1.attention.backends.flashinfer import (
     FlashInferTrtllmAPIDecode,
     _adaptive_xqa_mismatch_safe,
     _make_xqa_ragged_draft_block_mask,
-    _trtllm_gen_varlen_decode_args,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -56,7 +55,7 @@ class _FakeLayer(AttentionLayerBase):
 
 def _cfg(adaptive: bool = True) -> Any:
     """Minimal config view; real SpeculativeConfig shapes are covered by the
-    campaign validation record — here we assert the predicate's contract."""
+    validation record — here we assert the predicate's contract."""
     return SimpleNamespace(
         speculative_config=SimpleNamespace(
             enable_adaptive_verification=adaptive,
@@ -219,29 +218,6 @@ def test_mask_width40_and_noncausal():
         buf = b._fill_adaptive_decode_mask(q_cu, 3, sum(lens), causal)
         oracle = _make_xqa_ragged_draft_block_mask(lens, 40, causal, DEV)
         assert torch.equal(buf[: sum(lens)], oracle)
-
-
-def test_trtllm_gen_varlen_never_inferred():
-    def meta(q_cu, authorized, kernel=FlashInferDecodeKernel.TRTLLM_GEN):
-        return FlashInferTrtllmAPIDecode(
-            kernel=kernel,
-            block_tables=None,
-            seq_lens=None,
-            max_seq_len=1,
-            q_len_per_req=8,
-            q_cu_seq_lens=q_cu,
-            mask=None,
-            trtllm_gen_varlen=authorized,
-        )
-
-    q = torch.tensor([0, 3, 5, 6, 6], dtype=torch.int32, device=DEV)
-    assert _trtllm_gen_varlen_decode_args(meta(None, False), 2) == (None, None)
-    a = _trtllm_gen_varlen_decode_args(meta(q, True), 2)
-    assert a[1] == 8 and a[0] is q
-    with pytest.raises(AssertionError):
-        _trtllm_gen_varlen_decode_args(
-            meta(q, True, kernel=FlashInferDecodeKernel.XQA), 2
-        )
 
 
 def _make_builder():
