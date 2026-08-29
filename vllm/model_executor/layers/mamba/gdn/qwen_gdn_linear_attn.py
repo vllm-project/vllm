@@ -906,59 +906,33 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        # When VLLM_BATCH_INVARIANT and decode-only: project each token via a
-        # separate GEMV so BS=N matches BS=1. GEMM vs GEMV uses different CUDA
-        # kernel variants with different FP accumulation order; the ~1e-7
-        # difference is amplified by the SSM recurrence to ~4e-5 per step.
-        _bi_decode = False
-        _bi_prefill_cu = None
-        _bi_num_prefill_seqs = 0
+        # When VLLM_BATCH_INVARIANT: project each request independently so the
+        # GEMM M dimension is identical to the BS=1 case. This covers pure
+        # decode, pure prefill, and mixed batches uniformly via
+        # non_spec_query_start_loc. Speculative decoding is not yet supported.
+        _bi_cu: list[int] | None = None
         if envs.VLLM_BATCH_INVARIANT and num_tokens > 1:
             _fc = get_forward_context()
             _attn_raw = _fc.attn_metadata
             if isinstance(_attn_raw, dict) and self.prefix in _attn_raw:
                 _meta = _attn_raw[self.prefix]
                 if isinstance(_meta, GDNAttentionMetadata):
-                    _bi_decode = (
-                        _meta.num_prefills == 0 and _meta.num_decodes > 0
-                    )
-                    # For pure-prefill batches, project per-sequence so the
-                    # GEMM M dimension matches the BS=1 case. Different M
-                    # values cause cublas to select different algorithms with
-                    # different FP accumulation, producing ~1e-3 logprob drift.
-                    if (
-                        not _bi_decode
-                        and _meta.num_prefills > 0
-                        and _meta.num_decodes == 0
-                        and _meta.non_spec_query_start_loc is not None
-                    ):
-                        _bi_prefill_cu = _meta.non_spec_query_start_loc
-                        _bi_num_prefill_seqs = _meta.num_prefills
-        if _bi_decode:
+                    if _meta.num_spec_decodes > 0:
+                        raise RuntimeError(
+                            "VLLM_BATCH_INVARIANT is not supported with "
+                            "speculative decoding on GDN_ATTN."
+                        )
+                    if _meta.non_spec_query_start_loc is not None:
+                        _bi_cu = _meta.non_spec_query_start_loc.tolist()
+        if _bi_cu is not None:
             mixed_qkvz = torch.cat(
-                [
-                    self.in_proj_qkvz(hidden_states[i : i + 1])[0]
-                    for i in range(num_tokens)
-                ],
+                [self.in_proj_qkvz(hidden_states[_bi_cu[i] : _bi_cu[i + 1]])[0]
+                 for i in range(len(_bi_cu) - 1)],
                 dim=0,
             )
             ba = torch.cat(
-                [
-                    self.in_proj_ba(hidden_states[i : i + 1])[0]
-                    for i in range(num_tokens)
-                ],
-                dim=0,
-            )
-        elif _bi_prefill_cu is not None:
-            _cu = _bi_prefill_cu.tolist()
-            mixed_qkvz = torch.cat(
-                [self.in_proj_qkvz(hidden_states[_cu[i] : _cu[i + 1]])[0]
-                 for i in range(_bi_num_prefill_seqs)],
-                dim=0,
-            )
-            ba = torch.cat(
-                [self.in_proj_ba(hidden_states[_cu[i] : _cu[i + 1]])[0]
-                 for i in range(_bi_num_prefill_seqs)],
+                [self.in_proj_ba(hidden_states[_bi_cu[i] : _bi_cu[i + 1]])[0]
+                 for i in range(len(_bi_cu) - 1)],
                 dim=0,
             )
         else:
