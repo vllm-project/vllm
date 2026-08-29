@@ -42,6 +42,8 @@ from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
 
+print(f"[canary] cuda after imports: {torch.cuda.is_initialized()}", flush=True)
+
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
@@ -51,6 +53,9 @@ DEVICES = [
     f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
+
+print(f"[canary] cuda after module consts: {torch.cuda.is_initialized()}", flush=True)
+
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
 REQS_PER_LOGITPROC = 50
@@ -453,13 +458,7 @@ def _min_tokens_validate(
 
 
 def _make_min_tokens_processor() -> MinTokensLogitsProcessor:
-    # This processor ignores vllm_config, and building one here would
-    # initialize CUDA in the pytest process, breaking the forked tests below.
-    return MinTokensLogitsProcessor(
-        None,  # type: ignore[arg-type]
-        torch.device("cpu"),
-        False,
-    )
+    return MinTokensLogitsProcessor(VllmConfig(), torch.device("cpu"), False)
 
 
 def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
@@ -486,6 +485,7 @@ def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
     processor.apply(logits)
 
     assert torch.isneginf(logits).all()
+    print(f"[canary] cuda after test1: {torch.cuda.is_initialized()}", flush=True)
 
 
 def test_min_tokens_restores_all_masked_structured_output_stop_token():
@@ -519,6 +519,7 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token():
 
     assert logits[0, 0] == 1.0
     assert torch.isneginf(logits[0, 1:]).all()
+    print(f"[canary] cuda after test2: {torch.cuda.is_initialized()}", flush=True)
 
 
 def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode():
@@ -557,6 +558,7 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode
     assert logits[1, 0] == 3.0
     assert torch.isneginf(logits[1, 1:]).all()
     assert torch.isneginf(logits[:, 2:]).all()
+    print(f"[canary] cuda after test3: {torch.cuda.is_initialized()}", flush=True)
 
 
 def _thinking_budget_params(kwargs: dict) -> None:
