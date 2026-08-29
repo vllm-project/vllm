@@ -600,9 +600,21 @@ def filter_duplicate_safetensors_files(
 
 
 def get_safetensors_index_weights_by_file(
-    hf_folder: str, index_file: str
+    hf_folder: str, index_file: str, hf_weights_files: list[str]
 ) -> dict[str, set[str]] | None:
-    """Return the tensor names assigned to each shard by the index."""
+    """Return per-shard tensor allowlists, but only when the index needs them.
+
+    A safetensors index assigns each tensor name to exactly one shard. Almost
+    every checkpoint stores in each shard exactly the tensors the index assigns
+    to it, and for those this returns ``None`` so that all loader paths keep
+    their current behavior, including the accelerated backends that cannot
+    filter within a shard.
+
+    An allowlist is returned only when a shard actually stores tensors the
+    index did not assign to it, which happens when a checkpoint reuses a shard
+    from another model. Detecting this reads safetensors headers, not tensor
+    data.
+    """
     index_file_name = os.path.join(hf_folder, index_file)
     if not os.path.isfile(index_file_name):
         return None
@@ -614,7 +626,18 @@ def get_safetensors_index_weights_by_file(
     for weight_name, filename in weight_map.items():
         shard_path = os.path.normpath(os.path.join(hf_folder, filename))
         weights_by_file[shard_path].add(weight_name)
-    return dict(weights_by_file)
+
+    for st_file in hf_weights_files:
+        indexed_weights = weights_by_file.get(os.path.normpath(st_file))
+        if indexed_weights is None:
+            # Shard is not covered by the index, so there is nothing to
+            # enforce. Leave the existing behavior untouched.
+            return None
+        with safe_open(st_file, framework="pt") as f:
+            stored_weights = set(f.keys())
+        if stored_weights - indexed_weights:
+            return dict(weights_by_file)
+    return None
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:

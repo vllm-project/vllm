@@ -241,7 +241,9 @@ class DefaultModelLoader(BaseModelLoader):
             )
 
         indexed_weights_by_file = (
-            get_safetensors_index_weights_by_file(hf_folder, index_file)
+            get_safetensors_index_weights_by_file(
+                hf_folder, index_file, hf_weights_files
+            )
             if use_safetensors
             else None
         )
@@ -281,17 +283,19 @@ class DefaultModelLoader(BaseModelLoader):
             )
         elif use_safetensors:
             # fastsafetensors/instanttensor iterators cannot filter tensors
-            # inside a reused shard, so indexed-subset checkpoints must take
-            # the standard filtered iterator to honor the index assignments.
+            # inside a reused shard. `indexed_weights_by_file` is only set when
+            # a shard really does store unindexed tensors, so ordinary indexed
+            # checkpoints keep using these accelerated backends and only
+            # subset checkpoints take the standard filtered iterator.
             use_special_format = self.load_config.load_format in (
                 "fastsafetensors",
                 "instanttensor",
             )
             if use_special_format and indexed_weights_by_file is not None:
                 logger.warning(
-                    "Checkpoint index assigns a subset of stored tensors; "
-                    "falling back from %s to the filtered safetensors "
-                    "iterator.",
+                    "Checkpoint shards store tensors the index does not "
+                    "assign to them; falling back from %s to the filtered "
+                    "safetensors iterator so the index is honored.",
                     self.load_config.load_format,
                 )
                 use_special_format = False
