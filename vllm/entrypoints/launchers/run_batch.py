@@ -10,7 +10,7 @@ from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import BytesIO, StringIO
-from typing import Any, NoReturn, TypeAlias
+from typing import Any, Literal, NoReturn, TypeAlias
 from urllib.parse import urlparse
 
 import aiohttp
@@ -172,7 +172,7 @@ class BatchRequestInput(OpenAIBaseModel):
 
     # The HTTP method to be used for the request. Currently only POST is
     # supported.
-    method: str
+    method: Literal["POST"]
 
     # The OpenAI API relative URL to be used for the request. Currently
     # /v1/chat/completions is supported.

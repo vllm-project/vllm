@@ -153,7 +153,6 @@ INVALID_INPUT_BATCH = "\n".join(
     ]
 )
 
-
 INPUT_EMBEDDING_BATCH = "\n".join(
     json.dumps(req)
     for req in [
@@ -477,6 +476,23 @@ def test_batch_request_invalid_url_reports_validation_error(payload):
         BatchRequestInput.model_validate(payload)
 
     assert any(error["loc"] == ("url",) for error in exc_info.value.errors())
+
+
+def test_batch_request_rejects_unsupported_method():
+    payload = {
+        "custom_id": "request",
+        "method": "GET",
+        "url": "/v1/chat/completions",
+        "body": {
+            "model": "dummy",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        BatchRequestInput.model_validate(payload)
+
+    assert any(error["loc"] == ("method",) for error in exc_info.value.errors())
 
 
 def test_empty_file():
