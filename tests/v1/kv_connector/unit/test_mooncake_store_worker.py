@@ -31,8 +31,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    MooncakeLookupResult,
     PoolKey,
     ReqMeta,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -150,6 +152,7 @@ def _make_load_req(
     *,
     token_len: int,
     vllm_cached_tokens: int = 0,
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = (),
 ) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
@@ -161,6 +164,7 @@ def _make_load_req(
             kvpool_cached_tokens=token_len,
             can_load=True,
             token_len=token_len,
+            tail_key_boundaries=tail_key_boundaries,
         ),
     )
 
@@ -305,15 +309,16 @@ def _patch_worker_runtime(
     local_ip: str = "10.0.0.7",
     tp_rank: int = 0,
     tp_size: int = 1,
+    pcp_size: int = 1,
     dcp_size: int = 1,
 ) -> None:
-    single_rank_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    pcp_group = SimpleNamespace(world_size=pcp_size, rank_in_group=0)
     # DCP groups are contiguous splits of the TP group (see
     # parallel_state.py), so dcp_rank == tp_rank % dcp_size.
     dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=tp_rank % dcp_size)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_rank", lambda: tp_rank)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_world_size", lambda: tp_size)
-    monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
+    monkeypatch.setattr(worker, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
@@ -1433,6 +1438,29 @@ def test_recv_thread_uses_single_batch_when_no_disk_offload_budget(monkeypatch):
     store.batch_get_replica_desc.assert_not_called()
 
 
+def test_recv_thread_keys_chunk_by_lookup_selected_boundary():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, 256]
+    thread = _make_store_recving_thread(store)
+
+    # 32-token hit over 16-token chunks: chunk 1 would default to the hash at
+    # the 32-token boundary (a1); the lookup matched the 48-token one (a2).
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=32,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=48),),
+    )
+
+    thread._handle_request(req)
+
+    keys = store.batch_get_into_multi_buffers.call_args.args[0]
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+    ]
+
+
 def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_TIER_LOG", "1")
     caplog_vllm.set_level(logging.INFO, logger=worker.logger.name)
@@ -1797,6 +1825,59 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
 
     assert isinstance(w.store_replicate_config, fake_replicate_config_cls)
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
+
+
+def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        UniformTypeKVCacheSpecs,
+    )
+
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=4, dcp_size=4)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    inner_specs = {
+        "layer0": FullAttentionSpec(
+            block_size=16, num_kv_heads=8, head_size=64, dtype=None
+        ),
+        "layer1": FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=None
+        ),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs=inner_specs,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(list(inner_specs), uniform_spec)],
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(decode_context_parallel_size=4),
+        kv_cache_config,
+    )
+
+    scaled_spec = w._kv_cache_groups[0].kv_cache_spec
+    assert isinstance(scaled_spec, UniformTypeKVCacheSpecs)
+    assert scaled_spec.block_size == 64
+    assert all(spec.block_size == 64 for spec in scaled_spec.kv_cache_specs.values())
+    assert w.coord.attention_groups[0].spec.block_size == 64
+    assert w.token_dbs[0].block_size == 64
 
 
 @pytest.mark.parametrize("dcp_size", [1, 4])
@@ -2668,12 +2749,12 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     # 33 tokens for two 16-token blocks: the hit stops below the request end,
     # so the full-hit re-derivation stays out of the shard accounting.
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(33, [b"h0", b"h1"]) == 32
+    assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(33, [b"h0", b"h1"]) == 0
+    assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 0
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
@@ -2684,7 +2765,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
 
-    assert worker.lookup(16, [b"a0"]) == 0
+    assert worker.lookup(16, [b"a0"]).hit_length == 0
     assert worker.store.batch_is_exist.call_args.args[0] == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
@@ -2696,7 +2777,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]
-    assert worker.lookup(48, [b"a0", b"a1", b"a2"]) == 32
+    assert worker.lookup(48, [b"a0", b"a1", b"a2"]).hit_length == 32
 
 
 def test_lookup_partial_tail_uses_hash_alignment():
@@ -2736,7 +2817,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
 
-    assert worker.lookup(13, [b"h0", b"h1", b"h2"]) == 12
+    assert worker.lookup(13, [b"h0", b"h1", b"h2"]).hit_length == 12
 
 
 def test_lookup_full_hit_reuses_existing_boundary():
@@ -2744,7 +2825,10 @@ def test_lookup_full_hit_reuses_existing_boundary():
     worker = _make_bare_worker(block_size=16)
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    assert worker.lookup(32, [b"h0", b"h1"]) == 16
+    assert worker.lookup(32, [b"h0", b"h1"]) == MooncakeLookupResult(
+        hit_length=16,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=16),),
+    )
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2765,8 +2849,142 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
     # gives 48; a spurious re-derivation (anchored at 48) would pop again
     # and return 32.
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 48
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 48
     assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        use_eagle=True,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(6)]
+    present = {
+        (0, bytes(hashes[3])),
+        (0, bytes(hashes[5])),
+        (1, bytes(hashes[4])),
+        # A later Mamba state also exists, but its exact hit-boundary hash
+        # must win and therefore needs no override.
+        (1, bytes(hashes[5])),
+    }
+
+    def exists(keys):
+        return [
+            int(
+                any(
+                    f"@group:{group_id}@{block_hash.hex()}" in key
+                    for group_id, block_hash in present
+                )
+            )
+            for key in keys
+        ]
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    result = worker.lookup(25, hashes)
+
+    # The eagle drop trims the hit to 20 tokens, but the block that survives
+    # truncation is the one keyed at the 24-token boundary (hashes[5]), which
+    # the load path cannot derive from hit_length.
+    assert result.hit_length == 20
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=24),
+        TailKeyBoundary(group_id=1, num_tokens=20),
+    )
+
+
+def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(12)]
+    present = {
+        (0, bytes(hashes[3])),
+        (0, bytes(hashes[7])),
+        (0, bytes(hashes[11])),
+        (1, bytes(hashes[4])),
+    }
+
+    def exists(keys):
+        return [
+            int(
+                any(
+                    f"@group:{group_id}@{block_hash.hex()}" in key
+                    for group_id, block_hash in present
+                )
+            )
+            for key in keys
+        ]
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    result = worker.lookup(49, hashes)
+
+    assert result.hit_length == 20
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=32),
+        TailKeyBoundary(group_id=1, num_tokens=20),
+    )
 
 
 def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
@@ -2790,7 +3008,7 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
 
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 0
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 0
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2811,7 +3029,7 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
         hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
-    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]) == 64
+    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 64
 
 
 def test_lookup_checks_all_potential_swa_hit_boundaries():
@@ -2865,7 +3083,7 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
         [f"h{i}".encode() for i in range(12)],
     )
 
-    assert result == 32
+    assert result.hit_length == 32
     keys = worker.store.batch_is_exist.call_args.args[0]
     assert len(keys) == 6
     swa_keys = [key for key in keys if "@group:1@" in key]
@@ -2947,6 +3165,24 @@ def test_consumer_starts_send_thread_only_when_put_is_enabled(save_decode_cache)
     )
     _register_with_mocked_threads(worker, {"layer0": tensor})
     assert (worker.kv_send_thread is not None) == save_decode_cache
+
+
+def test_start_load_kv_queues_async_load():
+    w = _make_bare_worker()
+    req = _make_load_req(
+        "load-req",
+        [b"h0", b"h1"],
+        token_len=32,
+    )
+    assert req.load_spec is not None
+    req.load_spec.token_len = 0
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+
+    w.start_load_kv(meta)
+
+    assert req.load_spec.token_len == 32
+    assert w.recv_request_queue.get_nowait() is req
 
 
 def test_putting_consumer_queues_decode_save():
@@ -3385,7 +3621,7 @@ def test_lookup_records_mooncake_metrics():
     result = worker.lookup(33, [b"a0", b"a1"])
     stats = worker.get_kv_connector_stats()
 
-    assert result == 32
+    assert result.hit_length == 32
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2

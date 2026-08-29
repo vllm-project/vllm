@@ -109,11 +109,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     f"{cache_block_size} (mamba_cache_mode != 'align')"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.transfer_groups) > 1 and pcp * dcp > 1:
-            unsupported.append(
-                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
-            )
+        if len(kv_cache_config.transfer_groups) > 1 and pcp > 1:
+            unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
                 "MooncakeStoreConnector does not support: " + "; ".join(unsupported)
