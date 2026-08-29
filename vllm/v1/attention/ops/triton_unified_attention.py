@@ -289,6 +289,7 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    REORDER_CAUSAL_PREFILL: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -302,8 +303,27 @@ def kernel_unified_attention(
             "USE_TD requires BLOCK_SIZE to be a multiple of TILE_SIZE",
         )
 
-    q_block_global_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
+    tl.static_assert(
+        not REORDER_CAUSAL_PREFILL
+        or (
+            USE_CAUSAL
+            and not USE_PER_SEQ_CAUSAL
+            and not USE_MM_PREFIX
+            and not USE_R_SWA
+            and SLIDING_WINDOW <= 0
+            and CHUNK_LOOKBACK < 0
+            and not IS_3D
+        )
+    )
+
+    if REORDER_CAUSAL_PREFILL:
+        linear_program_idx = tl.program_id(0)
+        num_kv_heads = num_query_heads // num_queries_per_kv
+        q_block_global_idx = linear_program_idx // num_kv_heads
+        kv_head_idx = linear_program_idx % num_kv_heads
+    else:
+        q_block_global_idx = tl.program_id(0)
+        kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2) if IS_3D else 0
 
     (
@@ -318,6 +338,13 @@ def kernel_unified_attention(
 
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
+
+    # Later causal query blocks have longer KV prefixes. Launch them first
+    # within each sequence and keep equal-cost KV-head programs adjacent to
+    # reduce the long-running launch tail.
+    if REORDER_CAUSAL_PREFILL:
+        num_local_q_blocks = cdiv_fn(cur_batch_query_len, BLOCK_Q)
+        q_block_local_idx = num_local_q_blocks - 1 - q_block_local_idx
 
     if IS_3D:
         tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
@@ -847,6 +874,8 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
+    # Reverse q-blocks per sequence and make KV head the fastest grid index.
+    reorder_causal_prefill: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -1049,6 +1078,16 @@ def unified_attention(
         or is_batch_invariant
     )
 
+    reorder_causal_prefill = (
+        reorder_causal_prefill
+        and use_causal
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
+        and sliding_window_val <= 0
+        and chunk_lookback < 0
+        and not use_3d
+    )
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
     # caches and their strides are passed as ``None`` when the
@@ -1075,7 +1114,11 @@ def unified_attention(
 
     grid: tuple[Any, ...]
     if not use_3d:
-        grid = (total_num_q_blocks, num_kv_heads)
+        grid = (
+            (total_num_q_blocks * num_kv_heads,)
+            if reorder_causal_prefill
+            else (total_num_q_blocks, num_kv_heads)
+        )
         tile_size = TILE_SIZE_PREFILL
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
@@ -1163,6 +1206,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        REORDER_CAUSAL_PREFILL=reorder_causal_prefill,
         **launch_kwargs,
     )
 

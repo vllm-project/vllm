@@ -66,6 +66,8 @@ class TritonAttentionMetadata:
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
+    # Host-side phase decision; the wrapper also applies kernel eligibility.
+    reorder_causal_prefill: bool
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
@@ -175,6 +177,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         self.rswa_window = model_config.rswa_window
         self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        self.reorder_causal_prefill = envs.VLLM_TRITON_ATTN_PREFILL_REORDER
         if self.rswa_window is not None:
             self.persistent_rswa_prefix_lens = torch.empty(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -186,6 +189,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
+        # Launch order is a host-side choice frozen into a full CUDA graph.
+        # Capture the original mapping; eager and piecewise runs classify each
+        # real batch independently.
+        attn_metadata.reorder_causal_prefill = False
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
@@ -201,6 +208,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+
+        reorder_causal_prefill = False
+        if self.reorder_causal_prefill and max_query_len > 1:
+            is_prefilling = common_attn_metadata.is_prefilling
+            # Do not infer phase from query length: speculative verification
+            # can schedule multiple query tokens in a decode-only batch.
+            if is_prefilling is not None:
+                assert is_prefilling.device.type == "cpu", (
+                    "CommonAttentionMetadata.is_prefilling must be a CPU tensor"
+                )
+                reorder_causal_prefill = bool(is_prefilling[:num_reqs].any().item())
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
@@ -228,6 +246,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
+            reorder_causal_prefill=reorder_causal_prefill,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
@@ -686,6 +705,7 @@ class TritonAttentionImpl(AttentionImpl):
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
             ),
+            reorder_causal_prefill=attn_metadata.reorder_causal_prefill,
         )
 
         return output

@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
+    VLLM_TRITON_ATTN_PREFILL_REORDER: bool = False
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -628,6 +629,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
+    ),
+    # Reorder independent causal prefill programs in Triton unified attention.
+    # Disabled by default because performance is workload and device dependent.
+    "VLLM_TRITON_ATTN_PREFILL_REORDER": lambda: bool(
+        int(os.getenv("VLLM_TRITON_ATTN_PREFILL_REORDER", "0"))
     ),
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
