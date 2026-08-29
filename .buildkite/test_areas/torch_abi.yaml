@@ -1,6 +1,6 @@
 group: Torch ABI
 depends_on:
-  - image-build
+  - image-build-cpu
 steps:
 - label: ":nvidia: (L4) Torch Stable ABI Audit"
   key: torch-stable-abi-audit

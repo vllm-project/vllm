@@ -1,6 +1,6 @@
 group: CRCR Report
 depends_on:
-  - image-build
+  - image-build-cpu
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
