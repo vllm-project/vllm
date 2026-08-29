@@ -87,13 +87,24 @@ class EngineCoreSentinel:
 
         engine = self.engine
         ft_config = self.parallel_config.fault_tolerance_config
+        skipped_reqs = list(engine.scheduler.skipped_waiting)
+        if skipped_reqs:
+            skipped_req_ids = [req.request_id for req in skipped_reqs]
+            aborted = engine.scheduler.finish_requests(
+                skipped_req_ids, RequestStatus.FINISHED_ABORTED
+            )
+            for req in aborted:
+                engine.scheduler._free_request_blocks(req)
+                engine.scheduler.requests.pop(req.request_id, None)
+            engine._send_abort_outputs(aborted)
+
         if ft_config.resume_requests_after_recovery:
             timestamp = time.monotonic()
             while engine.scheduler.running:
                 request = engine.scheduler.running.pop()
-                engine.scheduler._preempt_request(request, timestamp)
-                request.async_tokens_to_discard = request.num_output_placeholders
-                request.num_output_placeholders = 0
+                engine.scheduler._preempt_request(
+                    request, timestamp, drop_stale_output=True
+                )
             engine.scheduler.prev_step_scheduled_req_ids.clear()
         else:
             aborted = engine.scheduler.finish_requests(
