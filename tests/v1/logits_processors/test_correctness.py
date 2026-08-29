@@ -47,33 +47,32 @@ def _canary(tag: str) -> None:
     """Report CUDA state at both torch and driver level.
 
     ``torch.cuda.is_initialized()`` only tracks torch's own lazy init, so it
-    misses a driver context created by any other library.
+    misses a driver context created by any other library. Open ``/dev/nvidia*``
+    descriptors detect such a context without needing NVML permissions.
     """
     import os
 
-    driver_ctx: object = "unknown"
+    nvidia_fds = set()
     try:
-        from vllm.utils.import_utils import import_pynvml
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                continue
+            if "nvidia" in target:
+                nvidia_fds.add(target)
+    except OSError:
+        nvidia_fds.add("unreadable")
 
-        pynvml = import_pynvml()
-        pynvml.nvmlInit()
-        try:
-            pid = os.getpid()
-            driver_ctx = any(
-                proc.pid == pid
-                for i in range(pynvml.nvmlDeviceGetCount())
-                for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(
-                    pynvml.nvmlDeviceGetHandleByIndex(i)
-                )
-            )
-        finally:
-            pynvml.nvmlShutdown()
-    except Exception as e:  # noqa: BLE001
-        driver_ctx = f"err:{type(e).__name__}"
+    try:
+        num_threads = len(os.listdir("/proc/self/task"))
+    except OSError:
+        num_threads = -1
 
     print(
         f"[canary] {tag}: torch={torch.cuda.is_initialized()} "
-        f"driver_ctx={driver_ctx} pid={os.getpid()}",
+        f"nvidia_fds={sorted(nvidia_fds)} threads={num_threads} "
+        f"pid={os.getpid()}",
         flush=True,
     )
 
