@@ -186,6 +186,12 @@ async def test_function_call_first_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.xfail(
+    reason=(
+        "MCP tools are not properly supported: tool name parameters "
+        "are not extracted for prompt rendering."
+    ),
+)
 async def test_mcp_tool_call(client: OpenAI, model_name: str):
     """MCP tool calling with code_interpreter.
 

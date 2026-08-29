@@ -61,6 +61,9 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
   large prefills do not exceed the owner's SSD-write budget. Set this together
   with the matching `--enable_offload=true` flag on `mooncake_master` and on
   the external `mooncake_client` (if any).
+- `tenant_id`: Optional Mooncake tenant namespace. Producers and consumers
+  that should share store data must use the same tenant id. Default:
+  `"default"`.
 
 Set the config path via environment variable:
 
@@ -133,6 +136,25 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     }'
 ```
 
+To also offload newly completed decode KV blocks, add the following extra
+configuration to the decoder's `MooncakeStoreConnector` entry. This currently
+requires the prefill and decode instances to use the same tensor-parallel size
+and compatible KV-cache topology.
+
+When decode processing starts, the consumer checks the block-aligned prompt
+prefix and fills any blocks missing from the Store. Subsequent saves append
+newly completed decode blocks. This keeps a complete, reusable prefix in the
+Store and also covers deployments where prompt KV is delivered directly by
+`MooncakeConnector` instead of through the Store.
+
+```json
+{
+    "kv_connector_extra_config": {
+        "save_decode_cache": true
+    }
+}
+```
+
 **Proxy:**
 
 A disaggregation proxy is required to route requests between prefiller and decoder nodes. The proxy assigns `do_remote_prefill=True` / `do_remote_decode=True` to coordinate P2P transfer via `MooncakeConnector`. Refer to the [MooncakeConnector usage guide](mooncake_connector_usage.md) for proxy setup details.
@@ -181,6 +203,26 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+### Tenant Isolation
+
+Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
+
+```json
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "127.0.0.1:50051",
+  "global_segment_size": "80GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "",
+  "enable_offload": false,
+  "tenant_id": "tenant-a"
+}
+```
+
+Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -204,18 +246,23 @@ the vLLM JSON config.
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
-- `enable_cross_layers_blocks` (bool): Enable cross-layer block packing for reduced store operations. Default: `false`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+
+Decode offloading uses the existing TP-rank key namespace. Cross-TP sharing is
+not yet supported.
 
 ## Notes
 
 ### Reproducible Block Hashes Across Processes
 
-The `MooncakeStoreConnector` relies on consistent block hashes across all vLLM processes sharing the distributed store. Because Python randomizes its hash seed per process by default, identical prompts can produce different block hashes on different processes — preventing cross-process prefix cache hits.
+The `MooncakeStoreConnector` relies on consistent block hashes across all vLLM processes sharing the distributed store. Block hashes chain from `NONE_HASH`, which is derived from a fixed default seed, so identical prompts produce identical block hashes across processes by default — enabling cross-process prefix cache hits without extra configuration.
 
-Set a fixed `PYTHONHASHSEED` on every instance that shares the store (DP ranks, separate prefiller/decoder nodes, and any other vLLM process pointed at the same Mooncake store):
+The exception is the non-cryptographic `xxhash`/`xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process; sharing a store with those requires `PYTHONHASHSEED`.
+
+To use a custom shared seed, set the same `PYTHONHASHSEED` on every instance that shares the store (DP ranks, separate prefiller/decoder nodes, and any other vLLM process pointed at the same Mooncake store):
 
 ```bash
-PYTHONHASHSEED=0 vllm serve ...
+PYTHONHASHSEED=<shared-value> vllm serve ...
 ```

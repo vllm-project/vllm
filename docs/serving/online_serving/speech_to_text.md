@@ -64,7 +64,8 @@ The Transcriptions API supports uploading audio files in various formats includi
 - `model`: The model to use for transcription (required)
 - `language`: The language code (e.g., "en", "zh") (optional)
 - `prompt`: Optional text to guide the transcription style (optional)
-- `response_format`: Format of the response ("json", "text") (optional)
+- `response_format`: Format of the response ("json", "text", "verbose_json", or
+  "diarized_json") (optional)
 - `temperature`: Sampling temperature between 0 and 1 (optional)
 
 For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/speech_to_text/transcription/protocol.py).
@@ -97,6 +98,29 @@ For `verbose_json` response format:
     }
     ```
 Currently “verbose_json” response format doesn’t support no_speech_prob.
+
+For models with diarization support, `diarized_json` returns OpenAI-compatible
+speaker segments. Currently, this is supported by
+`OpenMOSS-Team/MOSS-Transcribe-Diarize`.
+
+```json
+{
+  "task": "transcribe",
+  "duration": 6.1,
+  "text": "Hello. Hi, how are you?",
+  "segments": [
+    {
+      "type": "transcript.text.segment",
+      "id": "segment_0",
+      "start": 0.0,
+      "end": 2.8,
+      "text": "Hello.",
+      "speaker": "S01"
+    }
+  ],
+  "usage": {"type": "duration", "seconds": 7}
+}
+```
 
 ### Extra Parameters
 

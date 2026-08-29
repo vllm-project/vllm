@@ -32,6 +32,7 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"audio": MAXIMUM_AUDIOS}),
+        "--no-enable-prefix-caching",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

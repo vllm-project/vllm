@@ -28,15 +28,14 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
-    phys_shadow,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -85,6 +84,10 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     def get_impl_cls() -> type[MLAAttentionImpl]:
         return FlashInferMLASparseImpl
 
+    @staticmethod
+    def get_builder_cls() -> type["FlashInferMLASparseTRTLLMMetadataBuilder"]:
+        return FlashInferMLASparseTRTLLMMetadataBuilder
+
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major == 10
@@ -123,20 +126,6 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
             if not hasattr(hf_text_config, "index_topk"):
                 return "FlashInfer MLA Sparse requires model with index_topk config"
         return None
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
 
 class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
@@ -217,23 +206,6 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
                 )
         return None
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str in ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla"):
-            # fp8_ds_mla packed layout: 512 NoPE + 16 scales + 128 RoPE.
-            return (num_blocks, block_size, 656)
-        return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return None
-
 
 @dataclass
 class FlashInferMLASparseMetadata(AttentionMetadata):
@@ -292,6 +264,18 @@ class FlashInferMLASparseMetadataBuilder(
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
+
+
+class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
+    """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+    def _build_req_id_per_token(
+        self,
+        common_attn_metadata: "CommonAttentionMetadata",
+    ) -> torch.Tensor:
+        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
 
 
 # Global workspace buffer (lazily initialized)
@@ -405,36 +389,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
             )
-        elif (shadow := phys_shadow(self.topk_indices_buffer)) is not None:
-            # skip_topk layers reuse the previous fresh layer's PHYSICAL
-            # indices: the logical top-k indices are shared (one buffer for
-            # the whole forward) and block_table/req_id are per-step constant,
-            # so re-converting them per layer produces identical output. This
-            # covers both the backbone (index_topk_freq > 1) and MTP draft
-            # steps 1+ (index_share_for_mtp_iteration sets skip_topk; the
-            # draft compact re-arranges the shadow together with the logical
-            # buffer). The fresh/skip split is fixed per captured graph, so
-            # the branch is cudagraph-safe.
-            phys_buf, seq_buf = shadow
-            wrote_fresh = getattr(layer, "indexer", None) is not None and not getattr(
-                layer, "skip_topk", False
-            )
-            if wrote_fresh:
-                topk_indices_physical, seq_lens = (
-                    triton_convert_req_index_to_global_index(
-                        attn_metadata.req_id_per_token[:num_actual_toks],
-                        attn_metadata.block_table,
-                        topk_indices,
-                        BLOCK_SIZE=attn_metadata.block_size,
-                        NUM_TOPK_TOKENS=topk_indices.shape[1],
-                        return_valid_counts=True,
-                        out=phys_buf[:num_actual_toks],
-                        valid_counts_out=seq_buf[:num_actual_toks],
-                    )
-                )
-            else:
-                topk_indices_physical = phys_buf[:num_actual_toks]
-                seq_lens = seq_buf[:num_actual_toks]
         else:
             topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],

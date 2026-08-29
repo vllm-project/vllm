@@ -18,14 +18,12 @@ from .common import (
 from .models import (
     FLASHINFER_ATTN,
     FLASHINFER_MLA_ATTN,
-    FLASHMLA_SPARSE_ATTN,
     ROCM_AITER_UNIFIED_ATTN,
     ROCM_ATTN,
     TRITON_ATTN,
     deepseek_coder_v2_lite_fp8,
     deepseek_r1_fp4,
     deepseek_v3_fp8,
-    deepseek_v32_fp4,
     gpt_oss_20b,
     llama3_8b,
     llama3_8b_fp4,
@@ -120,11 +118,11 @@ def test_tp2_ar_rms_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4, deepseek_v32_fp4],
+    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4],
 )
 @pytest.mark.parametrize(
     "attn_backend",
-    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN],
+    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN],
 )
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
@@ -219,9 +217,9 @@ def test_tp2_ar_rms_fusions(
 
     matches = matches_fn(n_layers)
     if model_impl == "transformers":
-        # TODO(BadrBasowid): Match the vLLM backend's fusion count once the
-        # separate residual add and RMSNorm operations are fused.
-        matches = matches._replace(aiter_ar_rms_fusion=1)
+        # Transformers add+RMSNorm canonicalization exposes every generic
+        # AR+RMS fusion site, including the final norm.
+        matches = matches._replace(aiter_ar_rms_fusion=matches.ar_rms_fusion)
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)

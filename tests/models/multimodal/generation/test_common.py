@@ -30,7 +30,6 @@ from ....conftest import (
     VllmRunner,
 )
 from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
-from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
 from .vlm_utils.types import (
@@ -234,7 +233,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "default_torch_num_threads": 1,
         },
         marks=[pytest.mark.core_model],
     ),
@@ -250,10 +248,7 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        marks=[
-            pytest.mark.core_model,
-            *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
-        ],
+        marks=[pytest.mark.core_model],
     ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
@@ -283,19 +278,8 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            # TODO: [ROCm] Revert this once issue #30167 is resolved
-            **(
-                {
-                    "mm_processor_kwargs": {
-                        "min_pixels": 256 * 28 * 28,
-                        "max_pixels": 1280 * 28 * 28,
-                    },
-                }
-                if current_platform.is_rocm()
-                else {}
-            ),
         },
-        marks=[large_gpu_mark(min_gb=80 if current_platform.is_rocm() else 32)],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
@@ -335,20 +319,6 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
         # FIXME: https://github.com/huggingface/transformers/pull/38510
         marks=[pytest.mark.skip("Model is broken")],
-    ),
-    "chameleon": VLMTestInfo(
-        models=["facebook/chameleon-7b"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        # For chameleon, we only compare the sequences
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
-        max_tokens=8,
-        dtype="bfloat16",
     ),
     "cosmos3": VLMTestInfo(
         models=["nvidia/Cosmos3-Nano"],
@@ -950,17 +920,6 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
-    "chameleon-broadcast": VLMTestInfo(
-        models=["facebook/chameleon-7b"],
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        max_model_len=4096,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
-        marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
-    ),
     "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
@@ -1242,7 +1201,7 @@ def test_custom_inputs_models(
         create_new_process_for_each_test=True,
     ),
 )
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_single_image_models_heavy(
     tmp_path: PosixPath,
     model_type: str,

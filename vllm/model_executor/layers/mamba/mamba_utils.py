@@ -136,6 +136,15 @@ class MambaStateDtypeCalculator:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, torch.float32)
 
+    @classmethod
+    def append_kda_recoverssm_record(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (*base_dtypes, torch.float32, activation_dtype)
+
 
 class MambaStateShapeCalculator:
     @classmethod
@@ -144,7 +153,7 @@ class MambaStateShapeCalculator:
         num_heads: int,
         tp_size: int,
         head_dim: int,
-    ) -> tuple[tuple[int, int, int], ...]:
+    ) -> tuple[tuple[int, int, int]]:
         state_shape = (num_heads // tp_size, head_dim, head_dim)
         return (state_shape,)
 
@@ -226,9 +235,10 @@ class MambaStateShapeCalculator:
         tp_world_size: int,
         intermediate_size: int,
         conv_kernel: int,
+        num_spec: int = 0,
     ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
-        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
+        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1 + num_spec)
         return (conv_state_shape,)
 
     @classmethod
@@ -288,10 +298,31 @@ class MambaStateShapeCalculator:
 
         conv_dim = proj_size + 2 * proj_k_size
         conv_state_shape = cls._orient_conv_shape(
-            divide(conv_dim, tp_world_size), conv_kernel_size - 1
+            divide(conv_dim, tp_world_size), conv_kernel_size - 1 + num_spec
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
+
+    @classmethod
+    def append_kda_recoverssm_record(
+        cls,
+        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
+        num_heads: int,
+        head_dim: int,
+        tp_world_size: int,
+        spec_query_len: int,
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]:
+        local_num_heads = divide(num_heads, tp_world_size)
+        return (
+            *base_shapes,
+            (local_num_heads, spec_query_len, head_dim),
+            (local_num_heads, spec_query_len, 2 * head_dim),
+        )
 
 
 @dataclass

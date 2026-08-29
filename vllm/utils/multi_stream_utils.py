@@ -8,10 +8,6 @@ from typing import Any
 import torch
 
 
-class AuxStreamType(Enum):
-    Attention = 1
-
-
 class EventType(Enum):
     Main = 0
     Attention = 1
@@ -27,8 +23,9 @@ def maybe_execute_in_parallel(
     """Run two functions potentially in parallel on separate CUDA streams.
 
     When aux_stream is provided, fn0 runs on the current (default) stream and
-    fn1 runs on aux_stream, synchronized via CUDA events.  When aux_stream is
-    None, both functions execute sequentially on the current stream.
+    fn1 runs on aux_stream, synchronized via CUDA events. When aux_stream is
+    None or a breakable CUDA graph capture is active, both functions execute
+    sequentially on the current stream.
 
     This design follows TensorRT-LLM's maybe_execute_in_parallel pattern
     (tensorrt_llm/_torch/modules/multi_stream_utils.py).
@@ -39,11 +36,18 @@ def maybe_execute_in_parallel(
         event0: CUDA event recorded before fn0 so aux_stream can wait.
         event1: CUDA event recorded after fn1 so default stream can wait.
         aux_stream: The second CUDA stream for fn1.
-            Multi-stream is disabled when aux_stream is None.
+            Multi-stream is disabled when aux_stream is None or a breakable
+            CUDA graph capture is active.
 
     Returns:
         Tuple of (fn0_result, fn1_result).
     """
+    if aux_stream is not None:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+        if BreakableCUDAGraphCapture.is_active():
+            aux_stream = None
+
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
