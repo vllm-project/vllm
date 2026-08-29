@@ -68,7 +68,9 @@ class RelPositionalEncoding(nn.Module):
 
         pe_positive = torch.flip(pe_positive, [0]).unsqueeze(0)
         pe_negative = pe_negative[1:].unsqueeze(0)
-        self.pe = torch.cat([pe_positive, pe_negative], dim=1)
+        self.register_buffer(
+            "pe", torch.cat([pe_positive, pe_negative], dim=1), persistent=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Tmax = 2 * max_len - 1

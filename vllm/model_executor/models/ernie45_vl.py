@@ -343,8 +343,12 @@ class Ernie4_5_VisionPatchEmbed(nn.Module):
 class Ernie4_5_VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        self.inv_freq = 1.0 / theta ** (
-            torch.arange(start=0, end=dim, step=2, dtype=torch.float32) / dim
+        self.register_buffer(
+            "inv_freq",
+            1.0
+            / theta
+            ** (torch.arange(start=0, end=dim, step=2, dtype=torch.float32) / dim),
+            persistent=False,
         )
 
     def forward(self, seqlen: int) -> torch.Tensor:
@@ -1452,11 +1456,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                 ]
                 if token_id is not None
             ]
-            self._visual_token_ids_tensor_cache = torch.tensor(
+            visual_token_ids_tensor_cache = torch.tensor(
                 visual_token_ids, dtype=torch.long
             )
         else:
-            self._visual_token_ids_tensor_cache = None
+            visual_token_ids_tensor_cache = None
+        self.register_buffer(
+            "_visual_token_ids_tensor_cache",
+            visual_token_ids_tensor_cache,
+            persistent=False,
+        )
 
     def compute_logits(
         self,
