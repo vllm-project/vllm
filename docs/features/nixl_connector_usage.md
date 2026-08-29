@@ -437,7 +437,17 @@ counted separately via Prometheus (see
 | `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
 
+### Metrics Aggregation Semantics
+
+When running in distributed serving modes (e.g. Tensor Parallelism (TP) > 1 or Pipeline Parallelism (PP) > 1):
+
+- **Worker-to-Engine Aggregation**: Each worker process independently collects and emits its local `KVConnectorStats` during its forward/transfer iterations via `KVConnectorOutput`.
+- **KVOutputAggregator**: The engine's `KVOutputAggregator` collects these stats from all active ranks and applies multi-rank reduction (summing counts/bytes and averaging latencies across participating ranks).
+- **Periodic Interval Reset**: The summary log line (`KV Transfer metrics: ...`) calculates metrics over the specific reporting interval (defined by `--log-stats-interval`, default 10s) and resets counters at each interval to give real-time windowed throughput and latency figures.
+- **Prometheus Counters vs Log Window**: Unlike the windowed log summaries, Prometheus counters (such as `vllm:nixl_num_failed_transfers` and `vllm:nixl_num_kv_expired_reqs`) are monotonic cumulative metrics tracking the entire lifetime of the engine instance.
+
 ### Prometheus metrics
+
 
 In addition to the periodic log line, the following Prometheus metrics are
 exported when NixlConnector is active:
