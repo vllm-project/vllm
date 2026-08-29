@@ -18,6 +18,22 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 DEVICE_TYPE = current_platform.device_type
 
 
+def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
+    """Wake discarded allocations with deterministic nonzero contents."""
+    original_create_and_map = cumem.create_and_map
+
+    def create_and_map_with_poison(handle) -> None:
+        original_create_and_map(handle)
+        _, size, ptr, _ = handle
+        cumem.libcudart.cudaMemset(ptr, byte_value, size)
+
+    cumem.create_and_map = create_and_map_with_poison
+    try:
+        allocator.wake_up()
+    finally:
+        cumem.create_and_map = original_create_and_map
+
+
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_python_error():
     """
@@ -108,6 +124,28 @@ def test_discard_tags():
     allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_level2_discards_ordinary_tensor_with_weights_tag():
+    """Reproduce the level-2 variant for an ordinary tensor in weights."""
+    allocator = get_mem_allocator_instance()
+
+    with allocator.use_memory_pool("weights"):
+        fake_weight = torch.full((4096,), 0x44, dtype=torch.uint8, device=DEVICE_TYPE)
+        ordinary_tensor = torch.full(
+            (4096,), 0x55, dtype=torch.uint8, device=DEVICE_TYPE
+        )
+
+    pointers = (fake_weight.data_ptr(), ordinary_tensor.data_ptr())
+    allocator.sleep(offload_tags=())
+    _wake_up_with_poisoned_mappings(allocator)
+    torch.accelerator.synchronize()
+
+    assert (fake_weight.data_ptr(), ordinary_tensor.data_ptr()) == pointers
+    assert torch.all(fake_weight == 0xA5)
+    assert torch.all(ordinary_tensor == 0xA5)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

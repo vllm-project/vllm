@@ -114,8 +114,10 @@ class Gemma3nAltUp(nn.Module):
             hidden_size=hidden_size,
             eps=rms_norm_eps,
         )
-        self.router_input_scale = torch.tensor(
-            hidden_size**-1.0, dtype=self.modality_router.weight.dtype
+        self.register_buffer(
+            "router_input_scale",
+            torch.tensor(hidden_size**-1.0, dtype=self.modality_router.weight.dtype),
+            persistent=False,
         )
         self.correct_output_scale = nn.Parameter(
             torch.zeros(hidden_size, dtype=torch.float32)
@@ -597,9 +599,13 @@ class Gemma3nSelfDecoder(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
-        self.embed_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+        self.register_buffer(
+            "embed_scale",
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
+            persistent=False,
         )
         # Additional per-layer embeddings (PLE)
         self.embed_tokens_per_layer = VocabParallelEmbedding(
@@ -608,9 +614,13 @@ class Gemma3nSelfDecoder(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.per_layer_embed_tokens",
         )
-        self.embed_scale_per_layer = torch.tensor(
-            config.hidden_size_per_layer_input**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+        self.register_buffer(
+            "embed_scale_per_layer",
+            torch.tensor(
+                config.hidden_size_per_layer_input**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
+            persistent=False,
         )
         self.per_layer_model_projection = ColumnParallelLinear(
             config.hidden_size,
@@ -625,12 +635,18 @@ class Gemma3nSelfDecoder(nn.Module):
             hidden_size=config.hidden_size_per_layer_input,
             eps=config.rms_norm_eps,
         )
-        self.per_layer_input_scale = torch.rsqrt(torch.tensor(2.0)).to(
-            self.embed_tokens.weight.dtype
+        self.register_buffer(
+            "per_layer_input_scale",
+            torch.rsqrt(torch.tensor(2.0)).to(self.embed_tokens.weight.dtype),
+            persistent=False,
         )
-        self.per_layer_projection_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+        self.register_buffer(
+            "per_layer_projection_scale",
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
+            persistent=False,
         )
         self.altup_projections = nn.ModuleList(
             [
