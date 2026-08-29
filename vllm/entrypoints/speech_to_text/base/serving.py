@@ -124,7 +124,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         self.enable_force_include_usage = enable_force_include_usage
 
-        self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
         if self.model_cls.supports_segment_timestamp:
@@ -273,13 +272,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             if request.to_language
             else None
         )
-
-        if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise VLLMValidationError(
-                "Maximum file size exceeded",
-                parameter="audio_filesize_mb",
-                value=len(audio_data) / 1024**2,
-            )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)

@@ -26,7 +26,7 @@
 
 import functools
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch import nn
@@ -321,6 +321,14 @@ class InternS1ProMoeAttention(nn.Module):
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
+        attn_kwargs: dict[str, Any] = (
+            {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
+            if dual_chunk_attention_config
+            else {}
+        )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -329,12 +337,7 @@ class InternS1ProMoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attn_kwargs,
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -481,7 +484,7 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -489,6 +492,9 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 
 class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
+    language_model: InternS1ProMoeLLMForCausalLM
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -538,8 +544,8 @@ class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
 class InternS1ProForConditionalGeneration(
     Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
-    is_3d_moe_weight: bool = True
-    packed_modules_mapping = {
+    is_3d_moe_weight: ClassVar[bool] = True
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -559,7 +565,7 @@ class InternS1ProForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -601,8 +607,8 @@ class InternS1ProForConditionalGeneration(
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
-    def get_frope_params_map(self) -> str:
-        mapper = {}
+    def get_frope_params_map(self) -> dict[str, str]:
+        mapper: dict[str, str] = {}
         for name, params in self.language_model.model.named_parameters():
             if "rotary_emb.sin_coef" in name:
                 mapper["language_model.model.rotary_emb.sin_coef"] = (
@@ -616,17 +622,18 @@ class InternS1ProForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """load weights"""
-        skip_prefixes = ["model.time_series."]
+        orig_to_new_prefix: dict[str, str | None] = {
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.time_series.": None,
+        }
         if self.visual is None:
-            skip_prefixes.append("visual.")
+            orig_to_new_prefix["visual."] = None
         # FIXME(Isotr0py): See if we can avoid tighing FoPE to PP layers
         weights_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "model.visual.": "visual.",
-                "lm_head.": "language_model.lm_head.",
-                "model.language_model.": "language_model.model.",
-            },
+            orig_to_new_prefix=orig_to_new_prefix,
             orig_to_new_suffix=self.get_frope_params_map(),
         )
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=weights_mapper)

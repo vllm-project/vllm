@@ -137,6 +137,18 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # No fused XPU kernel for XD-sectioned RoPE; the base
+        # RotaryEmbedding.forward_xpu calls the generic C++ kernel, which
+        # rejects the 2-D [4, num_tokens] xdrope positions. Use the native path.
+        return self.forward_native(positions, query, key, offsets)
+
     @staticmethod
     def get_next_input_positions(
         context_len: int,
