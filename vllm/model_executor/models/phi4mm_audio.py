@@ -522,7 +522,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         seq_len: int,
         batch_size: int,
         chunk_size: int | list[int],
-        left_chunk: int | list[int],
+        left_chunk: int | list[int] | None,
     ) -> torch.Tensor:
         chunk_size_train_eff, left_chunk_train_eff = self._chunk_size_selection(
             chunk_size, left_chunk
@@ -562,7 +562,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         xs_pad: torch.Tensor,
         masks: torch.Tensor,
         chunk_size_nc: int | list[int],
-        left_chunk_nc: int | list[int],
+        left_chunk_nc: int | list[int] | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -639,7 +639,6 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             hs_mask = streaming_mask
 
         if chunk_size_nc is not None:
-            assert left_chunk_nc is not None
             enc_streaming_mask_nc = self._streaming_mask(
                 seq_len, batch_size, chunk_size_nc, left_chunk_nc
             )

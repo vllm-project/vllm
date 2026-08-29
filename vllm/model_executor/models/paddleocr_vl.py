@@ -1031,16 +1031,14 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             feature_data = mm_feature.data
             assert feature_data is not None
             if mm_feature.modality == "image":
-                grid_item = feature_data.get("image_grid_thw")
-                assert grid_item is not None
+                grid_item = feature_data["image_grid_thw"]
                 grid_data = grid_item.data
                 assert isinstance(grid_data, torch.Tensor)
                 t, h, w = grid_data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
             elif mm_feature.modality == "video":
-                grid_item = feature_data.get("video_grid_thw")
-                assert grid_item is not None
+                grid_item = feature_data["video_grid_thw"]
                 grid_data = grid_item.data
                 assert isinstance(grid_data, torch.Tensor)
                 t, h, w = grid_data.tolist()

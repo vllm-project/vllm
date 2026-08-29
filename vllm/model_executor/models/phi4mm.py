@@ -900,13 +900,13 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             assert isinstance(data, (list, np.ndarray, torch.Tensor))
             audio_data.append(data)
 
-        processor_data = dict(mm_data)
+        processor_data = dict(text=prompt_text, **mm_data)
         if audio_data:
             processor_data["audios"] = [(data, sr) for data in audio_data]
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **processor_data),
+            processor_data,
             hf_processor_mm_kwargs,
         )
 
