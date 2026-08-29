@@ -453,7 +453,13 @@ def _min_tokens_validate(
 
 
 def _make_min_tokens_processor() -> MinTokensLogitsProcessor:
-    return MinTokensLogitsProcessor(VllmConfig(), torch.device("cpu"), False)
+    # This processor ignores vllm_config, and building one here would
+    # initialize CUDA in the pytest process, breaking the forked tests below.
+    return MinTokensLogitsProcessor(
+        None,  # type: ignore[arg-type]
+        torch.device("cpu"),
+        False,
+    )
 
 
 def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
