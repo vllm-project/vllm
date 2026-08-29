@@ -111,7 +111,7 @@ from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -1140,6 +1140,28 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
         video_max_pixels = video_size["longest_edge"]
+
+        # With the HF processor's per-frame pixel cap enabled
+        # (cap_pixels_per_frame, huggingface/transformers#48071), a 2-frame
+        # dummy is processed at only 2 * cap pixels, so memory profiling
+        # underestimates the largest possible item: a fully sampled video
+        # still reaches the whole longest_edge budget. Spread the budget
+        # over enough frames that the cap is not binding for the dummy.
+        # This takes precedence over a shrinking num_frames override, which
+        # would otherwise reintroduce the under-profiling.
+        if mm_kwargs.get("cap_pixels_per_frame"):
+            max_video_tokens = mm_kwargs.get(
+                "max_video_tokens",
+                getattr(video_processor, "max_video_tokens", 768),
+            )
+            patch_size = mm_kwargs.get("patch_size", video_processor.patch_size)
+            merge_size = mm_kwargs.get("merge_size", video_processor.merge_size)
+            per_frame_cap = max_video_tokens * (patch_size * merge_size) ** 2
+            target_num_frames = max(
+                target_num_frames,
+                min(video_processor.max_frames, cdiv(video_max_pixels, per_frame_cap)),
+            )
+
         target_video_width, target_video_height = (
             self.info.get_image_size_with_most_features(
                 max_pixels=video_max_pixels // temporal_patch_size
