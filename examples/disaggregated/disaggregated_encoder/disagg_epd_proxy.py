@@ -94,7 +94,9 @@ def content_uuid(item: dict) -> str:
     the unmodified path, which hashes the content, would keep it. That asymmetry
     silently biases any comparison between the two.
     """
-    url = (item.get("image_url") or item.get("audio_url") or {}).get("url") or ""
+    url = (
+        item.get("image_url") or item.get("audio_url") or item.get("video_url") or {}
+    ).get("url") or ""
     payload = url or json.dumps(item, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -110,12 +112,12 @@ def _b64_tensor(values: list) -> str:
 
 
 def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
-    """Replace each image item with a metadata-only reference for the decoder.
+    """Replace each media item with a metadata-only reference for the decoder.
 
     The decoder does not need the pixels: the encoder instance already produced
     the embedding and published it through the EC connector under the same uuid.
     Sending only the grid lets the decoder size the placeholder range without
-    re-running the image transform.
+    re-running the media transform.
 
     `item_meta` holds what the encoder reported for each item (its cache key and
     the grid its processor actually produced), so the grid is never re-derived
@@ -146,10 +148,13 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                 # processor cache); let the decoder process the media itself.
                 new_content.append(item)
                 continue
+            embeds_type = (
+                "video_embeds" if item.get("type") == "video_url" else "image_embeds"
+            )
             new_content.append(
                 {
-                    "type": "image_embeds",
-                    "image_embeds": metadata,
+                    "type": embeds_type,
+                    embeds_type: metadata,
                     "uuid": item_uuid,
                 }
             )
@@ -158,7 +163,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
 
     if not rewritten:
         return req_data
-    logger.info("Rewrote %d image item(s) as metadata references", rewritten)
+    logger.info("Rewrote %d media item(s) as metadata references", rewritten)
     return {**req_data, "messages": new_messages}
 
 
