@@ -92,6 +92,7 @@ pub(super) fn prepare_generate_request(
             min_tokens,
         },
         intermediate: stream,
+        prompt_truncation: None,
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,

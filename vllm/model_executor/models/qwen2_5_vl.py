@@ -715,8 +715,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rotary_pos_emb_thw(self, t, h, w):
-        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max(h, w))
+
+        hpos_ids = torch.arange(h, device=cos.device).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w, device=cos.device).unsqueeze(0).expand(h, -1)
         hpos_ids = (
             hpos_ids.reshape(
                 h // self.spatial_merge_size,
@@ -738,12 +741,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             .flatten()
         )
         pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-        max_size = max(h, w)
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
-
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
@@ -1154,17 +1152,6 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path to use the
-        # video-specific logic in processing_qwen2_5_vl.py
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -1257,6 +1244,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
+    supports_tower_connector_lora = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]

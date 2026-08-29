@@ -70,6 +70,7 @@ openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmon
 openai-protocol = "1.6.0"
 openssl = "0.10"
 parking_lot = "0.12.5"
+parquet = { version = "59.2.0", default-features = false, features = ["json", "snap", "zstd", "flate2", "flate2-rust_backend", "lz4", "brotli"] }
 paste = "1.0.15"
 prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
@@ -89,7 +90,7 @@ rlimit = "0.11.0"
 rmp-serde = "1.3.1"
 rmpv = { version = "1.3.1", features = ["with-serde"] }
 rustc-hash = "1.1.0"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde-json-fmt = "0.1.0"
 serde_default = "0.2.0"
 serde_json = { version = "1.0.145", features = ["preserve_order"] }

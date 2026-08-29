@@ -681,27 +681,12 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return request
 
 
-# melody's streaming filter only buffers a partial ``<co: ...>`` citation
-# across ``write_decoded`` calls when ``stream_non_grounded_answer`` is
-# set: otherwise, the moment an opening ``<co`` is seen without a
-# closing ``</co: ...>`` in the same delta, the filter emits the partial
-# marker bytes verbatim as plain content. In vLLM's streaming path the
-# parser is fed one token (1-4 chars) per call, so an unbuffered filter
-# will leak ``<co: 0>``-style markers into ``delta.content`` and never
-# emit a ``FilterCitation`` for them. Enabling the flag flips the
-# partial-match branch in melody's ``parse_citations`` (see
-# ``src/parsing/citations_filter.rs``) to ``return (None, 0)`` -- i.e.
-# keep buffering -- which lets a full citation eventually resolve.
-# Non-streaming (unary) parsing receives the whole output in one call so
-# the flag is a no-op there and we leave ``unary_opts`` alone.
 class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=(
-                PyFilterOptions().cmd3().no_tools().stream_non_grounded_answer()
-            ),
+            streaming_opts=PyFilterOptions().cmd3().no_tools(),
             unary_opts=PyFilterOptions().cmd3().no_tools(),
             **kwargs,
         )
@@ -712,9 +697,7 @@ class CohereCommand4ReasoningParser(BaseCohereCommandReasoningParser):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=(
-                PyFilterOptions().cmd4().no_tools().stream_non_grounded_answer()
-            ),
+            streaming_opts=PyFilterOptions().cmd4().no_tools(),
             unary_opts=PyFilterOptions().cmd4().no_tools(),
             **kwargs,
         )
