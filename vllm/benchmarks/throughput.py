@@ -583,7 +583,7 @@ def get_requests(args, tokenizer):
     mm_backends = ("vllm", "vllm-chat")
     requests = get_samples(serve_args, tokenizer, multimodal_backends=mm_backends)
     requests = assign_loras(requests, args)
-    requests = filter_requests_for_dp(requests, args.data_parallel_size)
+    requests = filter_requests_for_dp(requests, getattr(args, "data_parallel_size", 1))
     return requests
 
 
