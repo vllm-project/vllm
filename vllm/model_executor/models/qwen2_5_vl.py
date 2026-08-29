@@ -715,8 +715,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rotary_pos_emb_thw(self, t, h, w):
-        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max(h, w))
+
+        hpos_ids = torch.arange(h, device=cos.device).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w, device=cos.device).unsqueeze(0).expand(h, -1)
         hpos_ids = (
             hpos_ids.reshape(
                 h // self.spatial_merge_size,
@@ -738,12 +741,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             .flatten()
         )
         pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-        max_size = max(h, w)
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
-
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
