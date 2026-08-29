@@ -530,6 +530,26 @@ class TestRenderEmbedPrompt:
         assert len(results) == 1
         assert torch.equal(results[0]["prompt_embeds"], tensor_input)
 
+    def test_prompt_embed_preserves_prompt_text(self):
+        renderer = _build_renderer(MockModelConfig(hidden_size=4))
+        prompt = {
+            "prompt_embeds": torch.zeros(2, 4),
+            "prompt": "source prompt",
+            "prompt_token_ids": [11, 12],
+            "prompt_is_token_ids": [True, False],
+        }
+        (rendered,) = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, prompt)
+        )
+        tokenized = renderer.tokenize_prompt(
+            rendered,
+            TokenizeParams(max_total_tokens=10),
+        )
+
+        engine_input = renderer.process_for_engine(tokenized, arrival_time=1.0)
+
+        assert engine_input["prompt"] == "source prompt"
+
     def test_multiple_prompt_embeds(self):
         hidden_size = 512
         renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
