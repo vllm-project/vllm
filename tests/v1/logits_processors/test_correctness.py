@@ -493,7 +493,12 @@ def _min_tokens_validate(
 
 
 def _make_min_tokens_processor() -> MinTokensLogitsProcessor:
-    return MinTokensLogitsProcessor(VllmConfig(), torch.device("cpu"), False)
+    _canary("  before VllmConfig")
+    cfg = VllmConfig()
+    _canary("  after VllmConfig")
+    proc = MinTokensLogitsProcessor(cfg, torch.device("cpu"), False)
+    _canary("  after ctor")
+    return proc
 
 
 def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
@@ -513,9 +518,11 @@ def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
             moved=(),
         )
     )
+    _canary("  after update_state")
 
     logits = torch.full((1, 3), -float("inf"))
     logits[0, 0] = 1.0
+    _canary("  after logits alloc")
 
     processor.apply(logits)
 
