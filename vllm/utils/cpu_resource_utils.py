@@ -217,14 +217,19 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         # For MacOS, no user-level CPU affinity and SMT, return all CPUs
         return _synthesize_cpu_list()
 
-    if platform.machine() == "s390x":
-        lscpu_output = subprocess.check_output(
-            "lscpu -J -e=CPU,CORE,NODE,SOCKET,BOOK", shell=True, text=True
-        )
-    else:
-        lscpu_output = subprocess.check_output(
-            "lscpu --json --extended=CPU,CORE,NODE --online", shell=True, text=True
-        )
+    try:
+        if platform.machine() == "s390x":
+            lscpu_output = subprocess.check_output(
+                "lscpu -J -e=CPU,CORE,NODE,SOCKET,BOOK", shell=True, text=True
+            )
+        else:
+            lscpu_output = subprocess.check_output(
+                "lscpu --json --extended=CPU,CORE,NODE --online",
+                shell=True,
+                text=True,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return _synthesize_cpu_list()
 
     # For platforms without NUMA, map bare `-` node to 0 so non-NUMA
     # systems keep the existing behavior from #39781.
@@ -248,10 +253,20 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
             r'"socket":\s*-\s*(,|\n|\})', r'"socket": 0\1', lscpu_output
         )
 
-        raw_cpus = json.loads(lscpu_output)["cpus"]
+        try:
+            parsed_output = json.loads(lscpu_output)
+        except json.JSONDecodeError:
+            return _synthesize_cpu_list()
+        raw_cpus = (
+            parsed_output.get("cpus") if isinstance(parsed_output, dict) else None
+        )
+        if not isinstance(raw_cpus, list):
+            return _synthesize_cpu_list()
         book_values = set()
         socket_values = set()
         for entry in raw_cpus:
+            if not isinstance(entry, dict):
+                continue
             book_values.add(LogicalCPUInfo._int(str(entry.get("book", "-1"))))
             socket_values.add(LogicalCPUInfo._int(str(entry.get("socket", "-1"))))
 
@@ -266,6 +281,8 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         if group_key is not None:
             logical_book_socket_list: list[LogicalCPUInfo] = []
             for entry in raw_cpus:
+                if not isinstance(entry, dict):
+                    continue
                 cpu_id = LogicalCPUInfo._int(str(entry.get("cpu", "-1")))
                 core = LogicalCPUInfo._int(str(entry.get("core", "-1")))
                 group = LogicalCPUInfo._int(str(entry.get(group_key, "-1")))
@@ -278,13 +295,24 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
                 return _synthesize_cpu_list()
             return logical_book_socket_list
 
-    logical_cpu_list: list[LogicalCPUInfo] = json.loads(
-        lscpu_output, object_hook=LogicalCPUInfo.json_decoder
-    )["cpus"]
+    try:
+        parsed_output = json.loads(
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder
+        )
+    except json.JSONDecodeError:
+        return _synthesize_cpu_list()
+    logical_cpu_list = (
+        parsed_output.get("cpus") if isinstance(parsed_output, dict) else None
+    )
+    if not isinstance(logical_cpu_list, list):
+        return _synthesize_cpu_list()
 
     # Filter CPUs with invalid attributes (only require id, core, node)
     logical_cpu_list = [
-        x for x in logical_cpu_list if -1 not in (x.id, x.physical_core, x.numa_node)
+        x
+        for x in logical_cpu_list
+        if isinstance(x, LogicalCPUInfo)
+        and -1 not in (x.id, x.physical_core, x.numa_node)
     ]
 
     # If lscpu returned no valid entries (e.g. RISC-V where all fields
