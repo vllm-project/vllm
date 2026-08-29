@@ -116,7 +116,6 @@ EXCLUDE = [
     r"vllm/model_executor/models/[nN]",
     r"vllm/model_executor/models/[oO]",
     r"vllm/model_executor/models/[qQ]",
-    r"vllm/model_executor/models/transformers",
     r"vllm/model_executor/models/[uU]",
     r"vllm/model_executor/models/[vV]",
     r"vllm/model_executor/models/[wW]",
