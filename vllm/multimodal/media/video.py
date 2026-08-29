@@ -166,7 +166,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
             }
             return MediaWithBytes((frames, metadata), data.encode())
 
-        return self.load_bytes(pybase64.b64decode(data))
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(
         self, filepath: Path
