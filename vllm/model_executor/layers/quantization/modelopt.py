@@ -2418,6 +2418,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8LinearMethod(self.mxfp8_config)
+            if quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
+                return ModelOptFp8PcPtLinearMethod(self.fp8_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
