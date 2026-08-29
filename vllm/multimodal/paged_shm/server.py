@@ -50,22 +50,34 @@ _ERROR_RESPONSE_TEMPLATE = '{"status":"error","message":"%s"}'
 
 
 # ------------------------------------------------------------------
-# Priority queue for single‑threaded use (heapq‑based)
+# Priority queue with deadline caching (single‑threaded)
 # ------------------------------------------------------------------
 class PriorityQueue:
     """
     Simple priority queue with min‑heap ordering.
+    Maintains a cached next deadline to speed up expiration checks.
     Not thread‑safe – designed for single‑threaded event loops.
     """
 
     def __init__(self):
         self._heap: list = []
+        self._next_deadline: float | None = None  # cached minimum deadline
 
     def put(self, item: Any) -> None:
+        """Push an item onto the heap and update the next deadline."""
         heapq.heappush(self._heap, item)
+        deadline = item[0]
+        if self._next_deadline is None or deadline < self._next_deadline:
+            self._next_deadline = deadline
 
     def get(self) -> Any:
-        return heapq.heappop(self._heap)
+        """Pop the smallest item and refresh the next deadline."""
+        item = heapq.heappop(self._heap)
+        if self._heap:
+            self._next_deadline = self._heap[0][0]
+        else:
+            self._next_deadline = None
+        return item
 
     def empty(self) -> bool:
         return len(self._heap) == 0
@@ -80,11 +92,19 @@ class PriorityQueue:
         """
         Remove all items whose deadline <= now, calling on_expired for each.
         Returns True if the queue becomes empty.
+        Uses the cached next deadline to skip if no item is due.
         """
+        if self._next_deadline is None or now < self._next_deadline:
+            # No item has expired yet
+            return self.empty()
+
         while self._heap and self._heap[0][0] <= now:
             item = heapq.heappop(self._heap)
             on_expired(item)
-        return not self._heap
+
+        # Update cached deadline after removals
+        self._next_deadline = self._heap[0][0] if self._heap else None
+        return self.empty()
 
 
 # ------------------------------------------------------------------
@@ -135,6 +155,30 @@ class PagedShmServer:
         self._read_tokens: dict[str, str] = {}
         # Reverse mapping: real_uuid -> set of tokens
         self._item_to_read_tokens: dict[str, set[str]] = {}
+
+        # Command dispatcher registry – all handlers accept (payload, identity)
+        self._handlers = {
+            CLOSE_WRITE: self._handle_close_write,
+            CLOSE_READ: self._handle_close_read,
+            GET_INFO: self._handle_get_info,
+            GET_MANAGER_STATES: self._handle_get_manager_states,
+            GET_STORAGE_INFO: self._handle_get_storage_info,
+            OPEN_WRITE: self._handle_open_write,
+            OPEN_READ: self._handle_open_read,
+            OPEN_WRITE_OR_READ: self._handle_open_write_or_read,
+            WAIT_FOR_READABLE: self._handle_wait_for_readable,
+        }
+
+    # ------------------------------------------------------------------
+    # Helper: check if any waiters exist
+    # ------------------------------------------------------------------
+    def _has_pending_waiters(self) -> bool:
+        """Return True if any wait queue contains pending entries."""
+        if not self._memory_waiters.empty():
+            return True
+        if self._open_read_waiters:
+            return True
+        return bool(self._readable_waiters)
 
     # ------------------------------------------------------------------
     # Expiration cleanup
@@ -201,6 +245,10 @@ class PagedShmServer:
     # ------------------------------------------------------------------
     def _perform_maintenance(self, socket: zmq.Socket) -> None:
         """Periodic cleanup and deferred request processing."""
+        # Skip if no waiters to avoid unnecessary work
+        if not self._has_pending_waiters():
+            return
+
         self._clean_expired_memory_waiters(socket)
         self.clean_expired_open_read(socket)
         self.clean_expired_wait_readable(socket)
@@ -344,11 +392,11 @@ class PagedShmServer:
         return json.dumps({"status": "ok", "data": all_data})
 
     # ------------------------------------------------------------------
-    # Request handlers
+    # Command handlers (all accept payload and identity)
     # ------------------------------------------------------------------
-    def open_write(self, data: bytes, identity: bytes) -> str | None:
+    def _handle_open_write(self, payload: str, identity: bytes) -> str | None:
         """Allocate blocks for a batch of items to be written."""
-        write_request = json.loads(data)
+        write_request = json.loads(payload)
         items = write_request["items"]
         timeout = float(write_request.get("timeout", 0.0))
 
@@ -374,13 +422,13 @@ class PagedShmServer:
 
         return self._build_write_response(allocated, item_objs)
 
-    def open_read(self, data: bytes, identity: bytes) -> str | None:
+    def _handle_open_read(self, payload: str, identity: bytes) -> str | None:
         """
         Acquire a read reference to an item, supporting both UUIDs and tokens.
         For UUIDs, generates a new read token and increments ref_count.
         For tokens, returns data without modifying ref_count.
         """
-        read_request = json.loads(data)
+        read_request = json.loads(payload)
         uuid_or_token = read_request["uuid"]
         timeout = float(read_request.get("timeout", 0.0))
 
@@ -448,7 +496,7 @@ class PagedShmServer:
             )
             return json.dumps({"status": "ok", "data": asdict(resp)})
 
-    def open_write_or_read(self, data: bytes, identity: bytes) -> str | None:
+    def _handle_open_write_or_read(self, payload: str, identity: bytes) -> str | None:
         """
         Atomically open for reading or writing a batch of items.
 
@@ -468,7 +516,7 @@ class PagedShmServer:
             MemoryError: if timeout=0 and not enough memory.
             ValueError: on invalid parameters.
         """
-        req = json.loads(data)
+        req = json.loads(payload)
         items_data = req["items"]
         timeout = float(req.get("timeout", 0.0))
 
@@ -485,9 +533,9 @@ class PagedShmServer:
             self._memory_waiters.put((deadline, identity, "write_or_read", items_data))
             return None
 
-    def wait_for_readable(self, data: bytes, identity: bytes) -> str | None:
+    def _handle_wait_for_readable(self, payload: str, identity: bytes) -> str | None:
         """Wait for an item to become readable (write completed)."""
-        req = json.loads(data)
+        req = json.loads(payload)
         uuid_or_token = req["uuid"]
         timeout = float(req.get("timeout", 0.0))
 
@@ -509,6 +557,104 @@ class PagedShmServer:
         deadline = time.monotonic() + timeout
         self._readable_waiters[real_uuid].put((deadline, identity))
         return None
+
+    def _handle_close_write(self, payload: str, identity: bytes) -> str:
+        """Finish writing an item, making it readable and cacheable."""
+        items = json.loads(payload)
+        uuid = items["uuid"]
+        tokens = self._item_to_read_tokens.get(uuid, set())
+        open_n_reads = len(tokens)
+        self.manager.close_write(uuid, open_n_reads)
+        return _OK_RESPONSE
+
+    def _handle_close_read(self, payload: str, identity: bytes) -> str:
+        """Release a read reference. Accepts only read tokens."""
+        uuid = payload
+        real_uuid, is_token = self._resolve_read_token(uuid)
+        if not is_token:
+            try:
+                self.manager.get_info(uuid)
+            except ValueError:
+                raise ValueError(f"Read token '{uuid}' not found") from None
+            else:
+                raise ValueError(
+                    f"close_read only accepts read tokens, got UUID '{uuid}'"
+                )
+
+        try:
+            info = self.manager.get_info(real_uuid)
+            if info["ref_count"] > 0:
+                self.manager.close_read(real_uuid)
+        except ValueError:
+            pass
+        self._destroy_token(uuid)
+        return _OK_RESPONSE
+
+    def _handle_get_manager_states(self, payload: str, identity: bytes) -> str:
+        """Return manager statistics as JSON."""
+        return json.dumps(self.manager.get_manager_states())
+
+    def _handle_get_storage_info(self, payload: str, identity: bytes) -> str:
+        """Return storage metadata as JSON."""
+        info = {
+            "name": self.shm_name,
+            "size": self.size,
+            "block_size": self.block_size,
+            "n_block": self.n_block,
+        }
+        return json.dumps({"status": "ok", "data": info})
+
+    def _handle_get_info(self, payload: str, identity: bytes) -> str:
+        """Return object info as JSON. Supports UUID or token."""
+        uuid = payload
+        real_uuid, _ = self._resolve_read_token(uuid)
+        info = self.manager.get_info(real_uuid)
+        info.pop("use_cache", None)
+        info.pop("blocks", None)
+        return json.dumps(info)
+
+    # ------------------------------------------------------------------
+    # DELETE handler (needs socket to notify waiters)
+    # ------------------------------------------------------------------
+    def _handle_delete(self, payload: str, identity: bytes, socket: zmq.Socket) -> str:
+        """Delete an item and free its blocks (forcefully)."""
+        uuid = payload
+
+        # Clear all waiting queues for this UUID, sending error responses
+        self._clear_waiters_for_uuid(uuid, socket)
+
+        if uuid in self._item_to_read_tokens:
+            for token in list(self._item_to_read_tokens[uuid]):
+                self._destroy_token(token)
+        self.manager.delete(uuid, force=True)
+        return _OK_RESPONSE
+
+    # ------------------------------------------------------------------
+    # Helper to clear waiters for a UUID
+    # ------------------------------------------------------------------
+    def _clear_waiters_for_uuid(self, uuid: str, socket: zmq.Socket) -> None:
+        """Remove all pending waiters associated with a UUID and send errors."""
+        # Clear open_read waiters
+        q = self._open_read_waiters.pop(uuid, None)
+        if q is not None:
+            while not q.empty():
+                _, identity, _ = q.get()
+                self._send_response(
+                    socket, identity, ERROR, "Item deleted while waiting"
+                )
+
+        # Clear readable waiters
+        q = self._readable_waiters.pop(uuid, None)
+        if q is not None:
+            while not q.empty():
+                _, identity = q.get()
+                self._send_response(
+                    socket, identity, ERROR, "Item deleted while waiting"
+                )
+
+        # Note: memory waiters are not per‑uuid; they will be retried by
+        # _defer_memory_requests and will fail/retry accordingly.
+        # We do not attempt to remove them from the heap.
 
     # ------------------------------------------------------------------
     # Deferred request processing (FCFS with batch attempts)
@@ -702,85 +848,24 @@ class PagedShmServer:
         return json.dumps({"status": "ok", "data": data})
 
     # ------------------------------------------------------------------
-    # Other command handlers
-    # ------------------------------------------------------------------
-    def close_write(self, items_data: bytes) -> str:
-        """Finish writing an item, making it readable and cacheable."""
-        items = json.loads(items_data)
-        uuid = items["uuid"]
-        tokens = self._item_to_read_tokens.get(uuid, set())
-        open_n_reads = len(tokens)
-        self.manager.close_write(uuid, open_n_reads)
-        return _OK_RESPONSE
-
-    def close_read(self, uuid: str) -> str:
-        """Release a read reference. Accepts only read tokens."""
-        real_uuid, is_token = self._resolve_read_token(uuid)
-        if not is_token:
-            try:
-                self.manager.get_info(uuid)
-            except ValueError:
-                raise ValueError(f"Read token '{uuid}' not found") from None
-            else:
-                raise ValueError(
-                    f"close_read only accepts read tokens, got UUID '{uuid}'"
-                )
-
-        try:
-            info = self.manager.get_info(real_uuid)
-            if info["ref_count"] > 0:
-                self.manager.close_read(real_uuid)
-        except ValueError:
-            pass
-        self._destroy_token(uuid)
-        return _OK_RESPONSE
-
-    def delete(self, uuid: str) -> str:
-        """Delete an item and free its blocks (forcefully)."""
-        if uuid in self._item_to_read_tokens:
-            for token in list(self._item_to_read_tokens[uuid]):
-                self._destroy_token(token)
-        self.manager.delete(uuid, force=True)
-        return _OK_RESPONSE
-
-    def get_manager_states(self) -> str:
-        """Return manager statistics as JSON."""
-        return json.dumps(self.manager.get_manager_states())
-
-    def get_storage_info(self) -> str:
-        """Return storage metadata as JSON."""
-        info = {
-            "name": self.shm_name,
-            "size": self.size,
-            "block_size": self.block_size,
-            "n_block": self.n_block,
-        }
-        return json.dumps({"status": "ok", "data": info})
-
-    def get_info(self, uuid: str) -> str:
-        """Return object info as JSON. Supports UUID or token."""
-        real_uuid, _ = self._resolve_read_token(uuid)
-        info = self.manager.get_info(real_uuid)
-        info.pop("use_cache", None)
-        info.pop("blocks", None)
-        return json.dumps(info)
-
-    def close(self):
-        """Close the shared memory storage."""
-        self._resources.close()
-
-    # ------------------------------------------------------------------
     # ZMQ communication helper
     # ------------------------------------------------------------------
-    @staticmethod
     def _send_response(
-        socket: zmq.Socket, identity: bytes, status: bytes, payload: str
+        self, socket: zmq.Socket | None, identity: bytes, status: bytes, payload: str
     ) -> None:
         """Send a multipart response."""
+        if socket is None:
+            # Should not happen in normal operation; log and ignore
+            logger.debug("No socket provided, cannot send response to %s", identity)
+            return
         try:
             socket.send_multipart([identity, EMPTY, status, payload.encode("utf-8")])
         except zmq.ZMQError as e:
             logger.debug("Failed to send response to %s: %s", identity, e)
+
+    def close(self):
+        """Close the shared memory storage."""
+        self._resources.close()
 
 
 # ------------------------------------------------------------------
@@ -803,15 +888,6 @@ def _zmq_server(
 
         conn.send(address)
         conn.close()
-
-        # Command dispatcher for simple commands
-        handlers: dict[bytes, tuple[Callable, bool]] = {
-            CLOSE_WRITE: (server.close_write, True),
-            CLOSE_READ: (server.close_read, True),
-            GET_INFO: (server.get_info, True),
-            GET_MANAGER_STATES: (server.get_manager_states, False),
-            GET_STORAGE_INFO: (server.get_storage_info, False),
-        }
 
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)
@@ -853,13 +929,12 @@ def _zmq_server(
                 logger.warning("Invalid delimiter from %s, ignoring", identity)
                 continue
 
-            # SHUTDOWN
+            # Handle special commands that don't follow the dispatch pattern
             if command == SHUTDOWN:
                 logger.info("Received SHUTDOWN from %s, exiting", identity)
                 server._send_response(socket, identity, OK, "shutting down")
                 break
 
-            # DEBUG_CLEAN
             if command == DEBUG_CLEAN:
                 if not server.debug:
                     server._send_response(
@@ -877,95 +952,18 @@ def _zmq_server(
                         )
                 continue
 
-            if command == OPEN_WRITE:
-                try:
-                    result = server.open_write(payloads[0].decode(), identity)
-                    if result is not None:
-                        server._send_response(socket, identity, OK, result)
-                except MemoryError as e:
-                    server._send_response(socket, identity, ERROR, f"MemoryError: {e}")
-                except ValueError as e:
-                    server._send_response(socket, identity, ERROR, f"ValueError: {e}")
-                except Exception as e:
-                    logger.exception("Unexpected error in OPEN_WRITE")
-                    server._send_response(
-                        socket, identity, ERROR, f"Internal error: {e}"
-                    )
-                continue
-
-            if command == OPEN_READ:
-                try:
-                    result = server.open_read(payloads[0].decode(), identity)
-                    if result is not None:
-                        server._send_response(socket, identity, OK, result)
-                except (ValueError, RuntimeError) as e:
-                    server._send_response(
-                        socket, identity, ERROR, f"{type(e).__name__}: {e}"
-                    )
-                except Exception as e:
-                    logger.exception("Unexpected error in OPEN_READ")
-                    server._send_response(
-                        socket, identity, ERROR, f"Internal error: {e}"
-                    )
-                continue
-
-            if command == OPEN_WRITE_OR_READ:
-                try:
-                    result = server.open_write_or_read(payloads[0].decode(), identity)
-                    if result is not None:
-                        server._send_response(socket, identity, OK, result)
-                except (ValueError, MemoryError) as e:
-                    server._send_response(
-                        socket, identity, ERROR, f"{type(e).__name__}: {e}"
-                    )
-                except Exception as e:
-                    logger.exception("Unexpected error in OPEN_WRITE_OR_READ")
-                    server._send_response(
-                        socket, identity, ERROR, f"Internal error: {e}"
-                    )
-                continue
-
-            if command == WAIT_FOR_READABLE:
-                try:
-                    result = server.wait_for_readable(payloads[0].decode(), identity)
-                    if result is not None:
-                        server._send_response(socket, identity, OK, result)
-                except (ValueError, RuntimeError) as e:
-                    server._send_response(
-                        socket, identity, ERROR, f"{type(e).__name__}: {e}"
-                    )
-                except Exception as e:
-                    logger.exception("Unexpected error in WAIT_FOR_READABLE")
-                    server._send_response(
-                        socket, identity, ERROR, f"Internal error: {e}"
-                    )
-                continue
-
+            # DELETE command – handled separately because it needs the socket
             if command == DELETE:
-                uuid = payloads[0].decode()
-                # Clear pending wait queues for this UUID before deletion
-                q = server._open_read_waiters.pop(uuid, None)
-                if q is not None:
-                    while not q.empty():
-                        _, ident, _ = q.get()
-                        server._send_response(
-                            socket, ident, ERROR, "Item deleted while waiting"
-                        )
-                q = server._readable_waiters.pop(uuid, None)
-                if q is not None:
-                    while not q.empty():
-                        _, ident = q.get()
-                        server._send_response(
-                            socket, ident, ERROR, "Item deleted while waiting"
-                        )
-
+                payload = payloads[0].decode() if payloads else ""
                 try:
-                    server.delete(uuid)
-                    server._send_response(socket, identity, OK, _OK_RESPONSE)
-                    # After deletion, try to satisfy any pending memory requests
+                    result = server._handle_delete(payload, identity, socket)
+                    server._send_response(socket, identity, OK, result)
+                    # After deletion, attempt to process pending memory requests
                     server._defer_memory_requests(socket)
                 except ValueError as e:
                     server._send_response(socket, identity, ERROR, f"ValueError: {e}")
+                except RuntimeError as e:
+                    server._send_response(socket, identity, ERROR, f"RuntimeError: {e}")
                 except Exception as e:
                     logger.exception("Unexpected error in DELETE")
                     server._send_response(
@@ -973,9 +971,9 @@ def _zmq_server(
                     )
                 continue
 
-            # Dispatch other commands
-            handler_info = handlers.get(command)
-            if handler_info is None:
+            # Dispatch normal commands
+            handler = server._handlers.get(command)
+            if handler is None:
                 server._send_response(
                     socket,
                     identity,
@@ -984,28 +982,26 @@ def _zmq_server(
                 )
                 continue
 
-            handler, requires_payload = handler_info
+            payload = payloads[0].decode() if payloads else ""
             try:
-                if requires_payload:
-                    param = payloads[0].decode()
-                    result = handler(param)
-                else:
-                    result = handler()
+                result = handler(payload, identity)
                 if result is not None:
                     server._send_response(socket, identity, OK, result)
-                else:
-                    server._send_response(socket, identity, OK, _OK_RESPONSE)
+                # else: handler returned None (e.g., deferred request)
+            except MemoryError as e:
+                server._send_response(socket, identity, ERROR, f"MemoryError: {e}")
             except ValueError as e:
                 server._send_response(socket, identity, ERROR, f"ValueError: {e}")
+            except RuntimeError as e:
+                server._send_response(socket, identity, ERROR, f"RuntimeError: {e}")
             except Exception as e:
                 logger.exception("Unexpected error in command %s", command)
                 server._send_response(socket, identity, ERROR, f"Internal error: {e}")
 
-            # After CLOSE_WRITE, wake up waiting readers, wait_for_readable waiters,
-            # and attempt to process deferred memory requests.
+            # Post-command actions for specific commands
             if command == CLOSE_WRITE:
                 try:
-                    close_req = json.loads(payloads[0].decode())
+                    close_req = json.loads(payload)
                     uuid = close_req.get("uuid")
                     if uuid:
                         server.clean_expired_open_read(socket, uuid)
@@ -1015,26 +1011,6 @@ def _zmq_server(
                         server._defer_memory_requests(socket)
                 except Exception:
                     pass
-
-            # After CLOSE_READ, attempt to process deferred memory requests.
-            if command == CLOSE_READ:
-                if not payloads:
-                    server._send_response(
-                        socket, identity, ERROR, "Missing token for close_read"
-                    )
-                    continue
-                param = payloads[0].decode()
-                try:
-                    result = server.close_read(param)
-                    server._send_response(socket, identity, OK, result)
-                except ValueError as e:
-                    server._send_response(socket, identity, ERROR, f"ValueError: {e}")
-                except Exception as e:
-                    logger.exception("Unexpected error in CLOSE_READ")
-                    server._send_response(
-                        socket, identity, ERROR, f"Internal error: {e}"
-                    )
-                continue
 
     except Exception as e:
         logger.exception("Fatal error in zmq_server: %s", e)
@@ -1127,5 +1103,4 @@ def maybe_start_paged_shm_server(
     )
     paged_shm_server.start()
 
-    multimodal_config.paged_shm_server_address = paged_shm_server.address
-    return paged_shm_server
+    multimodal_config.paged_shm_server_address = paged_s
