@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -587,3 +589,88 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+def _declared_defaults() -> dict[str, ast.expr]:
+    """Parse the ``TYPE_CHECKING`` declaration block of ``vllm/envs.py``.
+
+    The declarations are invisible at runtime, so they can only be read back
+    from the source.
+    """
+    source = Path(envs.__file__).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "TYPE_CHECKING"
+        ):
+            return {
+                stmt.target.id: stmt.value
+                for stmt in node.body
+                if isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+                and stmt.value is not None
+            }
+    raise AssertionError("no TYPE_CHECKING block found in vllm/envs.py")
+
+
+# Variables whose resolved default is computed, so no fixed literal can
+# describe it on every supported build.
+_DYNAMIC_DEFAULTS = {
+    # Suffixed with a per-process uuid4.
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+    # 64 on a ROCm torch build, 20 otherwise.
+    "VLLM_DBO_COMM_SMS",
+    # Derived from the torch version at runtime.
+    "VLLM_USE_AOT_COMPILE",
+    "VLLM_USE_MEGA_AOT_ARTIFACT",
+    # Owned by https://github.com/vllm-project/vllm/pull/54286, which aligns
+    # the runtime default with the declaration. Remove this entry once it
+    # lands.
+    "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE",
+}
+
+
+def test_every_declared_env_var_exists_at_runtime():
+    """A declaration without a runtime entry type-checks but raises."""
+    undefined = sorted(set(_declared_defaults()) - set(environment_variables))
+    assert not undefined, (
+        f"declared in the TYPE_CHECKING block but absent from "
+        f"environment_variables, so reading them raises AttributeError: "
+        f"{undefined}"
+    )
+
+
+def test_every_runtime_env_var_is_declared():
+    """An entry without a declaration is invisible to type checkers."""
+    undeclared = sorted(set(environment_variables) - set(_declared_defaults()))
+    assert not undeclared, (
+        f"present in environment_variables but missing from the "
+        f"TYPE_CHECKING block: {undeclared}"
+    )
+
+
+def test_declared_defaults_match_resolved_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A declared default that lies makes the annotation actively misleading."""
+    for name in environment_variables:
+        monkeypatch.delenv(name, raising=False)
+
+    mismatched = {}
+    for name, expr in _declared_defaults().items():
+        if name in _DYNAMIC_DEFAULTS or name not in environment_variables:
+            continue
+        try:
+            declared = ast.literal_eval(expr)
+        except ValueError:
+            # Non-literal declaration, e.g. path expansion or arithmetic.
+            continue
+        resolved = environment_variables[name]()
+        if declared != resolved:
+            mismatched[name] = (declared, resolved)
+
+    assert not mismatched, (
+        f"declared default does not match the value vLLM actually resolves "
+        f"(name: (declared, resolved)): {mismatched}"
+    )
