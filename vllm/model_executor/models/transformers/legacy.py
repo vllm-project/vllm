@@ -25,13 +25,24 @@ from vllm.sequence import IntermediateTensors
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+    from .base import Base
 
-class LegacyMixin:
+    _LegacyMixinBase = Base
+else:
+    _LegacyMixinBase = object
+
+
+class LegacyMixin(_LegacyMixinBase):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
+        mapper = self.hf_to_vllm_mapper
+        assert mapper is not None
+        assert isinstance(mapper.orig_to_new_prefix, dict)
+        assert isinstance(mapper.orig_to_new_substr, dict)
+
         # Drop unsupported/unwanted output embeddings layers.
-        self.hf_to_vllm_mapper.orig_to_new_prefix.update(
+        mapper.orig_to_new_prefix.update(
             {
                 "model.lm_head.": None,
                 "model.predictions.": None,
@@ -43,11 +54,11 @@ class LegacyMixin:
 
         # Some encoder models have the position_ids buffer in the checkpoint. vLLM will
         # always pass position_ids as an argument, so we drop the  buffer if it exists.
-        self.hf_to_vllm_mapper.orig_to_new_substr["position_ids"] = None
+        mapper.orig_to_new_substr["position_ids"] = None
 
         # Some encoder models have the bias of the final classifier layer in the
         # checkpoint. vLLM does not use this bias, so we drop it if it exists.
-        self.hf_to_vllm_mapper.orig_to_new_substr["score.bias"] = None
+        mapper.orig_to_new_substr["score.bias"] = None
 
         # roberta-like models an extra padding in positions.
         # FIXME(Isotr0py): This is quite hacky for roberta edge case,
@@ -55,21 +66,23 @@ class LegacyMixin:
         self.is_roberta = "roberta" in self.text_config.model_type
         self.padding_idx = self.text_config.pad_token_id
 
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        if self.is_roberta:
-            # RoBERTa positions start at padding_idx + 1.
-            # Non-in-place add to avoid mutating the persistent GPU buffer --
-            # in-place += would accumulate on CUDA graph padding slots.
-            positions = positions + self.padding_idx + 1
-        return super().forward(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+    if not TYPE_CHECKING:
+
+        def forward(
+            self,
+            input_ids: torch.Tensor | None,
+            positions: torch.Tensor,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+        ) -> torch.Tensor | IntermediateTensors:
+            if self.is_roberta:
+                # RoBERTa positions start at padding_idx + 1.
+                # Non-in-place add to avoid mutating the persistent GPU buffer --
+                # in-place += would accumulate on CUDA graph padding slots.
+                positions = positions + self.padding_idx + 1
+            return super().forward(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )

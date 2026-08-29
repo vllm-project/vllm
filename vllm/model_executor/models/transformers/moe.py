@@ -44,6 +44,25 @@ from .utils import log_replacement, maybe_per_layer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+
+    from .base import Base
+
+    class _TransformersMoERunnerBase(nn.Module):
+        moe_config: FusedMoEConfig
+        layer_name: str
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+
+    class _TransformersRoutedExpertsBase(nn.Module):
+        pass
+
+    _MoEMixinBase = Base
+else:
+    _TransformersMoERunnerBase = MoERunner
+    _TransformersRoutedExpertsBase = RoutedExperts
+    _MoEMixinBase = MixtureOfExperts
 
 logger = init_logger(__name__)
 
@@ -56,7 +75,7 @@ class TransformersMoEState:
 
 # --8<-- [start:transformers_fused_moe]
 @PluggableLayer.register("transformers_fused_moe")
-class TransformersMoERunner(MoERunner):
+class TransformersMoERunner(_TransformersMoERunnerBase):
     """Custom MoERunner for the Transformers modeling backend."""
 
     # --8<-- [end:transformers_fused_moe]
@@ -89,7 +108,8 @@ class TransformersMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
-        return super().forward(hidden_states, topk_weights)
+        assert isinstance(self, MoERunner)
+        return MoERunner.forward(self, hidden_states, topk_weights)
 
 
 def _transformers_moe_forward(
@@ -123,13 +143,18 @@ direct_register_custom_op(
 )
 
 
-class TransformersRoutedExperts(RoutedExperts):
+class TransformersRoutedExperts(_TransformersRoutedExpertsBase):
     def get_expert_mapping(
         self, include_fused: bool = False
     ) -> list[tuple[str, str, int, str]]:
+        assert isinstance(self, RoutedExperts)
         common_names = ("gate_proj", "down_proj", "up_proj")
-        common_map = super().get_expert_mapping(*common_names, include_fused)
-        mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
+        common_map = RoutedExperts.get_expert_mapping(
+            self, *common_names, include_fused
+        )
+        mixtral_map = RoutedExperts.get_expert_mapping(
+            self, "w1", "w2", "w3", include_fused
+        )
         if not include_fused:
             return common_map + mixtral_map
         common_fused, common_unfused = common_map[:3], common_map[3:]
@@ -137,11 +162,20 @@ class TransformersRoutedExperts(RoutedExperts):
         return common_fused + mixtral_fused + common_unfused + mixtral_unfused
 
 
-class MoEMixin(MixtureOfExperts):
+class MoEMixin(_MoEMixinBase):
+    mlp_layers: list[nn.Module]
+    moe_layers: list[MoERunner]
+    num_local_physical_experts: int
+
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
-        super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        if TYPE_CHECKING:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        else:
+            super(MixtureOfExperts, self).__init__(
+                vllm_config=vllm_config, prefix=prefix
+            )
 
     def update_physical_experts_metadata(
         self,
@@ -196,7 +230,11 @@ class MoEMixin(MixtureOfExperts):
 
         # Dtype the router computes in, if it is not the activation dtype.
         config_router_dtype = getattr(text_config, "moe_router_dtype", None)
-        config_router_dtype = STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype)
+        config_router_dtype = (
+            STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype)
+            if isinstance(config_router_dtype, str)
+            else None
+        )
 
         # Grouped topk routing kwargs
         num_expert_group = getattr(text_config, "n_group", None)
@@ -373,7 +411,9 @@ class MoEMixin(MixtureOfExperts):
                             # Handle all gather in expert parallel
                             if topk_ids.size(0) != hidden_states.size(0):
                                 dp_metadata = get_forward_context().dp_metadata
+                                assert dp_metadata is not None
                                 sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+                                assert sizes is not None
                                 is_sp = moe_state.is_sequence_parallel
                                 group = get_ep_group() if is_sp else get_dp_group()
                                 assert sizes[group.rank_in_group] == topk_ids.shape[0]

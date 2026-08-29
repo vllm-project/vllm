@@ -13,7 +13,7 @@ import contextlib
 import inspect
 import operator
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Sized
 from itertools import chain
 from unittest import mock
 
@@ -64,6 +64,7 @@ class _MetaProxy(fx.Proxy):
 
     def __len__(self) -> int:
         if self.meta is not _UNKNOWN:
+            assert isinstance(self.meta, Sized)
             return len(self.meta)
         return super().__len__()  # type: ignore[misc]
 
@@ -142,6 +143,7 @@ class _AllLeafTracer(fx.Tracer):
         if unknown:
             return _UNKNOWN
         if kind == "call_function":
+            assert callable(target)
             return target(*meta_args, **meta_kwargs)
         if kind == "call_method":
             receiver, *rest = meta_args
@@ -181,6 +183,7 @@ class _AllLeafTracer(fx.Tracer):
         meta = getattr(obj, "meta", _UNKNOWN)
         if meta is _UNKNOWN:
             return super().iter(obj)
+        assert isinstance(meta, Sized)
         return iter([obj[i] for i in range(len(meta))])
 
 
@@ -465,7 +468,7 @@ def peel(node: object) -> object:
     return node
 
 
-def is_fn(node: object, target: Callable) -> bool:
+def is_fn(node: object, target: object) -> bool:
     """Is node `<target>()`."""
     return (
         isinstance(node, fx.Node)

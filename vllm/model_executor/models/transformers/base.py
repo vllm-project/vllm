@@ -17,7 +17,7 @@
 """Transformers modeling backend base class."""
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Hashable, Iterable
 from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
@@ -84,6 +84,12 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
 
+    class _SupportsLoRABase:
+        pass
+
+else:
+    _SupportsLoRABase = SupportsLoRA
+
 logger = init_logger(__name__)
 
 
@@ -97,7 +103,7 @@ class Base(
     nn.Module,
     VllmModel,
     SupportsQuant,
-    SupportsLoRA,
+    _SupportsLoRABase,
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
@@ -105,7 +111,7 @@ class Base(
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        super().__init__()
+        nn.Module.__init__(self)
         logger.info("Using Transformers modeling backend.")
 
         self.vllm_config = vllm_config
@@ -244,7 +250,7 @@ class Base(
     def _decorate_cls_for_torch_compile(
         self,
         cls: type["PreTrainedModel"],
-        dynamic_arg_dims: dict[str, int] | None,
+        dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
     ):
@@ -280,7 +286,7 @@ class Base(
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=dict[str, int](
+            dynamic_arg_dims=dict[str, int | list[int] | dict[int, str]](
                 input_ids=1,  # shape: [1, seq_len]
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
@@ -303,6 +309,7 @@ class Base(
         self.hf_to_vllm_mapper = WeightsMapper()
         orig_to_new_renaming = self.hf_to_vllm_mapper.orig_to_new_renaming
         orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
+        assert isinstance(orig_to_new_regex, dict)
 
         for mapping in get_model_conversion_mapping(self.model):
             # Handle weights which have been renamed in Transformers
@@ -367,13 +374,17 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
+            model_cls = type(self.model)
+            module_cls = type(module)
+            assert isinstance(model_cls, Hashable)
+            assert isinstance(module_cls, Hashable)
             logger.warning_once(
                 "%s does not define a pipeline parallel plan. The Transformers "
                 "modeling backend will infer the split from the layers of %s in order "
                 "of declaration and keep parameter-free modules on every rank. This "
                 "may fail if the model's structure is non-standard. %s",
-                type(self.model),
-                type(module),
+                model_cls,
+                module_cls,
                 tip,
             )
 
@@ -440,12 +451,14 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
+            model_cls = type(self.model)
+            assert isinstance(model_cls, Hashable)
             logger.warning_once(
                 "%s does not define a tensor parallel plan. The Transformers modeling "
                 "backend will shard the model the best it can during graph fusion and "
                 "replicate the rest. This may be suboptimal or fail if the model does "
                 "not fuse cleanly. %s",
-                type(self.model),
+                model_cls,
                 tip,
             )
 
@@ -459,7 +472,10 @@ class Base(
             self.fusers[prefix] = fuser
 
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
-            self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
+            mapper = self.hf_to_vllm_mapper
+            assert mapper is not None
+            assert isinstance(mapper.orig_to_new_stacked, dict)
+            mapper.orig_to_new_stacked.update(orig_to_new_stacked)
 
             packed_modules_mapping = fuser.packed_modules_mapping
             self.packed_modules_mapping.update(packed_modules_mapping)
@@ -519,7 +535,7 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def create_attention_instances(self) -> dict[int, Attention]:
+    def create_attention_instances(self) -> dict[int, AttentionLayerBase]:
         """
         Create `Attention` instances to inform KV cache allocation.
         """

@@ -56,6 +56,7 @@ def vllm_attention_forward(
     attention_instances: "dict[int, Attention] | None" = None,
     **kwargs,
 ):
+    assert attention_instances is not None
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
@@ -91,6 +92,7 @@ def vllm_mla_attention_forward(
     attention_instances: "dict[int, MLAAttention] | None" = None,
     **kwargs,
 ):
+    assert attention_instances is not None
     self_attn = attention_instances[module.layer_idx]
     # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
     query = query.transpose(1, 2).flatten(0, 1)
