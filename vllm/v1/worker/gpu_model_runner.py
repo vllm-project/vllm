@@ -4981,9 +4981,18 @@ class GPUModelRunner(
             if not zeros_only:
                 # Trigger async copy of draft token ids to cpu.
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
-                    draft_token_ids, non_blocking=True
-                )
+                if num_spec_tokens == self.num_spec_tokens:
+                    self.draft_token_ids_cpu[:num_reqs].copy_(
+                        draft_token_ids, non_blocking=True
+                    )
+                else:
+                    # [:num_reqs, :num_spec_tokens] is a gapped view when
+                    # K < config K, forcing pageable staging (#53491);
+                    # split per-row instead.
+                    for i in range(num_reqs):
+                        self.draft_token_ids_cpu[i, :num_spec_tokens].copy_(
+                            draft_token_ids[i], non_blocking=True
+                        )
             else:
                 # No copy needed, just zero-out cpu tensor.
                 self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
