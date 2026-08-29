@@ -27,6 +27,7 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     parallel_launch_with_config,
 )
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
+from vllm import _custom_ops as ops
 from vllm.config import (
     CompilationConfig,
     EPLBConfig,
@@ -36,6 +37,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import (
+    get_dp_group,
     get_ep_group,
     get_eplb_group,
     tensor_model_parallel_all_gather,
@@ -45,7 +47,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 )
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     MoERunner,
@@ -53,6 +55,9 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
+    MoEPrepareAndFinalizeNaiveDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -1976,6 +1981,132 @@ def _parallel_worker_rocm_deepep(
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(exit_code)
+
+
+@pytest.mark.parametrize(
+    ("use_fp8_w8a8", "is_per_tensor", "a1_scale", "defer_input_quant", "expected"),
+    [
+        pytest.param(True, True, None, False, True, id="dynamic-per-tensor-fp8"),
+        pytest.param(True, True, None, True, False, id="deferred-by-caller"),
+        pytest.param(True, True, torch.tensor(1.0), False, False, id="static-fp8"),
+        pytest.param(True, False, None, False, False, id="per-token-or-block-fp8"),
+        pytest.param(False, True, None, False, False, id="non-fp8"),
+    ],
+)
+def test_should_quantize_after_dispatch(
+    use_fp8_w8a8, is_per_tensor, a1_scale, defer_input_quant, expected
+):
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
+        _should_quantize_after_dispatch,
+    )
+
+    quant_config = types.SimpleNamespace(
+        use_fp8_w8a8=use_fp8_w8a8,
+        is_per_tensor=is_per_tensor,
+        a1_scale=a1_scale,
+    )
+    assert _should_quantize_after_dispatch(quant_config, defer_input_quant) is expected
+
+
+def _run_allgather_reducescatter_fp8_dynamic_per_tensor_scale(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    uneven_num_tokens: bool,
+):
+    del cpu_group
+    token_counts = [2 + int(uneven_num_tokens) * rank for rank in range(pgi.world_size)]
+    num_tokens = token_counts[pgi.rank]
+    hidden_size = 16
+
+    hidden_states = torch.arange(
+        1,
+        num_tokens * hidden_size + 1,
+        dtype=torch.bfloat16,
+        device=pgi.device,
+    ).reshape(num_tokens, hidden_size)
+    hidden_states.mul_(4**pgi.rank)
+    topk_weights = torch.ones((num_tokens, 1), device=pgi.device)
+    topk_ids = torch.zeros((num_tokens, 1), dtype=torch.int32, device=pgi.device)
+    quant_config = FusedMoEQuantConfig.make(current_platform.fp8_dtype())
+
+    assert get_dp_group().world_size == pgi.world_size == 2
+    assert get_ep_group().world_size == pgi.world_size
+    assert quant_config.use_fp8_w8a8
+    assert quant_config.is_per_tensor
+    assert quant_config.a1_scale is None
+
+    _, global_scale = ops.scaled_fp8_quant(
+        hidden_states, scale=None, use_per_token_if_dynamic=False
+    )
+    torch.distributed.all_reduce(global_scale, op=torch.distributed.ReduceOp.MAX)
+
+    prepare_finalize = MoEPrepareAndFinalizeNaiveDPEPModular()
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=torch.tensor(
+            token_counts, device=pgi.device, dtype=torch.int
+        ),
+    ):
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        with dp_metadata.sp_local_sizes(1):
+            a1q, a1q_scale, _, _, _ = prepare_finalize.prepare(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                num_experts=2,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+                quant_config=quant_config,
+            )
+
+    global_hidden_states = get_dp_group().all_gatherv(
+        hidden_states, dim=0, sizes=token_counts
+    )
+    expected_a1q, _ = ops.scaled_fp8_quant(
+        global_hidden_states,
+        scale=global_scale,
+        use_per_token_if_dynamic=False,
+    )
+
+    assert a1q_scale is not None
+    assert a1q_scale.numel() == 1
+    torch.testing.assert_close(
+        a1q_scale.reshape(-1), global_scale.reshape(-1), atol=0, rtol=0
+    )
+    assert torch.equal(a1q, expected_a1q)
+
+
+@pytest.mark.parametrize("uneven_num_tokens", [False, True])
+def test_allgather_reducescatter_fp8_dynamic_per_tensor_scale(
+    monkeypatch, uneven_num_tokens
+):
+    """Gathered activations must have one matching per-tensor scale."""
+    world_size = 2
+    if current_platform.device_count() < world_size:
+        pytest.skip(f"Test requires {world_size} GPUs.")
+
+    if os.environ.get("VLLM_LOGGING_LEVEL") is None:
+        monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
+
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=world_size,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
+        ),
+        scheduler_config=SchedulerConfig.default_factory(max_num_batched_tokens=128),
+    )
+    parallel_launch_with_config(
+        world_size,
+        _run_allgather_reducescatter_fp8_dynamic_per_tensor_scale,
+        vllm_config,
+        None,
+        uneven_num_tokens,
+    )
 
 
 # TODO: add cudagraphs/torch.compile tests
