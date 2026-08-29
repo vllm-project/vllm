@@ -106,6 +106,9 @@ class HiSparseConnectorWorker:
         host_num_blocks: int,
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
+        *,
+        is_host_writer: bool = True,
+        host_write_event: torch.Event | None = None,
     ) -> None:
         if self._initialized:
             raise RuntimeError("HiSparse connector worker is already initialized.")
@@ -115,6 +118,10 @@ class HiSparseConnectorWorker:
         self.pages_per_host_block = pages_per_host_block
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
+        self.is_host_writer = is_host_writer
+        self.host_write_event = (
+            host_write_event if host_write_event is not None else torch.Event()
+        )
         self.cache_handles = cache_handles
         for cache in cache_handles:
             cache.defer_host_mirror = True
@@ -178,6 +185,9 @@ class HiSparseConnectorWorker:
             resident_caches.append(cache.view.cache)
             resident_slot_mappings.append(cache.slot_mapping)
         self.host_caches = host_caches
+        self.mirror_src_slot_mappings = resident_slot_mappings
+        if not self.is_host_writer:
+            return
 
         layouts = []
         resident_layouts = []
@@ -245,11 +255,9 @@ class HiSparseConnectorWorker:
             dtype=torch.uint64,
             device=device,
         )
-        self.mirror_src_slot_mappings = resident_slot_mappings
         self.mirror_src_block_stride = mirror_block_stride
         self.mirror_src_block_size = mirror_block_size
         self.mirror_src_rows = mirror_src_rows
-        self.host_write_event = torch.Event()
         self.spill_row_capacity = max_model_len
         spill_staging_count = max_concurrent_batches + 1
         self.spill_src_cpu = torch.empty(
@@ -287,6 +295,10 @@ class HiSparseConnectorWorker:
         metadata: HiSparseConnectorMetadata,
         request_state_indices: torch.Tensor | None,
     ) -> None:
+        if not self.is_host_writer:
+            torch.accelerator.current_stream(self.hot_backing.device).wait_event(
+                self.host_write_event
+            )
         copy_kv_cache_blocks_inplace(
             self.host_caches,
             self.host_num_blocks,
@@ -341,7 +353,7 @@ class HiSparseConnectorWorker:
             runtime.reset_hot_state()
 
     def _enqueue_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
-        if not transfers:
+        if not transfers or not self.is_host_writer:
             return
         transfers_per_batch = self.spill_row_capacity // self.kernel_block_size
         if transfers_per_batch == 0:
@@ -428,18 +440,19 @@ class HiSparseConnectorWorker:
         )
         if num_rows == 0:
             return
-        torch.ops._C_cache_ops.hisparse_backup_layers(
-            self.hot_backing,
-            self.mirror_layer_offsets,
-            self.mirror_src_indices_ptrs,
-            self.backup_host_anchor,
-            self.backup_host_cache_ptrs,
-            dst_slots,
-            num_rows,
-            self.mirror_src_block_stride,
-            self.mirror_src_block_size,
-            self.mirror_src_rows,
-        )
+        if self.is_host_writer:
+            torch.ops._C_cache_ops.hisparse_backup_layers(
+                self.hot_backing,
+                self.mirror_layer_offsets,
+                self.mirror_src_indices_ptrs,
+                self.backup_host_anchor,
+                self.backup_host_cache_ptrs,
+                dst_slots,
+                num_rows,
+                self.mirror_src_block_stride,
+                self.mirror_src_block_size,
+                self.mirror_src_rows,
+            )
         num_decode_tokens = min(cache.num_decode_tokens, num_rows)
         if num_decode_tokens:
             assert cache.req_id_per_token is not None
@@ -456,7 +469,8 @@ class HiSparseConnectorWorker:
         transfers = self._post_forward_transfers
         self._post_forward_transfers = []
         self._enqueue_transfers(transfers)
-        self.host_write_event.record(current_stream)
+        if self.is_host_writer:
+            self.host_write_event.record(current_stream)
 
     def take_transfer_updates(self) -> tuple[list[int], list[int]]:
         enqueued = self._enqueued_transfer_ids
