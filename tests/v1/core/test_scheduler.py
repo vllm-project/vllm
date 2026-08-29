@@ -4916,9 +4916,7 @@ def test_stale_finished_recving_is_ignored():
     model_runner_output = ModelRunnerOutput(
         req_ids=[],
         req_id_to_index={},
-        kv_connector_output=KVConnectorOutput(
-            finished_recving={"unknown-request"}
-        ),
+        kv_connector_output=KVConnectorOutput(finished_recving={"unknown-request"}),
     )
 
     # Should not raise; the stale report is simply ignored.
@@ -4935,9 +4933,7 @@ def test_stale_finished_sending_is_ignored():
     model_runner_output = ModelRunnerOutput(
         req_ids=[],
         req_id_to_index={},
-        kv_connector_output=KVConnectorOutput(
-            finished_sending={"unknown-request"}
-        ),
+        kv_connector_output=KVConnectorOutput(finished_sending={"unknown-request"}),
     )
 
     # Should not raise; the stale report is simply ignored.

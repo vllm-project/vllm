@@ -2871,12 +2871,8 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished recving KV transfer for request %s", req_id)
             req = self.requests.get(req_id)
             if req is None:
-                # A late/stale KV transfer completion may be reported for a
-                # request the scheduler has already removed (e.g. when multiple
-                # connectors load the same request and the faster one already
-                # completed it). This is state-wise harmless, so warn and skip
-                # instead of crashing the engine with an assertion error.
-                logger.warning(
+                # A slower connector may finish after the request was removed.
+                logger.warning_once(
                     "Got finished recving KV transfer for request %s that is "
                     "no longer being tracked by the scheduler; ignoring.",
                     req_id,
@@ -2891,7 +2887,7 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             req = self.requests.get(req_id)
             if req is None:
-                logger.warning(
+                logger.warning_once(
                     "Got finished sending KV transfer for request %s that is "
                     "no longer being tracked by the scheduler; ignoring.",
                     req_id,
