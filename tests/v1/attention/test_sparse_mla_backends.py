@@ -2412,6 +2412,95 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
     torch.testing.assert_close(plan.row_ids, expected_rows)
 
 
+def test_hisparse_prefill_staging_plan_resolves_resident_sources():
+    """Per-page resident hits become device sources; misses stay host DMAs."""
+    block_size = 4
+    resident_block_size = 2
+    block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5, 8], dtype=torch.int32)
+    plan = build_hisparse_prefill_staging_plan(block_table, seq_lens, block_size)
+    # Two resident pages per host block; 0 entries are null (not resident).
+    resident_table = torch.tensor(
+        [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]], dtype=torch.int32
+    )
+
+    plan.ensure_gpu_sources(resident_table, resident_block_size)
+
+    assert plan.gpu_row_ids is not None
+    unique_hosts = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
+    gpu_rows = plan.gpu_row_ids[0].view(-1, block_size)
+    reps = {5: (0, 0), 2: (0, 1), 9: (1, 0), 3: (1, 1)}
+    for u, host_id in enumerate(unique_hosts):
+        for t in range(block_size):
+            if host_id == 0:
+                assert int(gpu_rows[u, t]) == -1
+                continue
+            row, col = reps[host_id]
+            page = t // resident_block_size
+            res_block = int(resident_table[row, col * 2 + page])
+            expected = (
+                res_block * resident_block_size + t % resident_block_size
+                if res_block > 0
+                else -1
+            )
+            assert int(gpu_rows[u, t]) == expected
+    torch.testing.assert_close(
+        plan.miss_mask, (plan.gpu_row_ids < 0).int(), check_dtype=False
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hisparse_gather_prefill_cache_prefers_resident_rows():
+    """Staged rows come from the resident cache when a shadow page exists."""
+    if not _has_hisparse_ops():
+        pytest.skip("hisparse CUDA ops unavailable")
+    device = torch.device("cuda")
+    block_size, resident_block_size, row_width = 4, 2, 16
+    block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
+    plan = build_hisparse_prefill_staging_plan(block_table, seq_lens, block_size)
+    resident_table = torch.tensor(
+        [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]],
+        dtype=torch.int32,
+        device=device,
+    )
+    plan.ensure_gpu_sources(resident_table, resident_block_size)
+
+    num_host_blocks, num_res_blocks = 10, 24
+    host_cache = (
+        torch.arange(num_host_blocks * block_size * row_width, dtype=torch.float32)
+        .view(num_host_blocks, block_size, row_width)
+        .pin_memory()
+    )
+    resident_cache = (
+        (
+            -torch.arange(
+                num_res_blocks * resident_block_size * row_width, dtype=torch.float32
+            )
+            - 1.0
+        )
+        .view(num_res_blocks, resident_block_size, row_width)
+        .to(device)
+    )
+
+    staged = HiSparseRuntime.gather_prefill_cache(
+        None, host_cache, plan, resident_cache=resident_cache
+    )
+
+    staged_flat = staged.view(-1, row_width).cpu()
+    host_flat = host_cache.view(-1, row_width)
+    resident_flat = resident_cache.reshape(-1, row_width).cpu()
+    gpu_rows = plan.gpu_row_ids[0].cpu()
+    host_rows = plan.row_ids[0].cpu()
+    for i in range(staged_flat.shape[0]):
+        expected = (
+            resident_flat[int(gpu_rows[i])]
+            if int(gpu_rows[i]) >= 0
+            else host_flat[int(host_rows[i])]
+        )
+        torch.testing.assert_close(staged_flat[i], expected)
+
+
 def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
     """Dense MHA may consume every prefill token in a mixed batch."""
     impl = object.__new__(FlashMLASparseImpl)

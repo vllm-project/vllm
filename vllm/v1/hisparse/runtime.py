@@ -202,13 +202,75 @@ def hisparse_prefill_staging_remap(
     return new_bt, row_ids
 
 
-@dataclass(frozen=True)
+@dataclass
 class HiSparsePrefillStagingPlan:
     block_table: torch.Tensor
     row_ids: torch.Tensor
     dst_rows: torch.Tensor
     miss_mask: torch.Tensor
     block_size: int
+    # Host rows with a GPU-resident copy (adopted shadow pages): the flat
+    # resident-cache row to read instead of DMAing from host, -1 for misses.
+    gpu_row_ids: torch.Tensor | None = None
+
+    def ensure_gpu_sources(
+        self,
+        resident_block_table: torch.Tensor,
+        resident_block_size: int,
+    ) -> None:
+        """Resolve which staged rows can be served from the resident cache.
+
+        Computed once per plan (the resident block table is shared by every
+        layer in the group); non-null resident pages become miss_mask=0 rows
+        gathered device-to-device by ``gather_prefill_cache``.
+        """
+        if self.gpu_row_ids is not None:
+            return
+        block_size = self.block_size
+        if resident_block_size <= 0 or block_size % resident_block_size != 0:
+            return
+        device = self.row_ids.device
+        num_unique = self.row_ids.shape[1] // block_size
+        host_ids = self.row_ids[0].view(num_unique, block_size)[:, 0] // block_size
+        new_bt = self.block_table.to(torch.int64)
+        num_rows, num_cols = new_bt.shape
+        if num_rows == 0 or resident_block_table.shape[0] < num_rows:
+            return
+        # One representative (row, col) per unique host block: any request
+        # referencing the block holds an equivalent (refcounted) resident view.
+        flat_pos = torch.arange(num_rows * num_cols, device=device)
+        rep = torch.full(
+            (num_unique,), num_rows * num_cols, device=device, dtype=torch.int64
+        )
+        rep.scatter_reduce_(
+            0, new_bt.reshape(-1), flat_pos, reduce="amin", include_self=True
+        )
+        rep_row = (rep // num_cols).clamp(max=resident_block_table.shape[0] - 1)
+        rep_col = rep % num_cols
+        pages_per_block = block_size // resident_block_size
+        res_pos = rep_col[:, None] * pages_per_block + torch.arange(
+            pages_per_block, device=device
+        )
+        res_cols = resident_block_table.shape[1]
+        res_blocks = torch.where(
+            res_pos < res_cols,
+            torch.gather(
+                resident_block_table.to(torch.int64)[rep_row],
+                1,
+                res_pos.clamp(max=max(res_cols - 1, 0)),
+            ),
+            torch.zeros_like(res_pos),
+        )
+        offsets = torch.arange(block_size, device=device)
+        per_off_block = res_blocks[:, offsets // resident_block_size]
+        gpu_rows = (
+            per_off_block * resident_block_size
+            + (offsets % resident_block_size)[None, :]
+        )
+        # Block id 0 is the null block in both id spaces.
+        hit = (per_off_block > 0) & (host_ids[:, None] > 0)
+        self.gpu_row_ids = torch.where(hit, gpu_rows, -1).reshape(1, -1).to(torch.int32)
+        self.miss_mask = (self.gpu_row_ids < 0).int()
 
 
 def build_hisparse_prefill_staging_plan(
@@ -443,6 +505,7 @@ class HiSparseRuntime:
         self,
         kv_cache: torch.Tensor,
         plan: HiSparsePrefillStagingPlan,
+        resident_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Gather this runtime's host cache using a shared staging plan."""
         if kv_cache.shape[1] != plan.block_size:
@@ -461,6 +524,18 @@ class HiSparseRuntime:
             dtype=kv_cache.dtype,
             device=plan.block_table.device,
         )
+        if plan.gpu_row_ids is not None and resident_cache is not None:
+            gpu_rows = plan.gpu_row_ids[0].to(torch.long)
+            hit_rows = (gpu_rows >= 0).nonzero(as_tuple=False).squeeze(1)
+            if hit_rows.numel():
+                src = gpu_rows[hit_rows]
+                resident_block_size = resident_cache.shape[1]
+                rows = resident_cache[
+                    src // resident_block_size, src % resident_block_size
+                ]
+                if rows.dtype != staged.dtype:
+                    rows = rows.contiguous().view(staged.dtype)
+                staged.view(-1, row_width)[hit_rows] = rows
         torch.ops._C_cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,

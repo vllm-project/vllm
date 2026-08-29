@@ -1238,8 +1238,18 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         staging_plan = prefill_metadata.hisparse_staging_plan
         if staging_plan is not None and kv_c_and_k_pe_cache.device.type == "cpu":
             assert self.hisparse_cache is not None
-            kv_c_and_k_pe_cache = self.hisparse_cache.runtime.gather_prefill_cache(
-                kv_c_and_k_pe_cache, staging_plan
+            handle = self.hisparse_cache
+            resident_cache = None
+            if handle.view is not None and handle.block_table is not None:
+                staging_plan.ensure_gpu_sources(
+                    handle.block_table[attn_metadata.num_decodes :],
+                    handle.view.block_size,
+                )
+                resident_cache = handle.view.cache
+            kv_c_and_k_pe_cache = handle.runtime.gather_prefill_cache(
+                kv_c_and_k_pe_cache,
+                staging_plan,
+                resident_cache=resident_cache,
             )
         prefill_max_seq_len = attn_metadata.prefill_max_seq_len
         topk_tokens = attn_metadata.topk_tokens

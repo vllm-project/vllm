@@ -41,6 +41,19 @@ class _HiSparseRequestState:
     pending_pages: dict[int, int] = field(default_factory=dict)
     transition_target_pages: int | None = None
     publication: _PendingPublication | None = None
+    shadow_recorded_blocks: int = 0
+
+
+@dataclass
+class _ShadowEntry:
+    """GPU copies of a published host block, pinned past request lifetime.
+
+    ``host_hash`` snapshots the host block's content hash at record time so a
+    recycled host block id can never resurrect another request's pages.
+    """
+
+    host_hash: object
+    pages: tuple[tuple[KVCacheBlock, ...] | None, ...]
 
 
 @dataclass
@@ -154,6 +167,12 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
+        # host block id -> pinned GPU copies of its pages; lets a prefix hit on
+        # host blocks come back GPU-resident instead of null (FIFO-evicted
+        # first under pool pressure, so pinning never causes an OOM the
+        # reclaim path cannot resolve for free).
+        self.shadow_pages: dict[int, _ShadowEntry] = {}
+        self._shadow_gpu_to_host: dict[int, int] = {}
 
     def _get_request_state(self, request_id: str) -> _HiSparseRequestState:
         state = self.request_states.get(request_id)
@@ -178,13 +197,116 @@ class HiSparseCoordinator:
         if self.resident_managers and has_cpu_history:
             state = self._get_request_state(request_id)
             assert self.host_group_id is not None and self.host_manager is not None
-            num_host_blocks = len(new_computed_blocks[self.host_group_id])
+            host_blocks = new_computed_blocks[self.host_group_id]
+            num_host_blocks = len(host_blocks)
             num_pages = num_host_blocks * self.pages_per_host_block
             state.valid_pages.update(range(num_pages))
             state.ready_prefix_pages = max(num_pages, state.ready_prefix_pages)
+            self._adopt_shadow_pages(request_id, host_blocks)
+            state.shadow_recorded_blocks = max(
+                state.shadow_recorded_blocks, num_host_blocks
+            )
         if not self.resident_managers or has_cpu_history:
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
+
+    def _adopt_shadow_pages(
+        self,
+        request_id: str,
+        host_blocks: Sequence[KVCacheBlock],
+    ) -> None:
+        """Replace null resident pages with pinned GPU copies of the prefix.
+
+        Runs after the hit length is fully reconciled, so shadow hits and
+        misses can be scattered per page without affecting the prefix hit.
+        """
+        if not self.shadow_pages:
+            return
+        for host_idx, host_block in enumerate(host_blocks):
+            if host_block.is_null or host_block.block_hash is None:
+                continue
+            entry = self.shadow_pages.get(host_block.block_id)
+            if entry is None or entry.host_hash != host_block.block_hash:
+                continue
+            for page_offset, page_blocks in enumerate(entry.pages):
+                if page_blocks is None:
+                    continue
+                page_idx = host_idx * self.pages_per_host_block + page_offset
+                for manager, block in zip(self.resident_managers, page_blocks):
+                    if manager.adopt_resident_page(request_id, page_idx, block):
+                        manager.block_pool.touch([block])
+
+    def _record_shadow_pages(self, request_id: str, num_computed_tokens: int) -> None:
+        """Pin the GPU copies of just-published host blocks for later hits."""
+        if not self.resident_managers:
+            return
+        assert self.host_manager is not None
+        host_blocks = self.host_manager.req_to_blocks.get(request_id)
+        if not host_blocks:
+            return
+        state = self._get_request_state(request_id)
+        num_host_blocks = min(
+            num_computed_tokens // self.host_manager.block_size, len(host_blocks)
+        )
+        for host_idx in range(state.shadow_recorded_blocks, num_host_blocks):
+            host_block = host_blocks[host_idx]
+            if host_block.is_null or host_block.block_hash is None:
+                continue
+            existing = self.shadow_pages.get(host_block.block_id)
+            if existing is not None:
+                if existing.host_hash == host_block.block_hash:
+                    continue
+                self._drop_shadow_entry(host_block.block_id)
+            pages: list[tuple[KVCacheBlock, ...] | None] = []
+            for page_offset in range(self.pages_per_host_block):
+                page_idx = host_idx * self.pages_per_host_block + page_offset
+                page_blocks = []
+                for manager in self.resident_managers:
+                    block = manager.get_resident_page(request_id, page_idx)
+                    if block is None:
+                        break
+                    page_blocks.append(block)
+                pages.append(
+                    tuple(page_blocks)
+                    if len(page_blocks) == len(self.resident_managers)
+                    else None
+                )
+            if all(recorded is None for recorded in pages):
+                continue
+            for recorded in pages:
+                if recorded is None:
+                    continue
+                for manager, block in zip(self.resident_managers, recorded):
+                    manager.block_pool.touch([block])
+                    self._shadow_gpu_to_host[block.block_id] = host_block.block_id
+            self.shadow_pages[host_block.block_id] = _ShadowEntry(
+                host_hash=host_block.block_hash,
+                pages=tuple(pages),
+            )
+        state.shadow_recorded_blocks = max(
+            state.shadow_recorded_blocks, num_host_blocks
+        )
+
+    def _drop_shadow_entry(self, host_block_id: int) -> int:
+        """Unpin one shadow entry; return blocks actually returned to the pool."""
+        entry = self.shadow_pages.pop(host_block_id, None)
+        if entry is None:
+            return 0
+        freed = 0
+        for page_blocks in entry.pages:
+            if page_blocks is None:
+                continue
+            for manager, block in zip(self.resident_managers, page_blocks):
+                self._shadow_gpu_to_host.pop(block.block_id, None)
+                manager.block_pool.free_blocks([block])
+                if block.ref_cnt == 0:
+                    freed += 1
+        return freed
+
+    def _purge_shadow_for_gpu_block(self, gpu_block_id: int) -> None:
+        host_block_id = self._shadow_gpu_to_host.get(gpu_block_id)
+        if host_block_id is not None:
+            self._drop_shadow_entry(host_block_id)
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
@@ -246,11 +368,15 @@ class HiSparseCoordinator:
         pool = self.get_host_block_pool()
         if pool is None:
             return False
+        for block_id in block_ids:
+            self._drop_shadow_entry(block_id)
         pool.evict_blocks(block_ids)
         return True
 
     def reset_prefix_cache(self) -> bool:
         pool = self.get_host_block_pool()
+        for host_block_id in list(self.shadow_pages):
+            self._drop_shadow_entry(host_block_id)
         return pool is None or pool.reset_prefix_cache()
 
     def take_events(self) -> list[KVCacheEvent]:
@@ -265,6 +391,18 @@ class HiSparseCoordinator:
             or num_blocks <= 0
         ):
             return 0
+        # Cheapest tier first: shadow pages are clean by construction (their
+        # host copies were published), so unpinning them frees blocks with no
+        # copies and no block-table updates.
+        shadow_reclaimed = 0
+        for host_block_id in list(self.shadow_pages):
+            if shadow_reclaimed >= num_blocks:
+                break
+            shadow_reclaimed += self._drop_shadow_entry(host_block_id)
+        if shadow_reclaimed >= num_blocks:
+            self._apply_enqueued_spills()
+            self._complete_host_writes()
+            return shadow_reclaimed
         resident_managers = self.resident_managers
         spill_plan_budget = max(
             self.max_spill_pages - len(self.spills_to_send),
@@ -283,7 +421,7 @@ class HiSparseCoordinator:
             len(by_request) * self.num_growing_managers,
         )
 
-        reclaimed = 0
+        reclaimed = shadow_reclaimed
         eventual = sum(
             len(pending.resident_blocks)
             for pending in self.pending_spills.values()
@@ -301,6 +439,10 @@ class HiSparseCoordinator:
                         break
                     if block_idx in state.valid_pages:
                         for manager in resident_managers:
+                            current = manager.get_resident_page(request_id, block_idx)
+                            assert current is not None
+                            # Unpin first so the release genuinely frees.
+                            self._purge_shadow_for_gpu_block(current.block_id)
                             block = manager.release_resident_page(request_id, block_idx)
                             assert block is not None
                             reclaimed += 1
@@ -410,6 +552,7 @@ class HiSparseCoordinator:
                 num_computed_tokens,
                 retention_interval=retention_interval,
             )
+            self._record_shadow_pages(request_id, num_computed_tokens)
             state.publication = None
             return
         state.publication = _PendingPublication(
@@ -432,6 +575,7 @@ class HiSparseCoordinator:
             publication.num_computed_tokens,
             retention_interval=publication.retention_interval,
         )
+        self._record_shadow_pages(request_id, publication.num_computed_tokens)
         state.publication = None
 
     def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
@@ -596,6 +740,7 @@ class HiSparseCoordinator:
         for manager, block in zip(self.resident_managers, pending.resident_blocks):
             current = manager.get_resident_page(request_id, page_idx)
             if current is block and pending.release_after:
+                self._purge_shadow_for_gpu_block(block.block_id)
                 released = manager.release_resident_page(
                     request_id,
                     page_idx,
