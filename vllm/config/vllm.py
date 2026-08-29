@@ -1889,26 +1889,34 @@ class VllmConfig:
                 raise ValueError(
                     "max_num_scheduled_tokens is set to"
                     f" {self.scheduler_config.max_num_scheduled_tokens} based on"
-                    " the speculative decoding settings, which does not allow"
-                    " any tokens to be scheduled. Increase max_num_batched_tokens"
-                    " to accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens."
+                    " the speculative decoding settings, which does not allow any"
+                    " tokens to be scheduled. It is derived from"
+                    f" max_num_batched_tokens ({max_num_batched_tokens}) minus the"
+                    f" per-request draft overhead ({scheduled_token_delta} additional"
+                    " slots, from --num-speculative-tokens). Increase"
+                    " --max-num-batched-tokens or decrease --num-speculative-tokens so"
+                    " the budget is positive."
                 )
             if self.scheduler_config.max_num_scheduled_tokens < 8192:
                 logger.warning_once(
                     "max_num_scheduled_tokens is set to"
                     f" {self.scheduler_config.max_num_scheduled_tokens} based on"
                     " the speculative decoding settings. This may lead to suboptimal"
-                    " performance. Consider increasing max_num_batched_tokens to"
-                    " accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens.",
+                    " performance. It is derived from"
+                    f" max_num_batched_tokens ({max_num_batched_tokens}) minus the"
+                    f" per-request draft overhead ({scheduled_token_delta} additional"
+                    " slots, from --num-speculative-tokens). Consider increasing"
+                    " --max-num-batched-tokens or decreasing --num-speculative-tokens."
                 )
 
             if max_num_batched_tokens <= scheduled_token_delta:
                 raise ValueError(
                     "VllmConfig does not have enough slots to schedule a token and"
                     " support the speculative decoding settings."
-                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
+                    f" Got max_num_batched_tokens={max_num_batched_tokens} and"
+                    f" max_num_new_slots_for_drafting={scheduled_token_delta} (from"
+                    " --num-speculative-tokens). Increase --max-num-batched-tokens or"
+                    " decrease --num-speculative-tokens."
                 )
 
     def _set_cudagraph_sizes(self):

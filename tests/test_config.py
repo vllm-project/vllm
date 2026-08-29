@@ -2378,3 +2378,50 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+def test_speculative_scheduled_tokens_error_names_flags():
+    """Regression test for #50708.
+
+    When speculative decoding leaves no room in ``max_num_scheduled_tokens``,
+    the validator must point at the user-facing CLI flags that control the
+    draft-token budget (``--max-num-batched-tokens`` / ``--num-speculative-tokens``)
+    instead of only reporting a derived value.
+    """
+    with pytest.raises(ValueError) as exc_info:
+        VllmConfig(
+            model_config=ModelConfig(
+                model="facebook/opt-125m",
+                trust_remote_code=True,
+                dtype="float16",
+            ),
+            scheduler_config=SchedulerConfig(max_num_scheduled_tokens=0),
+            speculative_config=SpeculativeConfig(
+                model="ngram", num_speculative_tokens=5
+            ),
+        )
+    msg = str(exc_info.value)
+    assert "--max-num-batched-tokens" in msg
+    assert "--num-speculative-tokens" in msg
+
+
+def test_speculative_scheduled_tokens_warning_names_flags(caplog):
+    """``max_num_scheduled_tokens`` < 8192 should warn and name the flags."""
+    with caplog.set_level(logging.WARNING):
+        VllmConfig(
+            model_config=ModelConfig(
+                model="facebook/opt-125m",
+                trust_remote_code=True,
+                dtype="float16",
+            ),
+            scheduler_config=SchedulerConfig(max_num_batched_tokens=100),
+            speculative_config=SpeculativeConfig(
+                model="ngram", num_speculative_tokens=5
+            ),
+        )
+    assert any(
+        "--max-num-batched-tokens" in record.message for record in caplog.records
+    )
+    assert any(
+        "--num-speculative-tokens" in record.message for record in caplog.records
+    )
