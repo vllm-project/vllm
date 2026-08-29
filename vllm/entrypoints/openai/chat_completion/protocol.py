@@ -912,6 +912,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 parameter="tools",
             )
 
+        # An explicit null means the field was not specified: clients that
+        # serialise their unset optional fields still send the key. Drop it so
+        # everything below, and the later validators that read it, see what an
+        # absent key gives them rather than a None that matches no branch.
+        if data.get("tool_choice") is None:
+            data.pop("tool_choice", None)
+
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
