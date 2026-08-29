@@ -1103,4 +1103,5 @@ def maybe_start_paged_shm_server(
     )
     paged_shm_server.start()
 
-    multimodal_config.paged_shm_server_address = paged_s
+    multimodal_config.paged_shm_server_address = paged_shm_server.address
+    return paged_shm_server
