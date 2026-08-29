@@ -93,6 +93,7 @@ def test_ple_offload_h2h_uses_bound_input_buffers() -> None:
     connector._ngram_context_source = None
     connector._uses_cuda_inputs = False
     connector._validate_input_sources()
+    connector._d2h_event_pool = None
     connector._request_queue = queue.Queue(maxsize=1)
 
     connector._launch(num_reqs=2, num_tokens=4)
@@ -122,9 +123,7 @@ def test_ple_offload_request_thread_copies_mrv1_and_stops() -> None:
     connector._ngram_context_source = None
     connector._uses_cuda_inputs = False
     connector._pinned_input_buffers = []
-    connector._d2h_stream = None
-    connector._input_ready_event = None
-    connector._d2h_done_event = None
+    connector._d2h_event_pool = None
     connector._request_queue = queue.Queue(maxsize=1)
     connector._request_thread = None
     connector._request_thread_ready = threading.Event()
@@ -149,6 +148,45 @@ def test_ple_offload_request_thread_copies_mrv1_and_stops() -> None:
 
     assert connector._request_thread is None
     assert connector._zmq_ctx is None
+
+
+def test_ple_offload_mrv2_uses_event_per_inflight_batch() -> None:
+    """Keep async MRV2 batches from overwriting each other's event state."""
+    connector = PleOffloadConnector.__new__(PleOffloadConnector)
+    connector.tp_rank = 0
+    connector.dp_rank = 0
+    connector._uses_cuda_inputs = True
+    connector._request_queue = queue.Queue(maxsize=2)
+    connector._d2h_event_pool = queue.Queue(maxsize=2)
+    first_event = Mock()
+    second_event = Mock()
+    connector._d2h_event_pool.put_nowait(first_event)
+    connector._d2h_event_pool.put_nowait(second_event)
+    enqueue_cuda_inputs = Mock()
+    connector._enqueue_cuda_inputs = enqueue_cuda_inputs  # type: ignore[method-assign]
+
+    connector._launch(num_reqs=2, num_tokens=4)
+    connector._launch(num_reqs=1, num_tokens=2)
+
+    first_pending = connector._request_queue.get_nowait()
+    second_pending = connector._request_queue.get_nowait()
+    assert first_pending is not None
+    assert second_pending is not None
+    assert first_pending.d2h_done_event is first_event
+    assert second_pending.d2h_done_event is second_event
+    assert first_pending.request.num_tokens == 4
+    assert second_pending.request.num_tokens == 2
+    enqueue_calls = enqueue_cuda_inputs.call_args_list
+    assert enqueue_calls[0].args[1] is first_event
+    assert enqueue_calls[1].args[1] is second_event
+    assert connector._d2h_event_pool.empty()
+    with pytest.raises(RuntimeError, match="configured concurrent batches"):
+        connector._launch(num_reqs=1, num_tokens=1)
+
+    connector.tp_rank = 1
+    connector._launch(num_reqs=1, num_tokens=1)
+    assert enqueue_cuda_inputs.call_count == 2
+    assert connector._request_queue.empty()
 
 
 def test_ple_offload_request_thread_failure_exits_worker(
@@ -202,7 +240,7 @@ def test_ple_offload_mrv2_copies_into_pinned_shared_buffers() -> None:
     assert final_ptrs != initial_ptrs
 
     connector._pinned_input_buffers = []
-    connector._request_queue = queue.Queue(maxsize=1)
+    connector._request_queue = queue.Queue(maxsize=2)
 
     with torch.accelerator.device_index(connector.device.index):
         input_ids = torch.tensor(
@@ -226,14 +264,12 @@ def test_ple_offload_mrv2_copies_into_pinned_shared_buffers() -> None:
             tuple(buffer.data_ptr() for buffer in connector._pinned_input_buffers)
             == final_ptrs
         )
-        connector._d2h_stream = torch.cuda.Stream(device=connector.device)
-        connector._input_ready_event = torch.cuda.Event()
-        connector._d2h_done_event = torch.cuda.Event()
+        connector._d2h_event_pool = queue.Queue(maxsize=2)
+        connector._d2h_event_pool.put_nowait(torch.cuda.Event())
+        connector._d2h_event_pool.put_nowait(torch.cuda.Event())
         try:
             connector._launch(num_reqs=2, num_tokens=4)
 
-            # The model thread only records input readiness and queues metadata.
-            assert connector._input_ids_buf.tolist() == [-99, -99, -99, -99]
             request = connector._request_queue.get_nowait()
             assert request is not None
             connector._process_request(request, socket)
@@ -244,6 +280,7 @@ def test_ple_offload_mrv2_copies_into_pinned_shared_buffers() -> None:
                 [1, 2, 3],
                 [4, 5, 6],
             ]
+            assert connector._d2h_event_pool.qsize() == 2
             socket.send.assert_called_once()
         finally:
             torch.accelerator.synchronize(connector.device)
