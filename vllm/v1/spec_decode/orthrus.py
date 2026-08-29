@@ -53,7 +53,7 @@ mask.
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig, replace
+from vllm.config import CUDAGraphMode, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
@@ -127,6 +127,26 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             base,
             attention_config=replace(base.attention_config, backend=target_backend),
         )
+
+    @override
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Never capture cudagraphs for the diffusion draft.
+
+        The base class's PIECEWISE path (see
+        ``SpecDecodeBaseProposer.initialize_cudagraph_keys``) assumes the
+        draft's forward pass goes through the model's ``forward()`` --
+        the method ``@support_torch_compile`` instruments on
+        ``OrthrusModel``. Orthrus's diffusion path instead calls
+        ``forward_diffusion_paged`` directly (see ``OrthrusForCausalLM.
+        forward``), bypassing that compiled entry point entirely. Enabling
+        PIECEWISE capture here would set up a cudagraph dispatcher for
+        graphs the diffusion forward never populates -- a real hazard
+        (either a crash on replay, or worse, silently replaying stale
+        buffers from an unrelated capture), not just a missed optimization.
+        Forcing NONE keeps the draft correct and eager until
+        forward_diffusion_paged is made to run through the compiled path.
+        """
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
 
     @override
     def _get_model(self) -> torch.nn.Module:
