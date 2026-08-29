@@ -19,11 +19,12 @@ from vllm.model_executor.kernels.linear import (
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
     ModelOptFp8PbWoLinearMethod,
+    ModelOptFp8PcPtLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
@@ -219,6 +220,28 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_mixed_precision_dispatches_fp8_pc_pt_method():
+    """FP8_PER_CHANNEL_PER_TOKEN must reach ModelOptFp8PcPtLinearMethod.
+
+    Without a branch for it, get_quant_method falls through to
+    UnquantizedLinearMethod, the layer never registers weight_scale, and a
+    checkpoint carrying one fails to load.
+    """
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.mlp.down_proj": {
+                "quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"
+            }
+        }
+    )
+    layer = Mock(spec=LinearBase)
+    layer.__class__ = LinearBase
+
+    method = config.get_quant_method(layer, prefix="model.layers.0.mlp.down_proj")
+
+    assert isinstance(method, ModelOptFp8PcPtLinearMethod)
 
 
 def test_modelopt_mixed_precision_resolves_declared_packed_projection():
