@@ -5,12 +5,13 @@ import asyncio
 from collections.abc import (
     AsyncGenerator,
     Callable,
-    Iterable,
     Mapping,
     MutableSequence,
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
+from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -31,6 +32,7 @@ from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
@@ -41,13 +43,15 @@ if TYPE_CHECKING:
         SpeechToTextParams,
         VllmConfig,
     )
+    from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
-    from vllm.model_executor.models.interfaces_base import VllmModel
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
@@ -68,6 +72,29 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+MambaStateShapes: TypeAlias = (
+    tuple[tuple[int, int]]
+    | tuple[tuple[int, int, int]]
+    | tuple[tuple[int, int], tuple[int, int]]
+    | tuple[tuple[int, int], tuple[int, int, int]]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DiarizedTranscriptionSegment:
+    """A timestamped, speaker-attributed segment produced by an ASR model."""
+
+    start: float
+    end: float
+    speaker: str
+    text: str
 
 
 class StreamingTranscriptionPostProcessor:
@@ -98,7 +125,32 @@ _language_model_by_module = dict[nn.Module, "VllmModel"]()
 
 
 @runtime_checkable
-class SupportsMultiModal(Protocol):
+class SupportsMultiModalEmbeddings(Protocol):
+    """The interface for models that can merge external multimodal embeddings."""
+
+    supports_multimodal_embeddings: ClassVar[Literal[True]] = True
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """The interface required for all multi-modal models."""
 
     supports_multimodal: ClassVar[Literal[True]] = True
@@ -120,6 +172,18 @@ class SupportsMultiModal(Protocol):
     """
     A flag that indicates whether this model supports
     `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
+    supports_mm_device_do_normalize: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_device_do_normalize`.
+    """
+
+    supports_tower_connector_lora: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `lora_config.enable_tower_connector_lora`.
     """
 
     requires_raw_input_tokens: ClassVar[bool] = False
@@ -191,26 +255,30 @@ class SupportsMultiModal(Protocol):
             torch.nn.Module: The core language model component.
         """
         # Cached
-        if self in _language_model_by_module:
-            return _language_model_by_module[self]
+        assert isinstance(self, nn.Module)
+        self_module = self
+        if self_module in _language_model_by_module:
+            return _language_model_by_module[self_module]
 
         if self._language_model_names:
-            mod = self
+            mod = self_module
             for attr in common_prefix(
                 [name.split(".") for name in self._language_model_names]
             ):
                 if attr:
                     mod = getattr(mod, attr)
 
-            if mod is not self and hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+            candidate: object = mod
+            if candidate is not self_module and isinstance(candidate, VllmModel):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         # Fallback
-        for mod in self.children():
-            if hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+        for mod in self_module.children():
+            candidate = mod
+            if isinstance(candidate, VllmModel):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
@@ -237,7 +305,7 @@ class SupportsMultiModal(Protocol):
         """
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -270,7 +338,13 @@ class SupportsMultiModal(Protocol):
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
+
+        Marked components are also routed through the active offloader (when
+        it supports tower offloading), since `make_layers` only ever sees the
+        decoder layer stack.
         """
+        from vllm.model_executor.offloader import get_offloader
+
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
         if isinstance(modalities, str):
@@ -281,7 +355,7 @@ class SupportsMultiModal(Protocol):
         else:
             stage_name = "_".join([*modalities, "tower"])
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -296,6 +370,15 @@ class SupportsMultiModal(Protocol):
                 yield
 
         self._tower_model_names = children_names
+
+        # Towers are constructed directly, so `make_layers` never routes them
+        # through the offloader. Do it here, at the same construction stage,
+        # so offloaded tower weights are never allocated on the device.
+        offloader = get_offloader()
+        if offloader.supports_tower_offload:
+            for name in children_names:
+                modules = (module for module in [attrgetter(name)(self)])
+                offloader.wrap_modules(modules, prefix=name)
 
     @contextmanager
     def _mark_composite_model(
@@ -346,17 +429,27 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    @overload
-    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
-
-    @overload
-    def embed_input_ids(
+    def get_mm_lora_token_counts(
         self,
-        input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings,
         *,
-        is_multimodal: torch.Tensor,
-    ) -> Tensor: ...
+        modality: str,
+        mm_kwargs: "MultiModalKwargsItem | None",
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        """
+        Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
+
+        MM LoRA uses these counts to build adapter mappings for the tower and
+        connector forwards. Models with multiple modalities can override this
+        when each modality has different encoder padding or pooling behavior.
+        """
+        del modality, mm_kwargs
+        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
+        return (
+            num_encoder_tokens,
+            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
+        )
 
     def _embed_text_input_ids(
         self,
@@ -376,6 +469,24 @@ class SupportsMultiModal(Protocol):
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
+    ) -> Tensor: ...
 
     def embed_input_ids(
         self,
@@ -424,6 +535,13 @@ class SupportsMultiModalPruning(Protocol):
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
+    supported_video_pruning_methods: ClassVar[tuple["VideoPruningMethod", ...]] = (
+        "evs",
+    )
+    """Video pruning methods (as reported by
+    `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
+    Models supporting methods beyond EVS should override this."""
+
     def recompute_mrope_positions(
         self,
         input_ids: list[int] | torch.Tensor,
@@ -467,6 +585,24 @@ def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
     return getattr(model, "supports_multimodal", False)
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: type[object],
+) -> TypeIs[type[SupportsMultiModalEmbeddings]]: ...
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: object,
+) -> TypeIs[SupportsMultiModalEmbeddings]: ...
+
+
+def supports_multimodal_embeddings(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMultiModalEmbeddings]] | TypeIs[SupportsMultiModalEmbeddings]:
+    return getattr(model, "supports_multimodal_embeddings", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
@@ -620,6 +756,15 @@ def _supports_lora(model: type[object] | object) -> bool:
     return isinstance(model, SupportsLoRA)
 
 
+class _MakeEmptyIntermediateTensors(Protocol):
+    def __call__(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> "IntermediateTensors": ...
+
+
 @runtime_checkable
 class SupportsPP(Protocol):
     """The interface required for all models that support pipeline parallel."""
@@ -633,14 +778,8 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> "IntermediateTensors":
-        """Called when PP rank > 0 for profiling purposes."""
-        ...
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
+    """Called when PP rank > 0 for profiling purposes."""
 
     def forward(
         self,
@@ -648,7 +787,7 @@ class SupportsPP(Protocol):
         positions: Tensor,
         *,
         intermediate_tensors: "IntermediateTensors | None",
-    ) -> "IntermediateTensors | None":
+    ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]":
         """
         Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
@@ -665,12 +804,7 @@ class SupportsPP(Protocol):
 class _SupportsPPType(Protocol):
     supports_pp: Literal[True]
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> "IntermediateTensors": ...
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
 
     def forward(
         self,
@@ -678,7 +812,7 @@ class _SupportsPPType(Protocol):
         positions: Tensor,
         *,
         intermediate_tensors: "IntermediateTensors | None",
-    ) -> "Tensor | IntermediateTensors": ...
+    ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]": ...
 
 
 @overload
@@ -727,7 +861,7 @@ def supports_pp(
 
 def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
-        return isinstance(model, _SupportsPPType)
+        return SupportsPP in model.__mro__ or isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
@@ -753,11 +887,11 @@ class HasInnerState(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
+def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
 
 
 @overload
-def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
+def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
 
 
 def has_inner_state(
@@ -780,11 +914,11 @@ class IsAttentionFree(Protocol):
 
 
 @overload
-def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
+def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
 
 
 @overload
-def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
+def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
 
 
 def is_attention_free(
@@ -809,16 +943,14 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
 
         Returns:
-            Tuple containing:
-            - conv_state_shape: Shape for convolutional state cache
-            - temporal_state_shape: Shape for state space model cache
+            Shapes for each state cache used by the model.
         """
         ...
 
@@ -837,11 +969,11 @@ class IsHybrid(Protocol):
 
 
 @overload
-def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
+def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
 
 
 @overload
-def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
+def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
 
 
 def is_hybrid(
@@ -888,7 +1020,7 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
-    moe_layers: Iterable["MoERunner"]
+    moe_layers: Sequence["MoERunner"]
     """List of MoE layers in this model."""
 
     def set_eplb_state(
@@ -916,7 +1048,7 @@ class MixtureOfExperts(Protocol):
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
+            self.expert_weights.append(list(layer.get_expert_weights()))
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -931,6 +1063,37 @@ class MixtureOfExperts(Protocol):
     ) -> None: ...
 
 
+def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
+    """Return the MixtureOfExperts contained within an arbitrary model.
+
+    - If the model itself is a MixtureOfExperts, return the model directly.
+    - If the model is a multi-modal model, and its `language_model` is a
+      MixtureOfExperts, return the `language_model`.
+    - If neither, return None.
+
+    Args:
+        model: Model being served.
+
+    Returns:
+        The MixtureOfExperts instance contained within the model, or None.
+    """
+
+    if is_mixture_of_experts(model):
+        return model
+
+    if isinstance(model, SupportsMultiModal):
+        try:
+            mm_language_model = model.get_language_model()
+            return (
+                mm_language_model if is_mixture_of_experts(mm_language_model) else None
+            )
+        except NotImplementedError:
+            logger.info_once("Cannot fetch language_model from MultiModal model")
+            return None
+
+    return None
+
+
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return (
         isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
@@ -943,11 +1106,11 @@ class HasNoOps(Protocol):
 
 
 @overload
-def has_noops(model: object) -> TypeIs[HasNoOps]: ...
+def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
 
 
 @overload
-def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
+def has_noops(model: object) -> TypeIs[HasNoOps]: ...
 
 
 def has_noops(
@@ -968,20 +1131,45 @@ class SupportsMambaPrefixCaching(Protocol):
 
 @overload
 def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
+    model: type[object],
+) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
 
 
 @overload
 def supports_mamba_prefix_caching(
-    model: type[object],
-) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
 
 
 def supports_mamba_prefix_caching(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
     return getattr(model, "supports_mamba_prefix_caching", False)
+
+
+@runtime_checkable
+class SupportsReplaySSM(Protocol):
+    """The interface for models whose recurrent layers support ReplaySSM
+    cached decode.
+
+    This is currently experimental.
+    """
+
+    supports_replayssm: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+
+
+@overload
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+
+
+def supports_replayssm(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsReplaySSM]] | TypeIs[SupportsReplaySSM]:
+    return getattr(model, "supports_replayssm", False)
 
 
 @runtime_checkable
@@ -1006,8 +1194,8 @@ class SupportsLateInteraction(Protocol):
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
+    hf_to_vllm_mapper: "WeightsMapper | None" = None
+    packed_modules_mapping: dict[str, list[str]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -1040,10 +1228,9 @@ class SupportsQuant:
         if self.quant_config is None:
             return
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
-            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
-            self.quant_config.apply_vllm_mapper(unstacked_mapper)
-        if self.packed_modules_mapping is not None:
-            self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
+            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
+        if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
+            self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
 
 @runtime_checkable
@@ -1099,6 +1286,9 @@ class SupportsTranscription(Protocol):
     """
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
+
+    supports_diarized_transcription: ClassVar[bool] = False
+    """Enables the ``diarized_json`` response format for the model."""
 
     supports_explicit_language_detection: ClassVar[bool] = False
     """
@@ -1204,6 +1394,15 @@ class SupportsTranscription(Protocol):
             Cleaned transcription text.
         """
         return text
+
+    @classmethod
+    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+        """Parse the model-specific diarized transcript format.
+
+        Only models that set ``supports_diarized_transcription`` must override
+        this method.
+        """
+        raise NotImplementedError
 
     @classmethod
     def get_streaming_post_processor_cls(
@@ -1328,6 +1527,9 @@ class LocalArgmaxMixin:
         ``self.draft_id_to_target_id`` (optional): nn.Parameter
     """
 
+    logits_processor: "LogitsProcessor"
+    lm_head: "ParallelLMHead"
+
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax with optional D2T remapping."""
         top = self.logits_processor.get_top_tokens(
@@ -1351,7 +1553,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -1417,13 +1619,15 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             parent_ref = self.get_language_model()
         elif hasattr(self, "language_model"):
             parent_ref = self.language_model
-        assert hasattr(parent_ref, "model"), (
-            "Model instance must have 'model' attribute to set number of layers"
-        )
-        assert isinstance(parent_ref.model, EagleModelMixin), (
+        # A multimodal model that builds its decoder inside
+        # `_mark_language_model` has get_language_model() return the inner
+        # decoder itself, which IS the EagleModelMixin and has no further
+        # `.model`. Unwrap only when there is something to unwrap.
+        holder = getattr(parent_ref, "model", parent_ref)
+        assert isinstance(holder, EagleModelMixin), (
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
-        parent_ref.model._set_aux_hidden_state_layers(layers)
+        holder._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
@@ -1440,13 +1644,12 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             parent_ref = self.get_language_model()
         elif hasattr(self, "language_model"):
             parent_ref = self.language_model
-        assert hasattr(parent_ref, "model"), (
-            "Model instance must have 'model' attribute to get number of layers"
-        )
-        assert hasattr(parent_ref.model, "layers"), (
+        # Same unwrap-only-if-needed rule as set_aux_hidden_state_layers.
+        holder = getattr(parent_ref, "model", parent_ref)
+        assert hasattr(holder, "layers"), (
             "Model instance must have 'layers' attribute to get number of layers"
         )
-        num_layers = len(parent_ref.model.layers)
+        num_layers = len(holder.layers)
         return (2, num_layers // 2, num_layers - 3)
 
 
@@ -1640,13 +1843,12 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1658,7 +1860,9 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
-        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+        scatter_output_slices(
+            outputs["default"], indices, per_item_out_tokens, dest, clone
+        )
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,

@@ -9,6 +9,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
+    get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
     AiterSharedRoutedFusedMoERouter,
@@ -67,7 +68,8 @@ def create_fused_moe_router(
     The selection logic follows this priority order:
     1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
     2. ZeroExpertRouter - if zero_expert_type is not None
-    3. GroupedTopKRouter - if use_grouped_topk is True
+    3. GroupedTopKRouter - if use_grouped_topk is True and the grouping is not
+       degenerate (at most one group, with topk_group <= 1)
     4. CustomRoutingRouter - if custom_routing_function is not None
     5. FusedTopKBiasRouter - if e_score_correction_bias is not None
     6. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0
@@ -143,30 +145,48 @@ def create_fused_moe_router(
                 "num_expert_group and topk_group must be provided when "
                 "use_grouped_topk is True"
             )
-        grouped_topk_router = GroupedTopKRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            renormalize=renormalize,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=num_fused_shared_experts,
-        )
-        if (
-            grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
-            or num_expert_group > 1
-            or topk_group > 1
-        ):
-            return grouped_topk_router
 
-        # If routing_method for GroupedTopKRouter is Unspecified and there is only
-        # one group, fallback to standard top-k routing
-        use_grouped_topk = False
-        num_expert_group = None
-        topk_group = None
+        # For topk_group <= 1, grouped implementation is pure overhead.
+        degenerate_grouping = num_expert_group <= 1 and topk_group <= 1
+        # FusedTopKRouter cannot apply routed_scaling_factor, FusedTopKBiasRouter can.
+        scaling_handled_downstream = (
+            routed_scaling_factor == 1.0 or e_score_correction_bias is not None
+        )
+
+        # Degenerating must not change the advertised routing method, which drives
+        # kernel selection. num_expert_group only affects it for biased routing.
+        def advertised_routing_method(groups: int | None) -> RoutingMethodType:
+            return get_routing_method_type(
+                scoring_func=scoring_func,
+                top_k=top_k,
+                renormalize=renormalize,
+                num_expert_group=groups,
+                has_e_score_bias=e_score_correction_bias is not None,
+                routed_scaling_factor=routed_scaling_factor,
+            )
+
+        routing_method_preserved = advertised_routing_method(
+            num_expert_group
+        ) == advertised_routing_method(None)
+
+        if not (
+            degenerate_grouping
+            and scaling_handled_downstream
+            and routing_method_preserved
+        ):
+            return GroupedTopKRouter(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                eplb_state=eplb_state,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
+                e_score_correction_bias=e_score_correction_bias,
+                num_fused_shared_experts=num_fused_shared_experts,
+            )
+        # Otherwise fall through to the non-grouped chain below.
 
     if custom_routing_function is not None:
         return CustomRoutingRouter(

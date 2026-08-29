@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Chat template support for tokenizers using Jinja2 templates.
 //!
 //! This module is inlined from SMG's tokenizer crate with local adaptations:
@@ -147,6 +150,26 @@ mod tests {
         assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn test_midchain_dotted_integer_lookup() {
+        let template = CompiledChatTemplate::new(
+            "{{ values.0.name }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let mut kwargs = HashMap::new();
+        kwargs.insert("values".to_string(), serde_json::json!([{"name": "first"}]));
+
+        let result = template
+            .apply(TemplateContext {
+                template_kwargs: Some(&kwargs),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(result, "first");
     }
 
     #[test]

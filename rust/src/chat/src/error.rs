@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror::Error;
 use thiserror_ext::{AsReport as _, Macro};
 
@@ -20,6 +23,8 @@ pub enum Error {
     UnsupportedMultimodalContent(&'static str),
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
+    #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
+    MmLimitExceeded { modality: String, limit: usize },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -66,6 +71,12 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
     ToolCallStreamInvariant { message: String },
+    #[error("duplicate tool name `{name}`")]
+    DuplicateToolName { name: String },
+    #[error("tool_choice requires at least one available tool")]
+    ToolChoiceRequiresTools,
+    #[error("tool_choice function `{name}` was not found in the available tools")]
+    ToolChoiceFunctionNotFound { name: String },
     #[error("failed to build structural tag: {message}")]
     StructuralTag { message: String },
     #[error(transparent)]
@@ -80,11 +91,15 @@ impl Error {
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
-            Self::PromptTooLong { .. } => true,
+            Self::PromptTooLong { .. }
+            | Self::DuplicateToolName { .. }
+            | Self::ToolChoiceRequiresTools
+            | Self::ToolChoiceFunctionNotFound { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
-            | Self::UnsupportedModality { .. } => true,
+            | Self::UnsupportedModality { .. }
+            | Self::MmLimitExceeded { .. } => true,
 
             _ => false,
         }

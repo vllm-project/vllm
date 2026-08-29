@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -142,6 +145,9 @@ pub struct EngineCoreSamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// A value of zero returns routing data for the entire prompt.
+    pub routed_experts_prompt_start: u32,
 }
 
 impl EngineCoreSamplingParams {
@@ -172,6 +178,7 @@ impl EngineCoreSamplingParams {
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,
             extra_args: None,
+            routed_experts_prompt_start: 0,
         }
     }
 }

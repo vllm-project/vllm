@@ -13,10 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
-    FusedMoEPrepareAndFinalizeModular,
-)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
@@ -103,30 +100,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             hidden_size, act_dtype, moe_parallel_config
         ), intermediate_size_per_partition
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalizeModular | None:
-        from .all2all_utils import maybe_make_prepare_finalize
-
-        pf = maybe_make_prepare_finalize(
-            self.moe, self.moe_quant_config, routing_tables
-        )
-        assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
-        return pf
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: "RoutedExperts",
-    ) -> FusedMoEExpertsModular:
-        # based on the all2all implementation, select the appropriate
-        # gemm implementation
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     @abstractmethod
     def get_fused_moe_quant_config(
         self, layer: "RoutedExperts"
@@ -189,7 +162,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts
+            Output tensor from routed experts.
         """
         raise NotImplementedError
 
@@ -199,7 +172,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Apply the MoE operation using monolithic kernels.
 
@@ -209,6 +182,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             router_logits: Router logits (routing done internally)
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
         """
         raise NotImplementedError

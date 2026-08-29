@@ -9,29 +9,16 @@ pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
     --config-list-file=configs/models-small.txt
 """
 
-import importlib.metadata
 import shlex
-from importlib.util import find_spec
 
 import pytest
-import torch
+import requests
 import yaml
-from packaging import version
 
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
-
-# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
-# Earlier torch releases work with older quark versions. See
-# https://github.com/amd/Quark/issues/34
-# TODO: Remove once amd-quark>=0.12.0
-QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
-    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
-    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
-    else True
-)
 
 DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
 
@@ -73,9 +60,32 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         seed=eval_config.get("seed", 42),
         request_timeout_seconds=request_timeout_seconds,
         gen_prefix=eval_config.get("gen_prefix", ""),
+        max_concurrency=eval_config.get("max_concurrency"),
     )
 
     return results
+
+
+def get_acceptance_length(server_url: str) -> float:
+    """Mean tokens emitted per verification step, from the server's counters.
+
+    1.0 means every draft was rejected (speculation bought nothing); the
+    theoretical maximum is 1 + num_speculative_tokens.
+    """
+    response = requests.get(f"{server_url.rstrip('/').removesuffix('/v1')}/metrics")
+    response.raise_for_status()
+    counters: dict[str, float] = {}
+    for line in response.text.splitlines():
+        if line.startswith("vllm:spec_decode_num_"):
+            name, _, value = line.partition(" ")
+            counters[name.split("{")[0]] = float(value)
+
+    num_drafts = counters.get("vllm:spec_decode_num_drafts_total", 0.0)
+    num_accepted = counters.get("vllm:spec_decode_num_accepted_tokens_total", 0.0)
+    assert num_drafts > 0, (
+        "no drafts recorded; speculative decoding did not run for this config"
+    )
+    return 1.0 + num_accepted / num_drafts
 
 
 def test_gsm8k_correctness(config_filename):
@@ -109,18 +119,15 @@ def test_gsm8k_correctness(config_filename):
             "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
             "due to agent pool disk space issues and pod evictions."
         )
-    if current_platform.is_rocm() and ("Qwen3.5-35B-A3B-MXFP4" in config_filename.name):
+    if current_platform.is_rocm() and (
+        "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
+    ):
         from vllm.platforms.rocm import on_gfx950
 
-        if not on_gfx950() and "AITER-TP2" in config_filename.name:
+        if not on_gfx950():
             pytest.skip(
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
                 "The quantization scheme is not supported on non-GFX950 platforms."
-            )
-        if not QUARK_MXFP4_TORCH_COMPATIBLE:
-            pytest.skip(
-                "Skipping Qwen3.5-35B-A3B-MXFP4: amd-quark >= 0.12 is required "
-                "on torch >= 2.11."
             )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
@@ -183,5 +190,17 @@ def test_gsm8k_correctness(config_filename):
             f"GSM8K metric too low: {measured_metric:.4f} < "
             f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
         )
+
+        # Speculative configs additionally assert that drafts are actually
+        # landing: accuracy alone passes even when every draft is rejected.
+        min_acceptance_length = eval_config.get("min_acceptance_length")
+        if min_acceptance_length is not None:
+            acceptance_length = get_acceptance_length(server_url)
+            print(f"  Mean acceptance length: {acceptance_length:.3f}")
+            print(f"  Minimum acceptance length: {min_acceptance_length:.3f}")
+            assert acceptance_length >= min_acceptance_length, (
+                f"Acceptance length too low: {acceptance_length:.3f} < "
+                f"{min_acceptance_length:.3f}"
+            )
 
         print(f"✅ GSM8K test passed for {eval_config['model_name']}")
