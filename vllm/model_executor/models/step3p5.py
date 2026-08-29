@@ -163,12 +163,10 @@ class Step3p5Attention(nn.Module):
             enable_sliding_window = layer_types[self.layer_idx] == "sliding_attention"
         else:
             enable_sliding_window = self.layer_idx % 2 == 0
-        if (
-            yarn_only_types
-            and layer_types
-            and layer_types[self.layer_idx] not in yarn_only_types
-        ):
-            rope_scaling = None
+        if yarn_only_types:
+            assert layer_types is not None
+            if layer_types[self.layer_idx] not in yarn_only_types:
+                rope_scaling = None
 
         if sliding_window is not None and enable_sliding_window:
             sliding_window = sliding_window

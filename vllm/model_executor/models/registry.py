@@ -1253,9 +1253,11 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom)."
                 )
 
+        assert issubclass(model_module, transformers.PreTrainedModel)
+        transformers_model_cls: type[transformers.PreTrainedModel] = model_module
         if not (
-            model_module.is_backend_compatible()
-            or model_module._can_set_attn_implementation()
+            transformers_model_cls.is_backend_compatible()
+            or transformers_model_cls._can_set_attn_implementation()
         ):
             if model_config.model_impl != "transformers":
                 return None

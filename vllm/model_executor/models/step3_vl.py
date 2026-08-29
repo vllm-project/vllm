@@ -109,7 +109,7 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Step3VLProcessor:
         return Step3VLProcessor(
             tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(**kwargs),
+            image_processor=self.get_image_processor(),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -667,13 +667,13 @@ class Step3VLForConditionalGeneration(
 
     def _process_image_input(
         self, image_input: Step3VLImageInputs
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             image_features = image_input["data"]
-            return tuple(
+            return [
                 image_features[i].view(-1, image_features.shape[-1])
                 for i in range(image_features.shape[0])
-            )
+            ]
 
         image_features = self._get_vision_model_output(image_input["pixel_values"])
         patch_image_features = (
@@ -706,7 +706,7 @@ class Step3VLForConditionalGeneration(
             merged_image_features.append(
                 torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
             )
-        return tuple(merged_image_features)
+        return merged_image_features
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
