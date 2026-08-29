@@ -1693,6 +1693,17 @@ class EngineArgs:
             },
             instantiate_default_factories=not IS_SERVE_HELP,
         )
+        # Factory defaults are SUPPRESSed on the serve-help path because the
+        # heavy ones must not run there: CompilationConfig.__post_init__
+        # resolves the platform, which imports torch. The factories below are
+        # import-light, so re-instantiate them and let help render their
+        # defaults as it does on the normal path. The no-torch serve-help test
+        # is what enforces the lightness claim.
+        vllm_kwargs["additional_config"]["default"] = {}
+        vllm_kwargs["attention_config"]["default"] = AttentionConfig()
+        vllm_kwargs["ec_manager_config"]["default"] = EncoderCacheManagerConfig()
+        vllm_kwargs["kernel_config"]["default"] = KernelConfig()
+        vllm_kwargs["profiler_config"]["default"] = ProfilerConfig()
         vllm_kwargs["structured_outputs_config"]["default"] = StructuredOutputsConfig()
         vllm_group = parser.add_argument_group(
             title="VllmConfig",

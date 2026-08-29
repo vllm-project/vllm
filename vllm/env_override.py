@@ -118,6 +118,10 @@ def apply_pre_torch_environment() -> None:
     os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
 
+# vllm.utils.torch_utils carries a torch.__version__-based twin of this pair.
+# They cannot be merged: this module runs before Torch is imported and must never
+# import it, while torch_utils reads the runtime Torch. The two disagree only on
+# source-built or patched installs, where dist metadata and runtime Torch differ.
 @cache
 def _installed_torch_version() -> version.Version:
     try:

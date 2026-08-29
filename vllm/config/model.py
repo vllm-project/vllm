@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cache, cached_property
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -25,9 +25,10 @@ from vllm.config.multimodal import (
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import config, getattr_iter, validate_str_or_torch_dtype
 from vllm.logger import init_logger
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
+from vllm.utils import TorchDType
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -52,11 +53,6 @@ else:
     ParallelConfig = Any
     QuantizationMethods = str
     LogitsProcessor = Any
-
-if TYPE_CHECKING:
-    TorchDType: TypeAlias = torch.dtype
-else:
-    TorchDType: TypeAlias = object
 
 logger = init_logger(__name__)
 
@@ -927,16 +923,7 @@ class ModelConfig:
     @field_validator("dtype", mode="before")
     @classmethod
     def validate_dtype_before(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            if value not in get_args(ModelDType):
-                raise ValueError(f"Unknown dtype: {value!r}")
-            return value
-
-        import torch
-
-        if not isinstance(value, torch.dtype):
-            raise ValueError(f"Unknown dtype: {value!r}")
-        return value
+        return validate_str_or_torch_dtype(value, get_args(ModelDType), "dtype")
 
     @model_validator(mode="after")
     def validate_model_config_after(self: ModelConfig) -> ModelConfig:

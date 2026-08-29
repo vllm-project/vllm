@@ -156,6 +156,27 @@ def getattr_iter(
     return default_factory() if default_factory is not None else default
 
 
+def validate_str_or_torch_dtype(
+    value: object, str_choices: tuple[str, ...], field_name: str
+) -> object:
+    """Validate a str-Literal-or-torch.dtype config value.
+
+    The runtime annotation for such fields is `object` (see TorchDType in
+    vllm.utils), which makes pydantic's own validation vacuous; this
+    validator restores strictness without importing torch for str values.
+    """
+    if isinstance(value, str):
+        if value not in str_choices:
+            raise ValueError(f"Unknown {field_name}: {value!r}")
+        return value
+
+    import torch
+
+    if not isinstance(value, torch.dtype):
+        raise ValueError(f"Unknown {field_name}: {value!r}")
+    return value
+
+
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     """
     Get any docstrings placed after attribute assignments in a class body.

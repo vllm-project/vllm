@@ -2,29 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
 from vllm import envs
-from vllm.config.utils import config
+from vllm.config.utils import config, validate_str_or_torch_dtype
 from vllm.logger import init_logger
+from vllm.utils import TorchDType
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.config import ModelConfig
     from vllm.config.cache import CacheConfig
 else:
     ModelConfig = Any
     CacheConfig = Any
-
-if TYPE_CHECKING:
-    TorchDType: TypeAlias = torch.dtype
-else:
-    TorchDType: TypeAlias = object
 
 logger = init_logger(__name__)
 
@@ -142,16 +136,7 @@ class LoRAConfig:
     @field_validator("lora_dtype")
     @classmethod
     def _validate_lora_dtype(cls, value: object) -> object:
-        if isinstance(value, str):
-            if value not in get_args(LoRADType):
-                raise ValueError(f"Unknown LoRA dtype: {value}")
-            return value
-
-        import torch
-
-        if not isinstance(value, torch.dtype):
-            raise ValueError("lora_dtype must be a string or torch.dtype")
-        return value
+        return validate_str_or_torch_dtype(value, get_args(LoRADType), "lora_dtype")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         import torch

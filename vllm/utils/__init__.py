@@ -9,9 +9,13 @@ from typing import TYPE_CHECKING, TypeAlias
 if TYPE_CHECKING:
     import torch
 
+    TorchDevice: TypeAlias = torch.device
+    TorchDType: TypeAlias = torch.dtype
     TorchModule: TypeAlias = torch.nn.Module
     TorchTensor: TypeAlias = torch.Tensor
 else:
+    TorchDevice: TypeAlias = object
+    TorchDType: TypeAlias = object
     TorchModule: TypeAlias = object
     TorchTensor: TypeAlias = object
 

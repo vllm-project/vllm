@@ -926,6 +926,10 @@ def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
     return version.parse(torch_version) >= version.parse(target)
 
 
+# vllm.env_override carries an importlib.metadata-based twin of this pair.
+# They cannot be merged: env_override runs before Torch is imported and must never
+# import it, while these read the runtime Torch. The two disagree only on
+# source-built or patched installs, where dist metadata and runtime Torch differ.
 def is_torch_equal_or_newer(target: str) -> bool:
     """Check if the installed torch version is >= the target version.
 

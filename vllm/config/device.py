@@ -2,19 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import Any, Literal
 
 from pydantic import ConfigDict, SkipValidation
 
 from vllm.config.utils import config
+from vllm.utils import TorchDevice
 from vllm.utils.hashing import safe_hash
-
-if TYPE_CHECKING:
-    import torch
-
-    TorchDevice: TypeAlias = torch.device
-else:
-    TorchDevice: TypeAlias = object
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
