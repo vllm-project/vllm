@@ -2930,7 +2930,34 @@ def test_postprocess_messages_null_arguments_string():
     _postprocess_messages(messages)
     tool_calls = messages[0]["tool_calls"]
     assert tool_calls is not None
+    assert messages[0]["content"] == ""
     assert tool_calls[0]["function"]["arguments"] == {}
+
+
+def test_postprocess_messages_null_content_with_tool_calls():
+    """Assistant content=null + tool_calls must not reach templates as None.
+
+    OpenAI agent clients commonly send this shape. Jinja chat templates that
+    render {{ content }} would otherwise emit the literal string "None".
+    """
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"cmd": "ls"}'},
+                }
+            ],
+        }
+    ]
+    _postprocess_messages(messages)
+    assert messages[0]["content"] == ""
+    assert messages[0]["tool_calls"][0]["function"]["arguments"] == {
+        "cmd": "ls"
+    }
 
 
 @pytest.mark.asyncio
