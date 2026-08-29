@@ -17,17 +17,24 @@
 """Transformers modeling backend mixin for multi-modal models."""
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
 import transformers
 from packaging.version import Version
+from typing_extensions import Protocol, runtime_checkable
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
+from vllm.config.multimodal import AudioDummyOptions
 from vllm.config.utils import getattr_iter
-from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
+from vllm.inputs import (
+    MultiModalDataBuiltins,
+    MultiModalDataDict,
+    MultiModalInput,
+    mm_input,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -67,11 +74,29 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
+    from vllm.model_executor.models.interfaces_base import VllmModel
+
+    from .base import Base
+
+    _MultiModalMixinBase = Base
+else:
+    _MultiModalMixinBase = SupportsMultiModal
 
 logger = init_logger(__name__)
 
 _MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
 _MODALITY_SIZE_KEYS = {"audio": "num_audio_tokens", "image": "num_image_patches"}
+
+
+@runtime_checkable
+class _ImageWithSize(Protocol):
+    height: int
+    width: int
+
+
+@runtime_checkable
+class _PoolerOutput(Protocol):
+    pooler_output: torch.Tensor
 
 
 def _get_embed_token_id(replacement_ids: torch.Tensor) -> int:
@@ -149,6 +174,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         width, height = self.get_image_size_with_most_features()
         processor = self.get_hf_processor()
         multimodal_config = self.ctx.model_config.multimodal_config
+        assert multimodal_config is not None
         mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         mm_tokens = processor._get_num_multimodal_tokens(
             image_sizes=([height, width],), **mm_processor_kwargs
@@ -188,7 +214,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, "BaseDummyOptions"],
     ) -> MultiModalDataDict:
-        data: MultiModalDataDict = {}
+        data = MultiModalDataBuiltins()
         if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
             sampling_rate = self.info._get_audio_sampling_rate()
             sub = self.info._get_audio_processor()
@@ -196,10 +222,12 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             if chunk_length is None:
                 chunk_length = 30
             audio_len = int(chunk_length * sampling_rate)
+            audio_options = mm_options.get("audio")
+            assert audio_options is None or isinstance(audio_options, AudioDummyOptions)
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=mm_options.get("audio"),
+                overrides=audio_options,
             )
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
             target_width, target_height = self.info.get_image_size_with_most_features()
@@ -222,10 +250,11 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
     def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+    ) -> tuple[dict[str, object], Mapping[str, object]]:
         """Rename the parser's `audios` key to the `audio` argument HF audio
         processors take."""
         processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
+        assert isinstance(processor_data, dict)
         if self.info._is_audio_model() and "audios" in processor_data:
             processor_data["audio"] = processor_data.pop("audios")
         return processor_data, passthrough_data
@@ -367,7 +396,14 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         itself is to process it by itself.
         """
         audios = mm_data.get("audio")
-        if not audios or len({len(audio) for audio in audios}) == 1:
+        if not isinstance(audios, Sequence) or not audios:
+            return
+        audio_lengths = []
+        for audio in audios:
+            if not isinstance(audio, Sized):
+                return
+            audio_lengths.append(len(audio))
+        if len(set(audio_lengths)) == 1:
             return
 
         alone = [
@@ -452,7 +488,8 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         token_id = getattr(processor, names[0], getattr_iter(config, names))
         if token_id is None:
             token = getattr(processor, f"{modality}_token", None)
-            token_id = info.get_tokenizer().get_vocab().get(token)
+            if isinstance(token, str):
+                token_id = info.get_tokenizer().get_vocab().get(token)
         if token_id is None:
             raise ValueError(
                 f"Cannot find {modality}_token_id on processor or model config"
@@ -720,13 +757,15 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         for modality, items in out_mm_kwargs.items():
             # Popped so they are neither cached nor sent to the model; the updates
             # they produce are cached alongside the item instead
-            replacements = [
-                PromptUpdateDetails.select_token_id(
-                    (ids := item.pop(f"{modality}_replacement_ids").data).tolist(),
-                    _get_embed_token_id(ids),
+            replacements = []
+            for item in items:
+                ids = item.pop(f"{modality}_replacement_ids").data
+                assert isinstance(ids, torch.Tensor)
+                replacements.append(
+                    PromptUpdateDetails.select_token_id(
+                        ids.tolist(), _get_embed_token_id(ids)
+                    )
                 )
-                for item in items
-            ]
             token = getattr(hf_processor, f"{modality}_token")
             updates.append(
                 PromptReplacement(
@@ -775,10 +814,14 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
-        if not images:
+        if not isinstance(images, Iterable) or not images:
             return None
         try:
-            sizes = [(image.height, image.width) for image in images]
+            sizes = []
+            for image in images:
+                if not isinstance(image, _ImageWithSize):
+                    return None
+                sizes.append((image.height, image.width))
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
                 image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
             )
@@ -883,10 +926,13 @@ MultiModalProcessor = (
 )
 
 
-class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
+class MultiModalMixin(_MultiModalMixinBase, SupportsMRoPE):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
-        super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        if TYPE_CHECKING:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        else:
+            super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
@@ -916,6 +962,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             # Determining the supported modalities needs the HF processor, which in
             # turn needs a tokenizer
             mm_config = model_config.multimodal_config
+            assert mm_config is not None
             if mm_config.mm_encoder_only or any(
                 mm_config.get_limit_per_prompt(modality) == 0
                 for modality in encoder_classes
@@ -1009,7 +1056,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         )
         return model_output
 
-    def get_language_model(self) -> torch.nn.Module:
+    def get_language_model(self) -> "VllmModel":
         """Transformers modeling backend multimodal classes do not contain a separate
         vLLM language model class. Therefore, in order to return a language model vLLM
         class, we use a wrapper to give `self` the same interface as a text model."""
@@ -1021,12 +1068,23 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Exclude MultiModalMixin itself
         bases = [b for b in bases if b is not MultiModalMixin]
 
-        class LanguageModel(*bases):
-            def __init__(self, multimodal_model):
-                # Don't call super().__init__() to avoid re-initialization
-                self.__dict__.update(multimodal_model.__dict__)
+        if TYPE_CHECKING:
 
-            model = getattr_iter(self.model, ("language_model", "text_model"), None)
+            class LanguageModel(Base):
+                def __init__(self, multimodal_model):
+                    # Don't call super().__init__() to avoid re-initialization
+                    self.__dict__.update(multimodal_model.__dict__)
+
+                model = getattr_iter(self.model, ("language_model", "text_model"), None)
+
+        else:
+
+            class LanguageModel(*bases):
+                def __init__(self, multimodal_model):
+                    # Don't call super().__init__() to avoid re-initialization
+                    self.__dict__.update(multimodal_model.__dict__)
+
+                model = getattr_iter(self.model, ("language_model", "text_model"), None)
 
         return LanguageModel(self)
 
@@ -1177,7 +1235,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             for key, value in kwargs.items()
         }
 
-    def _get_image_features(self, pixel_values: torch.Tensor, **kwargs) -> Any:
+    def _get_image_features(
+        self, pixel_values: torch.Tensor, **kwargs
+    ) -> torch.Tensor | Sequence[torch.Tensor]:
         # grid_thw fields are registered keep_on_cpu; restore the on-device
         # placement that HF get_image_features implementations expect.
         for key, value in kwargs.items():
@@ -1198,6 +1258,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         if isinstance(features, tuple):
             return features[0]
         if isinstance(features, dict):
+            assert isinstance(features, _PoolerOutput)
             return features.pooler_output
         return features
 

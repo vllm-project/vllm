@@ -16,13 +16,13 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Hashable, Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
@@ -71,7 +71,7 @@ def init_on_device_without_buffers(device: torch.device):
                 module._parameters[name].to(device), **kwargs
             )
 
-    tensor_constructors_to_patch = {}
+    tensor_constructors_to_patch: dict[str, Callable[..., torch.Tensor]] = {}
 
     def patch_tensor_constructor(fn):
         def wrapper(*args, **kwargs):
@@ -147,8 +147,8 @@ def replace_linear_class(
     )
 
 
-TorchConv = nn.Conv2d | nn.Conv3d
-VllmConv = Conv2dLayer | Conv3dLayer
+TorchConv: TypeAlias = nn.Conv2d | nn.Conv3d
+VllmConv: TypeAlias = Conv2dLayer | Conv3dLayer
 
 
 def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
@@ -254,7 +254,9 @@ def replace_embedding_class(
         return VocabParallelEmbedding(**kwargs)
 
     # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
-    embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
+    embedding_cls = type(embedding)
+    assert isinstance(embedding_cls, Hashable)
+    embedding.__class__ = _rebase_on_vocab_parallel(embedding_cls)
     VocabParallelEmbedding.__init__(embedding, **kwargs)
     return embedding
 
@@ -272,7 +274,7 @@ def recursive_replace_linear(
             qual_name = maybe_prefix(prefix, child_name)
             # Replace modules as needed
             if isinstance(child_module, nn.Linear):
-                style = "replicate"
+                style: Style = "replicate"
                 new_module = replace_linear_class(
                     child_module,
                     style,

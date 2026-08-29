@@ -129,7 +129,6 @@ class QKVFuser(StackedFuser):
                 and any(ast.dump(arg) in arg_dumps for arg in node.args)
             ):
                 raise ValueError("another linear consumes the same input")
-
         # Insert the fused GEMM before the earliest call, in the innermost block
         # common to all three (the calls may be split across branches).
         chains = [block_chain(funcdef.body, call) for call in calls]
