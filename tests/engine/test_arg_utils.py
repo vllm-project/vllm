@@ -214,6 +214,23 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+def test_collect_detailed_traces_combined_cli_value(monkeypatch):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--otlp-traces-endpoint",
+            "http://localhost:4318/v1/traces",
+            "--collect-detailed-traces",
+            "model,worker",
+        ]
+    )
+    monkeypatch.setattr("vllm.tracing.is_tracing_available", lambda: True)
+
+    config = EngineArgs.from_cli_args(args).create_observability_config()
+
+    assert config.collect_detailed_traces == ["model", "worker"]
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
