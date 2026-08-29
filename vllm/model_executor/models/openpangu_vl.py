@@ -945,26 +945,23 @@ class OpenPanguVLForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds"
-            )
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw"
-            )
+        assert image_embeds is not None
+        image_embeds = self._validate_and_reshape_mm_tensor(
+            image_embeds, "image embeds"
+        )
+        image_grid_thw = self._validate_and_reshape_mm_tensor(
+            image_grid_thw, "image grid_thw"
+        )
 
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-            return OpenPanguVLImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
+        if not isinstance(image_embeds, torch.Tensor):
+            raise ValueError(
+                f"Incorrect type of image embeddings. Got type: {type(image_embeds)}"
             )
-
-        raise AssertionError("This line should be unreachable.")
+        return OpenPanguVLImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -990,26 +987,23 @@ class OpenPanguVLForConditionalGeneration(
                 video_grid_thw=video_grid_thw,
             )
 
-        if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, "video embeds"
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw"
-            )
+        assert video_embeds is not None
+        video_embeds = self._validate_and_reshape_mm_tensor(
+            video_embeds, "video embeds"
+        )
+        video_grid_thw = self._validate_and_reshape_mm_tensor(
+            video_grid_thw, "video grid_thw"
+        )
 
-            if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError(
-                    "Incorrect type of video embeddings. "
-                    f"Got type: {type(video_embeds)}"
-                )
-            return OpenPanguVLVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
+        if not isinstance(video_embeds, torch.Tensor):
+            raise ValueError(
+                f"Incorrect type of video embeddings. Got type: {type(video_embeds)}"
             )
-
-        raise AssertionError("This line should be unreachable.")
+        return OpenPanguVLVideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+        )
 
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
@@ -1041,7 +1035,7 @@ class OpenPanguVLForConditionalGeneration(
 
         for modality in mm_input_by_modality:
             if modality == "image":
-                image_input = mm_input_by_modality.get("image")
+                image_input = mm_input_by_modality["image"]
                 assert image_input is not None
                 vision_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings = (
@@ -1050,7 +1044,7 @@ class OpenPanguVLForConditionalGeneration(
                     else (multimodal_embeddings + vision_embeddings)
                 )
             if modality == "video":
-                video_input = mm_input_by_modality.get("video")
+                video_input = mm_input_by_modality["video"]
                 assert video_input is not None
                 video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings = (
@@ -1191,8 +1185,7 @@ class OpenPanguVLForConditionalGeneration(
             feature_data = mm_feature.data
             assert feature_data is not None
             if modality == "image":
-                grid_thw_item = feature_data.get("image_grid_thw")
-                assert grid_thw_item is not None
+                grid_thw_item = feature_data["image_grid_thw"]
                 grid_thw = grid_thw_item.data
                 assert isinstance(grid_thw, torch.Tensor)
                 t, h, w = grid_thw.tolist()
@@ -1205,8 +1198,7 @@ class OpenPanguVLForConditionalGeneration(
                     w // spatial_merge_size,
                 )
             elif modality == "video":
-                grid_thw_item = feature_data.get("video_grid_thw")
-                assert grid_thw_item is not None
+                grid_thw_item = feature_data["video_grid_thw"]
                 grid_thw = grid_thw_item.data
                 assert isinstance(grid_thw, torch.Tensor)
                 t, h, w = grid_thw.tolist()

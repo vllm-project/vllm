@@ -287,10 +287,10 @@ class OvisProcessingInfo(BaseProcessingInfo):
         # minus 1 for presented image token
         return (patch_grid_length // hidden_stride) ** 2 - 1
 
-    def get_image_pad_token(self) -> str:
+    def get_image_pad_token(self) -> str | None:
         hf_text_config = self.get_hf_config().get_text_config()
         text_model_type = hf_text_config.model_type
-        return IMAGE_PAD_TOKEN_MAP[text_model_type]
+        return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
