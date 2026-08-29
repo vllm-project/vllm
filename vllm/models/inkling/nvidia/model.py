@@ -20,6 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
@@ -56,6 +57,8 @@ from .ops.lamport import get_lamport_rs_conv, initialize_lamport_rs_conv
 from .ops.norm import add_rmsnorm, embed_rmsnorm
 from .sconv_swa_attn import _ATTN, _MLP, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
+
+logger = init_logger(__name__)
 
 InklingDelta: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
@@ -701,6 +704,48 @@ def _load_inkling_weights(
     for moe_name, moe in moe_modules.items():
         for rel in moe.finalize_load():
             loaded.add(f"{moe_name}.{rel}")
+
+    attn_layers = [mod for mod in module.modules() if isinstance(mod, InklingAttention)]
+    # Scales may have just been (re)loaded into the buffers; drop the
+    # cached scalar copies so the next forward re-reads them (covers
+    # in-place weight reload).
+    for mod in attn_layers:
+        mod._scale_floats = None
+
+    quantized = [mod for mod in attn_layers if mod.kv_cache_quantized]
+    if quantized:
+        # A malformed scale would degrade outputs silently; fail at load.
+        for mod in quantized:
+            for buf_name in ("q_scale", "k_scale", "v_scale"):
+                val = getattr(mod, buf_name)
+                if not torch.isfinite(val).all() or (val <= 0).any():
+                    raise ValueError(
+                        f"{mod.prefix}.{buf_name} is {val.item()!r}; KV "
+                        "cache scales must be finite and positive"
+                    )
+        # Warn when the checkpoint ships KV scale tensors for fewer
+        # layers than run quantized. Coverage comes from the loader's
+        # return value, not from buffer values: a calibrated checkpoint
+        # can legitimately carry scales that equal 1.0, and buffer
+        # defaults are also 1.0, so value equality cannot distinguish
+        # the two. V is the stream measured to exceed the e4m3 range at
+        # unity scale, so its shortfall is warned about even when k
+        # scales are present.
+        n_v = sum(1 for name in loaded if name.endswith(".attn.v_scale"))
+        n_k = sum(1 for name in loaded if name.endswith(".attn.k_scale"))
+        if n_v < len(quantized):
+            missing = "k_scale/v_scale" if n_k < len(quantized) else "v_scale"
+            logger.warning(
+                "fp8 KV cache is enabled but the checkpoint provides %s "
+                "tensors for %d of %d attention layers; the uncovered "
+                "layers run at unity scale. V activations can exceed the "
+                "e4m3 range and clip, which measurably degrades "
+                "long-derivation tasks. Calibrate per-layer scales into "
+                "the checkpoint before serving.",
+                missing,
+                n_v,
+                len(quantized),
+            )
     return loaded
 
 

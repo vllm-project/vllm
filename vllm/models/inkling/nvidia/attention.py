@@ -17,6 +17,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     kv_cache_dtype_str_to_dtype,
@@ -29,7 +32,9 @@ from vllm.v1.attention.backends.flash_attn import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     SlidingWindowSpec,
+    get_kv_quant_mode,
 )
 
 from ..configs import InklingModelConfig
@@ -167,6 +172,20 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         )
         self.register_buffer("k_scale", torch.ones((), dtype=torch.float32))
         self.register_buffer("v_scale", torch.ones((), dtype=torch.float32))
+        self.register_buffer("q_scale", torch.ones((), dtype=torch.float32))
+
+        self.kv_cache_quantized = (
+            get_kv_quant_mode(self.kv_cache_dtype) != KVQuantMode.NONE
+        )
+        self.query_quant: QuantFP8 | None = None
+        if self.kv_cache_quantized:
+            self._validate_quantized_kv_cache_dtype(self.kv_cache_dtype)
+            # FA4 fp8 requires q.dtype == kv dtype, so q is quantized in
+            # the layer with a static per-tensor scale.
+            self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        # Scalar copies of the (static) scale buffers, read once after
+        # weight loading so the hot path never syncs on a GPU scalar.
+        self._scale_floats: tuple[float, float, float] | None = None
 
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -174,11 +193,33 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
+    @staticmethod
+    def _validate_quantized_kv_cache_dtype(kv_cache_dtype: str) -> None:
+        # Only per-tensor e4m3 is wired up: the cache is viewed as the
+        # platform e4m3 dtype and the store clamp uses the e4m3 range, so
+        # every other quantized cache dtype must fail fast rather than
+        # run as e4m3.
+        if kv_cache_dtype not in ("fp8", "fp8_e4m3"):
+            raise NotImplementedError(
+                "Inkling fp8 KV cache supports only per-tensor e4m3 "
+                f"('fp8'/'fp8_e4m3'), got {kv_cache_dtype!r}"
+            )
+        capability = current_platform.get_device_capability()
+        if capability is None or capability.major != 10:
+            # fp8 kernels exist only for the SM100 family; Hopper and
+            # SM12x have no fp8 path in either FA4 backend.
+            cap_str = capability.as_version_str() if capability is not None else None
+            raise NotImplementedError(
+                "Inkling fp8 KV cache requires an SM100-family GPU, got "
+                f"compute capability {cap_str}"
+            )
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         block_size = vllm_config.cache_config.block_size
+        quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.is_local:
             assert self.local_extent is not None
             return SlidingWindowSpec(
@@ -187,18 +228,22 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 head_size=self.head_dim,
                 dtype=self.kv_cache_torch_dtype,
                 sliding_window=self.local_extent,
+                kv_quant_mode=quant_mode,
             )
         return FullAttentionSpec(
             block_size=block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=quant_mode,
         )
 
     def _split_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
-        key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
-            self.head_dim, dim=-1
-        )
+        kv_cache = self.kv_cache
+        if self.kv_cache_quantized:
+            # Allocated as uint8; the kernels consume the platform fp8 dtype.
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_dim, dim=-1)
         return (
             canonicalize_singleton_dim_strides(key_cache),
             canonicalize_singleton_dim_strides(value_cache),
@@ -259,6 +304,8 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 off_v,
                 self.conv_owner.block_size,
                 log_scaling if not self.is_local else None,
+                k_scale=self.k_scale if self.kv_cache_quantized else None,
+                v_scale=self.v_scale if self.kv_cache_quantized else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)
             self._attention(q, rel_logits, attn_output)
@@ -289,6 +336,25 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=self.num_kv_heads,
             max_kv_len=self._max_kv_len,
         )
+        descale_kwargs: dict[str, float] = {}
+        if self.query_quant is not None:
+            # cute FA4 fp8 requires q in the KV dtype. The plain torch
+            # quantization lets torch.compile fuse it into preceding ops.
+            num_tokens = q.shape[0]
+            q_quantized, _ = self.query_quant(q.view(num_tokens, -1), self.q_scale)
+            q = q_quantized.view(num_tokens, self.num_heads, self.head_dim)
+            if self._scale_floats is None:
+                self._scale_floats = (
+                    float(self.q_scale),
+                    float(self.k_scale),
+                    float(self.v_scale),
+                )
+            q_scale, k_scale, v_scale = self._scale_floats
+            descale_kwargs = dict(
+                q_descale=q_scale,
+                k_descale=k_scale,
+                v_descale=v_scale,
+            )
         INKLING_FA4_REL_ATTENTION_KERNEL(
             q[:nt],
             key_cache,
@@ -304,4 +370,5 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             rel_logits=rel_logits[:nt],
             num_splits=num_splits,
             out=output[:nt],
+            **descale_kwargs,
         )
