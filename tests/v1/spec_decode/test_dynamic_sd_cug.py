@@ -151,6 +151,37 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
             assert desc.num_active_loras == 0
 
 
+def test_dynamic_sd_cudagraphs_use_clamped_query_length(monkeypatch):
+    """Clamp configured K=5 to K=3, yielding query length 4 rather than 6."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=16,
+        max_spec_tokens=3,
+        num_spec_per_batch_size=[(1, 16, 5)],
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=4,
+    )
+
+    full_query_lens = {
+        desc.uniform_token_count for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    }
+    assert full_query_lens == {4}
+
+
 def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     """DSD should use PIECEWISE when the batch is not a uniform decode batch.
 
@@ -331,7 +362,7 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
 def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     """DSD should only capture FULL graphs for query lengths in the schedule.
 
-    With a partial schedule of ``(1, 32, 4)`` and ``(32, 128, 3)``, only the
+    With a partial schedule of ``(1, 31, 4)`` and ``(32, 128, 3)``, only the
     scheduled speculative-token counts (K = 4 and K = 3) become decode query
     lengths (K + 1 = 5 and 4). Uniform batches at those query lengths should get
     FULL graphs, while every other query length (e.g. the lower values 1, 2, 3)
@@ -343,9 +374,9 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     max_decode_query_len = max_spec_tokens + 1
 
     # (range_start, range_end, num_speculative_tokens): K = 4 and K = 3 are
-    # scheduled, so FULL decode graphs should exist for query lengths K + 1,
-    # i.e. exactly {5, 4}.
-    num_spec_per_batch_size = [(1, 32, 4), (32, 128, 3)]
+    # scheduled in non-overlapping tiers, so FULL decode graphs should exist
+    # for query lengths K + 1, i.e. exactly {5, 4}.
+    num_spec_per_batch_size = [(1, 31, 4), (32, 128, 3)]
     scheduled_query_lens = {entry[2] + 1 for entry in num_spec_per_batch_size}
 
     monkeypatch.setattr(
