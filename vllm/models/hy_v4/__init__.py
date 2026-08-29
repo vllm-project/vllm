@@ -14,15 +14,15 @@ The package is organized like `vllm.models.deepseek_v32`: this module is the
 only public entry point and dispatches on the current platform, so registry
 entries never reach into a platform subpackage.
 
-Only NVIDIA is supported for now. The port also drops the reference
-implementation's HPC/TPCP fusion paths, which depend on infrastructure that
-does not exist in this tree.
+NVIDIA and ROCm use separate implementations selected here. The ROCm path
+keeps platform-specific kernels isolated under ``amd/``.
 """
 
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
-    raise NotImplementedError("hy_v4 does not yet support ROCm.")
+    from .amd.model import HYV4ForCausalLM
+    from .amd.mtp import HYV4MTP
 elif current_platform.is_xpu():
     raise NotImplementedError("hy_v4 does not yet support XPU.")
 else:
