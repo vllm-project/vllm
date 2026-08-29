@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Transformers modeling backend's RMSNorm fuser."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,39 @@ class WeightlessRMSNorm(RMSNorm):
 
     def forward(self, x):
         return self._rms(x.to(torch.float32)).to(x.dtype)
+
+
+class Gemma4RMSNorm(RMSNorm):
+    """`pow(v, -0.5)` where the others write `rsqrt(v)` (HF `Gemma4RMSNorm._norm`).
+
+    Gemma 4 spells the reciprocal square root as `torch.pow(..., -0.5)` to keep
+    Torch and JAX in agreement, and -- unlike Gemma 1-3 -- its weight is *not*
+    zero-centered, so this fuses to a plain `RMSNorm`.
+    """
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, -0.5)
+
+    def forward(self, x):
+        return (self._rms(x.float()) * self.weight.float()).type_as(x)
+
+
+class PowOperatorRMSNorm(Gemma4RMSNorm):
+    """The `v ** -0.5` operator spelling of the same reciprocal square root."""
+
+    def _rms(self, x):
+        return x * (x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon) ** -0.5
+
+
+class WeightlessGemma4RMSNorm(Gemma4RMSNorm):
+    """Gemma 4 with `with_scale=False`: the `pow` spelling and no scale parameter."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__(hidden, eps, weight=False)
+
+    def forward(self, x):
+        return self._rms(x.float()).type_as(x)
 
 
 class LayerNorm(RMSNorm):
@@ -156,6 +190,9 @@ class UntraceableGatedRMSNorm(RMSNorm):
         (RMSNorm, 1e-5, False),
         (GemmaRMSNorm, 1e-6, True),
         (WeightlessRMSNorm, 1e-6, False),
+        (Gemma4RMSNorm, 1e-6, False),
+        (PowOperatorRMSNorm, 1e-6, False),
+        (WeightlessGemma4RMSNorm, 1e-6, False),
         (LayerNorm, 1e-6, False),
         (torch.nn.RMSNorm, 1e-5, False),  # fused `F.rms_norm` op
     ],
@@ -188,6 +225,8 @@ def test_gated_rms_norm_is_not_fused(cls):
         (RMSNorm, "RMSNorm", False),
         (GemmaRMSNorm, "GemmaRMSNorm", True),
         (WeightlessRMSNorm, "RMSNorm", False),
+        (Gemma4RMSNorm, "RMSNorm", False),
+        (WeightlessGemma4RMSNorm, "RMSNorm", False),
     ],
 )
 def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_config):
@@ -211,6 +250,23 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     weight = getattr(module, "weight", None)
     assert isinstance(built.weight, nn.Parameter) == (weight is not None)
     assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
+
+
+@pytest.mark.parametrize("cls", [Gemma4RMSNorm, PowOperatorRMSNorm])
+def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
+    """Matching `pow(v, -0.5)` is only sound if it really is the reciprocal square
+    root: the fused norm must reproduce the unfused forward, not just replace it.
+    `pow` and `rsqrt` take different paths to the same value, so compare at float32
+    tolerance rather than bit-for-bit."""
+    torch.manual_seed(0)
+    module = cls(16)
+    with torch.no_grad():
+        module.weight.copy_(torch.randn(16))
+    built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+    with torch.no_grad():
+        built.weight.copy_(module.weight)
+    x = torch.randn(4, 16)
+    torch.testing.assert_close(built(x), module(x), rtol=1e-5, atol=1e-6)
 
 
 def test_weightless_norm_has_no_hidden_size(default_vllm_config):
@@ -329,3 +385,127 @@ def test_gathered_norm_rejects_uneven_sharding(default_vllm_config):
     norm.tp_size = 2  # emulate TP=2 without a real process group
     with pytest.raises(ValueError, match="does not tile it evenly"):
         norm(torch.randn(2, 3))  # 3 * 2 != 8
+
+
+# The TP-aware norm has to be a subclass of the norm it wraps, and `CustomOp.__new__`
+# keys the out-of-tree swap on `cls.__name__` -- so a fixed `TPAwareRMSNorm` never
+# matches a platform plugin's `"RMSNorm"` registration, and the plugin's kernels are
+# silently skipped. `_tp_aware` closes that by deriving from the override instead.
+
+
+@contextmanager
+def _registered(base, override):
+    """Register `override` under `base.__name__`, as a platform plugin does.
+
+    `override=None` clears the name, so a test can assert the no-override
+    behaviour even in a process where a plugin has already registered one.
+    """
+    from vllm.model_executor.custom_op import op_registry_oot
+
+    sentinel = object()
+    previous = op_registry_oot.get(base.__name__, sentinel)
+    if override is None:
+        op_registry_oot.pop(base.__name__, None)
+    else:
+        op_registry_oot[base.__name__] = override
+    try:
+        yield override
+    finally:
+        if previous is sentinel:
+            op_registry_oot.pop(base.__name__, None)
+        else:
+            op_registry_oot[base.__name__] = previous
+
+
+def _plugin_norm(base, name):
+    """A plugin's override: `base`'s subclass whose `forward_native` is a sentinel."""
+    return type(name, (base,), {"forward_native": lambda self, x: torch.zeros_like(x)})
+
+
+def test_tp_aware_without_override_is_the_in_tree_class():
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm as VLLMGemmaRMSNorm
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+    from vllm.model_executor.models.transformers.fusers import rms_norm
+
+    with _registered(VLLMRMSNorm, None), _registered(VLLMGemmaRMSNorm, None):
+        assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
+        assert rms_norm._tp_aware(VLLMGemmaRMSNorm) is rms_norm.TPAwareGemmaRMSNorm
+
+
+def test_tp_aware_derives_from_a_registered_override():
+    """The built class carries the override's implementation *and* the TP gather,
+    and is named after the override so a repr or stack trace says which ran."""
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+    from vllm.model_executor.models.transformers.fusers import rms_norm
+
+    override = _plugin_norm(VLLMRMSNorm, "PluginRMSNorm")
+    with _registered(VLLMRMSNorm, override):
+        built = rms_norm._tp_aware(VLLMRMSNorm)
+
+    assert issubclass(built, override)
+    assert issubclass(built, rms_norm.TPAwareNormMixin)
+    assert built.__name__ == "TPAwarePluginRMSNorm"
+    # The gather must run *before* the override's math, not after it.
+    mro = built.__mro__
+    assert mro.index(rms_norm.TPAwareNormMixin) < mro.index(override)
+
+
+def test_tp_aware_ignores_an_unusable_registration():
+    """A registration that is not a subclass of the norm is not a usable override:
+    `CustomOp.__new__` would refuse the swap, so the in-tree class stays."""
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+    from vllm.model_executor.models.transformers.fusers import rms_norm
+
+    with _registered(VLLMRMSNorm, type("Unrelated", (nn.Module,), {})):
+        assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
+
+
+def test_tp_aware_class_is_cached_per_resolved_override():
+    """One class per (norm, override) pair -- two `fuse` calls must not produce two
+    unrelated types -- but the cache is keyed on the override, so it never serves a
+    stale class after the registration changes."""
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+    from vllm.model_executor.models.transformers.fusers import rms_norm
+
+    override = _plugin_norm(VLLMRMSNorm, "CachedPluginRMSNorm")
+    with _registered(VLLMRMSNorm, override):
+        first = rms_norm._tp_aware(VLLMRMSNorm)
+        assert rms_norm._tp_aware(VLLMRMSNorm) is first
+    with _registered(VLLMRMSNorm, None):
+        assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
+    with _registered(VLLMRMSNorm, override):
+        assert rms_norm._tp_aware(VLLMRMSNorm) is first
+
+
+@pytest.mark.parametrize(
+    "cls,base_name", [(RMSNorm, "RMSNorm"), (GemmaRMSNorm, "GemmaRMSNorm")]
+)
+def test_fuse_builds_the_registered_override(cls, base_name, default_vllm_config):
+    """End to end: the module the fuser installs runs the override's kernels.
+
+    `forward_native` is called directly -- the point is which implementation the
+    fused module carries, not which vendor forward this host dispatches to.
+    """
+    import vllm.model_executor.layers.layernorm as vllm_layernorm
+
+    base = getattr(vllm_layernorm, base_name)
+    override = _plugin_norm(base, f"Fused{base_name}Override")
+    with _registered(base, override):
+        module = cls(16)
+        built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+
+    assert isinstance(built, override)
+    x = torch.randn(4, 16)
+    torch.testing.assert_close(built.forward_native(x), torch.zeros_like(x))
+
+
+def test_info_names_the_implementation_that_runs():
+    """The fuse log has to name the override, or a silently skipped one reads
+    exactly like a working one."""
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+
+    fuser = RMSNormFuser(zero_centered=False, source_cls="HFRMSNorm")
+    with _registered(VLLMRMSNorm, None):
+        assert "-> RMSNorm (CustomOp)" in fuser.info("norm")
+    with _registered(VLLMRMSNorm, _plugin_norm(VLLMRMSNorm, "LoggedPluginRMSNorm")):
+        assert "-> LoggedPluginRMSNorm (CustomOp)" in fuser.info("norm")

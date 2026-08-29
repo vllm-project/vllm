@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """RMSNorm fuser: detect the norm structurally and swap in vLLM's fused RMSNorm."""
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import op_registry_oot
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -47,6 +49,16 @@ def _is_squared(node: object, x: fx.Node) -> bool:
     if is_op(node, "mul"):
         a, b = node.args
         return peel(a) is x and peel(b) is x
+    return False
+
+
+def _is_inverse_sqrt(node: object) -> bool:
+    """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it."""
+    node = peel(node)
+    if is_op(node, "rsqrt"):
+        return True
+    if is_op(node, "pow"):
+        return len(node.args) == 2 and node.args[1] == -0.5
     return False
 
 
@@ -117,6 +129,41 @@ class TPAwareGemmaRMSNorm(TPAwareNormMixin, GemmaRMSNorm):
     """`GemmaRMSNorm` that reconstructs a TP-sharded input before normalizing."""
 
 
+def _norm_impl(base: type[nn.Module]) -> type[nn.Module]:
+    """`base`, or the out-of-tree class registered under its name if usable."""
+    impl = op_registry_oot.get(base.__name__, base)
+    # A non-subclass is not a usable override: `CustomOp.__new__` would refuse
+    # the swap anyway, so keep the in-tree implementation.
+    return impl if issubclass(impl, base) else base
+
+
+@functools.cache
+def _build_tp_aware(base: type[nn.Module], impl: type[nn.Module]) -> type[nn.Module]:
+    """Cached `type()` call for `_tp_aware`, keyed on the resolved override.
+
+    Named after `impl`, not `base`, so a module repr or stack trace names the
+    implementation that actually runs.
+    """
+    del base  # only part of the cache key
+    return type(f"TPAware{impl.__name__}", (TPAwareNormMixin, impl), {})
+
+
+def _tp_aware(base: type[nn.Module]) -> type[nn.Module]:
+    """The TP-aware norm class to build, honouring out-of-tree overrides.
+
+    `CustomOp.__new__` keys the out-of-tree swap on `cls.__name__`, so a fixed
+    subclass named `TPAwareRMSNorm` never matches a platform plugin's
+    ``"RMSNorm"`` registration. Thus, derive from the override when one is
+    registered, which keeps both the plugin's kernels and the TP gather. The
+    result is cached on the resolved pair, so a later registration change is
+    picked up rather than stale.
+    """
+    impl = _norm_impl(base)
+    if impl is base:
+        return TPAwareGemmaRMSNorm if base is GemmaRMSNorm else TPAwareRMSNorm
+    return _build_tp_aware(base, impl)
+
+
 @dataclass
 class RMSNormFuser(BaseFuser):
     """Fuser for RMSNorm patterns, including Gemma-style zero-centered weights."""
@@ -131,7 +178,8 @@ class RMSNormFuser(BaseFuser):
     """`eps` itself, when it is not held in an attribute (see `_eps_source`)."""
 
     def info(self, name: str) -> str:
-        norm = "GemmaRMSNorm" if self.zero_centered else "RMSNorm"
+        base = GemmaRMSNorm if self.zero_centered else RMSNorm
+        norm = _norm_impl(base).__name__
         return f"Fused: {name} ({self.source_cls}) -> {norm} (CustomOp)"
 
     @classmethod
@@ -158,7 +206,7 @@ class RMSNormFuser(BaseFuser):
         # The rsqrt over the mean-square variance is the spine of the norm.
         rsqrt = None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and _variance_eps(node, x) is not None:
+            if _is_inverse_sqrt(node) and _variance_eps(node, x) is not None:
                 rsqrt = node
                 break
         if rsqrt is None:
@@ -239,7 +287,7 @@ class RMSNormFuser(BaseFuser):
             eps = args[3] if len(args) > 3 else kwargs.get("eps")
             return float(eps) if isinstance(eps, (int, float)) else None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
+            if _is_inverse_sqrt(node) and (eps := _variance_eps(node, x)) is not None:
                 return eps
         return None
 
@@ -259,8 +307,8 @@ class RMSNormFuser(BaseFuser):
             dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
-            return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
-        return TPAwareRMSNorm(
+            return _tp_aware(GemmaRMSNorm)(hidden_size=hidden_size, eps=eps)
+        return _tp_aware(RMSNorm)(
             hidden_size=hidden_size,
             eps=eps,
             has_weight=has_weight,
