@@ -18,6 +18,7 @@ CLOSE = "<|close|>"
 SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
+TOOLS_OPEN = f"{OPEN}tools{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
 
 
@@ -30,6 +31,8 @@ class DummyTokenizer:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
+        if text == TOOLS_OPEN:
+            return [5, 2, 3]
         return [ord(ch) for ch in text]
 
 
@@ -99,6 +102,18 @@ def test_is_reasoning_end_uses_full_input_ids():
 
     assert not parser.is_reasoning_end([4, 2])
     assert parser.is_reasoning_end([4, 2, 3])
+
+
+def test_tools_channel_ends_reasoning_when_think_close_is_missing():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    assert parser.is_reasoning_end([1, 2, 3, 9, 5, 2, 3])
+
+
+def test_new_think_block_stays_in_reasoning_after_prior_tools_channel():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    assert not parser.is_reasoning_end([5, 2, 3, 1, 2, 3])
 
 
 def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
