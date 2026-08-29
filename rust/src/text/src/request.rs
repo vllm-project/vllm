@@ -14,6 +14,7 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsPara
 
 use crate::error::{Error, Result};
 use crate::output::TextDecodeOptions;
+use crate::truncation::PromptTruncation;
 
 /// Normalize vLLM's signed `top_k` domain into [`SamplingParams::top_k`].
 ///
@@ -196,6 +197,9 @@ pub struct TextRequest {
     pub priority: i32,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
+    /// Prompt-truncation policy resolved by the caller.
+    #[serde(default)]
+    pub prompt_truncation: Option<PromptTruncation>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
     /// Override data parallel rank.
@@ -231,6 +235,7 @@ impl TextRequest {
             intermediate: true,
             priority: 0,
             cache_salt: None,
+            prompt_truncation: None,
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
@@ -256,6 +261,9 @@ impl TextRequest {
             return Err(Error::EmptyStopString {
                 request_id: self.request_id.clone(),
             });
+        }
+        if self.mm_features.is_some() && self.prompt_truncation.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
         }
         Ok(())
     }

@@ -4,6 +4,7 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -84,11 +85,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",

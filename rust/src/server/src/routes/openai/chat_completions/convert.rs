@@ -10,8 +10,9 @@ use vllm_chat::{
 
 use super::types::ChatCompletionRequest;
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error};
+use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
@@ -70,6 +71,12 @@ pub(super) fn prepare_chat_request(
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+
+    let prompt_truncation = resolve_generation_prompt_truncation(
+        request.truncate_prompt_tokens,
+        request.truncation_side,
+    )
+    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
     let request_id = format!("chatcmpl-{}", ctx.request_id);
     let response_model = lora_resolution
@@ -184,6 +191,7 @@ pub(super) fn prepare_chat_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
+        prompt_truncation,
         priority: ctx.priority.or(request.priority).unwrap_or(0),
         documents: request.documents,
         cache_salt: request.cache_salt,
@@ -439,7 +447,9 @@ mod tests {
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
         KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
     };
-    use vllm_text::{Prompt, output::TextDecodeOptions};
+    use vllm_text::{
+        Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide, output::TextDecodeOptions,
+    };
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
     use super::prepare_chat_request;
@@ -528,6 +538,27 @@ mod tests {
 
             assert_eq!(prepared.chat_request.sampling_params.top_k, expected);
         }
+    }
+
+    #[test]
+    fn prepare_chat_request_preserves_explicit_truncation_side() {
+        let mut request = base_request();
+        request.truncate_prompt_tokens = Some(2);
+        request.truncation_side = Some(TruncationSide::Right);
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare truncation");
+
+        assert_eq!(
+            prepared.chat_request.prompt_truncation,
+            Some(PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(2),
+                side: TruncationSide::Right,
+            })
+        );
     }
 
     #[test]

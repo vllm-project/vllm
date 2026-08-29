@@ -11,8 +11,8 @@ use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
-    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
-    TextDecodeOptions, TextRequest,
+    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
+    PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
 use super::pb;
@@ -110,11 +110,12 @@ pub fn to_text_request(
         )));
     }
 
-    if req.truncate_prompt_tokens != 0 {
-        return Err(Status::invalid_argument(
-            "truncate_prompt_tokens is not supported",
-        ));
-    }
+    // Proto3 uses zero as unset; positive values select fixed left truncation.
+    // The -1 input-budget sentinel is outside the uint32 field domain.
+    let prompt_truncation = (req.truncate_prompt_tokens != 0).then_some(PromptTruncation {
+        limit: PromptTruncationLimit::Fixed(u64::from(req.truncate_prompt_tokens)),
+        side: TruncationSide::Left,
+    });
 
     let prompt = match req.prompt {
         Some(pb::generate_request::Prompt::Text(text)) => Prompt::Text(text),
@@ -173,6 +174,7 @@ pub fn to_text_request(
         sampling_params,
         decode_options,
         intermediate: stream,
+        prompt_truncation,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
