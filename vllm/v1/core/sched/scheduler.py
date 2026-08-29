@@ -659,6 +659,9 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        waiting_requests_provider=(
+                            self._get_waiting_requests_for_eviction_hint
+                        ),
                     )
 
                     if new_blocks is not None:
@@ -1074,6 +1077,9 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    waiting_requests_provider=(
+                        self._get_waiting_requests_for_eviction_hint
+                    ),
                 )
 
                 if new_blocks is None:
@@ -2235,6 +2241,16 @@ class Scheduler(SchedulerInterface):
             return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
         return self.waiting or self.skipped_waiting or None
+
+    def _get_waiting_requests_for_eviction_hint(self) -> tuple[Request, ...]:
+        """Return a bounded, side-effect-free snapshot of ready waiters.
+
+        ``skipped_waiting`` can contain requests blocked on an asynchronous
+        dependency or constraint.  The first slice intentionally protects only
+        the explicitly ready ``waiting`` queue; merging the two queues would
+        require a separate policy and fairness review.
+        """
+        return tuple(itertools.islice(self.waiting, self.max_num_running_reqs))
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""

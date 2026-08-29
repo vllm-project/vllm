@@ -7,7 +7,7 @@ import hashlib
 import math
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence, Set
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, overload
@@ -226,6 +226,35 @@ class KVCacheBlockCopy(NamedTuple):
     dst_block_id: int
 
 
+class EvictionHintContext:
+    """Lazy, transaction-local retained-block hint for allocation.
+
+    The resolver is intentionally called at most once.  It must only perform
+    read-only cache lookups; block selection, eviction, reference counting,
+    and metrics remain owned by :class:`BlockPool`.
+    """
+
+    def __init__(self, resolver: Callable[[], Collection[int]] | None) -> None:
+        self._resolver = resolver
+        self._retained_block_ids: frozenset[int] | None = None
+        self._cleared = False
+
+    def get_retained_block_ids(self) -> frozenset[int]:
+        if self._cleared:
+            raise RuntimeError("EvictionHintContext has been cleared")
+        if self._retained_block_ids is None:
+            self._retained_block_ids = frozenset(
+                () if self._resolver is None else self._resolver()
+            )
+        return self._retained_block_ids
+
+    def clear(self) -> None:
+        """Release the resolver and memoized state at transaction end."""
+        self._resolver = None
+        self._retained_block_ids = None
+        self._cleared = True
+
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
@@ -347,6 +376,58 @@ class FreeKVCacheBlockQueue:
             self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
         return ret
+
+    def popleft_n_with_hint(
+        self, n: int, retained_block_ids: Set[int]
+    ) -> list[KVCacheBlock]:
+        """Pop ``n`` blocks while preferring blocks outside a retained set.
+
+        The free-list order is preserved within each group: non-retained
+        blocks are selected first, followed by retained blocks in their
+        original LRU order.  The method only unlinks the selected nodes after
+        the read-only scan has determined the result.
+        """
+        if n == 0:
+            return []
+        assert self.num_free_blocks >= n
+        if not retained_block_ids:
+            return self.popleft_n(n)
+
+        non_retained: list[KVCacheBlock] = []
+        retained: list[KVCacheBlock] = []
+        curr_block = self.fake_free_list_head.next_free_block
+        while curr_block is not self.fake_free_list_tail:
+            assert curr_block is not None
+            next_block = curr_block.next_free_block
+            if curr_block.block_id in retained_block_ids:
+                retained.append(curr_block)
+            elif len(non_retained) < n:
+                non_retained.append(curr_block)
+
+            # No retained blocks are needed once enough non-retained blocks
+            # have been found.  This also bounds the common-case scan.
+            if len(non_retained) == n:
+                break
+            curr_block = next_block
+
+        selected = non_retained + retained[: n - len(non_retained)]
+        assert len(selected) == n
+        for block in selected:
+            self.remove(block)
+        return selected
+
+    def has_cached_block_in_first_n(self, n: int) -> bool:
+        """Return whether the first ``n`` free blocks include cached data."""
+        assert self.num_free_blocks >= n
+        curr_block = self.fake_free_list_head.next_free_block
+        for _ in range(n):
+            assert curr_block is not None
+            if curr_block is self.fake_free_list_tail:
+                break
+            if curr_block.block_hash is not None:
+                return True
+            curr_block = curr_block.next_free_block
+        return False
 
     def remove(self, block: KVCacheBlock) -> None:
         """Remove a block in the free list and reduce num_free_blocks by 1.

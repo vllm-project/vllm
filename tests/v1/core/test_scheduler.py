@@ -29,6 +29,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
@@ -51,6 +52,70 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+@dataclasses.dataclass(order=True)
+class _EvictionHintRequest:
+    priority: int
+    arrival_time: int
+    request_id: str = dataclasses.field(compare=False)
+
+
+@pytest.mark.parametrize("policy", [SchedulingPolicy.FCFS, SchedulingPolicy.PRIORITY])
+def test_scheduler_eviction_hint_provider_uses_ready_waiting_only(policy):
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.waiting = create_request_queue(policy)
+    scheduler.skipped_waiting = create_request_queue(policy)
+    scheduler.max_num_running_reqs = 2
+
+    ready = [
+        _EvictionHintRequest(priority=3, arrival_time=2, request_id="ready-2"),
+        _EvictionHintRequest(priority=1, arrival_time=1, request_id="ready-1"),
+        _EvictionHintRequest(priority=2, arrival_time=3, request_id="ready-3"),
+    ]
+    blocked = _EvictionHintRequest(priority=0, arrival_time=0, request_id="blocked")
+    for request in ready:
+        scheduler.waiting.add_request(request)
+    scheduler.skipped_waiting.add_request(blocked)
+
+    snapshot = scheduler._get_waiting_requests_for_eviction_hint()
+
+    expected = ready[:2] if policy is SchedulingPolicy.FCFS else sorted(ready)[:2]
+    assert snapshot == tuple(expected)
+    assert blocked not in snapshot
+    assert len(scheduler.waiting) == len(ready)
+    assert len(scheduler.skipped_waiting) == 1
+
+
+def test_scheduler_passes_eviction_hint_provider_to_waiting_and_running_allocations(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    allocate_slots = Mock(wraps=scheduler.kv_cache_manager.allocate_slots)
+    monkeypatch.setattr(scheduler.kv_cache_manager, "allocate_slots", allocate_slots)
+
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+
+    provider = allocate_slots.call_args.kwargs["waiting_requests_provider"]
+    assert provider == scheduler._get_waiting_requests_for_eviction_hint
+
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[1000]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output, model_output)
+    allocate_slots.reset_mock()
+
+    scheduler.schedule()
+
+    provider = allocate_slots.call_args.kwargs["waiting_requests_provider"]
+    assert provider == scheduler._get_waiting_requests_for_eviction_hint
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():

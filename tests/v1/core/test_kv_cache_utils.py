@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import random
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    EvictionHintContext,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
     check_enough_kv_cache_memory,
@@ -525,6 +527,7 @@ def test_free_kv_cache_block_queue_popleft_n():
     for block in result_blocks:
         assert block.prev_free_block is None
         assert block.next_free_block is None
+
     # Pop 2 blocks
     # fake_head->b4->b0->b2->fake_tail
     result_blocks = queue.popleft_n(2)
@@ -546,6 +549,83 @@ def test_free_kv_cache_block_queue_popleft_n():
     for block in result_blocks:
         assert block.prev_free_block is None
         assert block.next_free_block is None
+
+
+def test_eviction_hint_context_is_lazy_memoized_and_clearable():
+    resolve_calls = 0
+
+    def resolve() -> set[int]:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return {1, 3}
+
+    context = EvictionHintContext(resolve)
+    assert resolve_calls == 0
+    assert context.get_retained_block_ids() == frozenset({1, 3})
+    assert context.get_retained_block_ids() == frozenset({1, 3})
+    assert resolve_calls == 1
+
+    context.clear()
+    with pytest.raises(RuntimeError, match="cleared"):
+        context.get_retained_block_ids()
+
+
+@pytest.mark.parametrize(
+    ("retained_ids", "num_blocks", "expected_selected", "expected_remaining"),
+    [
+        ({1, 3}, 4, [0, 2, 4, 1], [3]),
+        (set(), 3, [0, 1, 2], [3, 4]),
+        ({0, 1, 2, 3, 4}, 3, [0, 1, 2], [3, 4]),
+        ({1, 3}, 5, [0, 2, 4, 1, 3], []),
+        ({99}, 2, [0, 1], [2, 3, 4]),
+    ],
+)
+def test_free_kv_cache_block_queue_popleft_n_with_hint(
+    retained_ids: set[int],
+    num_blocks: int,
+    expected_selected: list[int],
+    expected_remaining: list[int],
+):
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+    queue = FreeKVCacheBlockQueue(blocks)
+
+    selected = queue.popleft_n_with_hint(num_blocks, retained_ids)
+
+    assert [block.block_id for block in selected] == expected_selected
+    assert [block.block_id for block in queue.get_all_free_blocks()] == (
+        expected_remaining
+    )
+    assert queue.num_free_blocks == len(expected_remaining)
+    assert all(
+        block.prev_free_block is None and block.next_free_block is None
+        for block in selected
+    )
+
+
+def test_free_kv_cache_block_queue_popleft_n_with_hint_preserves_order_property():
+    rng = random.Random(0)
+    for _ in range(50):
+        num_blocks = rng.randint(1, 32)
+        order = list(range(num_blocks))
+        rng.shuffle(order)
+        retained_ids = {block_id for block_id in order if rng.randrange(2)}
+        num_to_pop = rng.randint(0, num_blocks)
+        blocks = [KVCacheBlock(block_id=i) for i in order]
+        queue = FreeKVCacheBlockQueue(blocks)
+
+        uncached = [block_id for block_id in order if block_id not in retained_ids]
+        retained = [block_id for block_id in order if block_id in retained_ids]
+        expected_selected = (uncached + retained)[:num_to_pop]
+        expected_remaining = [
+            block_id for block_id in order if block_id not in expected_selected
+        ]
+
+        selected = queue.popleft_n_with_hint(num_to_pop, retained_ids)
+
+        assert [block.block_id for block in selected] == expected_selected
+        assert [block.block_id for block in queue.get_all_free_blocks()] == (
+            expected_remaining
+        )
 
 
 def test_free_kv_cache_block_queue_get_all_free_blocks():

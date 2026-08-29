@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
+    EvictionHintContext,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
@@ -644,13 +645,20 @@ class BlockPool:
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self,
+        num_blocks: int,
+        eviction_hint_context: EvictionHintContext | None = None,
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            eviction_hint_context: Optional transaction-local retained-block
+                hint.  The context is resolved only when the candidate prefix
+                contains a cached block.
 
         Returns:
             A list of new block.
@@ -658,7 +666,24 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        retained_block_ids = None
+        if (
+            self.enable_caching
+            and eviction_hint_context is not None
+            and num_blocks > 0
+            and self.free_block_queue.has_cached_block_in_first_n(num_blocks)
+        ):
+            # Avoid resolving the scheduler hint when the allocation cannot
+            # evict a cached block.  This scan is read-only; the queue selector
+            # performs all unlinking and accounting after the hint is resolved.
+            retained_block_ids = eviction_hint_context.get_retained_block_ids()
+
+        if retained_block_ids is None:
+            ret = self.free_block_queue.popleft_n(num_blocks)
+        else:
+            ret = self.free_block_queue.popleft_n_with_hint(
+                num_blocks, retained_block_ids
+            )
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
