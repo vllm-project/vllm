@@ -84,13 +84,18 @@ def _make_text_config(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def _synthetic_weight(vocab: int, cols: int, layer_idx: int = 0) -> torch.Tensor:
-    """Deterministic, layer-dependent fp8 values (never all-zero/uniform, and
+def _synthetic_weight(
+    vocab: int,
+    cols: int,
+    layer_idx: int = 0,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+) -> torch.Tensor:
+    """Deterministic, layer-dependent values (never all-zero/uniform, and
     distinguishable across layers so per-layer-keying tests are meaningful).
     """
     raw = torch.arange(vocab * cols, dtype=torch.float32).reshape(vocab, cols)
     raw = torch.remainder(raw + layer_idx * 97, 6.0) - 3.0
-    return raw.to(torch.float8_e4m3fn)
+    return raw.to(dtype)
 
 
 def _write_ple_layer(
@@ -103,16 +108,17 @@ def _write_ple_layer(
     scale: float,
     write_scale: bool = True,
     scale_dtype: torch.dtype = torch.bfloat16,
+    table_dtype: torch.dtype = torch.float8_e4m3fn,
 ) -> torch.Tensor:
     """Write one PLE layer's shard + weight_scale tensors as synthetic
     safetensors files (no model.safetensors.index.json, matching the real
-    checkpoint). Returns the full logical [vocab, cols] fp8 table.
+    checkpoint). Returns the full logical [vocab, cols] table in table_dtype.
     """
     prefix = (
         f"model.language_model.layers.{layer_idx}.ple.ple_embedding.ngram_embedding"
     )
     shard_size = (vocab + parts - 1) // parts
-    full = _synthetic_weight(vocab, cols, layer_idx)
+    full = _synthetic_weight(vocab, cols, layer_idx, dtype=table_dtype)
     for shard_index in range(parts):
         start = shard_index * shard_size
         rows = max(0, min(shard_size, vocab - start))
@@ -915,6 +921,44 @@ def test_readahead_table_close_is_idempotent_with_fds_open(tmp_path: Path) -> No
     assert all(mm is None for mm in table.mm)
 
 
+def test_readahead_gathers_correctly_across_a_320_byte_bf16_row_width(
+    tmp_path: Path,
+) -> None:
+    """The pre-pass's row-offset math (_readahead/_coalesce_runs) is
+    parameterized on row_bytes, not hardcoded to fp8's 1-byte-per-column
+    width — a BF16 table's 320-byte row (cols=160 x itemsize 2, the real
+    checkpoint's shape) must coalesce and gather identically to the
+    narrower fp8 fixtures exercised elsewhere in this file.
+    """
+    full = _write_ple_layer(
+        tmp_path,
+        layer_idx=0,
+        vocab=6,
+        parts=2,
+        cols=160,
+        scale=0.0,
+        write_scale=False,
+        table_dtype=torch.bfloat16,
+    )
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        3,
+        320,
+        torch.bfloat16,
+        workers=2,
+        chunk=2,
+        model_path=str(tmp_path),
+        readahead=64,
+    )
+
+    ids = np.array([0, 5, 2, 2], dtype=np.int64)
+    got = torch.from_numpy(table.gather(ids)).view(torch.bfloat16)
+
+    assert torch.equal(got, full[ids])
+    table.close()
+
+
 # --------------------------------------------------------------------------- #
 # Bounded prewarm
 # --------------------------------------------------------------------------- #
@@ -1297,6 +1341,49 @@ def test_validate_shards_for_passes_on_a_well_formed_checkpoint(
     )  # must not raise
 
 
+def test_validate_shards_for_refuses_a_bf16_table_with_a_stray_weight_scale(
+    tmp_path: Path,
+) -> None:
+    """BF16 (unquantized) tables are registered with requires_scale=False —
+    a weight_scale present on disk anyway signals exporter confusion (e.g. a
+    half fp8-to-bf16 conversion) and must be refused up front, not silently
+    ignored, per the NEW fail-closed case in _validate_layer_shards."""
+    _write_ple_layer(
+        tmp_path,
+        layer_idx=1,
+        vocab=10,
+        parts=3,
+        cols=2,
+        scale=0.25,
+        write_scale=True,
+        table_dtype=torch.bfloat16,
+    )
+    model_config = _model_config(tmp_path)
+
+    with pytest.raises(RuntimeError, match="BF16"):
+        ple_mmap.validate_shards_for(model_config, "model.layers.1.ple", head_dim=2)
+
+
+def test_validate_shards_for_passes_on_a_well_formed_bf16_checkpoint(
+    tmp_path: Path,
+) -> None:
+    _write_ple_layer(
+        tmp_path,
+        layer_idx=1,
+        vocab=10,
+        parts=3,
+        cols=2,
+        scale=0.25,
+        write_scale=False,
+        table_dtype=torch.bfloat16,
+    )
+    model_config = _model_config(tmp_path)
+
+    ple_mmap.validate_shards_for(
+        model_config, "model.layers.1.ple", head_dim=2
+    )  # must not raise
+
+
 def test_validate_shards_for_tolerates_an_unresolvable_model_path() -> None:
     """A bare repo id with no local snapshot (e.g. --load-format
     dummy/test construction, offline): validation defers to load time
@@ -1620,7 +1707,7 @@ def test_build_tables_raises_on_shard_width_mismatch(tmp_path: Path) -> None:
 
 
 def test_build_tables_refuses_a_uniformly_e5m2_ple_table(tmp_path: Path) -> None:
-    """F8_E5M2 was dropped from _FP8_DTYPES because is_fp8() does not
+    """F8_E5M2 was never added to _PLE_DTYPES because is_fp8() does not
     recognize it (dequant would silently never fire) — a UNIFORMLY-e5m2
     checkpoint (not a mixed-dtype one, already covered by discover_shards'
     own check) must still be refused, from BOTH validate_shards_for
@@ -1679,6 +1766,48 @@ def test_build_tables_refuses_a_uniformly_e5m2_ple_table(tmp_path: Path) -> None
 
     assert emb2.table is not None
     assert emb2.table.torch_dtype is emb2.torch_dtype
+
+
+def test_build_tables_attaches_a_bf16_table_and_forward_gathers_it_value_exact(
+    tmp_path: Path,
+) -> None:
+    """Intel AutoRound W4A16 exports pass the PLE table through as
+    unquantized BF16 with no weight_scale on disk: a real streamed load sets
+    weights_streamed True but weight_scale_loaded stays False (there is no
+    scale tensor to stream) — the False/False quadrant that Fix A's
+    streamed-loader error would otherwise refuse. For a requires_scale=False
+    dtype this must still attach and serve real values through the full
+    load_weights -> build_tables -> forward chain, not raise."""
+    full = _write_ple_layer(
+        tmp_path,
+        layer_idx=0,
+        vocab=8,
+        parts=2,
+        cols=2,
+        scale=0.0,
+        write_scale=False,
+        table_dtype=torch.bfloat16,
+    )
+    module = _mmap_ngram_module_for_load_test(vocab=8, cols=2)
+    module.load_weights(
+        [
+            ("ngram_embedding.shard_0.weight", full[0:4]),
+            ("ngram_embedding.shard_1.weight", full[4:8]),
+        ]
+    )
+    assert module.ngram_embedding.weights_streamed is True
+    assert module.ngram_embedding.weight_scale_loaded is False
+
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, module.ngram_embedding, 2)}
+    )
+    ple_mmap.build_tables(_model_config(tmp_path), cc)
+
+    ids = torch.tensor([[0, 7], [3, 3]], dtype=torch.long)
+    out = module.ngram_embedding(ids)
+
+    assert out.dtype == torch.bfloat16
+    assert torch.equal(out.reshape(-1, 2), full[ids.reshape(-1)])
 
 
 def test_build_tables_raises_on_missing_shard_file(tmp_path: Path) -> None:
@@ -2229,6 +2358,24 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
     dequant_on = mmap_ple_layer._dequantize_embeddings(got, torch.bfloat16)
 
     assert torch.equal(dequant_on, dequant_off)
+
+
+def test_dequantize_embeddings_casts_a_bf16_table_to_the_output_dtype() -> None:
+    """A BF16 (unquantized) PLE table carries no scale to apply: the
+    non-fp8 branch of _dequantize_embeddings must still cast to
+    output_dtype, mirroring the fp8 branch's final cast — without it, a
+    bf16 table served under e.g. ``--dtype float16`` reaches a downstream
+    matmul with a stale bf16 dtype and fails there, unattributably, instead
+    of here."""
+    layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(layer)
+    embeddings = torch.tensor([[1.5, -2.25], [0.5, 3.0]], dtype=torch.bfloat16)
+    assert not is_fp8(embeddings)
+
+    out = layer._dequantize_embeddings(embeddings, torch.float16)
+
+    assert out.dtype == torch.float16
+    assert torch.equal(out, embeddings.to(torch.float16))
 
 
 # --------------------------------------------------------------------------- #

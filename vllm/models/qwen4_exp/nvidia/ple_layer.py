@@ -641,7 +641,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         """Dequantize PLE lookup output."""
 
         if not is_fp8(embeddings):
-            return embeddings
+            # Unquantized (e.g. BF16) tables carry no scale to apply — just
+            # cast to the output dtype, same as the fp8 branch's final cast.
+            return embeddings.to(output_dtype)
         weight_scale = self._get_embedding_weight_scale()
         if weight_scale is None:
             raise RuntimeError("FP8 PLE embedding is missing its global scale")

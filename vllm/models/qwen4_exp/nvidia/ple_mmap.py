@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Serve the Qwen4Exp PLE n-gram table from NVMe via mmap.
 
-Why: the n-gram (PLE) table is tens of GiB in FP8 and the stock path keeps it
-resident (GPU, via ``VocabParallelEmbedding``). On a box where host and GPU
-share one unified memory pool, that table cannot sit next to the rest of the
-model. A token only ever touches a handful of rows out of the whole table, so
-it can live on disk and be served through the page cache instead.
+Why: the n-gram (PLE) table is tens of GiB (FP8-quantized, or unquantized
+BF16 for e.g. AutoRound W4A16 exports) and the stock path keeps it resident
+(GPU, via ``VocabParallelEmbedding``). On a box where host and GPU share one
+unified memory pool, that table cannot sit next to the rest of the model. A
+token only ever touches a handful of rows out of the whole table, so it can
+live on disk and be served through the page cache instead.
 
 How, with ``VLLM_PLE_MMAP=1``:
   * ``Qwen4ExpNGramEmbedding.__init__`` swaps the GPU-resident embedding for
@@ -14,10 +15,12 @@ How, with ``VLLM_PLE_MMAP=1``:
     from :class:`MmapPleTable` (``np.memmap`` views over the checkpoint's
     safetensors shards, page-cache backed).
   * ``Qwen4ExpNGramEmbedding.load_weights`` drops the per-shard tensors on
-    the floor (never materialized into a resident table) and keeps the
-    checkpoint's global FP8 ``weight_scale`` as a buffer on the placeholder,
+    the floor (never materialized into a resident table); for a dtype whose
+    :class:`_PleDtype` descriptor requires one, it also keeps the
+    checkpoint's global ``weight_scale`` as a buffer on the placeholder,
     which the untouched ``Qwen4ExpPLELayer._dequantize_embeddings`` already
-    knows how to consume.
+    knows how to consume. Unquantized dtypes (e.g. BF16) need no scale and
+    pass through unscaled.
   * the WHOLE forward — trigram hashing plus the row gather — is wrapped in
     a custom op, ``vllm::qwen4_exp_ple_mmap_forward``, so it runs OUTSIDE
     CUDA graph capture and outside torch.compile tracing entirely
@@ -79,8 +82,18 @@ logger = init_logger(__name__)
 OP_NAME = "qwen4_exp_ple_mmap_forward"
 QUALIFIED_OP_NAME = f"vllm::{OP_NAME}"
 
-_FP8_DTYPES: dict[str, torch.dtype] = {
-    "F8_E4M3": torch.float8_e4m3fn,
+
+@dataclass(frozen=True)
+class _PleDtype:
+    """One PLE table dtype's storage type and whether it needs a scale."""
+
+    torch_dtype: torch.dtype
+    requires_scale: bool
+
+
+_PLE_DTYPES: dict[str, _PleDtype] = {
+    "F8_E4M3": _PleDtype(torch.float8_e4m3fn, requires_scale=True),
+    "BF16": _PleDtype(torch.bfloat16, requires_scale=False),
     # F8_E5M2 deliberately excluded: is_fp8() (fp8_utils.py) only recognizes
     # float8_e4m3fn/float8_e4m3fnuz, so an e5m2 table would silently skip
     # Qwen4ExpPLELayer._dequantize_embeddings's dequant gate and fail late,
@@ -740,12 +753,15 @@ class MmapNgramEmbedding(nn.Module):
     :func:`build_tables`). While unset, ``forward``'s behavior depends on
     whether a real (non-dummy) load ever streamed weights through this
     module: ``--load-format dummy`` profiling never calls ``load_weights``
-    at all, so ``weights_streamed`` stays False and zeros are the correct,
-    intentional stand-in against the default unit ``weight_scale``. A real
-    load that streamed weights but never got a table attached (build_tables
-    didn't run, or raised and was swallowed somewhere) is a bug, and must
-    raise loudly rather than silently serve zeros as if they were real
-    embeddings (invariant 4: fail closed, never serve garbage).
+    at all, so ``weights_streamed`` stays False and zeros in the
+    placeholder's still-default fp8 dtype are the correct, intentional
+    stand-in — harmless regardless of which dtype eventually attaches, since
+    every :class:`_PleDtype` either dequantizes a zero to zero or passes it
+    through unscaled. A real load that streamed weights but never got a
+    table attached (build_tables didn't run, or raised and was swallowed
+    somewhere) is a bug, and must raise loudly rather than silently serve
+    zeros as if they were real embeddings (invariant 4: fail closed, never
+    serve garbage).
     """
 
     # Declared so static type-checkers resolve this to Tensor instead of
@@ -801,7 +817,10 @@ class MmapNgramEmbedding(nn.Module):
 def set_weight_scale(
     embedding: MmapNgramEmbedding, weight: torch.Tensor, device: torch.device
 ) -> None:
-    """Register the checkpoint's FP8 global scale on the placeholder.
+    """Register the checkpoint's global scale on the placeholder.
+
+    FP8 (and other requires_scale) dtypes only — an unquantized dtype like
+    BF16 has no scale on disk and never routes through this function.
 
     Called from ``Qwen4ExpNGramEmbedding.load_weights`` as it intercepts
     ``ngram_embedding.weight_scale`` from the streamed weight iterator, so
@@ -895,27 +914,39 @@ def _extract_layer_idx(layer_name: str) -> int:
 
 def _validate_layer_shards(
     layer_shards: _LayerShards, head_dim: int, layer_idx: int, model_path: str
-) -> tuple[str, int, int, str]:
+) -> tuple[str, int, int, str] | None:
     """Shared fail-closed checks between :func:`validate_shards_for` (cheap,
     construction-time) and :func:`_attach_table` (authoritative, attach-time)
     — the same class of validation runs at both points, just at
     different times relative to the checkpoint's streamed load.
 
     Returns:
-        The layer's validated (non-``None``) ``scale_entry``.
+        The layer's validated ``scale_entry``, or ``None`` when the
+        discovered dtype's descriptor has ``requires_scale=False``.
     """
     if layer_shards.cols != head_dim:
         raise RuntimeError(
             f"PLE mmap: layer {layer_idx} shard width {layer_shards.cols} "
             f"!= head_dim {head_dim}"
         )
-    if layer_shards.dtype_str not in _FP8_DTYPES:
+    desc = _PLE_DTYPES.get(layer_shards.dtype_str)
+    if desc is None:
         raise RuntimeError(
             f"PLE mmap: layer {layer_idx} shards have unsupported dtype "
-            f"{layer_shards.dtype_str!r}; only {sorted(_FP8_DTYPES)} "
-            "is supported (F8_E5M2 is refused: is_fp8() does not "
+            f"{layer_shards.dtype_str!r}; only {sorted(_PLE_DTYPES)} "
+            "are supported (F8_E5M2 is refused: is_fp8() does not "
             "recognize it, so dequant would silently never fire)"
         )
+    if not desc.requires_scale:
+        if layer_shards.scale_entry is not None:
+            raise RuntimeError(
+                f"PLE mmap: layer {layer_idx} is {layer_shards.dtype_str} "
+                "(unquantized, no scale required) but has an "
+                f"ngram_embedding.weight_scale on disk under {model_path} — "
+                "drop the stray scale or export shards in a dtype that "
+                "requires one"
+            )
+        return None
     if layer_shards.scale_entry is None:
         raise RuntimeError(
             f"PLE mmap: layer {layer_idx} has FP8 shards but no "
@@ -1076,45 +1107,55 @@ def _attach_table(
     scale_entry = _validate_layer_shards(
         layer_shards, embedding.embedding_dim, layer_idx, model_path
     )
-    if not embedding.weight_scale_loaded:
-        if embedding.weights_streamed:
-            # Rows were streamed but the scale was not — a broken or
-            # truncated weight iterator, not an unstreamed family; stay
-            # fail-closed rather than guess at a header value.
-            raise RuntimeError(
-                f"PLE mmap: layer {layer_idx} weight_scale was never loaded "
-                "from the checkpoint's streamed weights"
+    desc = _PLE_DTYPES[layer_shards.dtype_str]
+    if desc.requires_scale:
+        assert scale_entry is not None
+        if not embedding.weight_scale_loaded:
+            if embedding.weights_streamed:
+                # Rows were streamed but the scale was not — a broken or
+                # truncated weight iterator, not an unstreamed family; stay
+                # fail-closed rather than guess at a header value.
+                raise RuntimeError(
+                    f"PLE mmap: layer {layer_idx} weight_scale was never loaded "
+                    "from the checkpoint's streamed weights"
+                )
+            # This layer's ngram_embedding family was never streamed at all
+            # (a loader topology that never routes PLE weights to this
+            # worker) — fall back to a direct header read instead of failing
+            # closed on a scale that had nothing to be lost from.
+            header_scale = _read_scale(scale_entry)
+            logger.warning(
+                "PLE mmap: layer %d weight_scale falling back to a direct "
+                "header read — this layer's ngram_embedding family was never "
+                "streamed through the checkpoint loader",
+                layer_idx,
             )
-        # This layer's ngram_embedding family was never streamed at all
-        # (a loader topology that never routes PLE weights to this
-        # worker) — fall back to a direct header read instead of failing
-        # closed on a scale that had nothing to be lost from.
-        header_scale = _read_scale(scale_entry)
-        logger.warning(
-            "PLE mmap: layer %d weight_scale falling back to a direct "
-            "header read — this layer's ngram_embedding family was never "
-            "streamed through the checkpoint loader",
-            layer_idx,
-        )
-        # Same device the streamed path resolves to: the buffer being replaced.
-        set_weight_scale(embedding, header_scale, embedding.weight_scale.device)
-    else:
-        # Cross-check the streamed-and-registered scale against an independent
-        # direct read of the same tensor off disk: these are two self-consistent
-        # halves, and a mismatch would mean the streamed weight iterator silently
-        # renamed or skipped something.
-        header_scale = _read_scale(scale_entry).float()
-        streamed_scale = embedding.weight_scale.detach().to("cpu").float()
-        if not torch.allclose(header_scale, streamed_scale, atol=1e-6):
-            # .tolist()[:4], not .item(): a malformed (non-scalar) streamed
-            # scale must not crash the diagnostic itself with an unrelated
-            # "cannot be converted to Scalar" error.
-            raise RuntimeError(
-                f"PLE mmap: layer {layer_idx} weight_scale mismatch between the "
-                f"streamed checkpoint ({streamed_scale.flatten().tolist()[:4]}) "
-                f"and the header-parsed value "
-                f"({header_scale.flatten().tolist()[:4]})"
-            )
+            # Same device the streamed path resolves to: the buffer being replaced.
+            set_weight_scale(embedding, header_scale, embedding.weight_scale.device)
+        else:
+            # Cross-check the streamed-and-registered scale against an independent
+            # direct read of the same tensor off disk: these are two self-consistent
+            # halves, and a mismatch would mean the streamed weight iterator silently
+            # renamed or skipped something.
+            header_scale = _read_scale(scale_entry).float()
+            streamed_scale = embedding.weight_scale.detach().to("cpu").float()
+            if not torch.allclose(header_scale, streamed_scale, atol=1e-6):
+                # .tolist()[:4], not .item(): a malformed (non-scalar) streamed
+                # scale must not crash the diagnostic itself with an unrelated
+                # "cannot be converted to Scalar" error.
+                raise RuntimeError(
+                    f"PLE mmap: layer {layer_idx} weight_scale mismatch between the "
+                    f"streamed checkpoint ({streamed_scale.flatten().tolist()[:4]}) "
+                    f"and the header-parsed value "
+                    f"({header_scale.flatten().tolist()[:4]})"
+                )
+    # else: no-scale dtype (e.g. BF16). _validate_layer_shards already
+    # refused a stray on-disk scale above, so validation is the sole
+    # authority here — this branch deliberately ignores
+    # weight_scale_loaded/weights_streamed. A real loader never calls
+    # set_weight_scale for this table (there is nothing for it to stream),
+    # so weight_scale_loaded=True on an unscaled embedding only ever
+    # happens in a test double, and attaching must not chase that state.
 
     vocab = embedding.org_vocab_size
     # Verbatim shard-placement math from Qwen4ExpNGramEmbedding.load_weights
@@ -1158,7 +1199,7 @@ def _attach_table(
             layer_shards.shards,
             shard_size,
             row_bytes,
-            _FP8_DTYPES[layer_shards.dtype_str],
+            desc.torch_dtype,
             workers=envs.VLLM_PLE_MMAP_WORKERS,
             chunk=envs.VLLM_PLE_MMAP_CHUNK,
             model_path=model_path,
