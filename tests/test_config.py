@@ -950,6 +950,10 @@ def test_platform_rejects_unsupported_arch_during_config(monkeypatch):
 
     `_try_load_model_cls` checks this as well, but only once a worker is
     already up and loading the model.
+
+    `ModelConfig` is a pydantic dataclass, so the `ValueError` reaches the
+    caller wrapped in a `ValidationError`. That subclasses `ValueError` and
+    keeps the original message, which is what `match` asserts on.
     """
     rejected = []
 
