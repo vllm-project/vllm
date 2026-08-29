@@ -123,15 +123,18 @@ class LoRAKernelMeta:
                 token_lora_mapping, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
             )
             if num_tokens >= _VECTORIZED_METADATA_MIN_TOKENS:
-                sorted_lora_ids, sorted_indices = torch.sort(mapping_cpu, stable=True)
+                sorted_lora_ids = torch.empty_like(mapping_cpu)
+                sorted_indices_cpu = torch.empty_like(
+                    mapping_cpu, dtype=torch.int64, pin_memory=PIN_MEMORY
+                )
+                torch.sort(
+                    mapping_cpu,
+                    stable=True,
+                    out=(sorted_lora_ids, sorted_indices_cpu),
+                )
                 lora_ids, counts = torch.unique_consecutive(
                     sorted_lora_ids, return_counts=True
                 )
-
-                sorted_indices_cpu = torch.empty_like(
-                    sorted_indices, dtype=torch.int32, pin_memory=PIN_MEMORY
-                )
-                sorted_indices_cpu.copy_(sorted_indices)
                 lora_ids_cpu = torch.empty_like(
                     lora_ids, dtype=torch.int32, pin_memory=PIN_MEMORY
                 ).copy_(lora_ids)
