@@ -20,8 +20,12 @@ pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
     AssistantToolCall, ChatEvent, ChatTokenUsage,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
+pub use multimodal::timing::{MultiModalTimingRegistry, TimingContext};
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
@@ -57,7 +61,7 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::dtype::ModelDtype;
+pub use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
@@ -68,6 +72,8 @@ pub struct ChatRequestProcessor {
     /// Effective model dtype reported by the engine.
     /// Absent for text-only frontends without an engine handshake.
     model_dtype: Option<ModelDtype>,
+    /// Request-id-keyed registry for optional multimodal preprocessing timing.
+    mm_timing: Arc<MultiModalTimingRegistry>,
     /// Tool-call parser selection used when preparing generation requests.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
@@ -77,10 +83,11 @@ pub struct ChatRequestProcessor {
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
     /// dtype reported by the engine.
-    fn new(backend: DynChatBackend, model_dtype: ModelDtype) -> Self {
+    pub fn new(backend: DynChatBackend, model_dtype: ModelDtype) -> Self {
         Self {
             backend,
             model_dtype: Some(model_dtype),
+            mm_timing: Arc::new(MultiModalTimingRegistry::new(false)),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
         }
@@ -91,6 +98,7 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: None,
+            mm_timing: Arc::new(MultiModalTimingRegistry::new(false)),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
         }
@@ -107,6 +115,18 @@ impl ChatRequestProcessor {
         self
     }
 
+    /// Enable or disable multimodal preprocessing timing collection.
+    pub fn with_mm_processor_stats(mut self, enabled: bool) -> Self {
+        self.mm_timing = Arc::new(MultiModalTimingRegistry::new(enabled));
+        self
+    }
+
+    /// Drain and return per-request multimodal preprocessing timings
+    /// (`request_id` -> `{stage}_secs`).
+    pub fn mm_timing_stats(&self) -> HashMap<String, HashMap<String, f64>> {
+        self.mm_timing.stat()
+    }
+
     async fn finalize_rendered_prompt(
         &self,
         request: &ChatRequest,
@@ -114,11 +134,13 @@ impl ChatRequestProcessor {
     ) -> Result<(Prompt, Option<MmFeatures>)> {
         match self.model_dtype {
             Some(model_dtype) => {
+                let timing = self.mm_timing.context(&request.request_id);
                 multimodal::finalize_rendered_prompt(
                     request,
                     rendered,
                     self.backend.multimodal_model_info(),
                     model_dtype,
+                    &timing,
                 )
                 .await
             }
@@ -132,6 +154,7 @@ impl ChatRequestProcessor {
         &self,
         media: multimodal::MultimodalInput,
         token_ids: &mut Vec<u32>,
+        request_id: &str,
     ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
             return Ok(None);
@@ -140,10 +163,11 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let timing = self.mm_timing.context(request_id);
         let features = match media {
             multimodal::MultimodalInput::Raw(parts) => {
                 let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype).await?
+                info.prepare_multimodal(parts, token_ids, model_dtype, &timing).await?
             }
             multimodal::MultimodalInput::Preprocessed(features) => {
                 info.prepare_preprocessed(features, token_ids.len())?
@@ -249,6 +273,12 @@ impl ChatLlm {
         self
     }
 
+    /// Enable or disable multimodal preprocessing timing collection.
+    pub fn with_mm_processor_stats(mut self, enabled: bool) -> Self {
+        self.processor = self.processor.with_mm_processor_stats(enabled);
+        self
+    }
+
     /// Override the effective model dtype used for multimodal tensor encoding.
     pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
         self.processor.model_dtype = Some(model_dtype);
@@ -292,6 +322,12 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
+    /// Drain and return per-request multimodal preprocessing timings
+    /// (`request_id` -> `{stage}_secs`).
+    pub fn mm_timing_stats(&self) -> HashMap<String, HashMap<String, f64>> {
+        self.processor.mm_timing.stat()
+    }
+
     /// Prepare media for an already-tokenized request.
     /// Raw content is preprocessed; inline features are checked against model
     /// capabilities, modality limits, and the final prompt positions.
@@ -299,8 +335,9 @@ impl ChatLlm {
         &self,
         media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
+        request_id: &str,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media.into(), token_ids).await
+        self.processor.prepare_media(media.into(), token_ids, request_id).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
