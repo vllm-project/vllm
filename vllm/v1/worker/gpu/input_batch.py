@@ -145,12 +145,31 @@ class InputBatch:
         # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
         # accept any split with non-empty slots, so this shape works for them
         # too; attention metadata is built from the promised max_query_len.
-        base_tokens = num_tokens // num_reqs
-        num_extra = num_tokens % num_reqs
-        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
-        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
-        if num_extra > 0:
-            num_scheduled_tokens[-num_extra:] += 1
+        use_max_window_layout = max_query_len is not None and num_reqs > 1
+        if use_max_window_layout:
+            assert max_query_len is not None  # for mypy (flag implies a window)
+            # Exercise the promised window: one largest request, the
+            # remainder spread over the others within the cap.
+            big = min(max_query_len, num_tokens - (num_reqs - 1))
+            assert big >= 1
+            rest = num_tokens - big
+            rest_reqs = num_reqs - 1
+            base, extra = divmod(rest, rest_reqs) if rest_reqs else (0, 0)
+            assert rest_reqs == 0 or base >= 1
+            assert base + (extra > 0) <= max_query_len
+            num_scheduled_tokens = np.full(num_reqs, base, dtype=np.int32)
+            num_scheduled_tokens[0] = big
+            if rest_reqs and extra:
+                num_scheduled_tokens[1 : extra + 1] += 1
+        else:
+            base_tokens = num_tokens // num_reqs
+            num_extra = num_tokens % num_reqs
+            assert (
+                max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
+            )
+            num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+            if num_extra > 0:
+                num_scheduled_tokens[-num_extra:] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
