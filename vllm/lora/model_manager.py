@@ -790,9 +790,10 @@ class LoRAModelManager:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
 
         if module_name in self.supported_modules_to_save:
-            # TODO language wrapper key in self.punica_wrapper_mapping may not
-            # match DEFAULT_LANGUAGE_WRAPPER_KEY
-            return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
+            lm_wrapper = self.punica_wrapper_mapping.get(
+                self.mm_mapping.language_model[0]
+            )
+            return lm_wrapper
 
         # For multimodal model
         # NOTE Sort by prefix length (descending) to match the longest prefix first
