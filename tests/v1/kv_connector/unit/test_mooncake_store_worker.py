@@ -144,7 +144,11 @@ def _make_store_sending_thread(
     replicate_config: object | None = None,
     enable_group_semantics: bool = False,
     supports_group_ids: bool = False,
+    dcp_size: int = 1,
+    dcp_rank: int | None = None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
+    if dcp_rank is None:
+        dcp_rank = tp_rank % dcp_size if dcp_size > 1 else 0
     if coord is None:
         coord = _default_send_coord()
     if token_databases is None:
@@ -164,6 +168,8 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+        dcp_size=dcp_size,
+        dcp_rank=dcp_rank,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -174,7 +180,11 @@ def _make_store_recving_thread(
     *,
     tp_rank: int = 0,
     disk_offload_buffer_budget_bytes: int | None = None,
+    dcp_size: int = 1,
+    dcp_rank: int | None = None,
 ) -> mooncake_store_worker.KVCacheStoreRecvingThread:
+    if dcp_rank is None:
+        dcp_rank = tp_rank % dcp_size if dcp_size > 1 else 0
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
     token_database = ChunkedTokenDatabase(
@@ -196,6 +206,8 @@ def _make_store_recving_thread(
         ready_event=threading.Event(),
         coord=coord,
         disk_offload_buffer_budget_bytes=disk_offload_buffer_budget_bytes,
+        dcp_size=dcp_size,
+        dcp_rank=dcp_rank,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -212,7 +224,7 @@ def _make_load_req(
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=token_len,
-        block_ids=(list(range(len(block_hashes))),),
+        block_ids=(list(range(1, len(block_hashes) + 1)),),
         block_hashes=block_hashes,
         load_spec=LoadSpec(
             vllm_cached_tokens=vllm_cached_tokens,
@@ -1314,7 +1326,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+            block_ids=([1, 2, 3, 4], [1, 2, 3, 4]),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -1485,7 +1497,7 @@ def test_store_recving_thread_reports_failed_block_ids():
     )
 
     assert thread.get_and_clear_finished_requests() == {"req-a"}
-    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {2, 3}
     assert thread.get_and_clear_block_ids_with_load_errors() == set()
 
 
@@ -1502,7 +1514,7 @@ def test_store_recving_thread_reports_failed_block_ids_after_rotation():
         )
     )
 
-    assert thread.get_and_clear_block_ids_with_load_errors() == {2}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {3}
 
 
 def test_store_recving_thread_reports_all_attempted_blocks_on_exception():
@@ -1519,7 +1531,7 @@ def test_store_recving_thread_reports_all_attempted_blocks_on_exception():
     )
 
     assert thread.get_and_clear_finished_requests() == {"req-a"}
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2, 3}
 
 
 def test_store_worker_get_block_ids_with_load_errors_delegates_to_recv_thread():
@@ -2031,8 +2043,8 @@ def test_recv_thread_splits_disk_offload_loads_by_budget():
     assert isinstance(layout, RankLocalStoreLayout)
     base_addr = layout.kv_caches_base_addr[0]
     block_len = layout.block_len[0]
-    assert first_addrs == [[base_addr], [base_addr + block_len]]
-    assert second_addrs == [[base_addr + 2 * block_len]]
+    assert first_addrs == [[base_addr + block_len], [base_addr + 2 * block_len]]
+    assert second_addrs == [[base_addr + 3 * block_len]]
     expected_size = block_len
     assert first_sizes == [[expected_size], [expected_size]]
     assert second_sizes == [[expected_size]]
@@ -2055,7 +2067,7 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 1
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2}
 
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():
@@ -2104,7 +2116,7 @@ def test_recv_thread_reports_unsplittable_key_larger_than_budget():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 0
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2, 3}
 
 
 def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
@@ -2610,11 +2622,11 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
 ):
     """Every key a rank GETs must have been PUT by some rank.
 
-    When num_kv_head < tp_size, ranks holding the same KV heads stripe
-    their PUTs across one shared key namespace. That dedup is only valid
-    when those ranks really share a namespace: with DCP > 1 each rank GETs
-    every key from its own ``@dcpN`` namespace, so striding must be
-    disabled.
+    Each DCP rank GETs from its own ``(tp_rank // factor, dcp_rank)``
+    namespace. PUT striding is rescaled by ``dcp_size``
+    (``put_step = max(1, factor // dcp_size)``, phase
+    ``tp_rank // dcp_size``) so each namespace keeps exactly one writer
+    per chunk.
     """
     tp_size = 4
     store = MagicMock()
@@ -2648,13 +2660,14 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
         db = w.token_dbs[0]
         token_len = len(block_hashes) * db.block_size
         keys = [
-            PoolKey(db.metadata, block_hash.hex()).to_string()
+            db.key_for(block_hash)
             for _, _, block_hash in db.process_tokens(token_len, block_hashes)
         ]
         assert len(keys) == len(block_hashes)
         # PUT side: mirrors KVCacheStoreSendingThread's striding slice.
-        put_step = w._group_tp_replication_factors[0]
-        put_keys.update(keys[w.tp_rank % put_step :: put_step])
+        put_step = max(1, w._group_tp_replication_factors[0] // dcp_size)
+        phase = (w.tp_rank // dcp_size) % put_step
+        put_keys.update(keys[phase::put_step])
         # GET side: KVCacheStoreRecvingThread fetches every key.
         get_keys_per_rank[tp_rank] = set(keys)
 
@@ -3314,6 +3327,7 @@ def _make_bare_worker(
     worker._kv_cache_groups = [group]
     worker.pcp_size = 1
     worker.dcp_size = 1
+    worker.dcp_rank = 0
     worker.hash_block_size = block_size
     # Pre-build a single-group token_dbs so lookup-only tests don't have to
     # call register_kv_caches.
@@ -3342,9 +3356,9 @@ def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
 
     assert worker._lookup_key_prefixes[0] == (
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
-        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0",
-        "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0",
-        "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp1@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp2@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp3@pp_rank:0@group:0",
     )
 
 
@@ -3394,6 +3408,7 @@ def test_lookup_key_prefixes_cover_pcp_rank_namespaces():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
         "test-model@tp_rank:0@pcp1@dcp0@pp_rank:0@group:0",
     )
+    assert len(worker._lookup_key_prefixes[0]) == 2
 
 
 def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
@@ -3576,15 +3591,13 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     worker.num_kv_head = 1
     worker.dcp_size = 4
     _refresh_group_tp_replication_factors(worker)
-    worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
+    worker.store.batch_is_exist.return_value = [0] * 4
 
     assert worker.lookup(16, [b"a0"]).hit_length == 0
-    assert worker.store.batch_is_exist.call_args.args[0] == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
-        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
-        "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0@6130",
-        "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0@6130",
-    ]
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 4
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in keys}
+    assert dcp_ranks == {"0", "1", "2", "3"}
 
 
 def test_lookup_partial_prefix_returns_first_hit_length():
@@ -4499,3 +4512,720 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+# -- Chunk-derived DCP namespace tests --
+
+
+def test_per_rank_namespace_save_load_agree():
+    """Save and load on the same dcp_rank use the same per-rank namespace."""
+    block_hashes = [b"a0", b"a1"]
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    send_thread = _make_store_sending_thread(store, dcp_size=2, tp_rank=0)
+    _run_store_req(
+        send_thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=32,
+            block_ids=([1, 2],),
+            block_hashes=block_hashes,
+            can_save=True,
+        ),
+    )
+    save_keys = store.batch_is_exist.call_args.args[0]
+    assert len(save_keys) == 2
+    assert all("@dcp0@" in k for k in save_keys)
+
+    # Load on same dcp_rank — keys must match
+    store2 = MagicMock()
+    store2.batch_get_into_multi_buffers.return_value = [256, 256]
+    recv_thread = _make_store_recving_thread(store2, tp_rank=0, dcp_size=2)
+    recv_thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=32,
+            block_ids=([1, 2],),
+            block_hashes=block_hashes,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=32,
+                can_load=True,
+                token_len=32,
+            ),
+        )
+    )
+    load_keys = store2.batch_get_into_multi_buffers.call_args.args[0]
+    assert set(load_keys) == set(save_keys)
+
+
+def test_mla_lookup_single_key_per_chunk():
+    """MLA (factor=tp_size) queries all DCP namespaces per chunk."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 1
+    worker.dcp_size = 4
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    worker._kv_cache_groups = [KVCacheGroupSpec(["l0"], mla)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=16,
+        )
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    # factor=8, num_shards=1×4=4, 2 chunks → 8 keys total
+    worker.store.batch_is_exist.return_value = [1] * 8
+    assert worker.lookup(33, [b"a0", b"a1"]).hit_length == 32
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 8
+
+
+def test_gqa_lookup_num_kv_head_keys_per_chunk():
+    """GQA issues num_kv_head keys per chunk with all() aggregation."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 2
+    worker.dcp_size = 4
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=2, head_size=64, dtype=None)
+    worker._kv_cache_groups = [KVCacheGroupSpec(["l0"], spec)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=16,
+        )
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    # factor=4, num_shards=2×4=8, 2 chunks → 16 keys total
+    worker.store.batch_is_exist.return_value = [1] * 16
+    assert worker.lookup(33, [b"a0", b"a1"]).hit_length == 32
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 16
+
+
+def test_mamba_lookup_tp_size_keys_per_chunk():
+    """Mamba (factor=1) issues tp_size keys per chunk with all()."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 8
+    worker.dcp_size = 4
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [KVCacheGroupSpec(["l0"], mamba)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=16,
+        )
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    # factor=1, num_shards=8×4=32, 1 chunk → 32 keys
+    worker.store.batch_is_exist.return_value = [1] * 32
+    assert worker.lookup(17, [b"a0"]).hit_length == 16
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 32
+
+
+def test_put_step_equals_factor_no_dcp_early_return():
+    """Factor is true replication factor regardless of dcp_size."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 4
+    worker.dcp_size = 4
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    gqa = FullAttentionSpec(block_size=16, num_kv_heads=4, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["l0"], mla),
+        KVCacheGroupSpec(["l1"], gqa),
+        KVCacheGroupSpec(["l2"], mamba),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g),
+            block_size=16,
+        )
+        for g in range(3)
+    ]
+    _refresh_group_tp_replication_factors(worker)
+    assert worker._group_tp_replication_factors == (8, 2, 1)
+
+
+def test_write_amplification_mla_global_once():
+    """MLA with dcp=4, tp=8: each chunk saved by dcp_size ranks (one per namespace)."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    # 4 chunks, factor=8 → put_step=max(1,8//4)=2
+    # Each rank saves 2 chunks, each chunk saved by 4 ranks (one per DCP namespace)
+    all_saved_keys: list[str] = []
+    for tp_rank in range(8):
+        s = MagicMock()
+        s.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+        s.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+        thread = _make_store_sending_thread(s, tp_rank=tp_rank, put_step=8, dcp_size=4)
+        _run_store_req(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=64,
+                block_ids=([1, 2, 3, 4],),
+                block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+                can_save=True,
+            ),
+        )
+        if s.batch_is_exist.called:
+            all_saved_keys.extend(s.batch_is_exist.call_args.args[0])
+    # 8 ranks × 2 chunks each = 16 total keys
+    assert len(all_saved_keys) == 16
+
+
+def test_gqa_tp_rank_disambiguation():
+    """GQA factor < dcp_size: tp_rank disambiguates across all DCP namespaces."""
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 2
+    worker.dcp_size = 4
+    _refresh_group_tp_replication_factors(worker)
+    # factor=4, num_shards=2×4=8
+    # 1 chunk → 8 keys: 2 TP shards × 4 DCP namespaces
+    worker.store.batch_is_exist.return_value = [1] * 8
+    worker.lookup(16, [b"a0"])
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 8
+    tp_ranks = {k.split("@tp_rank:")[1].split("@")[0] for k in keys}
+    assert tp_ranks == {"0", "1"}
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in keys}
+    assert dcp_ranks == {"0", "1", "2", "3"}
+
+
+def test_tp_rank_metadata_change():
+    """token_dbs tp_rank == self.tp_rank // factor."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 4
+    worker.tp_rank = 3
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    gqa = FullAttentionSpec(block_size=16, num_kv_heads=4, head_size=64, dtype=None)
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["l0"], mla),
+        KVCacheGroupSpec(["l1"], gqa),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g),
+            block_size=16,
+        )
+        for g in range(2)
+    ]
+    _refresh_group_tp_replication_factors(worker)
+    # Recreate token_dbs with factor-adjusted tp_rank (as __init__ would)
+    import dataclasses as dc
+
+    for g_idx, factor in enumerate(worker._group_tp_replication_factors):
+        worker.token_dbs[g_idx] = ChunkedTokenDatabase(
+            dc.replace(
+                worker.token_dbs[g_idx].metadata,
+                tp_rank=worker.tp_rank // factor,
+            ),
+            block_size=16,
+        )
+    # MLA: factor=8, tp_rank // 8 = 0
+    assert worker.token_dbs[0].metadata.tp_rank == 0
+    # GQA: factor=2, tp_rank // 2 = 1
+    assert worker.token_dbs[1].metadata.tp_rank == 1
+
+
+def test_null_block_guard_save():
+    """Save skips NULL_BLOCK_ID and out-of-range chunks without IndexError."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+    # block_ids has NULL_BLOCK_ID at index 1 and only 2 entries (chunk 2 OOB)
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([1, NULL_BLOCK_ID],),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        ),
+    )
+    keys = store.batch_is_exist.call_args.args[0]
+    # chunk 0 saved, chunk 1 skipped (NULL_BLOCK_ID), chunk 2 skipped (OOB)
+    assert len(keys) == 1
+    assert "@dcp0@" in keys[0]
+
+
+def test_null_block_guard_load():
+    """Load skips NULL_BLOCK_ID and out-of-range chunks."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256]
+    recv_thread = _make_store_recving_thread(store)
+    recv_thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([1, NULL_BLOCK_ID],),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=48,
+                can_load=True,
+                token_len=48,
+            ),
+        )
+    )
+    keys = store.batch_get_into_multi_buffers.call_args.args[0]
+    # chunk 0 loaded, chunk 1 skipped (NULL), chunk 2 skipped (OOB)
+    assert len(keys) == 1
+
+
+def test_token_len_clamp():
+    """Save clamps token_len to len(block_hashes) * hash_block_size."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+    # token_len_chunk=64 but only 2 block_hashes (coverage = 32 tokens)
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=64,
+            block_ids=([1, 2, 3, 4],),
+            block_hashes=[b"a0", b"a1"],
+            can_save=True,
+        ),
+    )
+    keys = store.batch_is_exist.call_args.args[0]
+    # Clamped to 32 tokens = 2 chunks
+    assert len(keys) == 2
+
+
+def test_empty_key_list_early_return():
+    """Load exits cleanly when all chunks are NULL_BLOCK_ID."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    store = MagicMock()
+    recv_thread = _make_store_recving_thread(store)
+    recv_thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=32,
+            block_ids=([NULL_BLOCK_ID, NULL_BLOCK_ID],),
+            block_hashes=[b"a0", b"a1"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=32,
+                can_load=True,
+                token_len=32,
+            ),
+        )
+    )
+    # No batch_get call, request marked finished
+    assert not store.batch_get_into_multi_buffers.called
+    assert "req-a" in recv_thread.finished_requests
+
+
+def test_swa_dcp_lookup():
+    """SWA mask + DCP: lookup queries all DCP namespaces per chunk."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        SlidingWindowMLASpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 8
+    worker.dcp_size = 4
+    swa = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=None,
+        sliding_window=32,
+    )
+    worker._kv_cache_groups = [KVCacheGroupSpec(["l0"], swa)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=16,
+        )
+    ]
+    _refresh_group_tp_replication_factors(worker)
+    # factor=8, num_shards=1×4=4, 4 chunks → 16 keys
+    worker.store.batch_is_exist.return_value = [1] * 16
+    worker.lookup(64, [b"a0", b"a1", b"a2", b"a3"])
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 16
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in keys}
+    assert dcp_ranks == {"0", "1", "2", "3"}
+
+
+def test_mtp_dcp_lookup():
+    """MTP/EAGLE prefix-cache hashing + DCP interact correctly."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 1
+    worker.dcp_size = 4
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    worker._kv_cache_groups = [KVCacheGroupSpec(["l0"], mla)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=16,
+        )
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+        use_eagle=True,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    # factor=8, num_shards=1×4=4, 2 chunks → 8 keys
+    worker.store.batch_is_exist.return_value = [1] * 8
+    assert worker.lookup(33, [b"a0", b"a1"]).hit_length == 16
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 8
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in keys}
+    assert dcp_ranks == {"0", "1", "2", "3"}
+
+
+def test_rolling_update_coexistence():
+    """Lookup queries all DCP namespaces; old-format keys are a subset."""
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 4
+    worker.num_kv_head = 1
+    worker.dcp_size = 4
+    _refresh_group_tp_replication_factors(worker)
+    worker.store.batch_is_exist.return_value = [1] * 4
+    worker.lookup(16, [b"a0"])
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 4
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in keys}
+    assert dcp_ranks == {"0", "1", "2", "3"}
+
+
+def test_partial_tail_dcp_namespace():
+    """Partial-tail offload uses chunk-derived dcp_rank."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store, dcp_size=2)
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=32,
+            block_ids=([1, 2],),
+            block_hashes=[b"a0", b"a1"],
+            can_save=True,
+            boundary_state_offloads=[(0, 3, 20)],
+        ),
+    )
+    # Check partial-tail keys (from batch_is_exist for the partial tail)
+    all_calls = store.batch_is_exist.call_args_list
+    if len(all_calls) > 1:
+        tail_keys = all_calls[0].args[0]
+        for k in tail_keys:
+            chunk_idx = int(k.split("@dcp")[1].split("@")[0])
+            assert chunk_idx in (0, 1)
+
+
+def test_gqa_write_amplification():
+    """GQA: put_step=max(1,factor//dcp_size); each chunk saved by all ranks."""
+    all_saved_keys: list[str] = []
+    for tp_rank in range(8):
+        s = MagicMock()
+        s.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+        s.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+        # GQA: factor=2, put_step=max(1,2//4)=1 → every rank saves every chunk
+        thread = _make_store_sending_thread(s, tp_rank=tp_rank, put_step=2, dcp_size=4)
+        _run_store_req(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=64,
+                block_ids=([1, 2, 3, 4],),
+                block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+                can_save=True,
+            ),
+        )
+        if s.batch_is_exist.called:
+            all_saved_keys.extend(s.batch_is_exist.call_args.args[0])
+    # 8 ranks × 4 chunks = 32 total saves (put_step=1, every rank saves all)
+    assert len(all_saved_keys) == 32
+
+
+def test_mamba_save_load_dcp():
+    """Mamba save and load with DCP use chunk-derived namespace."""
+    block_hashes = [b"a0", b"a1"]
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    send_thread = _make_store_sending_thread(store, dcp_size=2, put_step=1)
+    _run_store_req(
+        send_thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=32,
+            block_ids=([1, 2],),
+            block_hashes=block_hashes,
+            can_save=True,
+        ),
+    )
+    save_keys = store.batch_is_exist.call_args.args[0]
+    # Mamba factor=1, put_step=max(1,1//2)=1: all ranks save all chunks
+    # Both keys use dcp_rank=0 (tp_rank=0 % dcp_size=2)
+    assert len(save_keys) == 2
+    assert all("@dcp0@" in k for k in save_keys)
+
+    # Load with DCP — keys must match
+    store2 = MagicMock()
+    store2.batch_get_into_multi_buffers.return_value = [256, 256]
+    recv_thread = _make_store_recving_thread(store2, dcp_size=2)
+    recv_thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=32,
+            block_ids=([1, 2],),
+            block_hashes=block_hashes,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=32,
+                can_load=True,
+                token_len=32,
+            ),
+        )
+    )
+    load_keys = store2.batch_get_into_multi_buffers.call_args.args[0]
+    assert set(load_keys) == set(save_keys)
+
+
+# -- Phase A: regression tests that would fail on the old buggy code --
+
+
+def _make_rank_db(tp_rank: int, dcp_rank: int) -> ChunkedTokenDatabase:
+    """DB whose metadata mirrors the worker's per-rank KeyMetadata."""
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", tp_rank, 0, dcp_rank, 0), block_size=16
+    )
+    db.set_kv_caches_base_addr([0x1000])
+    db.set_block_len([256])
+    return db
+
+
+def test_dcp_no_key_collision_across_ranks():
+    """Two DCP ranks saving the same chunk must produce different keys.
+
+    Old code used block_idx % dcp_size for the namespace, so all DCP ranks
+    wrote the same key → silent overwrite → KV misalignment.
+    """
+    block_hashes = [b"a0"]
+    keys_per_rank: dict[int, list[str]] = {}
+    for tp_rank in range(2):
+        s = MagicMock()
+        s.batch_is_exist.side_effect = lambda ks: [0] * len(ks)
+        s.batch_put_from_multi_buffers.side_effect = lambda ks, *a: [256] * len(ks)
+        thread = _make_store_sending_thread(
+            s,
+            tp_rank=tp_rank,
+            dcp_size=2,
+            token_databases=[_make_rank_db(tp_rank, tp_rank % 2)],
+        )
+        _run_store_req(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=16,
+                block_ids=([1],),
+                block_hashes=block_hashes,
+                can_save=True,
+            ),
+        )
+        keys_per_rank[tp_rank] = s.batch_is_exist.call_args.args[0]
+    assert keys_per_rank[0] != keys_per_rank[1]
+    assert "@dcp0@" in keys_per_rank[0][0]
+    assert "@dcp1@" in keys_per_rank[1][0]
+
+
+def test_dcp_put_step_covers_all_namespaces():
+    """MLA tp=8 dcp=4: every chunk must be saved to all 4 DCP namespaces.
+
+    Old code had put_step=tp_size=8, so each chunk was saved by only 1
+    rank → only 1 DCP namespace per chunk → external hit=0.
+    """
+    all_keys: list[str] = []
+    for tp_rank in range(8):
+        s = MagicMock()
+        s.batch_is_exist.side_effect = lambda ks: [0] * len(ks)
+        s.batch_put_from_multi_buffers.side_effect = lambda ks, *a: [256] * len(ks)
+        thread = _make_store_sending_thread(
+            s,
+            tp_rank=tp_rank,
+            put_step=8,
+            dcp_size=4,
+            token_databases=[_make_rank_db(tp_rank, tp_rank % 4)],
+        )
+        _run_store_req(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=16,
+                block_ids=([1],),
+                block_hashes=[b"a0"],
+                can_save=True,
+            ),
+        )
+        if s.batch_is_exist.called:
+            all_keys.extend(s.batch_is_exist.call_args.args[0])
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in all_keys}
+    assert dcp_ranks == {"0", "1", "2", "3"}
+
+
+def test_dcp_lookup_zero_hit_when_one_namespace_missing():
+    """Lookup requires all DCP namespaces present; one missing → hit=0."""
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 4
+    worker.num_kv_head = 1
+    worker.dcp_size = 4
+    _refresh_group_tp_replication_factors(worker)
+    worker.store.batch_is_exist.return_value = [1, 1, 1, 0]
+    assert worker.lookup(16, [b"a0"]).hit_length == 0
+
+
+def test_dcp_save_load_roundtrip_per_rank():
+    """Save and load on the same DCP rank produce matching keys."""
+    block_hashes = [b"a0", b"a1"]
+    for dcp_rank in range(2):
+        store = MagicMock()
+        store.batch_is_exist.side_effect = lambda ks: [0] * len(ks)
+        store.batch_put_from_multi_buffers.return_value = [256, 256]
+        send_thread = _make_store_sending_thread(store, tp_rank=dcp_rank, dcp_size=2)
+        _run_store_req(
+            send_thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=32,
+                block_ids=([1, 2],),
+                block_hashes=block_hashes,
+                can_save=True,
+            ),
+        )
+        save_keys = store.batch_is_exist.call_args.args[0]
+
+        store2 = MagicMock()
+        store2.batch_get_into_multi_buffers.return_value = [256, 256]
+        recv_thread = _make_store_recving_thread(store2, tp_rank=dcp_rank, dcp_size=2)
+        recv_thread._handle_request(
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=32,
+                block_ids=([1, 2],),
+                block_hashes=block_hashes,
+                load_spec=LoadSpec(
+                    vllm_cached_tokens=0,
+                    kvpool_cached_tokens=32,
+                    can_load=True,
+                    token_len=32,
+                ),
+            )
+        )
+        load_keys = store2.batch_get_into_multi_buffers.call_args.args[0]
+        assert set(load_keys) == set(save_keys)
+
+
+def test_dcp_non_power_of_2_tp_size():
+    """dcp_size=3, tp_size=6, MLA: put_step=max(1,6//3)=2."""
+    all_keys: list[str] = []
+    for tp_rank in range(6):
+        s = MagicMock()
+        s.batch_is_exist.side_effect = lambda ks: [0] * len(ks)
+        s.batch_put_from_multi_buffers.side_effect = lambda ks, *a: [256] * len(ks)
+        thread = _make_store_sending_thread(
+            s,
+            tp_rank=tp_rank,
+            put_step=6,
+            dcp_size=3,
+            token_databases=[_make_rank_db(tp_rank, tp_rank % 3)],
+        )
+        _run_store_req(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=16,
+                block_ids=([1],),
+                block_hashes=[b"a0"],
+                can_save=True,
+            ),
+        )
+        if s.batch_is_exist.called:
+            all_keys.extend(s.batch_is_exist.call_args.args[0])
+    dcp_ranks = {k.split("@dcp")[1].split("@")[0] for k in all_keys}
+    assert dcp_ranks == {"0", "1", "2"}

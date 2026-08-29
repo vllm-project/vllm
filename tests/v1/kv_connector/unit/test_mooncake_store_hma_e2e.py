@@ -329,7 +329,8 @@ def test_recv_skips_swa_blocks_before_window():
     req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+        # 1-based: block 0 is the reserved null block and the recv skips it.
+        block_ids=([1, 2, 3, 4], [1, 2, 3, 4]),
         block_hashes=hs,
         load_spec=LoadSpec(
             vllm_cached_tokens=0, kvpool_cached_tokens=64, can_load=True, token_len=64
