@@ -227,6 +227,95 @@ def test_triton_unified_attn(
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    (
+        "num_query_heads",
+        "num_kv_heads",
+        "head_size",
+        "block_size",
+        "window_size",
+    ),
+    [
+        (8, 8, 128, 16, (-1, -1)),
+        (8, 2, 64, 16, (-1, -1)),
+        (8, 2, 128, 16, (-1, -1)),
+        (8, 2, 256, 16, (-1, -1)),
+        (32, 1, 128, 16, (-1, -1)),
+        (8, 2, 128, 32, (-1, -1)),
+        (8, 2, 256, 544, (-1, -1)),
+        pytest.param(8, 2, 128, 16, (63, 0), id="sliding-window-fallback"),
+    ],
+)
+@torch.inference_mode()
+def test_triton_unified_attn_causal_prefill_reorder_bitwise(
+    dtype: torch.dtype,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    window_size: tuple[int, int],
+) -> None:
+    """Requesting launch reordering must not change any output bit."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    seq_lens = [(4, 37), (16, 65), (32, 97)]
+    query_lens = [query_len for query_len, _ in seq_lens]
+    kv_lens = [kv_len for _, kv_len in seq_lens]
+    num_blocks = 8 if block_size == 544 else 64
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks = (max(kv_lens) + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0,
+        num_blocks,
+        (len(seq_lens), max_num_blocks),
+        dtype=torch.int32,
+    )
+    output_base = torch.full_like(query, float("nan"))
+    output_reordered = torch.full_like(query, float("nan"))
+
+    def run(output: torch.Tensor, reorder_causal_prefill: bool) -> None:
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            max_seqlen_q=max(query_lens),
+            seqused_k=kv_lens_tensor,
+            max_seqlen_k=max(kv_lens),
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=window_size,
+            block_table=block_tables,
+            softcap=0.0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            reorder_causal_prefill=reorder_causal_prefill,
+        )
+
+    run(output_base, False)
+    run(output_reordered, True)
+
+    assert torch.isfinite(output_base).all()
+    assert torch.isfinite(output_reordered).all()
+    assert torch.equal(
+        output_base.contiguous().view(torch.int16),
+        output_reordered.contiguous().view(torch.int16),
+    )
+
+
 @pytest.mark.parametrize(
     "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
 )
