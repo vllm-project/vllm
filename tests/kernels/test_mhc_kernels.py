@@ -419,7 +419,6 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_mhc_pre_broadcast_tilelang_without_deep_gemm(monkeypatch):
     """Verify mhc_pre_broadcast_tilelang fallback when DeepGEMM is unavailable."""
     import torch
@@ -427,7 +426,7 @@ def test_mhc_pre_broadcast_tilelang_without_deep_gemm(monkeypatch):
     import vllm.utils.deep_gemm
     from vllm.model_executor.kernels.mhc.tilelang import (
         mhc_pre_broadcast_tilelang,
-        mhc_pre_ref,
+        
     )
 
     monkeypatch.setattr(vllm.utils.deep_gemm, "is_deep_gemm_supported", lambda: False)
