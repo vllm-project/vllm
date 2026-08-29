@@ -121,9 +121,9 @@ def can_initialize(
                 "(see #41376)"
             )
 
-    from vllm.platforms import current_platform
-
     if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
+        from vllm.platforms import current_platform
+
         capability = current_platform.get_device_capability()
         if capability and capability.major < 9:
             pytest.skip(
