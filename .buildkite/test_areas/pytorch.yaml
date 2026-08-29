@@ -91,6 +91,8 @@ steps:
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests
   timeout_in_minutes: 45
+  device: l4
+  num_devices: 1
   source_file_dependencies:
     - vllm/__init__.py
     - vllm/_aiter_ops.py
@@ -165,6 +167,8 @@ steps:
 - label: ":nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility"
   key: pytorch-fullgraph-cudagraph-l4-compatibility
   timeout_in_minutes: 60
+  device: l4
+  num_devices: 1
   source_file_dependencies:
   - vllm/__init__.py
   - vllm/_aiter_ops.py

@@ -30,6 +30,7 @@ steps:
 - label: ":nvidia: (L4) LoRA TP (Distributed)"
   key: lora-tp-distributed
   timeout_in_minutes: 60
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/lora

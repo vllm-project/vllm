@@ -97,6 +97,7 @@ steps:
 
 - label: ":nvidia: (L4) Rust Frontend Distributed"
   timeout_in_minutes: 25
+  device: l4
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
