@@ -116,6 +116,8 @@ class HiSparseConnectorWorker:
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
         self.cache_handles = cache_handles
+        for cache in cache_handles:
+            cache.defer_host_mirror = True
         self.leader_runtimes = [
             cache.runtime for cache in cache_handles if cache.runtime.is_group_leader
         ]
@@ -169,10 +171,19 @@ class HiSparseConnectorWorker:
     ) -> None:
         entries = [cache.runtime.backup_caches() for cache in self.cache_handles]
         hot_caches, host_caches = zip(*entries)
+        resident_caches = []
+        resident_slot_mappings = []
+        for cache in self.cache_handles:
+            assert cache.view is not None and cache.slot_mapping is not None
+            resident_caches.append(cache.view.cache)
+            resident_slot_mappings.append(cache.slot_mapping)
         self.host_caches = host_caches
 
         layouts = []
-        for hot_cache, host_cache in zip(hot_caches, host_caches):
+        resident_layouts = []
+        for hot_cache, resident_cache, host_cache in zip(
+            hot_caches, resident_caches, host_caches
+        ):
             if host_cache.ndim != 2 or not host_cache.is_contiguous():
                 raise RuntimeError("HiSparse host caches must be contiguous 2D.")
             row_bytes = hot_cache.shape[-1] * hot_cache.element_size()
@@ -185,9 +196,22 @@ class HiSparseConnectorWorker:
                     host_cache.shape[0],
                 )
             )
+            resident_layouts.append(
+                (
+                    resident_cache.shape[-1] * resident_cache.element_size(),
+                    resident_cache.shape[1],
+                    resident_cache.stride(0) * resident_cache.element_size(),
+                    resident_cache.shape[0] * resident_cache.shape[1],
+                    host_cache.shape[0],
+                )
+            )
         if any(layout != layouts[0] for layout in layouts[1:]):
             raise RuntimeError(
                 "HiSparse all-layer backup requires a uniform cache layout."
+            )
+        if any(layout != resident_layouts[0] for layout in resident_layouts[1:]):
+            raise RuntimeError(
+                "HiSparse all-layer mirror requires a uniform cache layout."
             )
         # One kernel copies every layer, so its pointer table requires a common
         # row and block geometry across the HiSparse caches.
@@ -208,6 +232,23 @@ class HiSparseConnectorWorker:
         self.backup_src_block_stride = src_block_stride
         self.backup_src_block_size = src_block_size
         self.backup_src_rows = src_rows
+        mirror_block_size, mirror_block_stride, mirror_src_rows = resident_layouts[0][
+            1:4
+        ]
+        self.mirror_layer_offsets = torch.tensor(
+            [cache.data_ptr() - backing_ptr for cache in resident_caches],
+            dtype=torch.int64,
+            device=device,
+        )
+        self.mirror_src_indices_ptrs = torch.tensor(
+            [slot_mapping.data_ptr() for slot_mapping in resident_slot_mappings],
+            dtype=torch.uint64,
+            device=device,
+        )
+        self.mirror_src_slot_mappings = resident_slot_mappings
+        self.mirror_src_block_stride = mirror_block_stride
+        self.mirror_src_block_size = mirror_block_size
+        self.mirror_src_rows = mirror_src_rows
         self.host_write_event = torch.Event()
         self.spill_row_capacity = max_model_len
         spill_staging_count = max_concurrent_batches + 1
@@ -362,8 +403,56 @@ class HiSparseConnectorWorker:
             self._pending_transfer_events.append((completion_event, transfer_ids))
             self._enqueued_transfer_ids.extend(transfer_ids)
 
+    def _enqueue_host_mirror(self) -> None:
+        cache = self.cache_handles[0]
+        dst_slots = cache.mirror_slot_mapping
+        if any(
+            handle.num_actual_tokens != cache.num_actual_tokens
+            or handle.num_decode_tokens != cache.num_decode_tokens
+            or handle.decode_batch != cache.decode_batch
+            or handle.runtime.eager_host_mirror != cache.runtime.eager_host_mirror
+            or handle.mirror_slot_mapping is None
+            or dst_slots is None
+            or handle.mirror_slot_mapping.data_ptr() != dst_slots.data_ptr()
+            for handle in self.cache_handles[1:]
+        ):
+            raise RuntimeError("HiSparse cache layers disagree on mirror metadata.")
+        if cache.decode_batch and not cache.runtime.eager_host_mirror:
+            return
+        if dst_slots is None:
+            raise RuntimeError("HiSparse host mirror has no source slot mapping.")
+        num_rows = min(
+            cache.num_actual_tokens,
+            dst_slots.numel(),
+            *(mapping.numel() for mapping in self.mirror_src_slot_mappings),
+        )
+        if num_rows == 0:
+            return
+        torch.ops._C_cache_ops.hisparse_backup_layers(
+            self.hot_backing,
+            self.mirror_layer_offsets,
+            self.mirror_src_indices_ptrs,
+            self.backup_host_anchor,
+            self.backup_host_cache_ptrs,
+            dst_slots,
+            num_rows,
+            self.mirror_src_block_stride,
+            self.mirror_src_block_size,
+            self.mirror_src_rows,
+        )
+        num_decode_tokens = min(cache.num_decode_tokens, num_rows)
+        if num_decode_tokens:
+            assert cache.req_id_per_token is not None
+            for handle in self.cache_handles:
+                if handle.runtime.is_group_leader:
+                    handle.runtime.invalidate_written_slots(
+                        dst_slots[:num_decode_tokens],
+                        cache.req_id_per_token[:num_decode_tokens],
+                    )
+
     def finish_forward(self) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
+        self._enqueue_host_mirror()
         transfers = self._post_forward_transfers
         self._post_forward_transfers = []
         self._enqueue_transfers(transfers)

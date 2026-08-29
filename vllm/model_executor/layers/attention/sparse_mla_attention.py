@@ -685,6 +685,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     def prepare_for_batch(self, attn_metadata: Any | None) -> None:
         self._hisparse_dummy_batch = attn_metadata is None
         if self.hisparse_cache is not None:
+            self.hisparse_cache.num_actual_tokens = (
+                attn_metadata.num_actual_tokens if attn_metadata is not None else 0
+            )
             self.hisparse_cache.num_decode_tokens = (
                 attn_metadata.num_decode_tokens if attn_metadata is not None else 0
             )
