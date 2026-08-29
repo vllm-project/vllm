@@ -80,6 +80,8 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_BLOCKED_WAITING_TIMEOUT_S = 60.0
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -882,6 +884,7 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
+            temporarily_deferred: list[Request] = []
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -907,8 +910,24 @@ class Scheduler(SchedulerInterface):
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
+                    if request.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+                        if request.blocked_since is None:
+                            request.blocked_since = time.time()
+                        elif (
+                            time.time() - request.blocked_since
+                            > _BLOCKED_WAITING_TIMEOUT_S
+                        ):
+                            self.finish_requests(
+                                request_id, RequestStatus.FINISHED_ABORTED
+                            )
+                            continue
+                    else:
+                        request.blocked_since = None
+
                     skip_request(request_queue)
                     continue
+                else:
+                    request.blocked_since = None
 
                 if request.num_stale_output_tokens and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
@@ -1145,7 +1164,11 @@ class Scheduler(SchedulerInterface):
                             num_external_computed_tokens,
                         )
                         if num_new_tokens == 0:
-                            break
+                            if self.running:
+                                break
+                            request_queue.pop_request()
+                            temporarily_deferred.append(request)
+                            continue
                         if (
                             pad_spec_decode
                             and num_new_tokens != 1 + self.num_spec_tokens
@@ -1182,7 +1205,11 @@ class Scheduler(SchedulerInterface):
 
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
-                        break
+                        if self.running:
+                            break
+                        request_queue.pop_request()
+                        temporarily_deferred.append(request)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1245,7 +1272,11 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    if self.running:
+                        break
+                    request_queue.pop_request()
+                    temporarily_deferred.append(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1353,6 +1384,13 @@ class Scheduler(SchedulerInterface):
                 self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
             if step_skipped_waiting:
                 self.waiting.prepend_requests(step_skipped_waiting)
+
+            # Re-queue ordinary requests that were temporarily deferred due to
+            # resource exhaustion (not blocked-waiting status). These go back
+            # into self.waiting so they are reconsidered next step without
+            # polluting the skipped_waiting / deferred metrics.
+            for req in temporarily_deferred:
+                self.waiting.add_request(req)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
