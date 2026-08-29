@@ -759,6 +759,38 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        result = self._find_longest_cache_hit_once(
+            block_hashes,
+            max_cache_hit_length,
+            alignment_tokens=self._cache_hit_alignment_tokens,
+            enable_partial_hash_hits=self.enable_partial_hash_hits,
+        )
+
+        # A fine candidate can expose a cross-manager reconciliation gap: for
+        # example, an EAGLE/SWA group may accept a hash-unit boundary that an
+        # align-mode Mamba group cannot restore without an internal checkpoint.
+        # Do not let enabling fine lookup regress a usable coarse checkpoint.
+        # Only pay for the second lookup when the first pass observed such a
+        # gap; otherwise fine lookup is a superset of the coarse candidates.
+        if self.enable_partial_hash_hits and result[2] > 0:
+            coarse_result = self._find_longest_cache_hit_once(
+                block_hashes,
+                max_cache_hit_length,
+                alignment_tokens=self.scheduler_block_size,
+                enable_partial_hash_hits=False,
+            )
+            if coarse_result[1] > result[1]:
+                return coarse_result
+        return result
+
+    def _find_longest_cache_hit_once(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+        *,
+        alignment_tokens: int,
+        enable_partial_hash_hits: bool,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -827,7 +859,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
                     eagle_margin = (
                         self.hash_block_size
-                        if self.enable_partial_hash_hits
+                        if enable_partial_hash_hits
                         and manager_cls.supports_fine_grained_hash_lookup
                         and group_block_size > self.hash_block_size
                         else group_block_size
@@ -842,7 +874,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self._cache_hit_alignment_tokens,
+                    alignment_tokens=alignment_tokens,
                     dcp_world_size=(
                         self.dcp_world_size
                         if isinstance(spec, FullAttentionSpec)
