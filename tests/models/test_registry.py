@@ -60,6 +60,11 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("Dots3 NOTE is only supported on CUDA")
 
+    if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel") and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("HY V4 is only supported on CUDA")
+
     # _try_load_model_cls runs verify_model_arch, which rejects architectures
     # whose kernels are missing for this GPU's compute capability.
     skip_if_capability_restricted(model_arch)
