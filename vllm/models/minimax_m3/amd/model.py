@@ -679,8 +679,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # the attend impl reads them back (no Python value crosses the break).
         self.topk_indices_buffer = topk_indices_buffer
         self.attn_backend = MiniMaxM3SparseBackend
+        # Side-cache dtype (--attention-config '{"indexer_kv_dtype": "fp8"}').
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
         # Indexer and main attention are separate impls. On ROCm the SM100 gate
-        # is always False, so both pick Triton and the index cache stays bf16.
+        # is always False, so both pick Triton.
         # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
         self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
@@ -713,6 +717,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cache_config=cache_config,
+            indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
         )
 
@@ -914,7 +919,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
-            index_q = qkv.new_empty((num_tokens, self.index_q_size))
+            # The fused writer requires index_q_out and index_cache to share a
+            # dtype, so index_q follows the side cache.
+            index_q = qkv.new_empty(
+                (num_tokens, self.index_q_size),
+                dtype=self.indexer.index_cache.dtype,
+            )
             if self.use_aiter_sparse_pa:
                 ops.fused_minimax_m3_qknorm_rope_kv_insert(
                     qkv,

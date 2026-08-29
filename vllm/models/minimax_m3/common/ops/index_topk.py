@@ -23,6 +23,9 @@ from vllm.utils.math_utils import round_up
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
+# The common Triton kernels read a bf16 index cache only.
+SUPPORTED_INDEXER_KV_DTYPES = ("bf16",)
+
 
 # ---------------------------------------------------------------------------
 # Bitonic top-k helpers (layout-agnostic).

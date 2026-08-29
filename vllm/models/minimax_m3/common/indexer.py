@@ -31,12 +31,14 @@ from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
     from vllm.models.minimax_m3.amd.ops.index_topk import (
+        SUPPORTED_INDEXER_KV_DTYPES,
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
 else:
     from vllm.models.minimax_m3.common.ops.index_topk import (
+        SUPPORTED_INDEXER_KV_DTYPES,
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
@@ -115,6 +117,8 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     ) -> None:
         super().__init__()
         if indexer_kv_dtype in ("fp8", "fp8_e4m3"):
+            # e4m3fn specifically: the fused writer checks for Float8_e4m3fn and
+            # saturates at its 448, so an fnuz cache would disagree on range.
             cache_dtype = torch.float8_e4m3fn
         elif indexer_kv_dtype == "bf16":
             cache_dtype = torch.bfloat16
@@ -468,7 +472,7 @@ def select_indexer_impl_cls(
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. Everything else falls back to the
-    Triton indexer (bf16 only).
+    Triton indexer: bf16 anywhere, plus fp8 e4m3 on gfx950.
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -496,10 +500,10 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype not in SUPPORTED_INDEXER_KV_DTYPES:
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
-            "Triton indexer impl."
+            f"Triton indexer impl (supported: {SUPPORTED_INDEXER_KV_DTYPES})."
         )
     logger.info_once(
         "MiniMax M3 indexer: selected Triton (no fmha_sm100) "

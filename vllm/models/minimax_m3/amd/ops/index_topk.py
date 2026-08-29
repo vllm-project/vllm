@@ -14,14 +14,25 @@ disabled (score-only indexer), single shared index head. The selected block ids
 feed the block-sparse attention kernels in ``sparse_attn``.
 """
 
+import functools
+
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+# The fp8 index cache is implemented and measured on gfx950 only.
+SUPPORTED_INDEXER_KV_DTYPES = ("bf16", "fp8", "fp8_e4m3") if on_gfx950() else ("bf16",)
+
+# Query rows per program in the prefill scorer. 128 is swept on gfx950; other
+# archs keep the original 64 until they are (cf. _SPARSE_ATTN_SUB_K in
+# sparse_attn.py). Sets grid dim 0, so it cannot be an autotune key.
+PREFILL_BLOCK_SIZE_Q = 128 if on_gfx950() else 64
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +81,88 @@ def _bitonic_merge(
     return x, ids
 
 
+@triton.jit
+def _topk_pair_max(
+    x, ids, t_dims: tl.constexpr, n_outer: tl.constexpr, n_dims: tl.constexpr
+):
+    """Halve the sort axis, keeping the top 2**t_dims of each pair of runs.
+
+    ``x`` is ``[n_outer, 2**n_dims]``; runs of 2**t_dims must alternate direction
+    (2r ascending, 2r+1 descending) or the pairwise max is not a half-cleaner.
+    ``x`` must also be finite: the halves are gathered by masked sum, so an inf
+    would contaminate its pair through ``inf * 0``.
+    """
+    tl.static_assert(n_outer > 1)
+    shape: tl.constexpr = [n_outer * 2 ** (n_dims - t_dims - 1), 2, 2**t_dims]
+    y = tl.reshape(x, shape)
+    y_idx = tl.reshape(ids, shape)
+    mask = tl.arange(0, 2)[None, :, None]
+    a = tl.sum(y * (1 - mask), 1)
+    b = tl.sum(y * mask, 1)
+    a_idx = tl.sum(y_idx * (1 - mask), 1)
+    b_idx = tl.sum(y_idx * mask, 1)
+    keep_a = a >= b
+    out_x = tl.where(keep_a, a, b)
+    out_idx = tl.where(keep_a, a_idx, b_idx)
+    out_shape: tl.constexpr = [n_outer, 2 ** (n_dims - 1)]
+    return tl.reshape(out_x, out_shape), tl.reshape(out_idx, out_shape)
+
+
+@triton.jit
+def _bitonic_topk(
+    x,
+    ids,
+    t_dims: tl.constexpr,
+    n_outer: tl.constexpr,
+    n_dims: tl.constexpr,
+    desc: tl.constexpr,
+):
+    """Exact top-2**t_dims along the sort axis of an ``[n_outer, 2**n_dims]`` tile.
+
+    ``desc`` orders the survivors; ``_topk_stream_merge`` requires ascending.
+    """
+    tl.static_assert(n_dims >= t_dims)
+    if n_dims == t_dims:
+        # Plain bitonic sort: runs stop one stage short because an order=2 merge
+        # at stage == n_dims would ask for a 2**-1 tile dimension.
+        for j in tl.static_range(1, n_dims):
+            x, ids = _bitonic_merge(x, ids.to(tl.int32), j, 2, n_dims)
+        x, ids = _bitonic_merge(x, ids.to(tl.int32), n_dims, desc, n_dims)
+    else:
+        for j in tl.static_range(1, t_dims + 1):
+            x, ids = _bitonic_merge(x, ids.to(tl.int32), j, 2, n_dims)
+        for lvl in tl.static_range(n_dims - t_dims):
+            x, ids = _topk_pair_max(x, ids, t_dims, n_outer, n_dims - lvl)
+            if n_dims - lvl - 1 > t_dims:
+                x, ids = _bitonic_merge(
+                    x, ids.to(tl.int32), t_dims, 2, n_dims - lvl - 1
+                )
+            else:
+                x, ids = _bitonic_merge(
+                    x, ids.to(tl.int32), t_dims, desc, n_dims - lvl - 1
+                )
+    return x, ids
+
+
+@triton.jit
+def _topk_stream_merge(run_score, run_idx, new_score, new_idx, t_dims: tl.constexpr):
+    """Fold an ascending tile top-k into a descending running top-k.
+
+    ``run_*`` must be descending and ``new_*`` ascending, or the merge is wrong.
+    Carrying 2**t_dims between iterations instead of the whole BLOCK_SIZE_K tile
+    is what this buys: the pass count is unchanged at M3's widths, but halving the
+    live state is worth 4-13% of this kernel at long context.
+    """
+    keep = run_score >= new_score
+    return _bitonic_merge(
+        tl.where(keep, run_score, new_score),
+        tl.where(keep, run_idx, new_idx).to(tl.int32),
+        t_dims,
+        True,
+        t_dims,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Index block-score kernel (paged). score[h, token, block] = max over the
 # 128-token block of (idx_q . index_k), causal-masked. BLOCK_SIZE_K == 128 so
@@ -78,7 +171,10 @@ def _bitonic_merge(
 # since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
 # might lose pointer alignment, which trigger Triton recompiles. we don't actually
 # need pointer alignment for those tensors anyway because we do scalar load.
-@triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
+@triton.jit(
+    do_not_specialize=["num_kv_chunks"],
+    do_not_specialize_on_alignment=["seq_lens", "prefix_lens"],
+)
 def _index_block_score_kernel(
     q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
     ik_cache_ptr,  # index-K cache: [num_blocks, 128, head_dim]
@@ -101,9 +197,11 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    num_kv_chunks,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
+    pid_c = tl.program_id(2)
     pid_b = pid_bh // num_idx_heads
     pid_h = pid_bh % num_idx_heads
 
@@ -112,6 +210,17 @@ def _index_block_score_kernel(
     seq_len = tl.load(seq_lens + pid_b)
     prefix_len = tl.load(prefix_lens + pid_b)
     if BLOCK_SIZE_Q * pid_q >= q_len:
+        return
+
+    # Causal window: only blocks up to the last query token's position.
+    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
+    num_blocks = tl.cdiv(hi, BLOCK_SIZE_K)
+    # Block-aligned fixed-count split of this query block's causal scan. Chunks
+    # cover disjoint block ranges, hence disjoint `score` columns.
+    chunk_size_blocks = tl.cdiv(num_blocks, num_kv_chunks)
+    chunk_start_block = pid_c * chunk_size_blocks
+    chunk_end_block = min(chunk_start_block + chunk_size_blocks, num_blocks)
+    if chunk_start_block >= chunk_end_block:
         return
 
     q_ptrs = tl.make_block_ptr(
@@ -130,10 +239,8 @@ def _index_block_score_kernel(
     off_d = tl.arange(0, head_dim)
     # Block table row for this request.
     bt_row = block_table_ptr + pid_b * stride_bt_b
-    # Causal window: only blocks up to the last query token's position.
-    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    for i in tl.range(0, hi, BLOCK_SIZE_K):
-        blk = i // BLOCK_SIZE_K
+    for blk in tl.range(chunk_start_block, chunk_end_block):
+        i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
@@ -146,7 +253,8 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
-        qk = tl.dot(q, k)
+        # fp32 accumulator: q/k may be e4m3 and the score is a max over 128 products.
+        qk = tl.dot(q, k, out_dtype=tl.float32)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
             qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
@@ -167,20 +275,87 @@ def _index_block_score_kernel(
 # Top-k selection over per-token block scores (layout-agnostic). block_size_q
 # is 1 for M3, so top-k is computed per query token.
 # ---------------------------------------------------------------------------
+# Query tokens per top-k program: wider amortises the selection network but divides
+# the grid. Clamped by TOPK_TILE_AREA, so intermediate widths are also reachable.
+TOPK_QUERY_TILE = 32
+TOPK_QUERY_TILE_SMALL = 8
+
+
+@functools.cache
+def _min_topk_programs() -> int:
+    """Occupancy floor for the wide tile: one program per CU. Queried lazily so
+    importing this module does not initialise the device."""
+    return current_platform.num_compute_units()
+
+
+# Empirical cap on BLOCK_SIZE_Q * BLOCK_SIZE_K: both tiles stay live in registers
+# across the selection network, so the two cannot be chosen independently.
+TOPK_TILE_AREA = 8192
+
+
+def _min_block_size_k(topk: int) -> int:
+    """Narrowest BLOCK_SIZE_K the kernel's ``> BLOCK_SIZE_T`` assert permits."""
+    return 2 * triton.next_power_of_2(topk)
+
+
+def _topk_query_tile(
+    max_query_len: int, batch: int, num_idx_heads: int, topk: int
+) -> int:
+    """Widest tile that fills the device and stays inside ``TOPK_TILE_AREA``."""
+    programs = triton.cdiv(max_query_len, TOPK_QUERY_TILE) * batch * num_idx_heads
+    tile = (
+        TOPK_QUERY_TILE if programs >= _min_topk_programs() else TOPK_QUERY_TILE_SMALL
+    )
+    # Floor of 2: `_topk_pair_max` needs n_outer > 1.
+    return min(tile, max(2, TOPK_TILE_AREA // _min_block_size_k(topk)))
+
+
+def _topk_prune_configs(configs, named_args, **kwargs):
+    """Drop configs the kernel cannot legally or affordably run.
+
+    An illegal config is otherwise scored as infinitely slow and then re-run for
+    real, surfacing a Triton compile assert instead of the ValueError below.
+    """
+    # Triton splits the call across named_args (positional) and kwargs.
+    args = {**named_args, **kwargs}
+    block_t = args["BLOCK_SIZE_T"]
+    block_q = args["BLOCK_SIZE_Q"]
+    legal = [
+        c
+        for c in configs
+        if c.kwargs["BLOCK_SIZE_K"] > block_t
+        and c.kwargs["BLOCK_SIZE_K"] * block_q <= TOPK_TILE_AREA
+    ]
+    if not legal:
+        raise ValueError(
+            f"MiniMax M3 index top-k has no usable config for topk={args['topk']} "
+            f"(BLOCK_SIZE_T={block_t}, BLOCK_SIZE_Q={block_q}): needs "
+            f"{block_t} < BLOCK_SIZE_K <= {TOPK_TILE_AREA // block_q}."
+        )
+    return legal
+
+
 # since prefill metadata is sliced from mixed batch metadata, prefix_lens
 # might lose pointer alignment, which trigger Triton recompiles. we don't actually
 # need pointer alignment for those tensors anyway because we do scalar load.
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE_K": 2048}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 1024}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 512}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 256}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 32}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 32}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_SIZE_K": 64}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 256}, num_warps=8, num_stages=2),
+        # Not competitive at M3's topk (pruned by TOPK_TILE_AREA) but the only
+        # legal configs once BLOCK_SIZE_T grows; do not delete.
+        triton.Config({"BLOCK_SIZE_K": 512}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 1024}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_SIZE_K": 2048}, num_warps=8, num_stages=2),
     ],
-    key=["BLOCK_SIZE_T"],
+    # BLOCK_SIZE_Q is in the key: the tiles want different BLOCK_SIZE_K.
+    key=["BLOCK_SIZE_T", "BLOCK_SIZE_Q"],
+    prune_configs_by={"early_config_prune": _topk_prune_configs},
 )
 @triton.jit(do_not_specialize_on_alignment=["prefix_lens"])
 def _topk_index_kernel(
@@ -202,9 +377,15 @@ def _topk_index_kernel(
     stride_ti_t,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
     MASK_INIT: tl.constexpr,
     MASK_LOCAL: tl.constexpr,
 ):
+    """Top-k blocks for BLOCK_SIZE_Q consecutive query tokens per program.
+
+    The bitonic helpers infer their outer count from ``numel >> n_dims``, so the
+    score tile must stay exactly ``[BLOCK_SIZE_Q, BLOCK_SIZE_K]``.
+    """
     tl.static_assert(BLOCK_SIZE_K > BLOCK_SIZE_T)
     pid_q = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -213,24 +394,35 @@ def _topk_index_kernel(
     block_start = tl.load(cu_seqblocks_q + pid_b)
     block_num = tl.load(cu_seqblocks_q + pid_b + 1) - block_start
     prefix_len = tl.load(prefix_lens + pid_b)
-    if pid_q >= block_num:
+    if pid_q * BLOCK_SIZE_Q >= block_num:
         return
+    q_ids = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    q_ok = q_ids < block_num
+    # Rows past the end of this request read row 0 and are masked on store.
+    q_pos = tl.where(q_ok, q_ids, 0) * sample_interval
+
     off_k = tl.arange(0, BLOCK_SIZE_K)
     off_t = tl.arange(0, BLOCK_SIZE_T)
+    n_dims: tl.constexpr = tl.standard._log2(BLOCK_SIZE_K)
+    t_dims: tl.constexpr = tl.standard._log2(BLOCK_SIZE_T)
+
+    valid_blocks = (prefix_len + q_pos + block_size) // block_size
+    vb_max = tl.max(tl.where(q_ok, valid_blocks, 0), axis=0)
+
     s_ptrs = (
         s_ptr
-        + (seq_start + pid_q * sample_interval) * stride_s_n
         + pid_h * stride_s_h
-        + off_k * stride_s_k
+        + (seq_start + q_pos)[:, None] * stride_s_n
+        + off_k[None, :] * stride_s_k
     )
-    topk_score = tl.full((BLOCK_SIZE_K,), -1e30, dtype=tl.float32)
-    topk_idx = tl.full((BLOCK_SIZE_K,), 0, dtype=tl.int32)
-    left_half_mask = tl.arange(0, BLOCK_SIZE_K) < BLOCK_SIZE_K // 2
-    valid_blocks = (prefix_len + pid_q * sample_interval + block_size) // block_size
-    for i in tl.range(0, valid_blocks, BLOCK_SIZE_K):
-        causal_mask = i + off_k < valid_blocks
-        local_mask = i + off_k >= max(0, valid_blocks - local_blocks)
-        init_mask = i + off_k < init_blocks
+    run_score = tl.full((BLOCK_SIZE_Q, BLOCK_SIZE_T), -1e30, dtype=tl.float32)
+    run_idx = tl.full((BLOCK_SIZE_Q, BLOCK_SIZE_T), 0, dtype=tl.int32)
+
+    for i in tl.range(0, vb_max, BLOCK_SIZE_K):
+        blk = i + off_k[None, :]
+        causal_mask = (blk < valid_blocks[:, None]) & q_ok[:, None]
+        local_mask = blk >= tl.maximum(valid_blocks[:, None] - local_blocks, 0)
+        init_mask = blk < init_blocks
         score = tl.load(s_ptrs, mask=causal_mask, other=-1e30).to(tl.float32)
         score = tl.where(score != score, -1e30, score)
         s_ptrs = s_ptrs + stride_s_k * BLOCK_SIZE_K
@@ -242,44 +434,27 @@ def _topk_index_kernel(
             score = tl.where(causal_mask & local_mask, score - 1e28, score)
         else:
             score = tl.where(causal_mask & local_mask, 1e29, score)
-        topk_score, last_topk_score = score, topk_score
-        topk_idx, last_topk_idx = (tl.where(causal_mask, i + off_k + 1, 0), topk_idx)
-        n_dims: tl.constexpr = tl.standard._log2(BLOCK_SIZE_K)
-        for j in tl.static_range(1, n_dims):
-            topk_score, topk_idx = _bitonic_merge(
-                topk_score, topk_idx.to(tl.int32), j, 2, n_dims
-            )
-        if i != 0:
-            topk_score, topk_idx = _bitonic_merge(
-                topk_score, topk_idx.to(tl.int32), n_dims, False, n_dims
-            )
-            topk_score_new = last_topk_score * left_half_mask + topk_score * (
-                1 - left_half_mask
-            )
-            topk_idx_new = last_topk_idx * left_half_mask + topk_idx * (
-                1 - left_half_mask
-            )
-            topk_score, topk_idx = _bitonic_merge(
-                topk_score_new, topk_idx_new.to(tl.int32), n_dims, True, n_dims
-            )
-        else:
-            topk_score, topk_idx = _bitonic_merge(
-                topk_score, topk_idx.to(tl.int32), n_dims, True, n_dims
-            )
-    topk_mask = tl.arange(0, BLOCK_SIZE_K // BLOCK_SIZE_T) == 0
-    topk_idx = tl.sum(
-        topk_mask[:, None]
-        * tl.reshape(topk_idx - 1, [BLOCK_SIZE_K // BLOCK_SIZE_T, BLOCK_SIZE_T]),
-        axis=0,
-    )
+        new_score, new_idx = _bitonic_topk(
+            score,
+            tl.where(causal_mask, blk + 1, 0),
+            t_dims,
+            BLOCK_SIZE_Q,
+            n_dims,
+            False,
+        )
+        run_score, run_idx = _topk_stream_merge(
+            run_score, run_idx, new_score, new_idx, t_dims
+        )
+
+    topk_idx = run_idx - 1
     ti_ptrs = (
         ti_ptr
-        + (block_start + pid_q) * stride_ti_n
+        + (block_start + q_ids)[:, None] * stride_ti_n
         + pid_h * stride_ti_h
-        + off_t * stride_ti_t
+        + off_t[None, :] * stride_ti_t
     )
-    store_mask = off_t < topk
-    valid_mask = off_t < valid_blocks
+    store_mask = (off_t[None, :] < topk) & q_ok[:, None]
+    valid_mask = off_t[None, :] < valid_blocks[:, None]
     topk_idx = tl.where(store_mask & valid_mask, topk_idx, -1)
     tl.store(ti_ptrs, topk_idx.to(ti_ptrs.dtype.element_ty), mask=store_mask)
 
@@ -291,6 +466,10 @@ def _topk_index_kernel(
 # constants so the grid is fixed within a cuda graph. The score scale is omitted
 # because decode only consumes block ordering.
 # ---------------------------------------------------------------------------
+# Block-loop pipeline depth used only for a 1-byte index cache.
+SCORE_PIPELINE_DEPTH = 3
+
+
 @triton.jit(do_not_specialize=["num_kv_chunks", "decode_query_len"])
 def _decode_index_score_kernel(
     q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
@@ -317,6 +496,7 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    SCORE_PIPELINE: tl.constexpr = 1,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
@@ -360,7 +540,7 @@ def _decode_index_score_kernel(
         mask=q_mask[None, :],
         other=0.0,
     )  # [D,HQ]
-    for blk in tl.range(chunk_start_block, chunk_end_block):
+    for blk in tl.range(chunk_start_block, chunk_end_block, num_stages=SCORE_PIPELINE):
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = blk * BLOCK_SIZE_K + off_k
         pos_mask = pos[:, None] < kv_len[None, :]
@@ -682,8 +862,22 @@ def minimax_m3_index_score(
         dtype=torch.float32,
         device=idx_q.device,
     )
-    BLOCK_SIZE_Q = 64
-    grid_score = (triton.cdiv(max_query_len, BLOCK_SIZE_Q), batch * num_idx_heads)
+    num_q_blocks = triton.cdiv(max_query_len, PREFILL_BLOCK_SIZE_Q)
+    # split-K over seq blocks, capped by the deepest possible scan so short
+    # prefills do not launch chunks that can only early-return.
+    TARGET_GRID = 4096
+    MAX_NUM_KV_CHUNKS = 32
+    score_ctas_per_chunk = num_q_blocks * batch * num_idx_heads
+    target = max(
+        1,
+        min(
+            MAX_NUM_KV_CHUNKS,
+            max_block,
+            TARGET_GRID // max(1, score_ctas_per_chunk),
+        ),
+    )
+    num_kv_chunks = 1 << (target.bit_length() - 1)
+    grid_score = (num_q_blocks, batch * num_idx_heads, num_kv_chunks)
     _index_block_score_kernel[grid_score](
         idx_q,
         index_kv_cache,
@@ -704,8 +898,9 @@ def minimax_m3_index_score(
         score.stride(1),
         score.stride(2),
         block_table.stride(0),
-        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+        BLOCK_SIZE_Q=PREFILL_BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        num_kv_chunks=num_kv_chunks,
     )
     return score
 
@@ -738,8 +933,14 @@ def minimax_m3_index_topk(
             dtype=torch.int32,
             device=score.device,
         )
-    # block_size_q == 1 -> query blocks coincide with query tokens.
-    grid_topk = (max_query_len, batch, num_idx_heads)
+    # The grid divisor and the kernel's BLOCK_SIZE_Q must be the same value, or
+    # tail query rows go unwritten and `sparse_attn` reads stale block ids.
+    query_tile = _topk_query_tile(max_query_len, batch, num_idx_heads, topk)
+    grid_topk = (
+        triton.cdiv(max_query_len, query_tile),
+        batch,
+        num_idx_heads,
+    )
     _topk_index_kernel[grid_topk](
         score,
         topk_idx,
@@ -757,6 +958,7 @@ def minimax_m3_index_topk(
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
+        BLOCK_SIZE_Q=query_tile,
         MASK_INIT=False,
         MASK_LOCAL=False,
     )
@@ -828,6 +1030,17 @@ def minimax_m3_index_decode(
     )
     num_kv_chunks = 1 << (target.bit_length() - 1)
     grid_score = (seq_lens.shape[0], num_kv_chunks)
+
+    # Deeper pipelining only pays for a 1-byte cache on the single-head,
+    # single-position path. All inputs are shape constants, so the grid is fixed.
+    chunk_blocks = triton.cdiv(max_block, num_kv_chunks)
+    gemv_path = num_idx_heads == 1 and BLOCK_SIZE_Q == 1
+    pipeline_pays = (
+        index_kv_cache.element_size() == 1
+        and gemv_path
+        and chunk_blocks > SCORE_PIPELINE_DEPTH
+    )
+    score_kwargs["SCORE_PIPELINE"] = SCORE_PIPELINE_DEPTH if pipeline_pays else 1
     _decode_index_score_kernel[grid_score](
         idx_q,
         index_kv_cache,

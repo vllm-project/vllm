@@ -258,6 +258,8 @@ def _insert_index_cache_kernel(
     CACHE_BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    FP8_OUT: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
     offs_d = tl.arange(0, BLOCK_D)
@@ -274,7 +276,11 @@ def _insert_index_cache_kernel(
     )
     mask = (slot >= 0) & (offs_d < HEAD_DIM)
     value = tl.load(src, mask=offs_d < HEAD_DIM, other=0.0)
-    tl.store(dst, value, mask=mask)
+    if FP8_OUT:
+        # e4m3 has no infinity, so an out-of-range convert is undefined; clamp
+        # explicitly, matching the fused CUDA writer.
+        value = tl.clamp(value.to(tl.float32), -FP8_MAX, FP8_MAX)
+    tl.store(dst, value.to(dst.dtype.element_ty), mask=mask)
 
 
 @torch.no_grad()
@@ -296,6 +302,8 @@ def minimax_m3_insert_index_cache(
         raise ValueError("MiniMax-M3 index cache requires contiguous head dimension")
 
     head_dim = index_k.shape[1]
+    fp8_out = index_cache.element_size() == 1
+    fp8_max = torch.finfo(index_cache.dtype).max if fp8_out else 0.0
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
         index_cache,
@@ -309,6 +317,8 @@ def minimax_m3_insert_index_cache(
         CACHE_BLOCK_SIZE=index_cache.shape[1],
         HEAD_DIM=head_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
+        FP8_OUT=fp8_out,
+        FP8_MAX=fp8_max,
         num_warps=4,
     )
 
