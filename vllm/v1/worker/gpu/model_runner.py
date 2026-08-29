@@ -1699,10 +1699,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            received_num_tokens = n
+            if not dummy_run:
+                received_lengths = {
+                    tensor.shape[0] for tensor in intermediate_tensors.tensors.values()
+                }
+                assert len(received_lengths) == 1
+                received_num_tokens = received_lengths.pop()
+                assert received_num_tokens <= n
             new_tensors = {
-                k: v[:n]
+                k: v[:received_num_tokens]
                 if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                else v[:received_num_tokens].copy_(intermediate_tensors.tensors[k])
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)

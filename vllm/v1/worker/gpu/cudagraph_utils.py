@@ -489,6 +489,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        self.intermediate_tensor_num_tokens: dict[BatchExecutionDescriptor, int] = {}
 
     def capture(
         self,
@@ -605,12 +606,19 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # Non-last PP rank.
                     assert isinstance(model_output, IntermediateTensors)
                     intermediate_tensors = model_output
+                    output_lengths = {
+                        tensor.shape[0]
+                        for tensor in intermediate_tensors.tensors.values()
+                    }
+                    assert len(output_lengths) == 1
+                    output_num_tokens = output_lengths.pop()
+                    self.intermediate_tensor_num_tokens[desc] = output_num_tokens
                     if self.intermediate_tensors is None:
                         self.intermediate_tensors = IntermediateTensors.empty_like(
                             intermediate_tensors
                         )
                     for k, v in intermediate_tensors.tensors.items():
-                        self.intermediate_tensors[k][:num_tokens] = v
+                        self.intermediate_tensors[k][:output_num_tokens] = v
 
             return forward_fn
 
@@ -623,7 +631,8 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
-            return self.intermediate_tensors[: desc.num_tokens]
+            num_tokens = self.intermediate_tensor_num_tokens[desc]
+            return self.intermediate_tensors[:num_tokens]
 
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]

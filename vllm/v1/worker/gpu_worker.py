@@ -87,7 +87,10 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    get_pp_intermediate_tensor_all_gather_overrides,
+    is_residual_scattered_for_sp,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -1149,6 +1152,11 @@ class Worker(WorkerBase):
                     self.vllm_config, batch_desc.num_tokens
                 )
             }
+
+        if parallel_config.pipeline_parallel_size > 1:
+            all_gather_tensors.update(
+                get_pp_intermediate_tensor_all_gather_overrides(self.get_model())
+            )
 
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (

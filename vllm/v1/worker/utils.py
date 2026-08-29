@@ -42,6 +42,30 @@ from vllm.v1.worker.block_table import get_block_table_width
 logger = init_logger(__name__)
 
 
+def get_pp_intermediate_tensor_all_gather_overrides(
+    model: Any,
+) -> dict[str, bool]:
+    """Return optional model-specific PP tensor transport overrides.
+
+    PP normally sends a TP slice and reconstructs replicated tensors with an
+    all-gather on the receiving stage. Model-level sequence parallel tensors
+    are already distinct across TP ranks and must instead travel directly
+    between matching ranks.
+    """
+    getter = getattr(model, "get_pp_intermediate_tensor_all_gather_overrides", None)
+    if getter is None:
+        return {}
+    overrides = getter()
+    if not isinstance(overrides, dict) or not all(
+        isinstance(key, str) and isinstance(value, bool)
+        for key, value in overrides.items()
+    ):
+        raise TypeError(
+            "PP intermediate tensor all-gather overrides must be dict[str, bool]"
+        )
+    return overrides
+
+
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
     if not any(num_nans_in_logits.values()):
         return

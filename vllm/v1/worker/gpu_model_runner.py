@@ -233,6 +233,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    get_pp_intermediate_tensor_all_gather_overrides,
     is_residual_scattered_for_sp,
     raise_if_nan_logits,
 )
@@ -3435,15 +3436,21 @@ class GPUModelRunner(
         # QKV + Attention needs the full residual before the SP split point.
         if sync_self:
             assert intermediate_tensors is not None
+            received_lengths: set[int] = set()
             for k, v in intermediate_tensors.items():
                 is_scattered = k == "residual" and is_rs
                 if is_scattered:
                     local_len = num_tokens // tp
                     v = get_tp_group().all_gather(v[:local_len], dim=0)
 
-                self.intermediate_tensors[k][:num_tokens].copy_(
-                    v[:num_tokens], non_blocking=True
+                received_num_tokens = min(num_tokens, v.shape[0])
+                received_lengths.add(received_num_tokens)
+                self.intermediate_tensors[k][:received_num_tokens].copy_(
+                    v[:received_num_tokens], non_blocking=True
                 )
+
+            assert len(received_lengths) == 1
+            num_tokens = received_lengths.pop()
 
         return IntermediateTensors(
             {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
@@ -4555,6 +4562,9 @@ class GPUModelRunner(
                             self.vllm_config, num_tokens_padded
                         )
                     }
+                    all_gather_tensors.update(
+                        get_pp_intermediate_tensor_all_gather_overrides(self.model)
+                    )
                     get_pp_group().send_tensor_dict(
                         hidden_states.tensors,
                         all_gather_group=get_tp_group(),
