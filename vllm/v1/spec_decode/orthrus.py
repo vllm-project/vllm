@@ -34,20 +34,30 @@ vllm/v1/worker/block_table.py, including DCP/CP-aware handling this
 simplified version does not). Treat as unverified until a successful
 generate() run is posted on the PR.
 
-Masking: the proposed block currently uses plain causal masking, not the
-reference implementation's non-causal within-block scheme
-(`generate_dual_pass_mask` in `modeling_orthrus.py`). An attempt to get
-the non-causal behaviour by reusing vLLM's prefix-LM masking
-(FlexAttentionBackend's `mm_req_doc_ranges` -> `get_prefix_lm_mask_mod`)
-was reverted: it requires FlexAttentionBackend, whose KV cache layout
-(LBNHC only) is incompatible with KV-sharing a target that runs
-FlashAttention. See `_create_draft_vllm_config` for the details and the
-follow-up options.
+Masking: within each request's proposed block, this uses non-causal
+(bidirectional) masking matching the reference implementation's
+`generate_dual_pass_mask` in `modeling_orthrus.py`, reusing vLLM's
+existing prefix-LM masking mechanism (FlexAttentionBackend's
+`mm_req_doc_ranges` -> `get_prefix_lm_mask_mod`) rather than writing new
+mask_mod code -- see `set_inputs_first_pass` and
+`_create_draft_vllm_config`. This was tried once before and reverted on
+the theory that FlexAttention's LBNHC-only KV cache layout requirement
+is incompatible with KV-sharing a target running FlashAttention -- but
+that reasoning was never checked against a running engine, and a real
+generate() run on this branch shows the target's actual KV cache layout
+is already LBNHC (FlashAttentionBackend declares no layout preference,
+so it defers to whatever layout gets picked elsewhere) -- i.e. the two
+backends already agree on layout with real weights loaded. Re-enabling
+this and testing end-to-end is the point of this change; if that
+observation turns out not to generalize (e.g. a different backend
+combination, model, or vLLM version), see the git history for the
+plain-causal fallback this replaces.
 
-This costs proposer *quality* (acceptance rate per round), not
-correctness -- vLLM's rejection sampling re-verifies every proposed token
-against a real AR forward, so generation is exactly lossless with either
-mask.
+Even the causal-only version was already exactly lossless (vLLM's
+rejection sampling verifies every proposed token against a real AR
+forward regardless of how the draft produced it); this masking change is
+about matching the reference's proposer *quality* (higher expected
+acceptance rate per round), not about fixing a correctness issue.
 """
 
 import torch
@@ -56,6 +66,7 @@ from typing_extensions import override
 from vllm.config import CUDAGraphMode, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
@@ -96,36 +107,22 @@ class OrthrusProposer(SpecDecodeBaseProposer):
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Keep the draft on the target's attention backend.
+        """Force FlexAttention for the draft's diffusion attention layers.
 
-        The draft's attention layers KV-share the *target's* cache tensors,
-        so both must agree on the KV cache layout. The base class resets
-        attention_config.backend to None for draft models, which can let
-        them pick a different backend than the target -- same hazard
-        Gemma4Proposer documents ("FLASH_ATTN ... cannot handle KV-shared
-        cache"). Carry the target's backend through explicitly.
-
-        This is also why the diffusion block currently uses causal masking
-        rather than the reference implementation's non-causal scheme: the
-        non-causal mask needs FlexAttentionBackend (the only backend with
-        custom mask_mod support), but FlexAttention only supports
-        KVCacheLayout.LBNHC, so forcing it here while the target runs
-        FlashAttention would reinterpret the target's cache with
-        incompatible strides. Getting both -- non-causal masking *and* KV
-        sharing -- requires either running the target on FlexAttention too
-        or first-class mask support in the target's backend; tracked as
-        follow-up work on the PR. Causal-only costs proposer quality
-        (acceptance rate), not correctness: spec-decode verification
-        re-checks every proposed token against a real AR forward, so
-        generation stays exactly lossless either way.
+        The non-causal within-block mask (see set_inputs_first_pass's
+        mm_req_doc_ranges below) needs FlexAttentionBackend -- vLLM's other
+        paged backends (FlashAttention/Triton) only support causal or
+        sliding-window masks, not this hybrid causal-prefix +
+        bidirectional-region shape. See the module docstring for why this
+        is expected to be layout-compatible with KV-sharing a FlashAttention
+        target despite an earlier (untested) revert assuming otherwise.
         """
         base = super()._create_draft_vllm_config()
-        target_backend = self.vllm_config.attention_config.backend
-        if target_backend is None:
-            return base
         return replace(
             base,
-            attention_config=replace(base.attention_config, backend=target_backend),
+            attention_config=replace(
+                base.attention_config, backend=AttentionBackendEnum.FLEX_ATTENTION
+            ),
         )
 
     @override
@@ -411,15 +408,31 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_len
         )
 
-        # Causal masking within the proposed block. The reference
-        # implementation's diffusion pass is non-causal within the block
-        # (see generate_dual_pass_mask in modeling_orthrus.py), which would
-        # give a better acceptance rate, but that needs FlexAttention's
-        # custom mask_mod and FlexAttention's KV cache layout is
-        # incompatible with KV-sharing the target's FlashAttention cache --
-        # see _create_draft_vllm_config for the full reasoning and the
-        # follow-up options. Causal-only is a weaker proposer, not an
-        # incorrect one: verification keeps generation exactly lossless.
+        # Non-causal-within-block masking (matching the reference
+        # implementation's diffusion pass, see generate_dual_pass_mask in
+        # modeling_orthrus.py): each request's proposed block should attend
+        # bidirectionally among its own new positions, on top of the usual
+        # causal view of everything before it. Reusing vLLM's existing
+        # prefix-LM masking mechanism (FlexAttentionBackend's
+        # mm_req_doc_ranges -> get_prefix_lm_mask_mod, normally used for
+        # vision-language bidirectional token spans) does exactly this: it
+        # ORs a bidirectional mask over each listed (start, end) logical
+        # position range on top of the base causal mask. Requires attn_diff
+        # to be on FlexAttentionBackend -- see _create_draft_vllm_config.
+        #
+        # KNOWN LIMITATION: mm_req_doc_ranges is a plain Python dict of
+        # per-request position ranges, so populating it forces one
+        # device->host sync per step to read seq_lens. That is inherent to
+        # this API (it is consumed on the host when building the
+        # FlexAttention block mask), and is a blocker for CUDA graph
+        # capture independent of the one initialize_cudagraph_keys already
+        # documents.
+        seq_lens_list = seq_lens.tolist()
+        mm_req_doc_ranges = {
+            req: [(seq_lens_list[req], seq_lens_list[req] + block_len - 1)]
+            for req in range(batch_size)
+        }
+
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             query_start_loc_cpu=new_query_start_loc_cpu,
@@ -432,6 +445,7 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             block_table_tensor=cad.block_table_tensor,
             slot_mapping=slot_mapping,
             causal=True,
+            mm_req_doc_ranges=mm_req_doc_ranges,
         )
 
         # This proposer predicts one token per position from block-local
