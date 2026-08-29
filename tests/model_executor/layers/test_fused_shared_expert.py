@@ -15,6 +15,7 @@ import vllm.config as vllm_config_module
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -487,6 +488,7 @@ def test_models_fse_init(
         quantization_config=None,
         runner_type="generate",
         is_moe=True,
+        logits_processors=None,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
@@ -545,6 +547,8 @@ def test_models_fse_init(
                 vllm_config.speculative_config = SimpleNamespace(
                     draft_model_config=SimpleNamespace(hf_config=config),
                     method="mtp",
+                    parallel_drafting=False,
+                    enable_adaptive_verification=False,
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
@@ -707,3 +711,135 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
     assert reason == (
         "shared-expert FSE quantization compatibility is not implemented for object"
     )
+
+
+def _fp8_config(**kwargs: Any) -> Fp8Config:
+    return Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+        weight_block_size=[128, 128],
+        **kwargs,
+    )
+
+
+def test_block_fp8_shared_expert_fse_is_compatible() -> None:
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        _fp8_config(),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible
+    assert reason is None
+
+
+def test_per_tensor_fp8_shared_expert_fse_is_incompatible() -> None:
+    """Per-tensor scales are 0-D, so the shared-expert chunker cannot slice them."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert not compatible
+    assert reason == (
+        "FP8 shared-expert FSE is only implemented for block-quantized checkpoints"
+    )
+
+
+@pytest.mark.parametrize("store_dtype", ["mxfp4", "nvfp4"])
+def test_store_dtype_fp8_shared_expert_fse_is_incompatible(store_dtype: str) -> None:
+    """Any routed-expert storage override rules out fusing the shared expert."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        _fp8_config(store_dtype=store_dtype),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert not compatible
+    assert reason == (
+        f"FP8 stores routed experts as {store_dtype}, which is not supported "
+        "for fused shared experts at model.layers.0.mlp.shared_experts"
+    )
+
+
+@pytest.mark.parametrize(
+    "ignored_layers",
+    [
+        ["model.layers.0.mlp.experts"],
+        ["model.layers.0.mlp.shared_experts.gate_up_proj"],
+        ["model.layers.0.mlp.shared_experts.down_proj"],
+    ],
+)
+def test_fp8_shared_expert_fse_rejects_asymmetric_ignored_layers(
+    ignored_layers: list[str],
+) -> None:
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        _fp8_config(ignored_layers=ignored_layers),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert not compatible
+    assert reason == (
+        "FP8 ignores routed and shared experts inconsistently at "
+        "model.layers.0.mlp.shared_experts"
+    )
+
+
+def test_fp8_shared_expert_fse_allows_symmetric_ignored_layers() -> None:
+    """Both sides unquantized is still a consistent scheme."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        _fp8_config(
+            ignored_layers=[
+                "model.layers.0.mlp.experts",
+                "model.layers.0.mlp.shared_experts.gate_up_proj",
+                "model.layers.0.mlp.shared_experts.down_proj",
+            ]
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible
+    assert reason is None
+
+
+def test_fp8_shared_expert_fse_expands_packed_projections() -> None:
+    """Both shards of a fused projection ignored is symmetric within that
+    projection, so the mismatch reported is against the routed experts."""
+    quant_config = _fp8_config(
+        ignored_layers=[
+            "model.layers.0.mlp.shared_experts.gate_proj",
+            "model.layers.0.mlp.shared_experts.up_proj",
+        ]
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert not compatible
+    assert reason == (
+        "FP8 ignores routed and shared experts inconsistently at "
+        "model.layers.0.mlp.shared_experts"
+    )
+
+
+def test_fp8_shared_expert_fse_propagates_partial_shard_exclusion() -> None:
+    """Half a fused projection excluded is rejected by `is_layer_skipped`
+    itself, exactly as it is in `Fp8Config.get_quant_method`."""
+    quant_config = _fp8_config(
+        ignored_layers=["model.layers.0.mlp.shared_experts.gate_proj"]
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    with pytest.raises(ValueError, match="some but not all shards"):
+        is_shared_expert_quant_fse_compatible(
+            quant_config,
+            "model.layers.0.mlp.experts",
+            "model.layers.0.mlp.shared_experts",
+        )
