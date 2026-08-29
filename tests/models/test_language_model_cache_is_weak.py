@@ -17,6 +17,7 @@ import torch.nn as nn
 
 from vllm.model_executor.models.interfaces import _language_model_by_module
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionTransformer
+from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
 from vllm.utils.cache import LRUCache
 
 pytestmark = pytest.mark.cpu_test
@@ -86,4 +87,22 @@ def test_qwen2_5_vl_rope_cache_does_not_pin_model():
 
     assert ref() is None, (
         "the Qwen2.5-VL RoPE cache is keeping the model alive after shutdown"
+    )
+
+
+def test_qwen3_vl_rope_cache_is_released_with_model():
+    model = object.__new__(Qwen3_VisionTransformer)
+    model._rot_pos_ids_cache = LRUCache(capacity=1024)
+
+    first = model.rot_pos_ids(2, 2, 2)
+    assert model.rot_pos_ids(2, 2, 2) is first
+
+    model_ref = weakref.ref(model)
+    tensor_ref = weakref.ref(first)
+    del model, first
+    gc.collect()
+
+    assert model_ref() is None
+    assert tensor_ref() is None, (
+        "the Qwen3-VL RoPE cache outlives the model after shutdown"
     )
