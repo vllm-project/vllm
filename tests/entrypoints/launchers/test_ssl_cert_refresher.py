@@ -4,9 +4,12 @@ import asyncio
 import tempfile
 from pathlib import Path
 from ssl import SSLContext
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vllm.entrypoints.launchers import launcher
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 
 
@@ -100,3 +103,36 @@ async def test_ssl_refresher():
     await asyncio.sleep(1)
     assert ssl_context.load_cert_chain_count == cert_chain_count
     assert ssl_context.load_ca_count == ca_count
+
+
+@pytest.mark.asyncio
+async def test_serve_http_stops_ssl_refresher_when_server_exits(monkeypatch):
+    config = SimpleNamespace(
+        ssl=object(),
+        ssl_keyfile="key.pem",
+        ssl_certfile="cert.pem",
+        ssl_ca_certs="ca.pem",
+        load=MagicMock(),
+    )
+    server = SimpleNamespace(serve=AsyncMock())
+    ssl_cert_refresher = MagicMock()
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", lambda *_args: None)
+    monkeypatch.setattr(launcher.uvicorn, "Config", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(launcher, "NoSignalServer", lambda _config: server)
+    monkeypatch.setattr(
+        launcher,
+        "SSLCertRefresher",
+        lambda **_kwargs: ssl_cert_refresher,
+    )
+    monkeypatch.setattr(launcher, "watchdog_loop", AsyncMock())
+    app = SimpleNamespace(routes=[], state=SimpleNamespace(engine_client=object()))
+
+    shutdown = await launcher.serve_http(
+        app, sock=None, enable_ssl_refresh=True, port=8000
+    )
+    try:
+        ssl_cert_refresher.stop.assert_called_once_with()
+    finally:
+        await shutdown
+        await asyncio.sleep(0)

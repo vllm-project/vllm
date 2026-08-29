@@ -158,8 +158,6 @@ async def serve_http(
         server_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
-        if ssl_cert_refresher:
-            ssl_cert_refresher.stop()
 
     shutdown_task = loop.create_task(handle_shutdown())
 
@@ -182,6 +180,8 @@ async def serve_http(
         shutdown_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
