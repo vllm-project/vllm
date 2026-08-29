@@ -339,9 +339,9 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
         decode_query_len=4,
         capture_sizes=[2, 4, 6, 8],
         num_speculative_tokens=3,
-        # max_num_seqs is 8, so this schedule covers K 0, 1, 2 and 3,
-        # giving decode_query_lens [1, 2, 3, 4].
-        dynamic_spec_schedule=[(1, 2, 0), (3, 4, 1), (5, 6, 2), (7, 8, 3)],
+        # max_num_seqs is 8, and K narrows as the batch grows, so the schedule
+        # covers K 3, 2, 1 and 0, giving decode_query_lens [1, 2, 3, 4].
+        dynamic_spec_schedule=[(1, 2, 3), (3, 4, 2), (5, 6, 1), (7, 8, 0)],
     )
 
     full_descs = manager._capture_descs[CUDAGraphMode.FULL]
