@@ -8,10 +8,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-)
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
@@ -228,17 +225,20 @@ class BuildPrefillChunkMetadataKernel(
 
     @dataclass(frozen=True)
     class CompileKey:
-        query_slice_start: int
-        query_slice_stop: int
-        DCP_RANK: int
-        DCP_WORLD: int
-        DCP_INTERLEAVE: int
         BLOCK_SIZE: int
         COMPRESS_RATIO: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=[
+            "query_slice_start",
+            "query_slice_stop",
+            "DCP_RANK",
+            "DCP_WORLD",
+            "DCP_INTERLEAVE",
+        ]
+    )
     def kernel(
         # Inputs
         query_start_loc_ptr,
@@ -317,43 +317,26 @@ class BuildPrefillChunkMetadataKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
-        query_slice_start: int,
-        query_slice_stop: int,
-        DCP_RANK: int,
-        DCP_WORLD: int,
-        DCP_INTERLEAVE: int,
         BLOCK_SIZE: int,
         COMPRESS_RATIO: int,
         input_variant: TritonPointerInputVariant,
     ) -> CompileKey:
         return self.CompileKey(
-            query_slice_start=query_slice_start,
-            query_slice_stop=query_slice_stop,
-            DCP_RANK=DCP_RANK,
-            DCP_WORLD=DCP_WORLD,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
             BLOCK_SIZE=BLOCK_SIZE,
             COMPRESS_RATIO=COMPRESS_RATIO,
             input_variant=input_variant,
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
         hf_config = vllm_config.model_config.hf_config
-        parallel_config = vllm_config.parallel_config
-        dcp_world = parallel_config.decode_context_parallel_size
-        dcp_interleave = parallel_config.cp_kv_cache_interleave_size
-        dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
         compress_ratios = tuple(
             max(1, int(ratio))
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
+        index_kpool = getattr(hf_config, "index_kpool", None)
+        if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
+            compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(
-            query_slice_start=WarmupIntRange(0, 2),
-            query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
-            DCP_RANK=dcp_rank,
-            DCP_WORLD=dcp_world,
-            DCP_INTERLEAVE=dcp_interleave,
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
             input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
@@ -371,11 +354,11 @@ class BuildPrefillChunkMetadataKernel(
             int32_ptr,
             int32_ptr,
             int32_ptr,
-            compile_key.query_slice_start,
-            compile_key.query_slice_stop,
-            compile_key.DCP_RANK,
-            compile_key.DCP_WORLD,
-            compile_key.DCP_INTERLEAVE,
+            0,
+            1,
+            0,
+            1,
+            1,
             BLOCK_SIZE=compile_key.BLOCK_SIZE,
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             grid=(1,),

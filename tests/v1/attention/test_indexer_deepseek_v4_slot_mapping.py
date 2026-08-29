@@ -33,6 +33,41 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
 
 
+def test_indexer_warmup_includes_pooled_selector_ratio():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                compress_ratios=[1, 4],
+                index_kpool=16,
+            )
+        )
+    )
+
+    keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
+
+    assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 16}
+
+
+def test_indexer_metadata_runtime_scalars_do_not_specialize():
+    kernel = BuildPrefillChunkMetadataKernel.kernel
+    runtime_scalar_names = {
+        "query_slice_start",
+        "query_slice_stop",
+        "DCP_RANK",
+        "DCP_WORLD",
+        "DCP_INTERLEAVE",
+    }
+
+    do_not_specialize = {
+        value if isinstance(value, str) else kernel.arg_names[value]
+        for value in kernel.do_not_specialize
+    }
+    assert do_not_specialize >= runtime_scalar_names
+    assert runtime_scalar_names.isdisjoint(
+        BuildPrefillChunkMetadataKernel.CompileKey.__dataclass_fields__
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
