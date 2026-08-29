@@ -472,9 +472,15 @@ class KVCacheManager:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
         # The number of computed tokens is the number of computed tokens plus
-        # the new prefix caching hits
+        # the new prefix caching hits.
+        # KV compression (KeyDiff) discards cache entries without rewinding
+        # the computation cursor, so physical cache occupancy is
+        # num_computed_tokens - num_kv_discarded (num_kv_discarded is 0 when
+        # compression is disabled).
         num_local_computed_tokens = (
-            request.num_computed_tokens + num_new_computed_tokens
+            request.num_computed_tokens
+            - request.num_kv_discarded
+            + num_new_computed_tokens
         )
         total_computed_tokens = min(
             num_local_computed_tokens + num_external_computed_tokens,
