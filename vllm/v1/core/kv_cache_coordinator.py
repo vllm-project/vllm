@@ -700,6 +700,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # (``scheduler_block_size``); retention is passed separately so it
             # can keep both the coarse segment tails and the fine replay
             # boundary (which needs the fine value).
+            print(
+                f"[dbg-pc] cache_blocks: req={request.request_id} "
+                f"num_computed_tokens={num_computed_tokens} "
+                f"aligned={aligned_num_computed_tokens} "
+                f"num_tokens_to_cache={num_tokens_to_cache} "
+                f"retention_interval={self.retention_interval}"
+            )
             manager.cache_blocks(
                 request,
                 num_tokens_to_cache,

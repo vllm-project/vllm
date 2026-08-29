@@ -1695,6 +1695,21 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
+                # [dbg-pc] reality check: of the blocks we advanced the cache counter
+                # over, how many are actually reusable (non-null AND hashed)?
+                blks = self.req_to_blocks[request.request_id][
+                    num_cached_blocks_before:num_cached_blocks_after
+                ]
+                reusable = sum(
+                    1 for b in blks if not b.is_null and b.block_hash is not None
+                )
+                nulls = sum(1 for b in blks if b.is_null)
+                print(
+                    f"[dbg-pc] mamba-commit: req={request.request_id} mode={self.mamba_cache_mode} "
+                    f"block_size={self.block_size} "
+                    f"intended_blocks={num_cached_blocks_after - num_cached_blocks_before} "
+                    f"reusable={reusable} null={nulls}"
+                )
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
