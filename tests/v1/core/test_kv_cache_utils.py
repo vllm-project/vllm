@@ -2334,6 +2334,41 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     ) == (544, 136)
 
 
+def test_resolve_dcp_kv_block_size_unwraps_uniform_type_specs():
+    attention = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float16,),
+    )
+    wrapped_attention = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"attention.0": attention, "attention.1": attention},
+    )
+    wrapped_mamba = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"mamba.0": mamba, "mamba.1": mamba},
+    )
+
+    assert kv_cache_utils.resolve_dcp_kv_block_size(attention, 4) == 64
+    assert kv_cache_utils.resolve_dcp_kv_block_size(wrapped_attention, 4) == 64
+    assert kv_cache_utils.resolve_dcp_kv_block_size(mamba, 4) == 16
+    assert kv_cache_utils.resolve_dcp_kv_block_size(wrapped_mamba, 4) == 16
+
+    scaled_attention = kv_cache_utils.resolve_dcp_kv_cache_spec(wrapped_attention, 4)
+    assert scaled_attention.block_size == 64
+    assert isinstance(scaled_attention, UniformTypeKVCacheSpecs)
+    assert all(
+        spec.block_size == 64 for spec in scaled_attention.kv_cache_specs.values()
+    )
+    assert kv_cache_utils.resolve_dcp_kv_cache_spec(wrapped_mamba, 4) is wrapped_mamba
+
+
 def test_multi_run_layer_compact_strides_place_hoisted_heads():
     """A layer-compact run region is its own dense allocation: under LHBNC the head
     groups sit between the layers and the blocks, so a run's block stride is one head

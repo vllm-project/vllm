@@ -19,7 +19,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -121,10 +123,14 @@ def test_worker_methods_delegate_to_store_worker():
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
+    connector.start_load_kv(MagicMock())
+    connector.wait_for_save()
     result = connector.get_finished(finished_req_ids)
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
+    worker.start_load_kv.assert_called_once_with(metadata)
+    worker.wait_for_save.assert_called_once_with(metadata)
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)
     assert result == ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.assert_called_once_with()
@@ -359,7 +365,9 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
+    result = client.lookup("req0", num_tokens=128, block_hashes=[])
+    assert result is not None
+    assert result.hit_length == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -394,7 +402,7 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
     while time.monotonic() < deadline:
         result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
         if result is not None:
-            return result
+            return result.hit_length
         time.sleep(0.005)
     return None
 
@@ -502,11 +510,13 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
 
     # Lookup ready with a hit -> report need_to_allocate + async-load flag.
     hit = 3 * block_size
-    mock_client.lookup.return_value = hit
+    boundary = TailKeyBoundary(group_id=0, num_tokens=4 * block_size)
+    mock_client.lookup.return_value = MooncakeLookupResult(hit, (boundary,))
     need, load_async = sched.get_num_new_matched_tokens(request, 0)
     assert need == hit
     assert load_async == sched.load_async
     assert sched.load_specs["r1"].kvpool_cached_tokens == hit
+    assert sched.load_specs["r1"].tail_key_boundaries == (boundary,)
 
 
 def test_protocol_tags_are_distinct_and_non_empty():
@@ -517,6 +527,20 @@ def test_protocol_tags_are_distinct_and_non_empty():
         assert isinstance(tag, bytes)
         assert len(tag) > 0
     assert protocol.RESP_OK != protocol.RESP_ERR
+
+
+def test_lookup_response_round_trip_preserves_tail_keys():
+    result = MooncakeLookupResult(
+        hit_length=20,
+        tail_key_boundaries=(
+            TailKeyBoundary(group_id=0, num_tokens=24),
+            TailKeyBoundary(group_id=1, num_tokens=20),
+        ),
+    )
+
+    assert protocol.decode_lookup_response(protocol.encode_lookup_response(result)) == (
+        result
+    )
 
 
 def test_scheduler_reset_connector_cache_invokes_connector_reset():
