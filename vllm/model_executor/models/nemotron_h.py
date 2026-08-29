@@ -709,7 +709,7 @@ class NemotronHForCausalLM(
     SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True
-    is_non_gated_moe: bool = True
+    is_non_gated_moe = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model", "mtp": None},

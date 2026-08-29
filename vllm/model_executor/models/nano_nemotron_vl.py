@@ -1504,7 +1504,7 @@ class NemotronH_Nano_VL_V2(
         # to preserve the order of the modalities.
         for modality in modalities:
             if modality == "images":
-                image_input = modalities.get("images")
+                image_input = modalities["images"]
                 assert image_input is not None
                 if isinstance(image_input, NanoNemotronVLImageEmbeddingInputs):
                     image_embeddings = image_input["data"]
@@ -1515,7 +1515,7 @@ class NemotronH_Nano_VL_V2(
                     image_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
-                video_input = modalities.get("videos")
+                video_input = modalities["videos"]
                 assert video_input is not None
                 if isinstance(video_input, NanoNemotronVLVideoEmbeddingInputs):
                     video_embeddings = video_input["data"]
@@ -1524,7 +1524,7 @@ class NemotronH_Nano_VL_V2(
                     video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
             if modality == "audios":
-                audio_input = modalities.get("audios")
+                audio_input = modalities["audios"]
                 assert audio_input is not None
                 audio_embeddings = self._process_audio_input(audio_input)
                 multimodal_embeddings += tuple(audio_embeddings)

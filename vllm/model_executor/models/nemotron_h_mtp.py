@@ -518,8 +518,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            if weight_loader is None:
-                weight_loader = default_weight_loader
+            assert weight_loader is not None
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
