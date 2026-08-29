@@ -791,7 +791,7 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_logits_processors(model_config)
-        self._validate_allowed_token_ids(tokenizer)
+        self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
@@ -967,7 +967,7 @@ class SamplingParams(
 
         validate_logits_processors_parameters(model_config.logits_processors, self)
 
-    def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
+    def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
             return
@@ -979,19 +979,24 @@ class SamplingParams(
                 value=allowed_token_ids,
             )
 
-        if tokenizer is not None:
-            vocab_size = len(tokenizer)
-            invalid_token_ids = [
-                token_id
-                for token_id in allowed_token_ids
-                if token_id < 0 or token_id >= vocab_size
-            ]
-            if invalid_token_ids:
-                raise VLLMValidationError(
-                    "allowed_token_ids contains out-of-vocab token id!",
-                    parameter="allowed_token_ids",
-                    value=invalid_token_ids,
-                )
+        # allowed_token_ids are client-supplied ids used as column indices
+        # into the logits tensor (the mask in InputBatch is sized by
+        # model_config.get_vocab_size(), and the ids are written as
+        # mask[req_index][allowed_token_ids]), so use the same bound here —
+        # like _validate_stop_token_ids and _validate_logit_bias, which
+        # index the same tensor.
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in allowed_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                "allowed_token_ids contains out-of-vocab token id!",
+                parameter="allowed_token_ids",
+                value=invalid_token_ids,
+            )
 
     def _validate_spec_decode(
         self,
