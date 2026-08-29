@@ -5,7 +5,11 @@
 import json
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseReasoningItem,
+)
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
@@ -377,3 +381,75 @@ def test_assistant_output_style_content_coerced():
     assert item.content[0].annotations == []
     assert item.status == "completed"
     assert item.id.startswith("msg_")
+
+
+def test_explicit_null_fields_are_backfilled_like_absent_ones():
+    """An SDK round-tripping a previous response serialises an unset optional
+    field as an explicit null rather than dropping the key. `id`, `status` and
+    `annotations` are all required here, so a null has to be backfilled the same
+    way an absent key is; left alone the item falls out of the union as a raw
+    dict and the request is rejected."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {"type": "reasoning", "id": None, "summary": []},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": None,
+                "status": None,
+                "content": [
+                    {"type": "output_text", "text": "world", "annotations": None}
+                ],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    reasoning, message = request.input
+    assert isinstance(reasoning, ResponseReasoningItem), type(reasoning)
+    assert reasoning.id.startswith("rs_")
+    assert isinstance(message, ResponseOutputMessage), type(message)
+    assert message.id.startswith("msg_")
+    assert message.status == "completed"
+    assert message.content[0].annotations == []
+
+
+def test_supplied_fields_are_never_overwritten():
+    """The null backfill must not reach values the caller actually set."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {"type": "reasoning", "id": "rs_mine", "summary": []},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg_mine",
+                "status": "incomplete",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "world",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com",
+                                "title": "t",
+                                "start_index": 0,
+                                "end_index": 1,
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    reasoning, message = request.input
+    assert reasoning.id == "rs_mine"
+    assert message.id == "msg_mine"
+    assert message.status == "incomplete"
+    assert len(message.content[0].annotations) == 1

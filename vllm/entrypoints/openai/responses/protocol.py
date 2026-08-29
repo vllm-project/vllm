@@ -538,7 +538,11 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
 
             elif item_type == "reasoning":
-                if "id" not in item:
+                # `is None` rather than `not in`: an SDK that round-trips a
+                # previous response serialises an unset optional field as an
+                # explicit null, and these fields are typed as required here, so
+                # skipping the backfill leaves the item to fail the outer union.
+                if item.get("id") is None:
                     item = {**item, "id": f"rs_{random_uuid()}"}
                 try:
                     processed_input.append(ResponseReasoningItem(**item))
@@ -559,9 +563,9 @@ class ResponsesRequest(OpenAIBaseModel):
 
                 original_item = item
                 item = dict(item)
-                if "id" not in item:
+                if item.get("id") is None:
                     item["id"] = f"msg_{random_uuid()}"
-                if "status" not in item:
+                if item.get("status") is None:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
                 new_content = []
@@ -569,7 +573,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     if (
                         isinstance(c, dict)
                         and c.get("type") == "output_text"
-                        and "annotations" not in c
+                        and c.get("annotations") is None
                     ):
                         c = {**c, "annotations": []}
                     new_content.append(c)
