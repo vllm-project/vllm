@@ -15,7 +15,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import msgspec
 import numpy as np
@@ -1306,6 +1306,7 @@ class NixlBaseConnectorWorker:
                             error=e,
                             remote_engine_id=eid,
                         )
+                        self.xfer_stats.record_failed_handshake()
 
             fut.add_done_callback(done_callback)
             return fut
@@ -3059,10 +3060,29 @@ class NixlBaseConnectorWorker:
         return True
 
     def _handle_failed_transfer(
-        self, req_id: str, handle: int | None, failed_req_ids: set[str] | None = None
+        self,
+        req_id: str,
+        handle: int | None,
+        failed_req_ids: set[str] | None = None,
+        failure: Literal["transfer", "handshake"] | None = "transfer",
     ) -> bool:
-        """Record a failure and release its handle, returning False to retain it."""
-        self.xfer_stats.record_failed_transfer()
+        """
+        Record a failure and release its handle, returning False to retain it.
+
+        Args:
+            req_id: The request ID.
+            handle: The transfer handle.
+            failed_req_ids: Requests observed as failed; each stays listed
+                until it has no outstanding handles.
+            failure: The failure category to record, grouped with transfer
+                failures when the handshake failed, or ``None`` when the
+                caller already recorded a more specific metric (eg KV expiry,
+                which is reported separately from transport failures).
+        """
+        if failure == "transfer":
+            self.xfer_stats.record_failed_transfer()
+        elif failure == "handshake":
+            self.xfer_stats.record_failed_handshake()
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
