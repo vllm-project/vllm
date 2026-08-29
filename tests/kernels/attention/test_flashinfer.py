@@ -25,7 +25,12 @@ except ImportError:
 import torch
 
 from vllm.platforms.interface import DeviceCapability
-from vllm.v1.kv_cache_interface import KVCacheLayout
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    KVQuantMode,
+    compute_layer_kv_cache_shape_bytes,
+)
 
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
@@ -253,115 +258,86 @@ def test_flashinfer_q_quantization_disable_overrides_nvfp4_trtllm_gen() -> None:
     assert q_dtype == torch.bfloat16
 
 
-def test_flashinfer_nvfp4_mixed_head_shape_uses_packed_layout() -> None:
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-    shape = FlashInferBackend.get_kv_cache_shape(
-        num_blocks=3,
+def _nvfp4_spec(head_size: int, head_size_v: int) -> FullAttentionSpec:
+    return FullAttentionSpec(
         block_size=16,
         num_kv_heads=2,
-        head_size=256,
-        cache_dtype_str="nvfp4",
-        head_size_v=512,
-    )
-
-    assert shape == (
-        3,
-        2,
-        16,
-        nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(512),
+        head_size=head_size,
+        head_size_v=head_size_v,
+        dtype=torch.bfloat16,
+        kv_quant_mode=KVQuantMode.NVFP4,
     )
 
 
-def test_flashinfer_nvfp4_same_head_shape_uses_separate_head_groups() -> None:
+def test_flashinfer_nvfp4_mixed_head_spec_packs_k_and_v_in_one_slot() -> None:
+    from vllm.utils.torch_utils import get_dtype_size
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    shape = FlashInferBackend.get_kv_cache_shape(
-        num_blocks=3,
-        block_size=16,
-        num_kv_heads=2,
-        head_size=256,
-        cache_dtype_str="nvfp4",
-        head_size_v=256,
-    )
+    spec = FlashInferBackend.customize_spec(_nvfp4_spec(256, 512))
 
-    assert shape == (3, 4, 16, nvfp4_kv_cache_full_dim(256))
+    assert spec.num_head_slots == 2
+    assert spec.state_content_bytes == (
+        nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(512)
+    ) * get_dtype_size(torch.bfloat16)
+
+
+def test_flashinfer_nvfp4_same_head_spec_uses_separate_head_groups() -> None:
+    from vllm.utils.torch_utils import get_dtype_size
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    spec = FlashInferBackend.customize_spec(_nvfp4_spec(256, 256))
+
+    assert spec.num_head_slots == 4
+    assert spec.state_content_bytes == nvfp4_kv_cache_full_dim(256) * get_dtype_size(
+        torch.bfloat16
+    )
 
 
 @pytest.mark.parametrize(
-    ("cache_dtype", "head_size_v", "expected_shape"),
+    ("quant_mode_name", "head_size_v", "expected_shape"),
     [
-        pytest.param("auto", None, (1392, 4, 32, 512), id="auto"),
-        pytest.param("fp8", None, (1392, 4, 32, 512), id="fp8"),
+        pytest.param("NONE", None, (1392, 4, 32, 2 * 256 * 2), id="auto"),
+        pytest.param("FP8_PER_TENSOR", None, (1392, 4, 32, 2 * 256 * 2), id="fp8"),
         pytest.param(
-            "nvfp4",
+            "NVFP4",
             256,
-            (1392, 8, 32, nvfp4_kv_cache_full_dim(256)),
+            (1392, 8, 32, nvfp4_kv_cache_full_dim(256) * 2),
             id="nvfp4-same-head",
         ),
         pytest.param(
-            "nvfp4",
+            "NVFP4",
             128,
             (
                 1392,
                 4,
                 32,
-                nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(128),
+                (nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(128)) * 2,
             ),
             id="nvfp4-mixed-head",
         ),
     ],
 )
-@pytest.mark.parametrize(
-    ("cache_layout", "include_num_layers_dimension"),
-    [
-        pytest.param("NHD", False, id="NHD"),
-        pytest.param("HND", False, id="HND"),
-        pytest.param("NHD", True, id="NHD-with-layers"),
-        pytest.param("HND", True, id="HND-with-layers"),
-    ],
-)
-def test_flashinfer_kv_cache_shape_matches_stride_order(
-    monkeypatch,
-    cache_dtype: str,
+def test_flashinfer_kv_cache_byte_shape(
+    quant_mode_name: str,
     head_size_v: int | None,
     expected_shape: tuple[int, ...],
-    cache_layout: str,
-    include_num_layers_dimension: bool,
 ) -> None:
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    """NVFP4 splits K and V across head slots, or packs both into one slot when
+    their head sizes differ. The trailing dimension counts bytes."""
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    _patch_impl_kv_cache_layout(monkeypatch, flashinfer_backend, cache_layout)
-
-    shape = flashinfer_backend.FlashInferBackend.get_kv_cache_shape(
-        num_blocks=1392,
-        block_size=32,
-        num_kv_heads=4,
-        head_size=256,
-        cache_dtype_str=cache_dtype,
-        head_size_v=head_size_v,
-    )
-    if include_num_layers_dimension:
-        shape = (64, *shape)
-        expected_shape = (64, *expected_shape)
-    stride_order = flashinfer_backend.FlashInferBackend.get_kv_cache_stride_order(
-        include_num_layers_dimension=include_num_layers_dimension,
-        head_size=256,
-        head_size_v=head_size_v,
-        cache_dtype_str=cache_dtype,
+    spec = FlashInferBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=32,
+            num_kv_heads=4,
+            head_size=256,
+            head_size_v=head_size_v,
+            dtype=torch.bfloat16,
+            kv_quant_mode=KVQuantMode[quant_mode_name],
+        )
     )
 
-    expected_stride_order = {
-        ("NHD", False): (0, 2, 1, 3),
-        ("HND", False): (0, 1, 2, 3),
-        ("NHD", True): (1, 0, 3, 2, 4),
-        ("HND", True): (1, 2, 0, 3, 4),
-    }[(cache_layout, include_num_layers_dimension)]
-
-    assert shape == expected_shape
-    assert stride_order == expected_stride_order
-    assert len(stride_order) == len(shape)
-    assert sorted(stride_order) == list(range(len(shape)))
+    assert compute_layer_kv_cache_shape_bytes(spec, 1392) == expected_shape
 
 
 def test_flashinfer_cascade_passes_kv_tuple(monkeypatch) -> None:

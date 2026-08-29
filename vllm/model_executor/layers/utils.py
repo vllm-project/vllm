@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import functools
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 
@@ -11,6 +13,10 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.flashinfer import (
+    flashinfer_bf16_mm,
+    is_flashinfer_cutedsl_bf16_gemm_supported,
+)
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -90,6 +96,144 @@ def default_unquantized_gemm(
     bias: torch.Tensor | None = None,
 ):
     return torch.nn.functional.linear(x, weight, bias)
+
+
+_FlashInferBf16RuntimeCheck = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor | None], bool
+]
+
+
+@dataclass(frozen=True)
+class _FlashInferBf16Backend:
+    flashinfer_backend: str
+    is_supported: Callable[[], bool]
+    can_implement: _FlashInferBf16RuntimeCheck
+
+
+def _can_use_flashinfer_cutedsl_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return False
+    if x.ndim < 1 or weight.ndim != 2:
+        return False
+    if (
+        not x.is_cuda
+        or not weight.is_cuda
+        or x.device != weight.device
+        or x.dtype != torch.bfloat16
+        or weight.dtype != torch.bfloat16
+        or not x.is_contiguous()
+        or not weight.is_contiguous()
+    ):
+        return False
+
+    k = x.shape[-1]
+    n = weight.shape[0]
+    if (
+        k <= 0
+        or n <= 0
+        or weight.shape[1] != k
+        or k % 128 != 0
+        or x.data_ptr() % 32 != 0
+        or weight.data_ptr() % 32 != 0
+    ):
+        return False
+
+    m = x.numel() // k
+    if not 1 <= m <= 32:
+        return False
+    return bias is None or (
+        bias.is_cuda
+        and bias.device == x.device
+        and bias.dtype == torch.bfloat16
+        and bias.ndim == 1
+        and bias.shape[0] == n
+        and bias.is_contiguous()
+    )
+
+
+_FLASHINFER_BF16_BACKENDS = {
+    "flashinfer_cutedsl": _FlashInferBf16Backend(
+        flashinfer_backend="cute-dsl",
+        is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
+        can_implement=_can_use_flashinfer_cutedsl_bf16,
+    ),
+}
+
+
+def _get_flashinfer_bf16_backend(vllm_backend: str) -> _FlashInferBf16Backend:
+    backend_spec = _FLASHINFER_BF16_BACKENDS.get(vllm_backend)
+    if backend_spec is None:
+        supported = ", ".join(sorted(_FLASHINFER_BF16_BACKENDS))
+        raise ValueError(
+            f"Unsupported vLLM FlashInfer BF16 backend {vllm_backend!r}; "
+            f"supported backends: {supported}"
+        )
+    return backend_spec
+
+
+def cuda_flashinfer_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool,
+    vllm_backend: str,
+) -> torch.Tensor:
+    backend_spec = _get_flashinfer_bf16_backend(vllm_backend)
+    if not backend_spec.can_implement(x, weight, bias):
+        return torch.nn.functional.linear(x, weight, bias)
+
+    k = x.shape[-1]
+    n = weight.shape[0]
+    x_2d = x.view(-1, k)
+    out_2d = flashinfer_bf16_mm(
+        x_2d,
+        weight.t(),
+        bias,
+        pdl,
+        backend_spec.flashinfer_backend,
+    )
+    return out_2d.view(*x.shape[:-1], n)
+
+
+def cuda_flashinfer_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool,
+    vllm_backend: str,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+def cuda_flashinfer_bf16_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    vllm_backend: str,
+    pdl: bool,
+) -> torch.Tensor:
+    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(
+        x,
+        weight,
+        bias,
+        pdl,
+        vllm_backend,
+    )
+
+
+direct_register_custom_op(
+    op_name="cuda_flashinfer_bf16_gemm",
+    op_func=cuda_flashinfer_bf16_gemm_impl,
+    fake_impl=cuda_flashinfer_bf16_gemm_fake,
+)
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
@@ -222,6 +366,27 @@ direct_register_custom_op(
     op_func=rocm_unquantized_gemm_impl,
     fake_impl=rocm_unquantized_gemm_fake,
 )
+
+
+@functools.cache
+def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
+    """Eagerly allocate wvSplitKrc's process-lifetime static workspaces.
+
+    They are otherwise created lazily on the first qualifying GEMM
+    (csrc/rocm/skinny_gemms.cu), which can be the first real request — after
+    the KV cache backing buffer exists. If one landed in that segment's
+    rounding tail, it would pin the entire segment at engine shutdown.
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        return
+    try:
+        x = torch.zeros(16, 1024, dtype=torch.bfloat16, device=device)
+        weight = torch.zeros(32, 1024, dtype=torch.bfloat16, device=device)
+        ops.wvSplitKrc(x, weight, num_compute_units())
+    except Exception:
+        logger.debug("wvSplitKrc workspace warmup failed", exc_info=True)
 
 
 # Above this weight size, oneDNN's onednn_mm consistently matches or beats
@@ -391,10 +556,36 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def dispatch_unquantized_gemm(
+    linear_backend: str = "auto",
+) -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
-    else:
+    elif not current_platform.is_cuda():
         return default_unquantized_gemm
+
+    backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
+    if backend_spec is None:
+        return default_unquantized_gemm
+
+    if not backend_spec.is_supported():
+        logger.warning_once(
+            "--linear-backend=%s requested FlashInfer mm_bf16 backend %r, "
+            "but it is unavailable on the current hardware or environment; "
+            "using automatic selection for unquantized linear layers.",
+            linear_backend,
+            backend_spec.flashinfer_backend,
+        )
+        return default_unquantized_gemm
+
+    logger.info_once(
+        "Using FlashInfer %s for eligible unquantized BF16 GEMMs.",
+        backend_spec.flashinfer_backend,
+    )
+    return functools.partial(
+        cuda_flashinfer_bf16_gemm,
+        vllm_backend=linear_backend,
+        pdl=current_platform.is_arch_support_pdl(),
+    )
