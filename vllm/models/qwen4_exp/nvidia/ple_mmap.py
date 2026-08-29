@@ -18,9 +18,9 @@ How, with ``VLLM_PLE_MMAP=1``:
     the floor (never materialized into a resident table); for a dtype whose
     :class:`_PleDtype` descriptor requires one, it also keeps the
     checkpoint's global ``weight_scale`` as a buffer on the placeholder,
-    which the untouched ``Qwen4ExpPLELayer._dequantize_embeddings`` already
-    knows how to consume. Unquantized dtypes (e.g. BF16) need no scale and
-    pass through unscaled.
+    which ``Qwen4ExpPLELayer._dequantize_embeddings`` already knows how to
+    consume. Unquantized dtypes (e.g. BF16) need no scale and pass through
+    unscaled.
   * the WHOLE forward — trigram hashing plus the row gather — is wrapped in
     a custom op, ``vllm::qwen4_exp_ple_mmap_forward``, so it runs OUTSIDE
     CUDA graph capture and outside torch.compile tracing entirely
@@ -311,16 +311,16 @@ def _read_scale(entry: tuple[str, int, int, str]) -> torch.Tensor:
 def _coalesce_runs(offsets: np.ndarray, row_bytes: int) -> list[tuple[int, int]]:
     """Merge equal-length spans at ascending ``offsets`` into byte runs.
 
+    Only spans that abut are merged. Bridging a gap would fetch pages no row
+    in this gather needs, and on a hash-scattered table that amplification
+    re-creates the cold-read cost the readahead exists to remove.
+
     Args:
         offsets: ascending int64 file offsets, one per row.
         row_bytes: length of the span each offset starts.
 
     Returns:
         ``(file_offset, length)`` pairs covering exactly the input spans.
-
-    Only spans that abut are merged. Bridging a gap would fetch pages no row
-    in this gather needs, and on a hash-scattered table that amplification
-    re-creates the cold-read cost the readahead exists to remove.
     """
     if offsets.size == 0:
         return []
@@ -359,6 +359,14 @@ class MmapPleTable:
         model_path: str,
         readahead: int = 0,
     ) -> None:
+        # First, and before anything below that can raise (the memmap loop,
+        # _open_readahead_fds, the thread pool): __del__ unconditionally
+        # calls close() on whatever state exists, including on a
+        # half-constructed table, so these must never be missing.
+        self._closed = False
+        self._fds: dict[str, int] = {}
+        self._shard_fds: list[int | None] = []
+        self.mm: list[np.memmap | None] = []
         if not shards:
             raise ValueError("PLE mmap: no shards to build a table from")
         self.shard_size = int(shard_size)
@@ -373,15 +381,14 @@ class MmapPleTable:
         # than growing a fallback ladder.
         self.readahead = max(0, int(readahead)) if _HAS_POSIX_FADVISE else 0
         n_slots = max(shards) + 1
-        self.mm: list[np.memmap | None] = [None] * n_slots
+        self.mm = [None] * n_slots
         self.rows_total = 0
         for idx, (path, offset, rows) in shards.items():
             self.mm[idx] = np.memmap(
                 path, dtype=np.uint8, mode="r", offset=offset, shape=(rows, row_bytes)
             )
             self.rows_total += rows
-        self._fds: dict[str, int] = {}
-        self._shard_fds: list[int | None] = [None] * n_slots
+        self._shard_fds = [None] * n_slots
         if self.readahead > 0:
             self._open_readahead_fds(shards)
             covered_files = len(self._fds)
@@ -400,6 +407,18 @@ class MmapPleTable:
                     total_files,
                     self.readahead,
                 )
+            else:
+                # _open_readahead_fds already warned per-file; this is the
+                # table-level state that matters for an on/off A/B — without
+                # it, self.readahead > 0 would keep reading as active while
+                # the pre-pass never issues a single fadvise call.
+                logger.warning(
+                    "PLE mmap: readahead requested (VLLM_PLE_MMAP_READAHEAD="
+                    "%d) but no shard file could be opened; the pre-pass is "
+                    "inert",
+                    self.readahead,
+                )
+                self.readahead = 0
         self.pool = ThreadPoolExecutor(max_workers=self.workers)
         self._pending = 0
         self._errors = 0
@@ -408,7 +427,6 @@ class MmapPleTable:
         # (elapsed_ms, populate_ms, copy_ms, coalesced runs) per gather.
         self._latencies_ms: list[tuple[float, float, float, int]] = []
         self._last_log = time.monotonic()
-        self._closed = False
 
     def _open_readahead_fds(self, shards: dict[int, tuple[str, int, int]]) -> None:
         """Open one shared read-only fd per distinct shard file.
@@ -457,12 +475,16 @@ class MmapPleTable:
         monotonic in ``uniq``, so every shard owns exactly one contiguous
         segment and this pre-pass covers precisely the rows the copy tasks do.
 
-        Two passes: a numpy count-only pass decides whether the bound
-        (``self.readahead``) is exceeded before anything is materialized, so
-        a bound-skipped gather pays only that count, not the (fd, offset,
-        length) Python-level run list the active path builds. Only once the
-        count clears the bound does a second pass build that list and issue
-        the ``posix_fadvise`` calls.
+        One numpy pass over every segment computes ``offsets`` (the FILE byte
+        offset each row's span starts at) exactly once and stashes it with
+        its shard fd; the coalesced run count needed to check the bound
+        (``self.readahead``) is accumulated in the same pass. Recomputing
+        ``offsets`` a second time — once to count, once to coalesce — was
+        measured costing the active (bound-clears) arm ~37% extra populate
+        time. Only once the total clears the bound does a second, Python-level
+        pass turn the stashed per-segment offsets into the (fd, offset,
+        length) run list and issue the ``posix_fadvise`` calls; a bound-
+        skipped gather never reaches it, so it pays only the numpy pass.
 
         Returns:
             The coalesced run count, reported even when it exceeds the bound
@@ -470,6 +492,7 @@ class MmapPleTable:
             from readahead being off.
         """
         total_runs = 0
+        segments: list[tuple[int, np.ndarray]] = []
         for s, e in zip(seg_starts, seg_ends):
             si = int(shard[s])
             mm = self.mm[si]
@@ -482,6 +505,7 @@ class MmapPleTable:
             total_runs += (
                 int(np.count_nonzero(offsets[1:] != offsets[:-1] + self.row_bytes)) + 1
             )
+            segments.append((fd, offsets))
 
         if total_runs > self.readahead:
             # Latched per table, not warning_once's process-wide (msg, *args)
@@ -498,34 +522,22 @@ class MmapPleTable:
                 )
             return total_runs
 
-        runs: list[tuple[int, int, int]] = []
-        for s, e in zip(seg_starts, seg_ends):
-            si = int(shard[s])
-            mm = self.mm[si]
-            fd = self._shard_fds[si]
-            if mm is None or fd is None:
-                continue
-            offsets = mm.offset + local[s:e] * self.row_bytes
-            runs.extend(
-                (fd, offset, length)
-                for offset, length in _coalesce_runs(offsets, self.row_bytes)
-            )
-
-        for fd, offset, length in runs:
-            try:
-                os.posix_fadvise(fd, offset, length, os.POSIX_FADV_WILLNEED)
-            except OSError as exc:
-                logger.warning_once(
-                    "PLE mmap: readahead call failed (%s); the gather still "
-                    "serves every row, just colder",
-                    exc.strerror,
-                )
-                # This fd is bad for every shard it backs (shards commonly
-                # share a file) — latch every matching slot so future
-                # gathers stop paying for a call that will only fail again.
-                for idx, shard_fd in enumerate(self._shard_fds):
-                    if shard_fd == fd:
-                        self._shard_fds[idx] = None
+        for fd, offsets in segments:
+            for offset, length in _coalesce_runs(offsets, self.row_bytes):
+                try:
+                    os.posix_fadvise(fd, offset, length, os.POSIX_FADV_WILLNEED)
+                except OSError as exc:
+                    logger.warning_once(
+                        "PLE mmap: readahead call failed (%s); the gather still "
+                        "serves every row, just colder",
+                        exc.strerror,
+                    )
+                    # This fd is bad for every shard it backs (shards commonly
+                    # share a file) — latch every matching slot so future
+                    # gathers stop paying for a call that will only fail again.
+                    for idx, shard_fd in enumerate(self._shard_fds):
+                        if shard_fd == fd:
+                            self._shard_fds[idx] = None
         return total_runs
 
     def gather(self, ids: np.ndarray) -> np.ndarray:
@@ -704,11 +716,19 @@ class MmapPleTable:
         table's ThreadPool when a layer's table is rebuilt in place (e.g. a
         weight-reload re-entering _attach_table on an already-populated
         placeholder).
+
+        Also safe on a table whose ``__init__`` raised before ``self.pool``
+        was assigned (e.g. the ThreadPoolExecutor call itself failed): the fd
+        and memmap containers are always set first, so whatever
+        ``_open_readahead_fds`` already opened by that point still gets
+        closed instead of leaking.
         """
         if self._closed:
             return
         self._closed = True
-        self.pool.shutdown(wait=False)
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            pool.shutdown(wait=False)
         self.mm = [None] * len(self.mm)
         for fd in self._fds.values():
             os.close(fd)

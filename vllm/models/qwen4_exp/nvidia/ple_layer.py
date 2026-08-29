@@ -532,7 +532,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 # doubles still work.
                 stock_embedding = cast(VocabParallelEmbedding, embedding)
                 copy_ple_embedding_shard_(
-                    stock_embedding.weight.data,
+                    cast(torch.Tensor, stock_embedding.weight).data,
                     loaded_weight,
                     checkpoint_start=checkpoint_start,
                     tp_start=stock_embedding.shard_indices.org_vocab_start_index,

@@ -10,6 +10,7 @@ exercised through its CPU dispatch key.
 from __future__ import annotations
 
 import errno
+import gc
 import logging
 import os
 from pathlib import Path
@@ -533,6 +534,26 @@ def _readahead_table(directory: Path, readahead: int) -> ple_mmap.MmapPleTable:
     )
 
 
+def _small_readahead_table(
+    directory: Path, readahead: int = 64
+) -> ple_mmap.MmapPleTable:
+    """A 9-row / 3-shard table over the fixture written by
+    _write_ple_layer(vocab=9, parts=3, cols=2): small enough to assert on
+    exact fd/mm counts.
+    """
+    layer_shards = ple_mmap.discover_shards(str(directory))[0]
+    return ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        3,
+        2,
+        torch.float8_e4m3fn,
+        workers=1,
+        chunk=8,
+        model_path=str(directory),
+        readahead=readahead,
+    )
+
+
 def _record_warnings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[tuple[str, tuple[object, ...]]]:
@@ -546,6 +567,48 @@ def _record_warnings(
         lambda msg, *args: recorded.append((msg, args)),
     )
     return recorded
+
+
+def _record_plain_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, tuple[object, ...]]]:
+    """Capture plain logger.warning calls (not warning_once's dedup path).
+
+    **kwargs, not just *args: some call sites (e.g. _open_readahead_fds'
+    own per-file warning_once) route through this same logger.warning with
+    a stacklevel= kwarg attached.
+    """
+    recorded: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        ple_mmap.logger,
+        "warning",
+        lambda msg, *args, **kwargs: recorded.append((msg, args)),
+    )
+    return recorded
+
+
+def _single_file_ple_checkpoint(
+    directory: Path, cols: int
+) -> tuple[torch.Tensor, Path]:
+    """Write one 9-row/3-shard PLE layer with every shard packed into a
+    SINGLE safetensors file — unlike _write_ple_layer, which always writes
+    one file per shard. Shards commonly share a file in a real checkpoint,
+    and this is the only fixture shape whose byte offsets land non-zero
+    and non-page-aligned within one file.
+    """
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    full = _synthetic_weight(9, cols)
+    path = directory / "model-ple-0-00000.safetensors"
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.shard_0.weight": full[0:3],
+            f"{prefix}.shard_1.weight": full[3:6],
+            f"{prefix}.shard_2.weight": full[6:9],
+            f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16),
+        },
+        str(path),
+    )
+    return full, path
 
 
 def test_coalesce_runs_merges_only_abutting_spans() -> None:
@@ -603,13 +666,9 @@ def test_readahead_bound_skips_the_pre_pass_but_still_reports_the_run_count(
     advised: list[tuple[object, ...]] = []
     monkeypatch.setattr(os, "posix_fadvise", lambda *args: advised.append(args))
     # The bound-exceeded warning is a per-table latch (logger.warning), not
-    # warning_once: _record_warnings only intercepts warning_once.
-    warnings: list[tuple[str, tuple[object, ...]]] = []
-    monkeypatch.setattr(
-        ple_mmap.logger,
-        "warning",
-        lambda msg, *args: warnings.append((msg, args)),
-    )
+    # warning_once, so _record_plain_warnings (not _record_warnings) is the
+    # right capture helper here.
+    warnings = _record_plain_warnings(monkeypatch)
 
     ids = np.array([0, 5, 12, 20, 31, 39], dtype=np.int64)
     got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
@@ -623,7 +682,7 @@ def test_readahead_bound_skips_the_pre_pass_but_still_reports_the_run_count(
 
 
 def test_bound_exceeded_warns_exactly_once_per_table_across_varying_run_counts(
-    tmp_path: Path,
+    tmp_path: Path, caplog_vllm: pytest.LogCaptureFixture
 ) -> None:
     """warning_once dedups on (msg, *args), and the observed run count is
     part of args and varies almost every gather — that would defeat the
@@ -635,88 +694,64 @@ def test_bound_exceeded_warns_exactly_once_per_table_across_varying_run_counts(
     _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
     table = _readahead_table(tmp_path, readahead=1)  # any gather here exceeds 1 run
 
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append  # type: ignore[method-assign]
-    ple_mmap.logger.addHandler(handler)
     try:
-        for ids in (
-            np.array([0, 39], dtype=np.int64),  # 2 shards -> 2 runs
-            np.array([0, 5, 39], dtype=np.int64),  # a different run count
-            np.array([0, 5, 12, 39], dtype=np.int64),  # a different run count again
+        with caplog_vllm.at_level(
+            logging.WARNING, logger="vllm.models.qwen4_exp.nvidia.ple_mmap"
         ):
-            table.gather(ids)
+            for ids in (
+                np.array([0, 39], dtype=np.int64),  # 2 shards -> 2 runs
+                np.array([0, 5, 39], dtype=np.int64),  # a different run count
+                np.array([0, 5, 12, 39], dtype=np.int64),  # different again
+            ):
+                table.gather(ids)
     finally:
-        ple_mmap.logger.removeHandler(handler)
         table.close()
 
-    bound_records = [r for r in records if "readahead skipped" in r.getMessage()]
+    bound_records = [
+        r for r in caplog_vllm.records if "readahead skipped" in r.getMessage()
+    ]
     assert len(bound_records) == 1
 
 
 def test_readahead_bound_skip_avoids_materializing_the_run_list(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The count-only pre-pass must stay cheap even when the gather is large
-    enough that materializing the (fd, offset, length) run list would be
-    measurable: a bound-skipped gather's populate cost must stay close to
-    the readahead=0 arm's (always exactly 0 — the pre-pass never even
-    runs), not scale with row count the way the materializing path does.
+    """A bound-skipped gather must build no run list at all: _coalesce_runs
+    is the seam where a segment's already-computed offsets turn into the
+    (fd, offset, length) Python tuples the active arm advises from — one
+    call per segment (see _readahead's single numpy pass). Counting calls
+    to it, rather than timing the two arms, proves the count-only path
+    stays numpy-only when the bound is exceeded, independent of
+    box-to-box noise.
     """
-    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
-    n_shards, rows_per_shard, cols = 128, 4, 4
-    vocab = n_shards * rows_per_shard
-    full = _synthetic_weight(vocab, cols)
-    tensors: dict[str, torch.Tensor] = {
-        f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16)
-    }
-    for shard_idx in range(n_shards):
-        start = shard_idx * rows_per_shard
-        tensors[f"{prefix}.shard_{shard_idx}.weight"] = full[
-            start : start + rows_per_shard
-        ]
-    safetensors.torch.save_file(
-        tensors, str(tmp_path / "model-ple-0-00000.safetensors")
-    )
-    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
-    # One (non-adjacent) row from every shard: each segment coalesces to
-    # exactly one run, so the run list genuinely has n_shards entries.
-    ids = np.array(
-        [shard_idx * rows_per_shard for shard_idx in range(n_shards)], dtype=np.int64
-    )
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    ids = np.array([0, 5, 12, 20, 31, 39], dtype=np.int64)  # 4 segments, 6 runs
 
-    def _table(readahead: int) -> ple_mmap.MmapPleTable:
-        return ple_mmap.MmapPleTable(
-            layer_shards.shards,
-            rows_per_shard,
-            cols,
-            torch.float8_e4m3fn,
-            workers=1,
-            chunk=8,
-            model_path=str(tmp_path),
-            readahead=readahead,
-        )
+    calls = 0
+    real_coalesce = ple_mmap._coalesce_runs
 
-    active = _table(n_shards)  # never exceeds the bound: materializes + advises
-    skipped = _table(1)  # exceeds on every gather: count-only path only
+    def _counting_coalesce(
+        offsets: np.ndarray, row_bytes: int
+    ) -> list[tuple[int, int]]:
+        nonlocal calls
+        calls += 1
+        return real_coalesce(offsets, row_bytes)
+
+    monkeypatch.setattr(ple_mmap, "_coalesce_runs", _counting_coalesce)
+
+    skipped = _readahead_table(tmp_path, readahead=1)  # 6 runs > 1: skip
     try:
-        for _ in range(5):
-            active.gather(ids)
-            skipped.gather(ids)
-        # min(), not mean(): isolates the cost this test cares about from
-        # scheduler noise, which only ever pushes a sample up.
-        active_populate = min(sample[1] for sample in active._latencies_ms)
-        skipped_populate = min(sample[1] for sample in skipped._latencies_ms)
+        skipped.gather(ids)
+    finally:
+        skipped.close()
+    assert calls == 0
 
-        # Measured ratio is a stable ~0.27 across 128-1024 shards (the
-        # per-segment numpy count survives; only the coalesced (fd, offset,
-        # length) list and the posix_fadvise calls are skipped) — half that
-        # leaves comfortable margin against box-to-box noise without being
-        # so loose the assertion stops meaning anything.
-        assert skipped_populate < 0.5 * active_populate
+    active = _readahead_table(tmp_path, readahead=64)  # 6 runs <= 64: materialize
+    try:
+        active.gather(ids)
     finally:
         active.close()
-        skipped.close()
+    assert calls == 4  # one _coalesce_runs call per segment
 
 
 def test_readahead_survives_an_oserror_from_every_call(
@@ -779,18 +814,7 @@ def test_readahead_advises_file_absolute_offsets_across_unaligned_shard_data(
     and comparing to the logical table catches that class of regression
     directly, independent of gather()'s own correctness.
     """
-    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
-    full = _synthetic_weight(9, 3)
-    path = tmp_path / "model-ple-0-00000.safetensors"
-    safetensors.torch.save_file(
-        {
-            f"{prefix}.shard_0.weight": full[0:3],
-            f"{prefix}.shard_1.weight": full[3:6],
-            f"{prefix}.shard_2.weight": full[6:9],
-            f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16),
-        },
-        str(path),
-    )
+    full, path = _single_file_ple_checkpoint(tmp_path, cols=3)
     layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
     # Sanity: shard 1/2 must NOT start at a page boundary, else this test
     # would still pass even with `mm.offset +` dropped from the pre-pass.
@@ -835,17 +859,7 @@ def test_readahead_holds_one_fd_per_distinct_shard_file(tmp_path: Path) -> None:
     the path — not the shard slot — is what keeps a 128-shard layer from
     holding 128 of them. close() must hand every one back.
     """
-    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
-    full = _synthetic_weight(9, 2)
-    safetensors.torch.save_file(
-        {
-            f"{prefix}.shard_0.weight": full[0:3],
-            f"{prefix}.shard_1.weight": full[3:6],
-            f"{prefix}.shard_2.weight": full[6:9],
-            f"{prefix}.weight_scale": torch.tensor([1.0], dtype=torch.bfloat16),
-        },
-        str(tmp_path / "model-ple-0-00000.safetensors"),
-    )
+    full, _path = _single_file_ple_checkpoint(tmp_path, cols=2)
     layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
     table = ple_mmap.MmapPleTable(
         layer_shards.shards,
@@ -901,17 +915,7 @@ def test_readahead_table_close_is_idempotent_with_fds_open(tmp_path: Path) -> No
     os.close()-ing an fd number the OS is free to reuse.
     """
     _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=1.0)
-    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
-    table = ple_mmap.MmapPleTable(
-        layer_shards.shards,
-        3,
-        2,
-        torch.float8_e4m3fn,
-        workers=1,
-        chunk=8,
-        model_path=str(tmp_path),
-        readahead=64,
-    )
+    table = _small_readahead_table(tmp_path)
     assert table._fds
 
     table.close()
@@ -919,6 +923,65 @@ def test_readahead_table_close_is_idempotent_with_fds_open(tmp_path: Path) -> No
 
     assert not table._fds
     assert all(mm is None for mm in table.mm)
+
+
+def test_inert_readahead_warns_and_reports_itself_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_open_readahead_fds already warns per shard file it fails to open;
+    when that leaves zero fds covered, table.readahead must say so too — a
+    tester comparing an on/off A/B via the knob's own value would otherwise
+    see it stay > 0 while the pre-pass never issues a single fadvise call.
+    """
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=1.0)
+
+    def _raise_open(*args: object, **kwargs: object) -> int:
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(os, "open", _raise_open)
+    # _record_plain_warnings tolerates **kwargs: os.open failing also routes
+    # _open_readahead_fds' own per-file warning_once through this same
+    # logger.warning, and _print_warning_once calls it with stacklevel=... .
+    warnings = _record_plain_warnings(monkeypatch)
+
+    table = _small_readahead_table(tmp_path)
+    try:
+        assert table.readahead == 0
+        inert_warnings = [w for w in warnings if "pre-pass is inert" in w[0]]
+        assert len(inert_warnings) == 1
+        assert inert_warnings[0][1] == (64,)
+    finally:
+        table.close()
+
+
+def test_del_after_threadpool_failure_still_closes_readahead_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure constructing the gather ThreadPool must not leak the fds
+    _open_readahead_fds already opened: the fd dict is populated before the
+    pool is, so close() — reached via __del__ on the half-built table —
+    still has real descriptors to hand back.
+    """
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=1.0)
+
+    def _raise_pool(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("synthetic ThreadPoolExecutor failure")
+
+    monkeypatch.setattr(ple_mmap, "ThreadPoolExecutor", _raise_pool)
+    closed_fds: list[int] = []
+    real_close = os.close
+
+    def _spying_close(fd: int) -> None:
+        closed_fds.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", _spying_close)
+
+    with pytest.raises(RuntimeError, match="synthetic ThreadPoolExecutor failure"):
+        _small_readahead_table(tmp_path)
+    gc.collect()
+
+    assert closed_fds
 
 
 def test_readahead_gathers_correctly_across_a_320_byte_bf16_row_width(
@@ -1774,10 +1837,11 @@ def test_build_tables_attaches_a_bf16_table_and_forward_gathers_it_value_exact(
     """Intel AutoRound W4A16 exports pass the PLE table through as
     unquantized BF16 with no weight_scale on disk: a real streamed load sets
     weights_streamed True but weight_scale_loaded stays False (there is no
-    scale tensor to stream) — the False/False quadrant that Fix A's
-    streamed-loader error would otherwise refuse. For a requires_scale=False
-    dtype this must still attach and serve real values through the full
-    load_weights -> build_tables -> forward chain, not raise."""
+    scale tensor to stream) — the True/False quadrant that the
+    streamed-loader's fail-closed error would otherwise refuse. For a
+    requires_scale=False dtype this must still attach and serve real values
+    through the full load_weights -> build_tables -> forward chain, not
+    raise."""
     full = _write_ple_layer(
         tmp_path,
         layer_idx=0,
@@ -1838,18 +1902,15 @@ def test_build_tables_raises_when_weight_scale_was_never_loaded(tmp_path: Path) 
     broken or truncated weight iterator, not an unstreamed family — this
     must stay in the fail-closed True/False quadrant (weights_streamed
     True, weight_scale_loaded False), never fall back to a header read."""
-    _write_ple_layer(
+    full = _write_ple_layer(
         tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25, write_scale=True
     )
     module = _mmap_ngram_module_for_load_test(vocab=8, cols=2)
-    shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2).to(torch.float8_e4m3fn)
-    shard_1 = torch.arange(8, 16, dtype=torch.float32).reshape(4, 2)
-    shard_1 = shard_1.to(torch.float8_e4m3fn)
 
     module.load_weights(
         [
-            ("ngram_embedding.shard_0.weight", shard_0),
-            ("ngram_embedding.shard_1.weight", shard_1),
+            ("ngram_embedding.shard_0.weight", full[0:4]),
+            ("ngram_embedding.shard_1.weight", full[4:8]),
         ]
     )
 
@@ -1893,12 +1954,7 @@ def test_build_tables_falls_back_to_header_scale_when_family_never_streamed(
         static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 2)}
     )
     model_config = _model_config(tmp_path)
-    warnings: list[tuple[str, tuple[object, ...]]] = []
-    monkeypatch.setattr(
-        ple_mmap.logger,
-        "warning",
-        lambda msg, *args: warnings.append((msg, args)),
-    )
+    warnings = _record_plain_warnings(monkeypatch)
 
     ple_mmap.build_tables(model_config, cc)
 
@@ -2112,6 +2168,32 @@ def test_mmap_ple_table_close_drops_memmaps_and_is_idempotent(tmp_path: Path) ->
     assert all(mm is None for mm in table.mm)
     with pytest.raises(IndexError, match="shard"):
         table.gather(np.array([0], dtype=np.int64))
+
+
+def test_del_on_a_half_constructed_table_raises_no_attributeerror(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """__init__ validates ``shards`` before setting any of the real table
+    state, and __del__ unconditionally calls close() on whatever exists —
+    so a table that never got past that check must still destruct cleanly
+    instead of printing a suppressed "Exception ignored" AttributeError to
+    stderr (the close()/fd/mm containers are set before the raise).
+    """
+    with pytest.raises(ValueError, match="no shards to build a table from"):
+        ple_mmap.MmapPleTable(
+            {},
+            10,
+            8,
+            torch.float8_e4m3fn,
+            workers=1,
+            chunk=8,
+            model_path="/nonexistent",
+        )
+    gc.collect()
+
+    captured = capsys.readouterr()
+    assert "Exception ignored" not in captured.err
+    assert "AttributeError" not in captured.err
 
 
 def test_attach_table_closes_a_stale_table_before_building_the_new_one(
