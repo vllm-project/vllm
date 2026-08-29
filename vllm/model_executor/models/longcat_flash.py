@@ -83,6 +83,8 @@ logger = init_logger(__name__)
 class FlashConfig(PretrainedConfig):
     """Flash model configuration."""
 
+    moe_intermediate_size: int
+
     model_type = "longcat_flash"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -185,9 +187,8 @@ class FlashConfig(PretrainedConfig):
             if hasattr(self, "ffn_hidden_size")
             else intermediate_size
         )
-        moe_intermediate_size = getattr(self, "moe_intermediate_size", None)
-        if moe_intermediate_size is not None:
-            self.moe_intermediate_size = moe_intermediate_size
+        if hasattr(self, "moe_intermediate_size"):
+            self.moe_intermediate_size = self.moe_intermediate_size
         elif hasattr(self, "expert_ffn_hidden_size"):
             self.moe_intermediate_size = self.expert_ffn_hidden_size
         else:

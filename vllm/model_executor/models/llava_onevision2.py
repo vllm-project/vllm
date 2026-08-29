@@ -30,6 +30,8 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    SupportsIndex,
+    SupportsInt,
     TypedDict,
 )
 
@@ -46,6 +48,7 @@ from transformers.dynamic_module_utils import (
 )
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from typing_extensions import Buffer
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -1592,7 +1595,9 @@ class LlavaOnevision2MultiModalProcessor(
         # array, or tensor, and ``and <array>`` would raise on the ambiguous
         # truth value of a multi-element array.
         _videos = mm_data.get("videos")
-        videos_present = isinstance(_videos, Sized) and len(_videos) > 0
+        if _videos is not None and not isinstance(_videos, Sized):
+            raise TypeError(f"object of type '{type(_videos).__name__}' has no len()")
+        videos_present = _videos is not None and len(_videos) > 0
 
         codec_video_paths = (
             _extract_codec_video_paths(mm_data["videos"]) if videos_present else None
@@ -1675,7 +1680,14 @@ class LlavaOnevision2MultiModalProcessor(
             timestamp_decimals = hf_processor_mm_kwargs.get(
                 "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
             )
-            assert isinstance(timestamp_decimals, int)
+            if not isinstance(
+                timestamp_decimals, (str, Buffer, SupportsInt, SupportsIndex)
+            ):
+                raise TypeError(
+                    "int() argument must be a string, a bytes-like object "
+                    f"or a real number, not '{type(timestamp_decimals).__name__}'"
+                )
+            timestamp_decimals = int(timestamp_decimals)
 
             per_video_frames: list[list[Image.Image]] = []
             per_video_timestamps: list[list[float]] = []
@@ -2240,21 +2252,15 @@ class LlavaOnevision2ForConditionalGeneration(
         if not modalities:
             return []
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
-        for multimodal_input in modalities.values():
-            if isinstance(
-                multimodal_input,
-                (
-                    LlavaOnevision2ImagePixelInputs,
-                    LlavaOnevision2ImageEmbeddingInputs,
-                ),
-            ):
-                multimodal_embeddings += self._process_image_input(multimodal_input)
-            elif isinstance(multimodal_input, LlavaOnevision2VideoPixelInputs):
-                multimodal_embeddings += self._process_video_input(multimodal_input)
-            else:
-                raise TypeError(
-                    f"Unsupported multimodal input: {type(multimodal_input)}"
-                )
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                assert image_input is not None
+                multimodal_embeddings += self._process_image_input(image_input)
+            elif modality == "videos":
+                video_input = modalities["videos"]
+                assert video_input is not None
+                multimodal_embeddings += self._process_video_input(video_input)
         return multimodal_embeddings
 
     def get_input_embeddings(

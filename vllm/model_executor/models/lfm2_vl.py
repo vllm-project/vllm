@@ -3,6 +3,7 @@
 
 import itertools
 import math
+import typing
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
@@ -17,6 +18,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
     find_closest_aspect_ratio,
     round_by_factor,
 )
+from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -926,8 +928,15 @@ class Lfm2VLForConditionalGeneration(
             "min_image_tokens",
             getattr(self.config, "min_image_tokens", None) or 64,
         )
-        assert isinstance(value, int)
-        return max(1, value)
+        if not isinstance(
+            value,
+            (str, Buffer, typing.SupportsInt, typing.SupportsIndex),
+        ):
+            raise TypeError(
+                "int() argument must be a string, a bytes-like object "
+                f"or a real number, not '{type(value).__name__}'"
+            )
+        return max(1, int(value))
 
     def _get_lfm2vl_item_tile_slices(
         self,

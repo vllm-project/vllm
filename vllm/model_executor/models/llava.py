@@ -279,18 +279,19 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         image_token_id = hf_config.image_token_index
 
         def get_replacement(item_idx: int):
-            images = mm_items["image"]
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
-            elif isinstance(images, ImageProcessorItems):
+            else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
-            else:
-                raise TypeError(f"Unsupported image items: {type(images)}")
 
             return [image_token_id] * num_image_tokens
 

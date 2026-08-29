@@ -416,19 +416,20 @@ class LlavaOnevisionMultiModalProcessor(
         video_token_id = hf_config.video_token_index
 
         def get_video_replacement(item_idx: int):
-            videos = mm_items["video"]
+            videos = mm_items.get_items(
+                "video", (VideoEmbeddingItems, VideoProcessorItems)
+            )
 
             if isinstance(videos, VideoEmbeddingItems):
                 num_video_tokens = videos.get_feature_size(item_idx)
-            elif isinstance(videos, VideoProcessorItems):
+            else:
+                assert isinstance(videos, VideoProcessorItems)
                 image_size = videos.get_frame_size(item_idx)
                 num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
                 )
-            else:
-                raise TypeError(f"Unsupported video items: {type(videos)}")
 
             return [video_token_id] * num_video_tokens
 
@@ -867,20 +868,17 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
-        for multimodal_input in mm_input_by_modality.values():
-            if isinstance(
-                multimodal_input,
-                (LlavaOnevisionImagePixelInputs, LlavaOnevisionImageEmbeddingInputs),
-            ):
-                image_embeddings = self._process_image_input(multimodal_input)
+        for modality in mm_input_by_modality:
+            if modality == "image":
+                image_input = mm_input_by_modality["image"]
+                assert image_input is not None
+                image_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings += tuple(image_embeddings)
-            elif isinstance(multimodal_input, LlavaOnevisionVideoPixelInputs):
-                video_embeddings = self._process_video_pixels(multimodal_input)
+            if modality == "video":
+                video_input = mm_input_by_modality["video"]
+                assert video_input is not None
+                video_embeddings = self._process_video_pixels(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
-            else:
-                raise TypeError(
-                    f"Unsupported multimodal input: {type(multimodal_input)}"
-                )
 
         return multimodal_embeddings
 

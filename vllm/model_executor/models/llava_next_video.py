@@ -214,19 +214,20 @@ class LlavaNextVideoMultiModalProcessor(
         video_token_id = hf_config.video_token_index
 
         def get_replacement(item_idx: int):
-            videos = mm_items["video"]
+            videos = mm_items.get_items(
+                "video", (VideoEmbeddingItems, VideoProcessorItems)
+            )
 
             if isinstance(videos, VideoEmbeddingItems):
                 num_video_tokens = videos.get_feature_size(item_idx)
-            elif isinstance(videos, VideoProcessorItems):
+            else:
+                assert isinstance(videos, VideoProcessorItems)
                 image_size = videos.get_frame_size(item_idx)
                 num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
                 )
-            else:
-                raise TypeError(f"Unsupported video items: {type(videos)}")
 
             return [video_token_id] * num_video_tokens
 
