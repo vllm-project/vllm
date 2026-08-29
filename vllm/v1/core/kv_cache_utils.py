@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     compute_layout_strides,
+    iter_layer_specs,
     replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -649,9 +650,29 @@ def hash_block_tokens(
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the token span of a cache block under DCP."""
-    if isinstance(spec, AttentionSpec):
+    layer_specs = iter_layer_specs(spec)
+    if len(layer_specs) > 0 and all(
+        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
+    ):
         return spec.block_size * dcp_world_size
     return spec.block_size
+
+
+def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
+    """Return a KV cache spec with block sizes adjusted for DCP."""
+    block_size = resolve_dcp_kv_block_size(spec, dcp_world_size)
+    if block_size == spec.block_size:
+        return spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return replace(
+            spec,
+            block_size=block_size,
+            kv_cache_specs={
+                name: resolve_dcp_kv_cache_spec(layer_spec, dcp_world_size)
+                for name, layer_spec in spec.kv_cache_specs.items()
+            },
+        )
+    return replace(spec, block_size=block_size)
 
 
 def resolve_kv_cache_block_sizes(

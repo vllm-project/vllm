@@ -1827,6 +1827,59 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
 
 
+def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        UniformTypeKVCacheSpecs,
+    )
+
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=4, dcp_size=4)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    inner_specs = {
+        "layer0": FullAttentionSpec(
+            block_size=16, num_kv_heads=8, head_size=64, dtype=None
+        ),
+        "layer1": FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=None
+        ),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs=inner_specs,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(list(inner_specs), uniform_spec)],
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(decode_context_parallel_size=4),
+        kv_cache_config,
+    )
+
+    scaled_spec = w._kv_cache_groups[0].kv_cache_spec
+    assert isinstance(scaled_spec, UniformTypeKVCacheSpecs)
+    assert scaled_spec.block_size == 64
+    assert all(spec.block_size == 64 for spec in scaled_spec.kv_cache_specs.values())
+    assert w.coord.attention_groups[0].spec.block_size == 64
+    assert w.token_dbs[0].block_size == 64
+
+
 @pytest.mark.parametrize("dcp_size", [1, 4])
 def test_worker_put_striding_covers_every_rank_get_namespace(
     tmp_path, monkeypatch, dcp_size

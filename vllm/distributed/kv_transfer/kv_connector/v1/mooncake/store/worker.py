@@ -67,12 +67,11 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
-    resolve_dcp_kv_block_size,
+    resolve_dcp_kv_cache_spec,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -1512,19 +1511,15 @@ class MooncakeStoreWorker:
             )
             return
 
-        # Scale transfer-group specs to the token span used under DCP.
-        groups = []
-        for group in kv_cache_config.transfer_groups:
-            block_size = resolve_dcp_kv_block_size(group.kv_cache_spec, self.dcp_size)
-            if block_size != group.kv_cache_spec.block_size:
-                group = dataclasses.replace(
-                    group,
-                    kv_cache_spec=dataclasses.replace(
-                        group.kv_cache_spec, block_size=block_size
-                    ),
-                )
-            groups.append(group)
-        self._kv_cache_groups: list[KVCacheGroupSpec] = groups
+        self._kv_cache_groups = [
+            dataclasses.replace(
+                group,
+                kv_cache_spec=resolve_dcp_kv_cache_spec(
+                    group.kv_cache_spec, self.dcp_size
+                ),
+            )
+            for group in kv_cache_config.transfer_groups
+        ]
         spec_cfg = getattr(vllm_config, "speculative_config", None)
         use_eagle = bool(
             spec_cfg.use_eagle()
