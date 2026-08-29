@@ -1658,6 +1658,11 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
+            # Guard: KV-connector disagg paths (e.g. MoRIIO WideEP) may schedule
+            # synthetic health-probe requests whose compound req_ids are not
+            # included in model_runner_output.req_id_to_index. Skip them.
+            if req_id not in model_runner_output.req_id_to_index:
+                continue
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
