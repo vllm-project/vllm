@@ -1,8 +1,7 @@
-# Rust `vllm bench mm-processor` — Design (no code yet)
+# Rust `vllm bench mm-processor` — Design
 
-This document tracks the design discussion for a `vllm bench mm-processor`-style CLI
-command for the Rust frontend. **No code is included yet**; this draft PR is opened to
-align on scope before implementation.
+This document tracks the design and implementation for a `vllm bench mm-processor`-style
+CLI command for the Rust frontend.
 
 See: https://github.com/vllm-project/vllm/issues/47601 and
 https://github.com/vllm-project/vllm/issues/44280
@@ -30,34 +29,46 @@ Rust results are from a small smoke run; full benchmark pending. Note the model'
 `preprocessor_config.json` uses `shortest_edge=65536`/`longest_edge=16777216`, so even
 224x224 inputs upscale to 256 tokens — keep in mind for fair cross-model comparisons.
 
-## Proposed scope
+## Implementation
 
 ### Phase 1 — Timing hooks in `vllm-chat`
 
 - Request-id-keyed timing registry mirroring Python's `MultiModalTimingRegistry`
-  (`vllm/multimodal/registry.py`).
-- Instrument the preprocessing stages in `MultimodalModelInfo::prepare_multimodal`
-  (`rust/src/chat/src/multimodal.rs`): media fetch, `processor.preprocess` (the
-  `spawn_blocking` calls in `rust/src/chat/src/multimodal/image.rs`), prompt expansion,
-  and total.
-- Gated behind a flag; `stat()` clears; disabled is a no-op.
+  (`vllm/multimodal/registry.py`): `TimingContext` + `MultiModalTimingRegistry` in
+  `rust/src/chat/src/multimodal/timing.rs`.
+- Instruments the preprocessing stages in `MultimodalModelInfo::prepare_multimodal`
+  (`rust/src/chat/src/multimodal.rs`): `media_fetch`, `preprocess_image`,
+  `preprocess_video`, `preprocess_audio`, `prompt_expansion`, and `preprocessor_total`.
+- Gated behind `with_mm_processor_stats(enabled)`; `stat()` drains; disabled is a no-op.
 
 ### Phase 2 — `vllm-bench mm-processor` subcommand (Rust)
 
-Offline preprocessing-only mode: no server/engine/weights needed. Load model backends
-via `load_model_backends`, generate N `random-mm` prompts (reusing the existing dataset
-generation in `rust/src/bench/src/datasets/random_mm.rs`), run them through
-`prepare_multimodal`, aggregate per-stage timing from the Phase 1 registry, and report
+Implemented as `vllm_bench::run_mm_processor` plus the `MmProcessorArgs` CLI struct in
+`rust/src/bench/src/mm_processor.rs`, wired through the `mm-processor` subcommand in
+`rust/src/bench/src/main.rs`.
+
+The benchmark spawns a managed headless Python engine (real weights, real encoder),
+connects over the same handshake transport the serving frontend uses, then submits N
+`random-mm` prompts (reusing the dataset generation in
+`rust/src/bench/src/datasets/random_mm.rs`) through the full chat pipeline
+(render -> markers -> media fetch -> processor -> engine encode/decode). Per-stage
+timing is drained from the Phase 1 registry; results are reported as
 mean/median/std/P-s plus `--output-json`.
 
-An HTTP/E2E mode is intentionally out of scope: E2E latency is dominated by generation
-(delegated to the Python engine) and `vllm-bench --backend openai-chat` already covers
-E2E serving benchmarks.
+Note (deviation from the original design): this is a full end-to-end path (a live
+engine + generation), not an offline `prepare_multimodal`-only mode. An offline,
+weights-free preprocessing-only mode is not implemented yet; E2E parity with Python's
+`vllm bench mm-processor` was prioritized.
 
-Flags mirroring Python: `--dataset-name random-mm`, `--num-prompts`, `--num-warmups`,
-`--random-mm-*`, `--metric-percentiles`, `--output-json`.
+Concurrency is capped by `--max-concurrency` (default `1`), which matches Python's
+serial `LLMEngine` driver for a like-for-like preprocessing/e2e latency comparison.
+Set it higher to measure a concurrent serving-style workload.
+
+Flags mirroring Python: `--model`, `--num-prompts` (default 10), `--num-warmups`
+(default 1), `--random-mm-*`, `--metric-percentiles` (default 99),
+`--output-json`, plus `--max-concurrency`.
 
 ## Open questions
 
-1. Land Phase 1 (hooks) first, or both together?
+1. Implement the offline `prepare_multimodal`-only mode (no engine/weights)?
 2. Anything to add from the Rust frontend side?
