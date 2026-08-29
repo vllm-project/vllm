@@ -96,6 +96,7 @@ class Request:
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
+        self.blocked_since: float | None = None
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
 

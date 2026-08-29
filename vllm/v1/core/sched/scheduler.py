@@ -70,6 +70,8 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_BLOCKED_WAITING_TIMEOUT_S = 60.0
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -782,6 +784,7 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            temporarily_deferred: list[Request] = []
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
@@ -799,17 +802,37 @@ class Scheduler(SchedulerInterface):
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(
-                    request.status
-                ) and not self._try_promote_blocked_waiting_request(request):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    continue
+                if self._is_blocked_waiting_status(request.status):
+                    if self._try_promote_blocked_waiting_request(request):
+                        # Reset blocked_since on successful promotion
+                        request.blocked_since = None
+                    else:
+                        # Exclude WAITING_FOR_STREAMING_REQ from timeout
+                        if request.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+                            if request.blocked_since is None:
+                                request.blocked_since = time.time()
+                            elif (
+                                time.time() - request.blocked_since
+                                > _BLOCKED_WAITING_TIMEOUT_S
+                            ):
+                                self.finish_requests(
+                                    request_id, RequestStatus.FINISHED_ABORTED
+                                )
+                                continue
+                        else:
+                            # clear blocked_since for client-paced wait
+                            request.blocked_since = None
+
+                        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                            logger.debug(
+                                "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                                request_id,
+                            )
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                else:
+                    request.blocked_since = None
 
                 if (
                     request.num_stale_output_tokens > 0
@@ -1015,7 +1038,11 @@ class Scheduler(SchedulerInterface):
                             num_external_computed_tokens,
                         )
                         if num_new_tokens == 0:
-                            break
+                            if self.running:
+                                break
+                            request_queue.pop_request()
+                            temporarily_deferred.append(request)
+                            continue
                         if (
                             pad_spec_decode
                             and num_new_tokens != 1 + self.num_spec_tokens
@@ -1052,7 +1079,11 @@ class Scheduler(SchedulerInterface):
 
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
-                        break
+                        if self.running:
+                            break
+                        request_queue.pop_request()
+                        temporarily_deferred.append(request)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1103,7 +1134,11 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    if self.running:
+                        break
+                    request_queue.pop_request()
+                    temporarily_deferred.append(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1216,6 +1251,13 @@ class Scheduler(SchedulerInterface):
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
+
+            # Re-queue ordinary requests that were temporarily deferred due to
+            # resource exhaustion (not blocked-waiting status). These go back
+            # into self.waiting so they are reconsidered next step without
+            # polluting the skipped_waiting / deferred metrics.
+            for req in temporarily_deferred:
+                self.waiting.add_request(req)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
