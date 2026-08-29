@@ -75,7 +75,7 @@ pub(crate) fn validate_vocab_range(
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
@@ -122,5 +122,49 @@ mod tests {
                 vocab_size: 1000,
             } if token_ids == vec![1000, 1001]
         ));
+    }
+
+    #[test]
+    fn allowed_token_ids_validated_against_model_vocab_size() {
+        // Simulates a multimodal model where tokenizer has 128257 tokens
+        // but model output vocab is only 128256.
+        let limits = SamplingLimits {
+            max_model_len: 2048,
+            max_logprobs: 20,
+            model_vocab_size: 128256,
+            tokenizer_vocab_size: 128257,
+        };
+
+        let mut params = EngineCoreSamplingParams::default();
+        // ID 128256 is valid in the tokenizer but invalid for model output.
+        params.allowed_token_ids = Some(vec![128256]);
+
+        let result = validate_vocab_range(&params, &limits);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            TokenIdsError::OutOfVocab {
+                parameter: "allowed_token_ids",
+                token_ids,
+                vocab_size: 128256,
+            } if token_ids == vec![128256]
+        ));
+    }
+
+    #[test]
+    fn allowed_token_ids_accepts_last_valid_model_id() {
+        let limits = SamplingLimits {
+            max_model_len: 2048,
+            max_logprobs: 20,
+            model_vocab_size: 128256,
+            tokenizer_vocab_size: 128257,
+        };
+
+        let mut params = EngineCoreSamplingParams::default();
+        params.allowed_token_ids = Some(vec![128255]);
+
+        let result = validate_vocab_range(&params, &limits);
+        assert!(result.is_ok());
     }
 }
