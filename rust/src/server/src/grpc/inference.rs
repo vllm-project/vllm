@@ -86,7 +86,7 @@ impl InferenceServiceImpl {
                 let mm_features = self
                     .state
                     .chat
-                    .prepare_media(media, &mut token_ids)
+                    .prepare_media(media, &mut token_ids, &text_request.request_id)
                     .await
                     .map_err(|error| Status::internal(error.to_report_string()))?;
                 text_request.prompt = Prompt::TokenIds(token_ids);

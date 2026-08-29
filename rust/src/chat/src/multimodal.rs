@@ -41,9 +41,11 @@ mod expand;
 mod image;
 mod item;
 mod tensor;
+pub mod timing;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
+use self::timing::TimingContext;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -558,6 +560,7 @@ pub(crate) async fn finalize_rendered_prompt(
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
+    timing: &TimingContext,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     if !request.has_multimodal() {
         return Ok((rendered.prompt, None));
@@ -572,7 +575,9 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
+    let prepared = info
+        .prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype, timing)
+        .await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
@@ -701,28 +706,40 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        timing: &TimingContext,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         if media_parts_len == 0 {
             return Ok(Vec::new());
         }
+        let _total = timing.record("preprocessor_total");
+
         self.validate_mm_limits(&media_parts)?;
-        let fetched = self.fetch_media(media_parts).await?;
+        let fetched = {
+            let _stage = timing.record("media_fetch");
+            self.fetch_media(media_parts).await?
+        };
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
+            let _stage = timing.record("preprocess_image");
             prepared
                 .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
         }
         if !fetched.videos.is_empty() {
+            let _stage = timing.record("preprocess_video");
             prepared
                 .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
         }
         if !fetched.audios.is_empty() {
+            let _stage = timing.record("preprocess_audio");
             prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
         }
 
-        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
+        let mut ranges = {
+            let _stage = timing.record("prompt_expansion");
+            expand_prompt_token_ids(prompt_token_ids, &prepared)?
+        };
 
         let mut features = Vec::with_capacity(media_parts_len);
         for media in prepared {

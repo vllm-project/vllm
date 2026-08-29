@@ -5787,6 +5787,11 @@ dependencies = [
  "url",
  "uuid",
  "vllm-build-info",
+ "vllm-chat",
+ "vllm-engine-core-client",
+ "vllm-llm",
+ "vllm-managed-engine",
+ "vllm-text",
  "vllm-tracing",
 ]
 

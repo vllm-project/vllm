@@ -192,6 +192,11 @@ def validate_args(args):
         args.lora_path = None
     if not hasattr(args, "max_loras"):
         args.max_loras = None
+    # The processor benchmark has no serving backend of its own; reuse the
+    # multimodal-capable chat path so random-mm image content passes the
+    # backend gate inside get_samples.
+    if not getattr(args, "backend", None):
+        args.backend = "vllm-chat"
 
     if args.dataset_name == "hf" and not args.dataset_path:
         raise ValueError(

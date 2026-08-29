@@ -538,28 +538,43 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
         A namespace satisfying get_samples's attribute reads.
     """
     d = vars(args).copy()
-    # random_*: prefer --random-* over legacy --input/output/prefix-len.
-    d["random_input_len"] = getattr(args, "random_input_len", None) or args.input_len
-    d["random_output_len"] = getattr(args, "random_output_len", None) or args.output_len
-    d["random_prefix_len"] = getattr(args, "random_prefix_len", None) or args.prefix_len
+    # Legacy --input/output/prefix-len only exist on the serve/throughput
+    # namespaces; other entry points (e.g. `vllm bench mm-processor`) reuse
+    # this adapter without them, so fall back to None instead of crashing.
+    input_len = getattr(args, "input_len", None)
+    output_len = getattr(args, "output_len", None)
+    prefix_len = getattr(args, "prefix_len", None)
+    # random_*: prefer --random-* (even when explicitly zero) and only fall
+    # back to the legacy names when the attribute is absent.
+    d["random_input_len"] = getattr(args, "random_input_len", None)
+    if d["random_input_len"] is None:
+        d["random_input_len"] = input_len
+    d["random_output_len"] = getattr(args, "random_output_len", None)
+    if d["random_output_len"] is None:
+        d["random_output_len"] = output_len
+    d["random_prefix_len"] = getattr(args, "random_prefix_len", None)
+    if d["random_prefix_len"] is None:
+        d["random_prefix_len"] = prefix_len
     # --output-len maps to the per-dataset output-len entry points get_samples
     # reads. None passes through (each dataset applies its own default),
     # matching prior throughput behaviour of omitting output_len when unset.
-    d["hf_output_len"] = args.output_len
-    d["sharegpt_output_len"] = args.output_len
+    d["hf_output_len"] = output_len
+    d["sharegpt_output_len"] = output_len
     # sonnet reads dedicated attrs; fall back to SonnetDataset's own defaults.
-    d["sonnet_input_len"] = args.input_len if args.input_len is not None else 550
-    d["sonnet_output_len"] = args.output_len if args.output_len is not None else 150
-    d["sonnet_prefix_len"] = args.prefix_len
+    d["sonnet_input_len"] = input_len if input_len is not None else 550
+    d["sonnet_output_len"] = output_len if output_len is not None else 150
+    d["sonnet_prefix_len"] = prefix_len
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
     # multimodal chat backend (preserves today's vllm-chat handling).
     d["enable_multimodal_chat"] = bool(
-        getattr(args, "enable_multimodal_chat", False) or args.backend == "vllm-chat"
+        getattr(args, "enable_multimodal_chat", False)
+        or getattr(args, "backend", None) == "vllm-chat"
     )
     # serve-only attrs throughput never exposed; keep serve's defaults.
     d.setdefault("disable_shuffle", False)
     d.setdefault("skip_chat_template", False)
     d.setdefault("no_stream", False)
+    d.setdefault("no_oversample", False)
     d.setdefault("request_id_prefix", "")
     d.setdefault("chat_template_kwargs", None)
     return argparse.Namespace(**d)
@@ -570,10 +585,10 @@ def get_requests(args, tokenizer):
     # Throughput reuses bench serve's dataset dispatch. vllm-chat is the only
     # multimodal-capable throughput backend, so it is the only one allowed past
     # the multimodal gates inside get_samples; other backends raise there.
-    mm_backends = ("vllm-chat",) if args.backend == "vllm-chat" else ()
+    mm_backends = ("vllm-chat",) if getattr(args, "backend", None) == "vllm-chat" else ()
     requests = get_samples(serve_args, tokenizer, multimodal_backends=mm_backends)
     requests = assign_loras(requests, args)
-    requests = filter_requests_for_dp(requests, args.data_parallel_size)
+    requests = filter_requests_for_dp(requests, getattr(args, "data_parallel_size", 1))
     return requests
 
 
