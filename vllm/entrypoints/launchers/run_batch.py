@@ -185,7 +185,9 @@ class BatchRequestInput(OpenAIBaseModel):
     @classmethod
     def check_type_for_url(cls, value: Any, info: ValidationInfo):
         # Use url to disambiguate models
-        url: str = info.data["url"]
+        url = info.data.get("url")
+        if not isinstance(url, str):
+            return value
         if url == "/v1/chat/completions":
             return ChatCompletionRequest.model_validate(value)
         if url == "/v1/embeddings":

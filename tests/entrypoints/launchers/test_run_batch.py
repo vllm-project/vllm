@@ -10,11 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
 from vllm.connections import HTTPConnection
 from vllm.entrypoints.launchers.run_batch import (
+    BatchRequestInput,
     BatchRequestOutput,
     BatchTranscriptionRequest,
     download_bytes_from_url,
@@ -150,6 +152,7 @@ INVALID_INPUT_BATCH = "\n".join(
         },
     ]
 )
+
 
 INPUT_EMBEDDING_BATCH = "\n".join(
     json.dumps(req)
@@ -449,6 +452,31 @@ INPUT_TOOL_CALLING_BATCH = json.dumps(
         },
     }
 )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"custom_id": "request", "method": "POST", "body": {}},
+        {
+            "custom_id": "request",
+            "method": "POST",
+            "url": None,
+            "body": {},
+        },
+        {
+            "custom_id": "request",
+            "method": "POST",
+            "url": 123,
+            "body": {},
+        },
+    ],
+)
+def test_batch_request_invalid_url_reports_validation_error(payload):
+    with pytest.raises(ValidationError) as exc_info:
+        BatchRequestInput.model_validate(payload)
+
+    assert any(error["loc"] == ("url",) for error in exc_info.value.errors())
 
 
 def test_empty_file():
