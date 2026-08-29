@@ -286,7 +286,9 @@ class KimiK3ToolParser(ToolParser):
         tools_start = m_tools.start() if m_tools else -1
         response_end = m_rclose.start() if m_rclose else -1
 
-        candidates = [i for i in (tools_start, response_end) if i != -1]
+        message_end = self._message_close_re.search(current_text, body_start)
+        message_end = message_end.start() if message_end else -1
+        candidates = [i for i in (tools_start, response_end, message_end) if i != -1]
         if candidates:
             sendable_idx = min(candidates)
         else:
@@ -294,6 +296,7 @@ class KimiK3ToolParser(ToolParser):
                 _partial_tag_overlap(current_text, self.response_open),
                 _partial_tag_overlap(current_text, self.response_close),
                 _partial_tag_overlap(current_text, self.tools_open),
+                _partial_tag_overlap(current_text, "<|close|>message<|sep|>"),
             )
             sendable_idx = len(current_text) - overlap
 

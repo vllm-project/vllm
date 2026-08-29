@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -20,6 +21,8 @@ THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
 TOOLS_OPEN = f"{OPEN}tools{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
 
 
 class DummyTokenizer:
@@ -33,11 +36,22 @@ class DummyTokenizer:
             return [4, 2, 3]
         if text == TOOLS_OPEN:
             return [5, 2, 3]
+        if text == RESPONSE_OPEN:
+            return [6, 2, 3]
+        if text == RESPONSE_CLOSE:
+            return [7, 2, 3]
+        if text == MESSAGE_CLOSE:
+            return [8, 2, 3]
         return [ord(ch) for ch in text]
 
 
 class ReasoningOnlyParser(KimiK3Parser):
     reasoning_parser_cls = KimiK3ReasoningParser
+
+
+class ReasoningAndToolParser(KimiK3Parser):
+    reasoning_parser_cls = KimiK3ReasoningParser
+    tool_parser_cls = KimiK3ToolParser
 
 
 def test_parser_manager_selects_kimi_k3_parser_for_reasoning_only():
@@ -108,6 +122,40 @@ def test_tools_channel_ends_reasoning_when_think_close_is_missing():
     parser = KimiK3ReasoningParser(DummyTokenizer())
 
     assert parser.is_reasoning_end([1, 2, 3, 9, 5, 2, 3])
+
+
+@pytest.mark.parametrize(
+    "marker", [TOOLS_OPEN, RESPONSE_OPEN, RESPONSE_CLOSE, MESSAGE_CLOSE]
+)
+def test_implicit_channel_markers_end_reasoning(marker):
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    assert parser.is_reasoning_end([*OPEN_IDS, 9, *DummyTokenizer().encode(marker)])
+
+
+def test_parse_skipped_think_close_reaches_tool_parser():
+    parser = ReasoningAndToolParser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_choice="auto",
+    )
+    output = (
+        f"{THINK_OPEN}step{TOOLS_OPEN}"
+        '<|open|>call tool="read_file" index="0"<|sep|>'
+        '<|open|>argument key="path" type="string"<|sep|>README.md'
+        f"{CLOSE}argument{SEP}{CLOSE}call{SEP}{CLOSE}tools{SEP}"
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        output, request, enable_auto_tools=True
+    )
+
+    assert reasoning == "step"
+    assert content is None
+    assert tool_calls is not None
+    assert tool_calls[0].name == "read_file"
 
 
 def test_new_think_block_stays_in_reasoning_after_prior_tools_channel():
@@ -194,6 +242,72 @@ def test_streaming_split_close_marker_hands_content_downstream():
     assert closed.reasoning is None
     assert closed.content == f"{RESPONSE_OPEN}answer"
     assert parser.extract_content_ids([2, 3, 10]) == [10]
+
+
+def test_streaming_implicit_tools_marker_hands_channel_downstream():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    result = parser.extract_reasoning_content_streaming(
+        previous_text=f"{THINK_OPEN}step",
+        current_text=f"{THINK_OPEN}step{TOOLS_OPEN}",
+        delta_text=TOOLS_OPEN,
+        previous_token_ids=[1, 2, 3, 9],
+        current_token_ids=[1, 2, 3, 9, 5, 2, 3],
+        delta_token_ids=[5, 2, 3],
+    )
+
+    assert result is not None
+    assert result.reasoning is None
+    assert result.content == TOOLS_OPEN
+
+
+def test_parse_delta_skipped_think_close_passes_tools_channel():
+    parser = ReasoningAndToolParser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_choice="auto",
+    )
+
+    parser.parse_delta(
+        delta_text="step",
+        delta_token_ids=[9],
+        request=request,
+        prompt_token_ids=OPEN_IDS,
+        finished=False,
+    )
+    result = parser.parse_delta(
+        delta_text=TOOLS_OPEN,
+        delta_token_ids=[5, 2, 3],
+        request=request,
+        finished=False,
+    )
+
+    assert result is None
+    result = parser.parse_delta(
+        delta_text=(
+            '<|open|>call tool="read_file" index="0"<|sep|>'
+            '<|open|>argument key="path" type="string"<|sep|>README.md'
+            f"{CLOSE}argument{SEP}{CLOSE}call{SEP}"
+        ),
+        delta_token_ids=[9],
+        request=request,
+        finished=False,
+    )
+
+    assert result is not None
+    assert result.tool_calls is not None
+    assert result.tool_calls[0].function.name == "read_file"
+
+
+def test_tool_streaming_content_stops_at_message_terminator():
+    parser = KimiK3ToolParser(DummyTokenizer())
+
+    streamed = parser._extract_response_content(f"answer{MESSAGE_CLOSE}")
+    non_streamed = parser._strip_response_content(f"answer{MESSAGE_CLOSE}")
+
+    assert streamed == non_streamed == "answer"
 
 
 def test_thinking_disabled_streams_content():
