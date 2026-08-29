@@ -16,25 +16,33 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+
 from .primitives import (
     NUM_LAMPORT_BUFFERS,
     PACKED_BYTES,
     VEC_BF16,
     bf16x8_to_packed_u32x4,
-    block_sum_specialized,
+    finalize_top16_bf16,
     fragment_is_dirty,
     load_global_u32x4,
+    load_shared_f32x2,
+    load_shared_f32x4,
     load_volatile_u32,
     map_shared_to_peer,
     packed_u32x4_to_bf16x8,
     red_async_release_gpu_add_u32,
     sanitize_negative_zero,
+    stmc_bf16x8,
     store_global_u32x4,
     store_lamport_sentinel_128,
     store_shared_cluster_f32,
     to_cute,
     to_cute_dynamic_m,
+    warp_sum_specialized,
 )
+
+_SEVEN_CTA_MAX_M = 4
 
 
 def _mapping(
@@ -90,7 +98,7 @@ def _select_routed_schedule(
 
 
 class AllReduceRMSNormWithReduceScatterEarlyExit:
-    """One routed role plus one ReduceScatter role per destination group."""
+    """One routed role plus one compact ReduceScatter role."""
 
     def __init__(
         self,
@@ -104,6 +112,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         fp32_internal: bool = False,
         include_reduce_scatter: bool = True,
         include_routed: bool = True,
+        top_k: int = 0,
     ):
         validate_shape(
             tp_size=tp_size,
@@ -124,22 +133,44 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             mapped_threads,
             shared_roles,
         ) = _mapping(tp_size, latent_dim, hidden_dim)
+        seven_cta_geometry = (
+            include_routed
+            and max_m <= _SEVEN_CTA_MAX_M
+            and max_token_ctas == max_m
+            and (tp_size, latent_dim, hidden_dim) == (8, 3584, 7168)
+        )
+        self.seven_cta_geometry = seven_cta_geometry
+        self.single_token_geometry = seven_cta_geometry and max_m == 1
         if include_reduce_scatter:
-            self.cluster_ctas = mapped_cluster
-            self.threads = mapped_threads
+            if seven_cta_geometry:
+                self.cluster_ctas = 7
+                self.threads = 64
+                shared_roles = (tp_size + self.cluster_ctas - 1) // self.cluster_ctas
+            else:
+                self.cluster_ctas = mapped_cluster
+                self.threads = mapped_threads
         else:
-            self.threads, self.cluster_ctas = _select_routed_schedule(
-                tp_size, latent_dim, hidden_dim, max_m
-            )
+            if seven_cta_geometry:
+                self.threads, self.cluster_ctas = 64, 7
+            else:
+                self.threads, self.cluster_ctas = _select_routed_schedule(
+                    tp_size, latent_dim, hidden_dim, max_m
+                )
+        self.shared_roles = 1 if include_reduce_scatter else shared_roles
+        self.shared_destination_stride = self.shared_roles * self.cluster_ctas
+        self.shared_destinations_per_cta = (
+            self.tp_size + self.shared_destination_stride - 1
+        ) // self.shared_destination_stride
+        self.shard_vectors = self.shard_dim // VEC_BF16
         # Diagnostic specialization: a one-role grid executes only the routed
         # AllReduce/RMSNorm path.  Keep this compile-time so the production
         # fused path is unchanged when include_reduce_scatter=True.
         if include_routed and include_reduce_scatter:
-            self.roles = 1 + shared_roles
+            self.roles = 1 + self.shared_roles
         elif include_routed:
             self.roles = 1
         else:
-            self.roles = shared_roles
+            self.roles = self.shared_roles
         self.warps = (self.threads + 31) // 32
         self.last_warp_lanes = self.threads - (self.warps - 1) * 32
         self.last_warp_mask = (1 << self.last_warp_lanes) - 1
@@ -153,6 +184,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         self.fp32_internal = fp32_internal
         self.include_reduce_scatter = include_reduce_scatter
         self.include_routed = include_routed
+        self.top_k = top_k
 
     @cute.jit
     def __call__(
@@ -171,7 +203,10 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         m: Int32,
         epsilon: Float32,
         stream: cuda.CUstream,
+        expert_weights: cute.Tensor,
+        expanded_idx_to_permuted_idx: cute.Tensor,
     ):
+        grid_x = m if cutlass.const_expr(self.seven_cta_geometry) else self.token_ctas
         self.kernel(
             latent_source,
             gamma,
@@ -186,11 +221,13 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             shared_peer_ptrs,
             m,
             epsilon,
+            expert_weights,
+            expanded_idx_to_permuted_idx,
         ).launch(
-            grid=(self.token_ctas, self.cluster_ctas, self.roles),
+            grid=(grid_x, self.cluster_ctas, self.roles),
             block=(self.threads, 1, 1),
             cluster=(1, self.cluster_ctas, 1),
-            smem=(self.warps + self.cluster_ctas) * 4,
+            smem=2 * self.cluster_ctas * self.warps * 4,
             stream=stream,
             use_pdl=True,
         )
@@ -211,6 +248,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         shared_peer_ptrs: cute.Tensor,
         m: Int32,
         epsilon: Float32,
+        expert_weights: cute.Tensor,
+        expanded_idx_to_permuted_idx: cute.Tensor,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         token_cta, cta_y, role = cute.arch.block_idx()
@@ -223,6 +262,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
 
         cute.arch.griddepcontrol_wait()
         token = token_cta
+        parity = Int32(0)
         while token < m:
             self._token_device(
                 latent_source,
@@ -239,13 +279,17 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 m,
                 epsilon,
                 token,
+                parity,
                 token_cta,
                 cta_y,
                 logical_role,
                 cluster_rank,
                 tidx,
+                expert_weights,
+                expanded_idx_to_permuted_idx,
             )
             token = token + self.token_ctas
+            parity = parity ^ Int32(1)
 
     @cute.jit
     def _token_device(
@@ -264,11 +308,14 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         m: Int32,
         epsilon: Float32,
         token: Int32,
+        parity: Int32,
         token_cta: Int32,
         cta_y: Int32,
         role: Int32,
         cluster_rank: Int32,
         tidx: Int32,
+        expert_weights: cute.Tensor,
+        expanded_idx_to_permuted_idx: cute.Tensor,
     ):
         if role == 0:
             # ---------------- routed AllReduce + RMSNorm ----------------
@@ -292,15 +339,84 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             )
             dirty_elements = Int64(dirty_index) * (Int64(bytes_per_buffer) // Int64(2))
 
-            local_ptr = cute.make_ptr(
-                BFloat16,
-                (latent_source.iterator + element_offset).llvm_ptr,
-                cute.AddressSpace.gmem,
-                assumed_align=16,
-            )
-            local_packed = sanitize_negative_zero(
-                load_global_u32x4(local_ptr, volatile=False)
-            )
+            if cutlass.const_expr(self.top_k > 0):
+                # finalize topk reduction
+                if cutlass.const_expr(
+                    self.top_k == 16
+                    and self.latent_dim == 3584
+                    and expert_weights.element_type == BFloat16
+                ):
+                    gemm2_vector = cute.make_ptr(
+                        BFloat16,
+                        (
+                            latent_source.iterator + Int64(packed_idx) * VEC_BF16
+                        ).llvm_ptr,
+                        cute.AddressSpace.gmem,
+                        assumed_align=16,
+                    )
+                    route_indices = cute.make_ptr(
+                        Int32,
+                        (
+                            expanded_idx_to_permuted_idx.iterator
+                            + Int64(token) * self.top_k
+                        ).llvm_ptr,
+                        cute.AddressSpace.gmem,
+                        assumed_align=16,
+                    )
+                    route_weights = cute.make_ptr(
+                        BFloat16,
+                        (expert_weights.iterator + Int64(token) * self.top_k).llvm_ptr,
+                        cute.AddressSpace.gmem,
+                        assumed_align=16,
+                    )
+                    local_packed = sanitize_negative_zero(
+                        finalize_top16_bf16(
+                            gemm2_vector,
+                            route_indices,
+                            route_weights,
+                        )
+                    )
+                else:
+                    local_values = cute.make_rmem_tensor(
+                        cute.make_layout((VEC_BF16,)), Float32
+                    )
+                    for element in cutlass.range_constexpr(VEC_BF16):
+                        local_values[element] = Float32(0.0)
+                    for slot in cutlass.range_constexpr(self.top_k):
+                        permuted_idx = expanded_idx_to_permuted_idx[token, slot]
+                        if permuted_idx >= Int32(0):
+                            permuted_element = (
+                                Int64(permuted_idx) * self.latent_dim
+                                + Int64(packed_idx) * VEC_BF16
+                            )
+                            permuted_ptr = cute.make_ptr(
+                                BFloat16,
+                                (latent_source.iterator + permuted_element).llvm_ptr,
+                                cute.AddressSpace.gmem,
+                                assumed_align=16,
+                            )
+                            values = packed_u32x4_to_bf16x8(
+                                load_global_u32x4(permuted_ptr, volatile=False)
+                            )
+                            weight = expert_weights[token, slot].to(Float32)
+                            for element in cutlass.range_constexpr(VEC_BF16):
+                                local_values[element] = (
+                                    local_values[element]
+                                    + values[element].to(Float32) * weight
+                                )
+                    local_packed = sanitize_negative_zero(
+                        bf16x8_to_packed_u32x4(local_values.load().to(BFloat16))
+                    )
+            else:
+                local_ptr = cute.make_ptr(
+                    BFloat16,
+                    (latent_source.iterator + element_offset).llvm_ptr,
+                    cute.AddressSpace.gmem,
+                    assumed_align=16,
+                )
+                local_packed = sanitize_negative_zero(
+                    load_global_u32x4(local_ptr, volatile=False)
+                )
             multicast_offset = (
                 Int64(current_index) * Int64(bytes_per_buffer)
                 + (
@@ -309,17 +425,20 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 )
                 * 2
             )
-            store_global_u32x4(
+            stmc_bf16x8(
                 latent_multicast_ptr + multicast_offset,
                 local_packed,
-                volatile=False,
             )
+            cute.arch.griddepcontrol_launch_dependents()
 
-            cute.arch.cluster_arrive()
-            if cluster_rank == 0 and tidx < 32:
-                cute.arch.cluster_wait()
-                if tidx == 0:
-                    red_async_release_gpu_add_u32(latent_flags.iterator + 8, Uint32(1))
+            if cutlass.const_expr(not self.single_token_geometry):
+                cute.arch.cluster_arrive()
+                if cluster_rank == 0 and tidx < 32:
+                    cute.arch.cluster_wait()
+                    if tidx == 0:
+                        red_async_release_gpu_add_u32(
+                            latent_flags.iterator + 8, Uint32(1)
+                        )
 
             global_tid = (
                 Int64(token) * self.cluster_ctas + Int64(cta_y)
@@ -378,9 +497,6 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 for element in cutlass.range_constexpr(VEC_BF16):
                     accum[element] = accum[element] + values[element]
 
-            # Preserve the original early PDL point before RMSNorm.
-            cute.arch.griddepcontrol_launch_dependents()
-
             if cutlass.const_expr(self.fp32_internal):
                 # High-precision fused mode: retain the rank reduction in
                 # FP32 through the RMS square and row reduction.
@@ -398,32 +514,53 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 reduction_profile=0,
             )
             smem = cutlass.utils.SmemAllocator()
-            warp_sums = smem.allocate_tensor(
-                Float32, cute.make_layout((self.warps,)), byte_alignment=4
-            )
             cluster_sums = smem.allocate_tensor(
                 Float32,
-                cute.make_layout((self.cluster_ctas,)),
-                byte_alignment=4,
+                cute.make_layout((2 * self.cluster_ctas * self.warps,)),
+                byte_alignment=16,
             )
-            block_sum = block_sum_specialized(
+            lane = cute.arch.lane_idx()
+            warp_idx = cute.arch.warp_idx()
+            warp_sum = warp_sum_specialized(
                 thread_sum,
-                warp_sums,
-                tidx,
+                warp_idx,
+                lane,
                 self.warps,
                 self.last_warp_lanes,
                 self.last_warp_mask,
             )
-            if tidx < self.cluster_ctas:
-                local_slot = cluster_sums.iterator + cluster_rank
-                remote_slot = map_shared_to_peer(local_slot, Int32(tidx))
-                store_shared_cluster_f32(remote_slot, block_sum)
+            # Alternate DSM slots until the next cluster synchronization so
+            # peers may safely begin publishing the following token wave.
+            parity_offset = parity * Int32(self.cluster_ctas * self.warps)
+            if lane < self.cluster_ctas:
+                local_slot = (
+                    cluster_sums.iterator
+                    + parity_offset
+                    + cluster_rank * self.warps
+                    + warp_idx
+                )
+                remote_slot = map_shared_to_peer(local_slot, lane)
+                store_shared_cluster_f32(remote_slot, warp_sum)
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()
 
             full_sum = Float32(0.0)
             for peer in cutlass.range_constexpr(self.cluster_ctas):
-                full_sum = full_sum + cluster_sums[peer]
+                peer_slot = cluster_sums.iterator + parity_offset + peer * self.warps
+                if cutlass.const_expr(self.warps == 4):
+                    sum0, sum1, sum2, sum3 = load_shared_f32x4(peer_slot)
+                    full_sum = full_sum + sum0 + sum1 + sum2 + sum3
+                elif cutlass.const_expr(self.warps == 2):
+                    sum0, sum1 = load_shared_f32x2(peer_slot)
+                    full_sum = full_sum + sum0 + sum1
+                else:
+                    for peer_warp in cutlass.range_constexpr(self.warps):
+                        full_sum = (
+                            full_sum
+                            + cluster_sums[
+                                parity_offset + peer * self.warps + peer_warp
+                            ]
+                        )
             inv_rms = cute.math.rsqrt(
                 full_sum / Float32(self.latent_dim) + epsilon, fastmath=True
             )
@@ -443,9 +580,9 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 volatile=False,
             )
 
-            # The x=0 CTA rotates only after reaching its final token wave.
-            # Waiting for all M arrivals then guarantees every token-wave CTA
-            # loaded the current generation before the metadata is advanced.
+            # The general schedule waits until every token cluster has loaded
+            # this generation. The M=1 schedule has only this cluster, whose
+            # DSM barrier above already covers all routed CTAs.
             if (
                 token_cta == 0
                 and token + self.token_ctas >= m
@@ -453,9 +590,10 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 and tidx == 0
             ):
                 access_counter = latent_flags.iterator + 8
-                arrived = load_volatile_u32(access_counter)
-                while arrived < Uint32(m):
+                if cutlass.const_expr(not self.single_token_geometry):
                     arrived = load_volatile_u32(access_counter)
+                    while arrived < Uint32(m):
+                        arrived = load_volatile_u32(access_counter)
                 next_index = (current_index + Uint32(1)) % Uint32(NUM_LAMPORT_BUFFERS)
                 actual_bytes = Uint32(m) * Uint32(self.tp_size * self.latent_dim * 2)
                 cute.arch.store((latent_flags.iterator + 0).llvm_ptr, next_index)
@@ -493,111 +631,136 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             )
             dirty_elements = Int64(dirty_index) * (Int64(bytes_per_buffer) // Int64(2))
 
-            source_element = (
-                Int64(token) * self.hidden_dim
-                + Int64(destination) * self.shard_dim
-                + Int64(tidx) * VEC_BF16
-            )
-            source_ptr = cute.make_ptr(
-                BFloat16,
-                (shared_source.iterator + source_element).llvm_ptr,
-                cute.AddressSpace.gmem,
-                assumed_align=16,
-            )
-            local_packed = sanitize_negative_zero(
-                load_global_u32x4(source_ptr, volatile=False)
-            )
-            peer_base = cute.arch.load(
-                (shared_peer_ptrs.iterator + destination).llvm_ptr,
-                Int64,
-            )
-            destination_element = current_elements + (
-                (Int64(token) * self.tp_size + self.rank) * self.shard_dim
-                + Int64(tidx) * VEC_BF16
-            )
-            store_global_u32x4(
-                peer_base + destination_element * 2,
-                local_packed,
-                volatile=False,
-            )
+            for destination_round in cutlass.range_constexpr(
+                self.shared_destinations_per_cta
+            ):
+                round_destination = destination + Int32(
+                    destination_round * self.shared_destination_stride
+                )
+                if round_destination < Int32(self.tp_size):
+                    peer_base = cute.arch.load(
+                        (shared_peer_ptrs.iterator + round_destination).llvm_ptr,
+                        Int64,
+                    )
+                    vector = tidx
+                    while vector < self.shard_vectors:
+                        source_element = (
+                            Int64(token) * self.hidden_dim
+                            + Int64(round_destination) * self.shard_dim
+                            + Int64(vector) * VEC_BF16
+                        )
+                        source_ptr = cute.make_ptr(
+                            BFloat16,
+                            (shared_source.iterator + source_element).llvm_ptr,
+                            cute.AddressSpace.gmem,
+                            assumed_align=16,
+                        )
+                        local_packed = sanitize_negative_zero(
+                            load_global_u32x4(source_ptr, volatile=False)
+                        )
+                        destination_element = current_elements + (
+                            (Int64(token) * self.tp_size + self.rank) * self.shard_dim
+                            + Int64(vector) * VEC_BF16
+                        )
+                        store_global_u32x4(
+                            peer_base + destination_element * 2,
+                            local_packed,
+                            volatile=False,
+                        )
+                        vector = vector + self.threads
 
-            # One arrival per shared destination group and token.
+            cute.arch.griddepcontrol_launch_dependents()
+
+            # One arrival per shared cluster and token.
             cute.arch.cluster_arrive()
             if cluster_rank == 0 and tidx < 32:
                 cute.arch.cluster_wait()
                 if tidx == 0:
                     red_async_release_gpu_add_u32(shared_flags.iterator + 8, Uint32(1))
 
-            global_tid = (
-                Int64(token) * self.tp_size + Int64(destination)
-            ) * self.threads + Int64(tidx)
             total_threads = Int64(m) * self.tp_size * self.threads
             clear_fragments = (Int64(bytes_to_clear) + PACKED_BYTES - 1) // PACKED_BYTES
-            clear_idx = global_tid
-            if dirty_num_stages > Uint32(0):
-                while clear_idx < clear_fragments:
-                    clear_ptr = cute.make_ptr(
-                        BFloat16,
-                        (
-                            shared_workspace.iterator
-                            + dirty_elements
-                            + clear_idx * VEC_BF16
-                        ).llvm_ptr,
-                        cute.AddressSpace.gmem,
-                        assumed_align=16,
-                    )
-                    store_lamport_sentinel_128(clear_ptr)
-                    clear_idx = clear_idx + total_threads
-
-            if destination == self.rank:
-                rank_words = cute.make_rmem_tensor(
-                    cute.make_layout((self.tp_size, 4), stride=(4, 1)), Uint32
+            for destination_round in cutlass.range_constexpr(
+                self.shared_destinations_per_cta
+            ):
+                round_destination = destination + Int32(
+                    destination_round * self.shared_destination_stride
                 )
-                valid = False
-                while not valid:
-                    valid = True
-                    for source_rank in cutlass.range_constexpr(self.tp_size):
-                        remote_element = current_elements + (
-                            (Int64(token) * self.tp_size + source_rank) * self.shard_dim
-                            + Int64(tidx) * VEC_BF16
-                        )
-                        remote_ptr = cute.make_ptr(
+                global_tid = (
+                    Int64(token) * self.tp_size + Int64(round_destination)
+                ) * self.threads + Int64(tidx)
+                clear_idx = global_tid
+                if round_destination < Int32(
+                    self.tp_size
+                ) and dirty_num_stages > Uint32(0):
+                    while clear_idx < clear_fragments:
+                        clear_ptr = cute.make_ptr(
                             BFloat16,
-                            (shared_workspace.iterator + remote_element).llvm_ptr,
+                            (
+                                shared_workspace.iterator
+                                + dirty_elements
+                                + clear_idx * VEC_BF16
+                            ).llvm_ptr,
                             cute.AddressSpace.gmem,
                             assumed_align=16,
                         )
-                        remote = load_global_u32x4(remote_ptr, volatile=True)
-                        for word in cutlass.range_constexpr(4):
-                            rank_words[source_rank, word] = remote[word]
-                        valid = valid & (not fragment_is_dirty(remote))
+                        store_lamport_sentinel_128(clear_ptr)
+                        clear_idx = clear_idx + total_threads
 
-                accum = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
-                for element in cutlass.range_constexpr(VEC_BF16):
-                    accum[element] = Float32(0.0)
-                for source_rank in cutlass.range_constexpr(self.tp_size):
-                    values = packed_u32x4_to_bf16x8(
-                        rank_words[source_rank, None].load()
-                    ).to(Float32)
-                    for element in cutlass.range_constexpr(VEC_BF16):
-                        accum[element] = accum[element] + values[element]
-                result = accum.load().to(BFloat16)
-                output_element = (
-                    Int64(token) * self.hidden_dim
-                    + self.rank * self.shard_dim
-                    + Int64(tidx) * VEC_BF16
-                )
-                store_global_u32x4(
-                    Int64((shared_output.iterator + output_element).toint()),
-                    bf16x8_to_packed_u32x4(result),
-                    volatile=False,
-                )
+                if round_destination == self.rank:
+                    vector = tidx
+                    while vector < self.shard_vectors:
+                        rank_words = cute.make_rmem_tensor(
+                            cute.make_layout((self.tp_size, 4), stride=(4, 1)),
+                            Uint32,
+                        )
+                        valid = False
+                        while not valid:
+                            valid = True
+                            for source_rank in cutlass.range_constexpr(self.tp_size):
+                                remote_element = current_elements + (
+                                    (Int64(token) * self.tp_size + source_rank)
+                                    * self.shard_dim
+                                    + Int64(vector) * VEC_BF16
+                                )
+                                remote_ptr = cute.make_ptr(
+                                    BFloat16,
+                                    (
+                                        shared_workspace.iterator + remote_element
+                                    ).llvm_ptr,
+                                    cute.AddressSpace.gmem,
+                                    assumed_align=16,
+                                )
+                                remote = load_global_u32x4(remote_ptr, volatile=True)
+                                for word in cutlass.range_constexpr(4):
+                                    rank_words[source_rank, word] = remote[word]
+                                valid = valid & (not fragment_is_dirty(remote))
 
-            if destination == self.rank:
-                cute.arch.barrier()
+                        accum = cute.make_rmem_tensor(
+                            cute.make_layout((VEC_BF16,)), Float32
+                        )
+                        for element in cutlass.range_constexpr(VEC_BF16):
+                            accum[element] = Float32(0.0)
+                        for source_rank in cutlass.range_constexpr(self.tp_size):
+                            values = packed_u32x4_to_bf16x8(
+                                rank_words[source_rank, None].load()
+                            ).to(Float32)
+                            for element in cutlass.range_constexpr(VEC_BF16):
+                                accum[element] = accum[element] + values[element]
+                        result = accum.load().to(BFloat16)
+                        output_element = (
+                            Int64(token) * self.hidden_dim
+                            + self.rank * self.shard_dim
+                            + Int64(vector) * VEC_BF16
+                        )
+                        store_global_u32x4(
+                            Int64((shared_output.iterator + output_element).toint()),
+                            bf16x8_to_packed_u32x4(result),
+                            volatile=False,
+                        )
+                        vector = vector + self.threads
 
-            cute.arch.griddepcontrol_launch_dependents()
-
+                    cute.arch.barrier()
             if (
                 token_cta == 0
                 and token + self.token_ctas >= m
@@ -607,7 +770,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             ):
                 access_counter = shared_flags.iterator + 8
                 arrived = load_volatile_u32(access_counter)
-                target = Uint32(m) * Uint32(self.tp_size // self.cluster_ctas)
+                target = Uint32(m) * Uint32(self.shared_roles)
                 while arrived < target:
                     arrived = load_volatile_u32(access_counter)
                 next_index = (current_index + Uint32(1)) % Uint32(NUM_LAMPORT_BUFFERS)
@@ -645,6 +808,8 @@ def _compile_key(
     fp32_internal: bool,
     include_reduce_scatter: bool,
     include_routed: bool,
+    *,
+    top_k: int,
 ):
     return (
         torch.accelerator.current_device_index(),
@@ -657,6 +822,7 @@ def _compile_key(
         fp32_internal,
         include_reduce_scatter,
         include_routed,
+        top_k,
     )
 
 
@@ -673,6 +839,9 @@ def _runtime_args(
     shared_flags: torch.Tensor,
     shared_peer_ptrs: torch.Tensor,
     rms_eps: float,
+    *,
+    expert_weights: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
 ):
     return (
         to_cute_dynamic_m(latent_source, mode=0, assumed_align=16),
@@ -686,9 +855,11 @@ def _runtime_args(
         to_cute(shared_workspace, 16),
         to_cute(shared_flags, 16),
         to_cute(shared_peer_ptrs, 16),
-        Int32(latent_source.shape[0]),
+        Int32(shared_source.shape[0]),
         Float32(rms_eps),
         cuda.CUstream(torch.cuda.current_stream(latent_source.device).cuda_stream),
+        to_cute_dynamic_m(expert_weights, mode=0, assumed_align=16),
+        to_cute_dynamic_m(expanded_idx_to_permuted_idx, mode=0, assumed_align=16),
     )
 
 
@@ -712,6 +883,7 @@ def compile_kernel(
     fp32_internal: bool,
     include_reduce_scatter: bool = True,
     include_routed: bool = True,
+    top_k: int = 0,
 ) -> None:
     """Compile the rank/M specialization without retaining caller tensors."""
 
@@ -725,11 +897,17 @@ def compile_kernel(
         fp32_internal,
         include_reduce_scatter,
         include_routed,
+        top_k=top_k,
     )
     if key in _COMPILED:
         return
     device = latent_output.device
-    latent = torch.empty((max_m, latent_dim), dtype=torch.bfloat16, device=device)
+    latent_rows = max_m * max(top_k, 1)
+    latent = torch.empty((latent_rows, latent_dim), dtype=torch.bfloat16, device=device)
+    expert_weights = torch.empty(
+        (max_m, max(top_k, 1)), dtype=torch.bfloat16, device=device
+    )
+    expanded_idx = torch.empty((max_m, max(top_k, 1)), dtype=torch.int32, device=device)
     gamma = torch.empty((latent_dim,), dtype=torch.bfloat16, device=device)
     shared = torch.empty((max_m, hidden_dim), dtype=torch.bfloat16, device=device)
     kernel = AllReduceRMSNormWithReduceScatterEarlyExit(
@@ -742,6 +920,7 @@ def compile_kernel(
         fp32_internal=fp32_internal,
         include_reduce_scatter=include_reduce_scatter,
         include_routed=include_routed,
+        top_k=top_k,
     )
     _COMPILED[key] = cute.compile(
         kernel,
@@ -758,6 +937,8 @@ def compile_kernel(
             shared_flags,
             shared_peer_ptrs,
             rms_eps,
+            expert_weights=expert_weights,
+            expanded_idx_to_permuted_idx=expanded_idx,
         ),
     )
 
@@ -785,6 +966,9 @@ def launch(
     fp32_internal: bool,
     include_reduce_scatter: bool = True,
     include_routed: bool = True,
+    expert_weights: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
+    top_k: int = 0,
 ) -> None:
     compile_kernel(
         rank=rank,
@@ -805,6 +989,7 @@ def launch(
         fp32_internal=fp32_internal,
         include_reduce_scatter=include_reduce_scatter,
         include_routed=include_routed,
+        top_k=top_k,
     )
     _COMPILED[
         _compile_key(
@@ -817,6 +1002,7 @@ def launch(
             fp32_internal,
             include_reduce_scatter,
             include_routed,
+            top_k=top_k,
         )
     ](
         *_runtime_args(
@@ -832,6 +1018,8 @@ def launch(
             shared_flags,
             shared_peer_ptrs,
             rms_eps,
+            expert_weights=expert_weights,
+            expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
         )
     )
 
@@ -851,6 +1039,7 @@ class CollectiveKernel:
         max_token_ctas: int,
         rms_eps: float,
         fp32_internal: bool,
+        top_k: int = 0,
     ) -> None:
         validate_shape(
             tp_size=tp_size,
@@ -866,7 +1055,23 @@ class CollectiveKernel:
         self.max_token_ctas = max_token_ctas
         self.rms_eps = float(rms_eps)
         self.fp32_internal = fp32_internal
+        self.top_k = top_k
         device = torch.device("cuda", torch.accelerator.current_device_index())
+
+        self._dummy_expert_weights = torch.empty(
+            (max_m, max(top_k, 1)), dtype=torch.bfloat16, device=device
+        )
+        self._dummy_expanded_idx = torch.empty(
+            (max_m, max(top_k, 1)), dtype=torch.int32, device=device
+        )
+        self._seven_cta_max_m = (
+            min(max_m, _SEVEN_CTA_MAX_M)
+            if (tp_size, latent_dim, hidden_dim) == (8, 3584, 7168)
+            and top_k == 16
+            and self._dummy_expert_weights.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(device)[0] == 10
+            else 0
+        )
 
         bytes_per_routed_buffer = max_m * tp_size * latent_dim * 2
         routed_bytes = NUM_LAMPORT_BUFFERS * bytes_per_routed_buffer
@@ -928,6 +1133,39 @@ class CollectiveKernel:
 
         torch.accelerator.synchronize(device)
         dist.barrier(group=group, device_ids=[device.index])
+        if self._seven_cta_max_m:
+            specializations = (
+                (1, 1),
+                (self._seven_cta_max_m, self._seven_cta_max_m),
+            )
+            for owner in range(tp_size):
+                if rank == owner:
+                    for compile_max_m, compile_token_ctas in specializations:
+                        if (compile_max_m, compile_token_ctas) == (
+                            max_m,
+                            max_token_ctas,
+                        ):
+                            continue
+                        compile_kernel(
+                            rank=rank,
+                            tp_size=tp_size,
+                            latent_dim=latent_dim,
+                            hidden_dim=hidden_dim,
+                            max_m=compile_max_m,
+                            max_token_ctas=compile_token_ctas,
+                            latent_output=self._latent_output,
+                            routed_workspace=self._routed_workspace,
+                            routed_flags=self._routed_flags,
+                            routed_multicast_ptr=self._routed_multicast_ptr,
+                            shared_output=self._shared_output,
+                            shared_workspace=self._shared_workspace,
+                            shared_flags=self._shared_flags,
+                            shared_peer_ptrs=self._shared_peer_ptrs,
+                            rms_eps=self.rms_eps,
+                            fp32_internal=fp32_internal,
+                            top_k=top_k,
+                        )
+                dist.barrier(group=group, device_ids=[device.index])
         for owner in range(tp_size):
             if rank == owner:
                 compile_kernel(
@@ -947,38 +1185,100 @@ class CollectiveKernel:
                     shared_peer_ptrs=self._shared_peer_ptrs,
                     rms_eps=self.rms_eps,
                     fp32_internal=fp32_internal,
+                    top_k=top_k,
                 )
             dist.barrier(group=group, device_ids=[device.index])
 
     def __call__(
         self,
-        latent_source: torch.Tensor,
+        latent_source: torch.Tensor | UnfinalizedMoEOutput,
         shared_source: torch.Tensor,
         gamma: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if latent_source.ndim != 2 or shared_source.ndim != 2:
-            raise ValueError("latent_source and shared_source must be rank-2")
-        m = latent_source.shape[0]
+        if shared_source.ndim != 2:
+            raise ValueError("shared_source must be rank-2")
+        expected: list[tuple[torch.Tensor, tuple[int, ...], str, torch.dtype]]
+        if isinstance(latent_source, UnfinalizedMoEOutput):
+            if self.top_k <= 0:
+                raise ValueError("collective was not configured for top-k finalize")
+            gemm2_permuted = latent_source.gemm2_permuted
+            expert_weights = latent_source.expert_weights
+            expanded_idx = latent_source.expanded_idx_to_permuted_idx
+            m = expanded_idx.shape[0]
+            expected = [
+                (
+                    gemm2_permuted,
+                    (gemm2_permuted.shape[0], self.latent_dim),
+                    "gemm2_permuted",
+                    torch.bfloat16,
+                ),
+                (
+                    expert_weights,
+                    (m, self.top_k),
+                    "expert_weights",
+                    torch.bfloat16,
+                ),
+                (
+                    expanded_idx,
+                    (m, self.top_k),
+                    "expanded_idx_to_permuted_idx",
+                    torch.int32,
+                ),
+            ]
+        else:
+            if self.top_k > 0:
+                raise ValueError("top-k collective requires an unfinalized output")
+            if latent_source.ndim != 2:
+                raise ValueError("latent_source must be rank-2")
+            m = latent_source.shape[0]
+            gemm2_permuted = latent_source
+            expert_weights = self._dummy_expert_weights
+            expanded_idx = self._dummy_expanded_idx
+            expected = [
+                (
+                    latent_source,
+                    (m, self.latent_dim),
+                    "latent_source",
+                    torch.bfloat16,
+                ),
+            ]
         device = self._routed_workspace.device
-        expected = (
-            (latent_source, (m, self.latent_dim), "latent_source"),
-            (shared_source, (m, self.hidden_dim), "shared_source"),
-            (gamma, (self.latent_dim,), "gamma"),
+        expected.extend(
+            [
+                (
+                    shared_source,
+                    (m, self.hidden_dim),
+                    "shared_source",
+                    torch.bfloat16,
+                ),
+                (gamma, (self.latent_dim,), "gamma", torch.bfloat16),
+            ]
         )
-        for tensor, shape, name in expected:
+        for tensor, shape, name, dtype in expected:
             if (
                 tensor.shape != shape
-                or tensor.dtype != torch.bfloat16
+                or tensor.dtype != dtype
                 or tensor.device != device
                 or not tensor.is_contiguous()
             ):
-                raise ValueError(f"{name} must be contiguous CUDA BF16 {list(shape)}")
+                raise ValueError(
+                    f"{name} must be contiguous CUDA {dtype} {list(shape)}"
+                )
         if not 1 <= m <= self.max_m:
             raise ValueError(f"runtime M={m} must be in [1, {self.max_m}]")
 
+        launch_max_m = self.max_m
+        launch_token_ctas = self.max_token_ctas
+        if self._seven_cta_max_m and m <= self._seven_cta_max_m:
+            if m == 1:
+                launch_max_m = 1
+                launch_token_ctas = 1
+            else:
+                launch_max_m = self._seven_cta_max_m
+                launch_token_ctas = self._seven_cta_max_m
         with torch.accelerator.device_index(device.index):
             launch(
-                latent_source,
+                gemm2_permuted,
                 gamma,
                 self._latent_output,
                 self._routed_workspace,
@@ -994,9 +1294,12 @@ class CollectiveKernel:
                 tp_size=self.tp_size,
                 latent_dim=self.latent_dim,
                 hidden_dim=self.hidden_dim,
-                max_m=self.max_m,
-                max_token_ctas=self.max_token_ctas,
+                max_m=launch_max_m,
+                max_token_ctas=launch_token_ctas,
                 fp32_internal=self.fp32_internal,
+                top_k=self.top_k,
+                expert_weights=expert_weights,
+                expanded_idx_to_permuted_idx=expanded_idx,
             )
         return (
             self._latent_output[:m],

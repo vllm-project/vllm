@@ -892,8 +892,7 @@ class precompiled_wheel_utils:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)
         2. user-specified variant (VLLM_PRECOMPILED_WHEEL_VARIANT) from nightly repo
-           or auto-detected CUDA variant based on system (torch, nvidia-smi)
-        3. the default variant from nightly repo
+           or CUDA variant selected from VLLM_MAIN_CUDA_VERSION, torch, or nvidia-smi
 
         If downloading from the nightly repo, the commit can be specified via
         VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
@@ -924,28 +923,21 @@ class precompiled_wheel_utils:
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
-            try_default = False
-            wheels, repo_url, download_filename = None, None, None
+            download_filename = None
             try:
                 wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
                     commit, variant
                 )
             except Exception as e:
-                logger.warning(
-                    "Failed to fetch precompiled wheel metadata for variant %s: %s",
-                    variant,
-                    e,
-                )
-                try_default = True  # try outside handler to keep the stacktrace simple
-            if try_default:
-                print("Trying the default variant from remote")
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, None
-                )
-                # if this also fails, then we have nothing more to try / cache
-            assert wheels is not None and repo_url is not None, (
-                "Failed to fetch precompiled wheel metadata"
-            )
+                raise RuntimeError(
+                    "Failed to fetch precompiled wheel metadata for CUDA "
+                    f"variant {variant!r} at commit {commit}. The "
+                    "root/default variant is not used as a fallback because "
+                    "its CUDA compatibility with the selected variant cannot "
+                    "be verified. Provide a compatible wheel with "
+                    "VLLM_PRECOMPILED_WHEEL_LOCATION or disable "
+                    "VLLM_USE_PRECOMPILED to build from source."
+                ) from e
             # The metadata.json has the following format:
             # see .buildkite/scripts/generate-nightly-index.py for details
             """[{
@@ -1493,6 +1485,11 @@ if (
 ):
     cmdclass["build_rust"] = precompiled_build_rust
 
+# Resolve the Python version first because get_vllm_version() may set
+# SETUPTOOLS_SCM_PRETEND_VERSION, which the Rust version should inherit.
+vllm_version = get_vllm_version()
+rust_build.prepare_build_environment()
+
 # Rust artifacts, built via setuptools-rust and installed into the package
 # directory alongside the Python modules.
 rust_extensions = rust_build.rust_extensions(
@@ -1501,7 +1498,7 @@ rust_extensions = rust_build.rust_extensions(
 
 setup(
     # static metadata should rather go in pyproject.toml
-    version=get_vllm_version(),
+    version=vllm_version,
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
     install_requires=get_requirements(),
@@ -1525,7 +1522,7 @@ setup(
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.2.4"],
+        "b12x": ["b12x==1.2.6"],
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
