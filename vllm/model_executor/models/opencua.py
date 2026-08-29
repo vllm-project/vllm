@@ -7,6 +7,7 @@
 
 """Inference-only OpenCUA-7B model compatible with HuggingFace weights."""
 
+import typing
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -20,12 +21,6 @@ from transformers.models.qwen2_vl import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
-)
-from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -47,6 +42,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
 )
 from .qwen2_vl import (
+    Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalDataParser,
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
@@ -184,48 +180,19 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         ]
 
 
-class OpenCUADummyInputsBuilder(BaseDummyInputsBuilder[OpenCUAProcessingInfo]):
+if typing.TYPE_CHECKING:
+    _OpenCUADummyInputsBuilderBase = BaseDummyInputsBuilder[OpenCUAProcessingInfo]
+else:
+    _OpenCUADummyInputsBuilderBase = Qwen2VLDummyInputsBuilder
+
+
+class OpenCUADummyInputsBuilder(_OpenCUADummyInputsBuilderBase):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
         image_token = "<|media_placeholder|>"
 
         return image_token * num_images
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-    ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
-        )
-
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
-        return {
-            "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
-            ),
-            "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
-            ),
-        }
 
 
 @MULTIMODAL_REGISTRY.register_processor(
