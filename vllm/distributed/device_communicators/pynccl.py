@@ -486,6 +486,13 @@ class PyNcclCommunicator:
         """Release comm GPU memory (collective, idempotent); keeps topology."""
         if self.disabled or self._suspended:
             return
+        if not self.nccl.has_symbol("ncclCommSuspend"):
+            logger.warning_once(
+                "ncclCommSuspend is not available in the loaded NCCL/RCCL "
+                "library (requires NCCL >= 2.29.7); skipping communicator "
+                "memory suspension."
+            )
+            return
         self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
         self._suspended = True
 

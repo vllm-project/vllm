@@ -421,9 +421,18 @@ class NCCLLibrary:
                     elif func.name == "ncclCommQueryProperties":
                         # Optional on NCCL versions older than 2.29.
                         continue
+                    elif func.name in ("ncclCommSuspend", "ncclCommResume"):
+                        # Optional; requires NCCL >= 2.29.7. Absent on RCCL
+                        # and older NCCL — PyNcclCommunicator checks
+                        # has_symbol() before calling either.
+                        continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
+
+    def has_symbol(self, name: str) -> bool:
+        """Whether the loaded NCCL/RCCL library exports the given symbol."""
+        return name in self._funcs
 
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")

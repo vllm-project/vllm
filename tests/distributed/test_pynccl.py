@@ -491,3 +491,23 @@ def test_pynccl_suspend_resume_idempotent():
 
     assert comm.nccl.ncclCommSuspend.call_count == 1
     assert comm.nccl.ncclCommResume.call_count == 1
+
+
+def test_pynccl_suspend_noop_without_symbol():
+    """RCCL / NCCL < 2.29.7 lack ncclCommSuspend; suspend() must no-op, not
+    crash, and resume() must then no-op too since nothing was suspended."""
+    from unittest.mock import Mock
+
+    comm = object.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm._suspended = False
+    comm.comm = object()
+    comm.nccl = Mock()
+    comm.nccl.has_symbol.return_value = False
+
+    comm.suspend()
+    comm.resume()
+
+    comm.nccl.ncclCommSuspend.assert_not_called()
+    comm.nccl.ncclCommResume.assert_not_called()
+    assert comm._suspended is False
