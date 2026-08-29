@@ -1,20 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Multimodal preprocessing benchmark against a live vLLM engine
-//! (`vllm-bench mm-processor`).
-//!
-//! Mirrors `vllm bench mm-processor` (`vllm/benchmarks/mm_processor.py`):
-//! spawn a managed headless Python engine with the model loaded, generate a
-//! synthetic multimodal dataset with the random-mm generator, and submit every
-//! request through the same chat pipeline used by the serving frontend
-//! (render -> markers -> media fetch -> processor -> engine encode/decode).
-//! Per-stage preprocessing latency is collected by the `TimingContext` /
-//! `MultiModalTimingRegistry` hooks and drained via
-//! `ChatRequestProcessor::mm_timing_stats`.
-//!
-//! Per-request end-to-end latency spans submission to final token, including
-//! queueing and preprocessing (Python's fallback E2EL semantics).
+//! Multimodal preprocessing benchmark (`vllm-bench mm-processor`), mirroring
+//! `vllm bench mm-processor`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -46,12 +34,10 @@ use crate::error::BenchError;
 use crate::metrics::calculator::{mean, median_sorted, percentile_sorted, sort_clone, std_dev};
 use crate::tokenizer::{TokenizerKind, load_tokenizer};
 
-/// Scale factor to convert the seconds recorded by `TimingContext` into the
-/// milliseconds reported by the benchmark (matching Python's `unit="ms"`).
+/// Seconds -> milliseconds.
 const SEC_TO_MS: f64 = 1000.0;
 
-/// Preferred column order for the printed table; any additional stages are
-/// appended in alphabetical order.
+/// Preferred column order; other stages appended alphabetically.
 const STAGE_ORDER: &[&str] = &[
     "preprocessor_total_ms",
     "media_fetch_ms",
@@ -61,8 +47,7 @@ const STAGE_ORDER: &[&str] = &[
     "prompt_expansion_ms",
 ];
 
-/// Maximum time to wait for the managed engines to register with the
-/// frontend transport (matches the Rust frontend default).
+/// Time to wait for managed engines to register.
 const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Maximum time to wait for the managed engine to drain on shutdown.
@@ -130,9 +115,7 @@ pub struct MmProcessorArgs {
     #[arg(long, default_value = "mm-proc-")]
     pub request_id_prefix: String,
 
-    /// Maximum number of requests submitted concurrently. Defaults to 1 to
-    /// match Python's serial `LLMEngine` driver for a like-for-like
-    /// preprocessing comparison.
+    /// Maximum concurrent requests (default 1, matching Python's serial driver).
     #[arg(long, default_value_t = 1)]
     pub max_concurrency: usize,
 
@@ -140,15 +123,11 @@ pub struct MmProcessorArgs {
     #[arg(long, default_value_t = false)]
     pub trust_remote_code: bool,
 
-    /// Optional chat-template override (inline template or path to a template
-    /// file), mirroring `vllm serve --chat-template`. When set, it bypasses the
-    /// model's `tokenizer_config.json` chat template.
+    /// Optional chat-template override (inline text or path).
     #[arg(long)]
     pub chat_template: Option<String>,
 
-    /// Managed Python headless-engine options. The benchmark spawns one
-    /// engine deployment with the model loaded and drives it over the same
-    /// transport as the Rust serving frontend.
+    /// Managed headless-engine options.
     #[command(flatten)]
     pub engine: ManagedEngineArgs,
 }
@@ -310,11 +289,8 @@ pub async fn run_mm_processor(args: MmProcessorArgs) -> Result<()> {
     Ok(())
 }
 
-/// Submit every sample through the full chat pipeline and drive each stream
-/// to completion, returning per-request wall-clock latencies.
-///
-/// Concurrency is capped by `semaphore`; pass a `Semaphore::new(1)` to match
-/// Python's serial `LLMEngine` driver.
+/// Submit every sample through the chat pipeline and drive each stream to
+/// completion, returning per-request wall-clock latencies.
 async fn run_batch(
     chat: &ChatLlm,
     samples: &[SampleRequest],
@@ -366,11 +342,7 @@ fn generate_dataset(
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Build a chat request from a dataset sample: the decoded text prompt plus the
-/// pre-serialized `image_url` fragments (base64 data URLs) as content parts.
-///
-/// Sampling matches the Python benchmark: greedy decode capped at the expected
-/// output length.
+/// Build a chat request from a sample (text prompt + `image_url` parts).
 fn build_chat_request(sample: &SampleRequest) -> Result<ChatRequest> {
     let mut request = ChatRequest::for_test();
     request.request_id = sample.request_id.clone().unwrap_or_else(|| "mm-proc".to_string());
