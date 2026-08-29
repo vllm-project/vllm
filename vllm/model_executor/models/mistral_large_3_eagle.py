@@ -31,19 +31,15 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
 
-    class _EagleMistralLarge3ModelBase(nn.Module):
-        pass
-
     class _EagleMistralLarge3ForCausalLMBase(nn.Module):
         pass
 
 else:
-    _EagleMistralLarge3ModelBase = DeepseekV2Model
     _EagleMistralLarge3ForCausalLMBase = MistralLarge3ForCausalLM
 
 
 @support_torch_compile
-class EagleMistralLarge3Model(_EagleMistralLarge3ModelBase):
+class EagleMistralLarge3Model(DeepseekV2Model):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", start_layer_id: int = 0
     ):

@@ -1319,14 +1319,12 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            return Qwen2_5_VLImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
-
-        raise AssertionError("This line should be unreachable.")
+        assert image_embeds is not None
+        return Qwen2_5_VLImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -1347,15 +1345,13 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 second_per_grid_ts=second_per_grid_ts,
             )
 
-        if video_embeds is not None:
-            return Qwen2_5_VLVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-            )
-
-        raise AssertionError("This line should be unreachable.")
+        assert video_embeds is not None
+        return Qwen2_5_VLVideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+        )
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs

@@ -919,12 +919,9 @@ class MiniCPMOBaseModel(_MiniCPMOBaseModelBase):
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
     ) -> MiniCPMOMultiModalInputs:
-        base_modalities = super()._parse_and_validate_multimodal_inputs(**kwargs)
-        modalities: MiniCPMOMultiModalInputs = {}
-        if "images" in base_modalities:
-            modalities["images"] = base_modalities["images"]
-        if "videos" in base_modalities:
-            modalities["videos"] = base_modalities["videos"]
+        modalities = MiniCPMOMultiModalInputs(
+            **super()._parse_and_validate_multimodal_inputs(**kwargs)
+        )
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -1026,7 +1023,7 @@ class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
             try:
                 version_str = str(config.version)
                 version_parts = version_str.split(".")
-                version_values = tuple(int(x) for x in version_parts)
+                version_values = tuple(int(x) for x in version_parts[:2])
             except (ValueError, TypeError) as e:
                 raise ValueError(
                     f"Invalid model version format in config: {config.version}. "
