@@ -41,6 +41,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
     "Granite4VisionConfig": "vllm.transformers_utils.configs.granite4_vision",
     "HYV3Config": "vllm.transformers_utils.configs.hy_v3",
+    "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
     "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
@@ -130,6 +131,7 @@ __all__ = [
     "FunAudioChatAudioEncoderConfig",
     "Granite4VisionConfig",
     "HYV3Config",
+    "HYV4Config",
     "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",

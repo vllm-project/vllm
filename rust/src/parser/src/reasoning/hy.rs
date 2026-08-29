@@ -5,13 +5,13 @@ use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, Result};
 
-/// Internal HY3 reasoning stage used by the unified HY3 parser.
-pub(crate) struct HyV3ReasoningParser {
+/// Internal HY reasoning stage used by the unified HY parsers.
+pub(crate) struct HyReasoningParser {
     inner: DelimitedReasoningParser,
 }
 
-impl HyV3ReasoningParser {
-    /// Create a HY3 reasoning parser for the tokenizer-specific marker suffix.
+impl HyReasoningParser {
+    /// Create a HY reasoning parser for the tokenizer-specific marker suffix.
     pub(crate) fn new(tokenizer: DynTokenizer, suffix: &str) -> Result<Self> {
         Ok(Self {
             inner: DelimitedReasoningParser::new(
@@ -24,15 +24,15 @@ impl HyV3ReasoningParser {
     }
 }
 
-impl ReasoningParser for HyV3ReasoningParser {
-    // Suffix discovery belongs to `HyV3UnifiedParser` so its reasoning and
+impl ReasoningParser for HyReasoningParser {
+    // Suffix discovery belongs to the unified HY parser so its reasoning and
     // tool delimiters always use the same tokenizer-derived value.
     fn create(_tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,
     {
         Err(ReasoningError::DummyUnifiedParser {
-            name: "hy_v3".to_string(),
+            name: "hy".to_string(),
         })
     }
 

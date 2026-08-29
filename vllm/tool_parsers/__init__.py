@@ -94,6 +94,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hy_v3_tool_parser",
         "HYV3ToolParser",
     ),
+    "hy_v4": (
+        "hy_v4_tool_parser",
+        "HYV4ToolParser",
+    ),
     "internlm": (
         "internlm2_tool_parser",
         "Internlm2ToolParser",

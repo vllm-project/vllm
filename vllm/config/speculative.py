@@ -57,6 +57,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
+    "hy_v4_mtp",
     "gemma4_mtp",
     "inkling_mtp",
 ]
@@ -915,6 +916,13 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+            )
+
+        if hf_config.model_type == "hy_v4":
+            hf_config.model_type = "hy_v4_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV4MTPModel"]}
             )
 
         if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
