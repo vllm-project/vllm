@@ -2820,6 +2820,60 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
+            # The scheduler charges speculative-decoding draft slots against
+            # the input budget BEFORE the align-mode floor
+            # (scheduler.py: min(num_new_tokens, token_budget,
+            # input_budget - draft_slots), with token_budget =
+            # max_num_scheduled_tokens or max_num_batched_tokens), so the
+            # block-multiple check must apply to the effective per-chunk
+            # budget, not the raw knob. The long-prefill threshold and
+            # max_num_scheduled_tokens cap num_new_tokens directly and are
+            # NOT reduced by draft slots.
+            spec_config = getattr(self, "speculative_config", None)
+            draft_slots = (
+                getattr(spec_config, "max_num_new_slots_for_drafting", 0)
+                if spec_config is not None
+                else 0
+            )
+            effective = self.scheduler_config.max_num_batched_tokens - draft_slots
+            long_prefill = self.scheduler_config.long_prefill_token_threshold
+            scheduled_cap = self.scheduler_config.max_num_scheduled_tokens
+            binding_knob = "--max-num-batched-tokens"
+            suggest_extra = draft_slots
+            if scheduled_cap is not None and scheduled_cap < effective:
+                effective = scheduled_cap
+                binding_knob = "--max-num-scheduled-tokens"
+                suggest_extra = 0
+            if 0 < long_prefill < effective:
+                effective = long_prefill
+                binding_knob = "--long-prefill-token-threshold"
+                suggest_extra = 0
+            if effective >= block_size and effective % block_size != 0:
+                floored = effective // block_size * block_size
+                if binding_knob == "--max-num-batched-tokens" and draft_slots:
+                    budget_clause = (
+                        f"and {draft_slots} draft token slots reserved by "
+                        f"speculative decoding, the effective {effective}-token "
+                        "chunk budget"
+                    )
+                elif binding_knob == "--max-num-batched-tokens":
+                    budget_clause = f"the {effective}-token chunk budget"
+                else:
+                    budget_clause = f"the {binding_knob} cap of {effective}"
+                logger.warning(
+                    "Mamba cache mode 'align' clips interior prefill chunks "
+                    "to block-aligned ends: with block_size=%d %s schedules "
+                    "%d tokens per chunk (%.1f%% of the budget unused). Set "
+                    "%s so the effective budget is a multiple of %d (e.g. %d) "
+                    "to use the full budget.",
+                    block_size,
+                    budget_clause,
+                    floored,
+                    (effective - floored) / effective * 100,
+                    binding_knob,
+                    block_size,
+                    floored + block_size + suggest_extra,
+                )
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":

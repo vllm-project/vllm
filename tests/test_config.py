@@ -1855,25 +1855,111 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
-def test_validate_mamba_align_subblock_prefill():
-    """Align mode permits configured prefill chunks smaller than a block."""
-    config = SimpleNamespace(
+def _mamba_align_config(
+    block_size: int,
+    max_num_batched_tokens: int,
+    long_prefill_token_threshold: int = 0,
+    draft_slots: int | None = None,
+    max_num_scheduled_tokens: int | None = None,
+) -> SimpleNamespace:
+    spec = (
+        None
+        if draft_slots is None
+        else SimpleNamespace(max_num_new_slots_for_drafting=draft_slots)
+    )
+    return SimpleNamespace(
         cache_config=SimpleNamespace(
-            block_size=11392,
+            block_size=block_size,
             mamba_cache_mode="align",
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
         ),
         scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=8192,
-            long_prefill_token_threshold=4096,
+            max_num_batched_tokens=max_num_batched_tokens,
+            long_prefill_token_threshold=long_prefill_token_threshold,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
             disable_chunked_mm_input=False,
         ),
         kv_transfer_config=None,
+        speculative_config=spec,
     )
 
-    VllmConfig.validate_block_size(config)
+
+def test_validate_mamba_align_subblock_prefill():
+    """Align mode permits configured prefill chunks smaller than a block."""
+    VllmConfig.validate_block_size(_mamba_align_config(11392, 8192, 4096))
+
+
+def test_validate_mamba_align_warns_on_unaligned_effective_budget(caplog_vllm):
+    """The draft-slot-adjusted effective budget is what must be aligned."""
+    # No spec decode: 8192 floors to 6576; suggest 8768.
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        VllmConfig.validate_block_size(_mamba_align_config(2192, 8192))
+    assert "chunk budget schedules" in caplog_vllm.text
+    assert "(e.g. 8768)" in caplog_vllm.text
+
+    caplog_vllm.clear()
+    # DSpark K=3 reserves K-1=2 draft slots: 8768 - 2 = 8766 is NOT aligned.
+    # (8768 was the value the v1 warning wrongly blessed and suggested.)
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        VllmConfig.validate_block_size(_mamba_align_config(2192, 8768, draft_slots=2))
+    assert "chunk budget schedules" in caplog_vllm.text
+    assert "2 draft token slots" in caplog_vllm.text
+    assert "(e.g. 8770)" in caplog_vllm.text
+
+    caplog_vllm.clear()
+    # The tighter long-prefill threshold is the binding chunk limit; it caps
+    # num_new_tokens directly and is not reduced by draft slots, so the
+    # message must not attribute the budget to them.
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        VllmConfig.validate_block_size(
+            _mamba_align_config(2192, 8770, 4096, draft_slots=2)
+        )
+    assert "(e.g. 4384)" in caplog_vllm.text
+    assert "--long-prefill-token-threshold" in caplog_vllm.text
+    assert "draft token slots" not in caplog_vllm.text
+
+    caplog_vllm.clear()
+    # A binding user-set --max-num-scheduled-tokens is the scheduler's
+    # token_budget term: 8770 - 2 = 8768 is aligned, but chunks still floor
+    # 8000 -> 6576, so the warn must fire on the scheduled cap (and not
+    # attribute the budget to draft slots).
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        VllmConfig.validate_block_size(
+            _mamba_align_config(
+                2192, 8770, draft_slots=2, max_num_scheduled_tokens=8000
+            )
+        )
+    assert "--max-num-scheduled-tokens" in caplog_vllm.text
+    assert "(e.g. 8768)" in caplog_vllm.text
+    assert "draft token slots" not in caplog_vllm.text
+
+
+def test_validate_mamba_align_no_warning_when_effective_budget_aligned(caplog_vllm):
+    """Aligned effective budgets and sub-block budgets stay silent."""
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        # 8770 - 2 draft slots = 8768 = 4 x 2192: the correct DSpark knob.
+        VllmConfig.validate_block_size(_mamba_align_config(2192, 8770, draft_slots=2))
+        # No spec decode: a plain block multiple.
+        VllmConfig.validate_block_size(_mamba_align_config(2192, 8768))
+        # Sub-block budgets are exempt from flooring by design.
+        VllmConfig.validate_block_size(_mamba_align_config(11392, 8192, 4096))
+        # A binding aligned --max-num-scheduled-tokens is the real chunk cap:
+        # 6576 = 3 x 2192 wastes nothing even though 8768 - 2 is unaligned.
+        VllmConfig.validate_block_size(
+            _mamba_align_config(
+                2192, 8768, draft_slots=2, max_num_scheduled_tokens=6576
+            )
+        )
+        # A non-binding scheduled cap must not mask the unaligned budget check
+        # path either way: 8770 - 2 = 8768 stays aligned and silent.
+        VllmConfig.validate_block_size(
+            _mamba_align_config(
+                2192, 8770, draft_slots=2, max_num_scheduled_tokens=9000
+            )
+        )
+    assert "schedules" not in caplog_vllm.text
 
 
 @pytest.mark.parametrize(
