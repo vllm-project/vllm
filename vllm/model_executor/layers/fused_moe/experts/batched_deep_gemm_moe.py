@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 6423e800e (fix(deep-gemm): keep CUDA Graph capture host-free)
 import torch
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -476,12 +479,20 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
+<<<<<<< HEAD
         expected_m = self.estimate_expected_m(
             global_num_experts=global_num_experts,
             max_tokens_per_expert=max_num_tokens,
             topk=topk_ids.size(-1),
         )
 
+=======
+        # Use the static padded capacity for tuning. Reading the live expert
+        # maximum with .item() synchronizes the CPU and invalidates CUDA Graph
+        # capture; the value only selects a DeepGEMM launch shape and does not
+        # change the masked rows or numerical computation.
+        expected_m = max_num_tokens
+>>>>>>> 6423e800e (fix(deep-gemm): keep CUDA Graph capture host-free)
         fp8_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
             (w1, self.w1_scale),
