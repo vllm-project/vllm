@@ -18,13 +18,17 @@ class _Tokenizer:
         return SimpleNamespace(input_ids=[0] * self.token_counts.get(text, 0))
 
 
-def _calculate(outputs: list[RequestFuncOutput]):
+def _calculate(outputs: list[RequestFuncOutput], use_tokenizer: bool = True):
     return calculate_metrics(
         input_requests=[],
         outputs=outputs,
         dur_s=2.0,
-        tokenizer=_Tokenizer(
-            {output.generated_text: output.output_tokens for output in outputs}
+        tokenizer=(
+            _Tokenizer(
+                {output.generated_text: output.output_tokens for output in outputs}
+            )
+            if use_tokenizer
+            else None
         ),
         selected_percentiles=[50.0],
         goodput_config_dict={},
@@ -64,7 +68,7 @@ def test_calculate_metrics_counts_unicode_output_characters():
         ]
     )
 
-    # Python's len() counts Unicode code points, not UTF-8 bytes.
+    # Python's character iteration counts Unicode code points, not UTF-8 bytes.
     assert metrics.total_output_chars == len("hello") + len(multilingual_text)
     assert metrics.output_char_throughput == pytest.approx(
         metrics.total_output_chars / 2.0
@@ -92,8 +96,26 @@ def test_calculate_metrics_handles_zero_tokens_and_whitespace():
         ]
     )
 
-    assert metrics.total_output_chars == 3
-    assert metrics.output_char_throughput == pytest.approx(1.5)
+    assert metrics.total_output_chars == 0
+    assert metrics.output_char_throughput == 0.0
+    assert metrics.mean_chars_per_token == 0.0
+
+
+def test_calculate_metrics_does_not_synthesize_token_ratio_without_usage():
+    metrics = _calculate(
+        [
+            RequestFuncOutput(
+                success=True,
+                generated_text="hello",
+                output_tokens=0,
+                latency=1.0,
+            )
+        ],
+        use_tokenizer=False,
+    )
+
+    assert metrics.total_output_chars == 5
+    assert metrics.total_output == 1
     assert metrics.mean_chars_per_token == 0.0
 
 

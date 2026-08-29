@@ -586,6 +586,8 @@ def calculate_metrics(
     """
     actual_output_lens: list[int] = []
     total_output_chars = 0
+    measured_output_tokens = 0
+    has_unmeasured_output_tokens = False
     total_input = 0
     completed = 0
     good_completed = 0
@@ -598,11 +600,16 @@ def calculate_metrics(
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
-            total_output_chars += len(outputs[i].generated_text or "")
+            generated_text = outputs[i].generated_text or ""
+            total_output_chars += sum(not char.isspace() for char in generated_text)
+            output_tokens_measured = output_len > 0
 
             if not output_len:
                 if tokenizer is None:
+                    # Preserve the historical fallback for token throughput,
+                    # but do not use it as a measured token count.
                     output_len = 1
+                    has_unmeasured_output_tokens = True
                 else:
                     # We use the tokenizer to count the number of output tokens
                     # for some serving backends instead of looking at
@@ -610,10 +617,11 @@ def calculate_metrics(
                     # bundled together
                     # Note : this may inflate the output token count slightly
                     output_len = len(
-                        tokenizer(
-                            outputs[i].generated_text, add_special_tokens=False
-                        ).input_ids
+                        tokenizer(generated_text, add_special_tokens=False).input_ids
                     )
+                    output_tokens_measured = True
+            if output_tokens_measured:
+                measured_output_tokens += output_len
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
             tpot = 0.0
@@ -776,7 +784,9 @@ def calculate_metrics(
         total_output_chars=total_output_chars,
         output_char_throughput=total_output_chars / dur_s,
         mean_chars_per_token=(
-            total_output_chars / total_output_tokens if total_output_tokens > 0 else 0.0
+            total_output_chars / measured_output_tokens
+            if measured_output_tokens > 0 and not has_unmeasured_output_tokens
+            else 0.0
         ),
     )
 
