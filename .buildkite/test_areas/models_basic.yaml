@@ -14,6 +14,14 @@ steps:
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  mirror:
+    amd:
+      label: ":amd: (MI355) Basic Models (Initialization)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200) Basic Models (Extra Initialization) Shard %N"
   device: h200_35gb
