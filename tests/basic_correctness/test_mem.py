@@ -18,6 +18,21 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 DEVICE_TYPE = current_platform.device_type
 
 
+def mapped_usage(allocator) -> int:
+    """Bytes the allocator still has mapped on the device.
+
+    `torch.accelerator.get_memory_info()` is a device-wide `cudaMemGetInfo` /
+    `hipMemGetInfo` query, so its delta also carries whatever else on the GPU
+    allocates or frees while we measure. The allocator's own bookkeeping is
+    process-local and exact.
+    """
+    return sum(
+        data.handle[1]
+        for data in allocator.pointer_to_data.values()
+        if not data.is_asleep
+    )
+
+
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
     """Wake discarded allocations with deterministic nonzero contents."""
     original_create_and_map = cumem.create_and_map
@@ -82,11 +97,13 @@ def test_basic_cumem():
     output = x + y + z
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
-    free_bytes = torch.accelerator.get_memory_info()[0]
+    # Track the allocator's own mapped bytes, not device-wide free memory.
+    mapped_bytes = mapped_usage(allocator)
+    assert mapped_bytes >= y.nbytes + z.nbytes
     allocator.sleep()
-    free_bytes_after_sleep = torch.accelerator.get_memory_info()[0]
-    assert free_bytes_after_sleep > free_bytes
+    assert mapped_usage(allocator) == 0
     allocator.wake_up()
+    assert mapped_usage(allocator) == mapped_bytes
 
     # they can be used together
     output = x + y + z
@@ -105,13 +122,14 @@ def test_discard_tags():
     with allocator.use_memory_pool("kv_cache"):
         kv = torch.ones(512, 512, device=DEVICE_TYPE)
 
-    free_bytes = torch.accelerator.get_memory_info()[0]
+    mapped_bytes = mapped_usage(allocator)
 
     # Discard kv_cache only — weights should remain valid
     allocator.discard("kv_cache")
 
-    free_bytes_after_discard = torch.accelerator.get_memory_info()[0]
-    assert free_bytes_after_discard > free_bytes
+    mapped_bytes_after_discard = mapped_usage(allocator)
+    assert mapped_bytes - mapped_bytes_after_discard >= kv.nbytes
+    assert mapped_bytes_after_discard >= weights.nbytes
 
     # Weights are still usable
     assert torch.allclose(weights, torch.ones_like(weights))
@@ -172,11 +190,12 @@ def test_cumem_with_cudagraph():
     with torch.cuda.graph(model_graph):
         y = model(x)
 
-    free_bytes = torch.accelerator.get_memory_info()[0]
+    mapped_bytes = mapped_usage(allocator)
+    assert mapped_bytes >= weight.nbytes + cache.nbytes
     allocator.sleep()
-    free_bytes_after_sleep = torch.accelerator.get_memory_info()[0]
-    assert free_bytes_after_sleep > free_bytes
+    assert mapped_usage(allocator) == 0
     allocator.wake_up()
+    assert mapped_usage(allocator) == mapped_bytes
 
     # after waking up, the content in the weight tensor
     # should be restored, but the content in the cache tensor
