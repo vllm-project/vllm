@@ -1604,6 +1604,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsTranscription,
 ):
     is_3d_moe_weight: bool = True
+    supports_tower_connector_lora: bool = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",

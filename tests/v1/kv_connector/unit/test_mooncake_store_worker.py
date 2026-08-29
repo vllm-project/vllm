@@ -2960,7 +2960,7 @@ def test_putting_consumer_queues_decode_save():
 
     with patch.object(torch.cuda, "Event") as event_cls:
         event = event_cls.return_value
-        w.get_finished(set(), meta)
+        w.wait_for_save(meta)
 
     event.record.assert_called_once_with()
     send_thread.add_request.assert_called_once_with(req)

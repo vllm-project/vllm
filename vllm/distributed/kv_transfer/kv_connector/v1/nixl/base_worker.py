@@ -300,13 +300,13 @@ class NixlBaseConnectorWorker:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
         self.kv_cache_config = kv_cache_config
         self._layer_specs = {
             layer: group.kv_cache_spec
-            for group in kv_cache_config.kv_cache_groups
+            for group in kv_cache_config.transfer_groups
             for layer in group.layer_names
         }
 
@@ -318,7 +318,7 @@ class NixlBaseConnectorWorker:
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         )
         if self._has_mamba:
             assert self._is_hma_required
@@ -554,7 +554,7 @@ class NixlBaseConnectorWorker:
         # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
             get_representative_spec_type(g.kv_cache_spec)
-            for g in self.kv_cache_config.kv_cache_groups
+            for g in self.kv_cache_config.transfer_groups
         )
 
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
@@ -1906,7 +1906,7 @@ class NixlBaseConnectorWorker:
         )
         mamba_layers = {
             name
-            for g, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            for g, group in enumerate(self.kv_cache_config.transfer_groups)
             if _is_ssm_spec(self._group_spec_types[g])
             for name in group.layer_names
         }
@@ -2361,7 +2361,7 @@ class NixlBaseConnectorWorker:
             return block_ids
         block_arange = np.arange(0, ratio).reshape(1, -1)
         # Mamba blocks have no logical<>physical discrepancy (block-size=1)
-        group_specs = self.kv_cache_config.kv_cache_groups
+        group_specs = self.kv_cache_config.transfer_groups
         physical_block_ids = []
         for i, group in enumerate(block_ids):
             spec = group_specs[i].kv_cache_spec
