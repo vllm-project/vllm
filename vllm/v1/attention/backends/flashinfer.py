@@ -265,13 +265,17 @@ def _adaptive_xqa_mismatch_safe(vllm_config: VllmConfig | None) -> bool:
     # supports_device_cpu_query_lens_mismatch: the class-level capability
     # claim is evaluated before any builder exists, so it must itself
     # reject head geometries the kernels cannot serve; per-group
-    # mismatches still fail closed at finalize.
+    # mismatches still fail closed at finalize. Self-contained by design:
+    # unlike can_use_trtllm_attention, this never reads the thread-local
+    # current VllmConfig (force-off is checked from the passed config at
+    # the end of this predicate), so the predicate is pure in its
+    # argument.
+    if not supports_trtllm_attention(is_prefill=False):
+        return False
     mc = vllm_config.model_config
-    if not can_use_trtllm_attention(
-        mc.get_num_attention_heads(vllm_config.parallel_config),
-        mc.get_num_kv_heads(vllm_config.parallel_config),
-        is_prefill=False,
-    ):
+    num_qo_heads = mc.get_num_attention_heads(vllm_config.parallel_config)
+    num_kv_heads = mc.get_num_kv_heads(vllm_config.parallel_config)
+    if num_kv_heads == 0 or num_qo_heads % num_kv_heads != 0:
         return False
     # Non-causal target verification runs the DFlash-style head attention,
     # which is not part of the proven-safe XQA decode path.
@@ -1484,6 +1488,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "Adaptive verification requires a multi-token decode width; "
                 f"the runner resolved decode_query_len={decode_query_len!r}."
             )
+        assert not self.adaptive_xqa_mismatch_mode, (
+            "Adaptive-mismatch finalization is one-shot at runner init; "
+            "re-finalizing a target builder would reallocate its mask "
+            "buffer and re-warm the fill kernel."
+        )
         # Persistent packed-mask buffer , allocated once before any
         # cudagraph capture: rows cover the padded worst case
         # (max_num_reqs decode slots x the bound), columns are the packed

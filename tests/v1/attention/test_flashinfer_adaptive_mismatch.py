@@ -1,15 +1,12 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer conditional device/CPU query-lens mismatch support (SM120 XQA).
+"""Invariant tests for conditional FlashInfer XQA device-ragged decode.
 
-Covers the invariant matrix for conditional FlashInfer XQA mismatch
-support: the shared capability predicate, deferred finalize (role tag,
-runner bound, transactional init), mismatch-safe classification (device
-offsets pass through, fixed bound, prefill routing above the bound),
-the persistent device-built packed mask, cascade/fallback exclusions,
-and the SM100 prepare-only plumbing.
-
-Requires a real CUDA device on SM120/SM121 (dedicated XQA).
+Covers the invariant matrix for conditional mismatch support: the shared
+capability predicate (self-contained in its config argument), the
+target-layer-scoped deferred finalize, the persistent packed draft mask
+vs the host oracle, the device-ragged decode classifier, the VARLEN_DECODE
+cudagraph gating, and build()-time ragged metadata. SM120-only (the XQA
+path this guards); SM100 trtllm-gen varlen is covered upstream by #52157's
+tests.
 """
 
 from types import SimpleNamespace
@@ -67,6 +64,10 @@ def _cfg(adaptive: bool = True) -> Any:
             disable_flashinfer_q_quantization=None,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda pc: 32,
+            get_num_kv_heads=lambda pc: 8,
+        ),
         use_v2_model_runner=True,
     )
 

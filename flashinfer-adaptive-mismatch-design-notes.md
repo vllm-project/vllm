@@ -27,17 +27,21 @@ the production-flags module (fp8 KV + SWA + spec width 8).
 
 ## Design
 
-1. **One shared predicate** `_adaptive_xqa_mismatch_safe(vllm_config)`:
+1. **One shared predicate** `_adaptive_xqa_mismatch_safe(vllm_config)`
+   (self-contained in its argument — no thread-local config reads):
    target-side adaptive on + SM120/SM121 + DCP=1 + causal target
-   attention + not forced-native. The selector gate, the manager's
+   attention + not forced-native + model-config head-count divisibility
+   (mirrors the SM100 classmethod gate). The selector gate, the manager's
    independent scan, and the VARLEN_DECODE cudagraph result all consult
    it, so the two adaptive boot gates cannot disagree.
-2. **Deferred finalize** (`_finalize_adaptive_decode(decode_query_len)`):
-   the runner's resolved decode width is the authoritative bound
-   (model-state data, not on SpeculativeConfig); the group's model role
-   comes from a tag recorded at Attention construction (the compilation
-   global is restored before builders exist). Allocation + kernel
-   warmup are transactional; the mode flag flips last.
+2. **Deferred finalize** (`_finalize_adaptive_decode(decode_query_len,
+   is_target)`): the runner's resolved decode width is the authoritative
+   bound (model-state data, not on SpeculativeConfig); the group's
+   target-layer role comes from the runner-derived target layer names
+   (all KV-cache attention layers minus the speculator's draft layers,
+   the #52783 derivation) resolved per group in `init_attn_backend`.
+   Allocation + kernel warmup are transactional; the mode flag flips
+   last; finalization is one-shot at runner init.
 3. **Mismatch-safe classification**: the CPU even-distribution decides
    only the provable single-token fast path (all widths exactly 1);
    otherwise device offsets pass through untouched with the fixed
@@ -49,10 +53,13 @@ the production-flags module (fp8 KV + SWA + spec width 8).
 5. **Exclusions**: cascade disabled for mismatch batches before any
    wrapper planning; defense-in-depth asserts against native decode,
    DCP, and uniform-only TRTLLM-API metadata.
-6. **SM100 prepare-only**: `supports_device_ragged_decode` is the single
-   kernel-capability declaration; TRTLLM-gen varlen metadata is wired
-   but requires an explicit `trtllm_gen_varlen` authorization that no
-   live path can set until real-SM100 hardware validation exists.
+6. **SM100**: merged #52157 owns the SM100 trtllm-gen varlen path
+   (`use_trtllm_gen_varlen_decode`; per-step CPU upper bound as max, no
+   XQA mask). Our `supports_device_ragged_decode` remains the SM12x
+   kernel-capability declaration; extending it to SM100 requires
+   real-hardware capture/replay + model-output validation plus predicate/
+   CG/finalize updates. SM100 stays CG-blocked (UNIFORM_BATCH) until
+   then — behavior preserved exactly as merged.
 
 ## Measurements (deployed wheel, parent W1 harness, ~49K ctx)
 
