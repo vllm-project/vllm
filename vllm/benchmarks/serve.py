@@ -353,7 +353,7 @@ class BenchmarkMetrics:
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
     total_output_chars: int = 0
     output_char_throughput: float = 0.0
-    mean_chars_per_token: float = 0.0
+    mean_chars_per_token: float | None = None
 
 
 @dataclass
@@ -784,13 +784,22 @@ def calculate_metrics(
         total_output_chars=total_output_chars,
         output_char_throughput=total_output_chars / dur_s,
         mean_chars_per_token=(
-            total_output_chars / measured_output_tokens
-            if measured_output_tokens > 0 and not has_unmeasured_output_tokens
-            else 0.0
+            None
+            if has_unmeasured_output_tokens
+            else (
+                total_output_chars / measured_output_tokens
+                if measured_output_tokens > 0
+                else 0.0
+            )
         ),
     )
 
     return metrics, actual_output_lens
+
+
+def _format_mean_chars_per_token(value: float | None) -> str:
+    """Format the character/token ratio for the terminal summary."""
+    return "N/A" if value is None else f"{value:.2f}"
 
 
 def _build_generation_result(
@@ -1290,8 +1299,9 @@ async def benchmark(
             )
         )
         print(
-            "{:<40} {:<10.2f}".format(
-                "Mean characters per token:", metrics.mean_chars_per_token
+            "{:<40} {:<10}".format(
+                "Mean characters per token:",
+                _format_mean_chars_per_token(metrics.mean_chars_per_token),
             )
         )
         print(
