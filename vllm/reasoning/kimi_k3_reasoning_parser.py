@@ -99,6 +99,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         # XTML markers as literal strings (skip_special_tokens=False at serve time)
         self._think_open = "<|open|>think<|sep|>"
         self._think_close = "<|close|>think<|sep|>"
+        self._tools_open = "<|open|>tools<|sep|>"
 
         # Content-channel markers that must be stripped from the final output.
         # The tool parser handles these when active, but when tool_choice is
@@ -134,6 +135,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
         )
+        self._tools_open_ids = tokenizer.encode(
+            self._tools_open, add_special_tokens=False
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -168,6 +172,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         # "close is the newest marker" already encodes.
         return (
             _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
+            or _newest_marker(input_ids, self._tools_open_ids, self._think_open_ids)
+            == 0
         )
 
     def is_reasoning_end_streaming(
@@ -189,10 +195,21 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        carry = (
+            max(
+                len(self._think_close_ids),
+                len(self._think_open_ids),
+                len(self._tools_open_ids),
+            )
+            - 1
+        )
         head = len(input_ids) - len(delta)
         window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        return (
+            _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+            or _newest_marker(window, self._tools_open_ids, self._think_open_ids)
+            == 0
+        )
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
