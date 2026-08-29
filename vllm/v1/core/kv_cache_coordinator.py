@@ -867,14 +867,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            group_block_size = self.single_type_managers[
-                first_group.group_ids[0]
-            ].block_size
+        # Truncate every full-attention group (target and draft) blocks
+        # to final hit_length.
+        for group in self.attention_groups:
+            if not isinstance(group.spec, FullAttentionSpec):
+                continue
+            group_block_size = self.single_type_managers[group.group_ids[0]].block_size
             num_blocks = cdiv(hit_length, group_block_size)
-            for group_id in first_group.group_ids:
+            for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
