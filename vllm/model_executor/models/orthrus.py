@@ -13,8 +13,8 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -37,6 +37,8 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 _BUILDING_DIFFUSION_DRAFT: ContextVar[bool] = ContextVar(
     "orthrus_building_diffusion_draft", default=False
@@ -87,23 +89,44 @@ def _force_write_diffusion_kv(
     needs its output written into the *same physical* shared cache so the
     rest of the block can attend to it in the same forward).
 
-    Calling the low-level cache-update op directly, bypassing
-    ``Attention.forward``'s skip, is the smallest fix that doesn't need a
-    new vLLM-wide kv-sharing variant: ``set_inputs_first_pass`` already
-    computes a real slot_mapping into the target's cache for every
-    position in this block, so this writes to slots nothing else owns.
-
-    Skipped during vLLM's startup dummy/profiling run
-    (``SpecDecodeBaseProposer.dummy_run`` calls ``set_forward_context``
-    with ``attn_metadata=None``, unlike every real step): the physical KV
-    cache tensor isn't in the state this raw op call expects yet at that
-    point, so calling it there crashes with an opaque AOTI tensor-handle
-    error. The dummy run only needs realistic *shapes* for memory
-    profiling, not an actually-populated cache.
+    Calling vLLM's own ``unified_kv_cache_update`` -> ``do_kv_cache_update``
+    -> ``reshape_and_cache_flash`` custom op directly here (bypassing only
+    ``Attention.forward``'s skip) crashes with an opaque PyTorch AOTI
+    tensor-handle error ("aoti_torch_get_size ... API call failed"),
+    on both a real decode step and vLLM's dummy/profiling run -- this
+    compiled kernel has apparently never been exercised against a
+    kv-sharing-*aliased* cache tensor before (the one existing kv-sharing
+    pattern, Gemma4 MTP, never calls it at all), and something about that
+    combination breaks an internal assumption inside the precompiled
+    extension. Rather than debug a prebuilt CUDA kernel's internals,
+    write the same physical slots with plain PyTorch indexing instead:
+    ``do_kv_cache_update``'s own ``kv_cache.transpose(1, 2).split(...)``
+    key_cache/value_cache split is plain tensor ops (not the crashing
+    part), and slot numbers already follow the standard
+    ``physical_block_id * block_size + offset`` convention
+    ``set_inputs_first_pass`` uses to build slot_mapping in the first
+    place, so indexing the flattened (block, offset) leading dimensions
+    by slot number is the same addressing the CUDA kernel implements.
     """
-    if get_forward_context().attn_metadata is None:
+    forward_context = get_forward_context()
+    if forward_context.attn_metadata is None:
+        # vLLM's startup dummy/profiling run only needs realistic shapes,
+        # not an actually-populated cache.
         return
-    unified_kv_cache_update(key, value, attn_diff.layer_name)
+    slot_mapping = forward_context.slot_mapping.get(attn_diff.layer_name)
+    if slot_mapping is None:
+        return
+    kv_cache = attn_diff.kv_cache
+    logger.info(
+        "DEBUG _force_write_diffusion_kv: kv_cache.shape=%s kv_cache.stride=%s "
+        "key.shape=%s value.shape=%s slot_mapping.shape=%s slot_mapping[:8]=%s",
+        tuple(kv_cache.shape),
+        tuple(kv_cache.stride()),
+        tuple(key.shape),
+        tuple(value.shape),
+        tuple(slot_mapping.shape),
+        slot_mapping[:8].tolist(),
+    )
 
 
 # Orthrus adds a parallel set of "*_diff" attention projections next to the
