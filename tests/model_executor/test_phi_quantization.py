@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
 
 
 def test_phi_embedding_receives_quant_config():
+    from vllm.config import CompilationMode
     from vllm.model_executor.models.phi import PhiModel
 
     quant_config = Mock()
@@ -16,6 +17,7 @@ def test_phi_embedding_receives_quant_config():
     vllm_config.model_config.hf_config = config
     vllm_config.cache_config = Mock()
     vllm_config.quant_config = quant_config
+    vllm_config.compilation_config.mode = CompilationMode.NONE
 
     with (
         patch("vllm.model_executor.models.phi.VocabParallelEmbedding") as embedding,
