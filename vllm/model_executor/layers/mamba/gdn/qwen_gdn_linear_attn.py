@@ -197,6 +197,8 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int64)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
