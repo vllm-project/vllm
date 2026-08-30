@@ -587,6 +587,18 @@ def test_fp8_gate_rejects_e5m2(monkeypatch):
         InklingAttention._validate_quantized_kv_cache_dtype("fp8_e5m2")
 
 
+def test_amd_gate_rejects_quantized_kv_cache_dtype():
+    amd_attention = pytest.importorskip(
+        "vllm.models.inkling.amd.attention",
+        reason="ROCm attention module not importable on this platform",
+    )
+    for dtype in ("auto", "float16", "bfloat16"):
+        amd_attention.InklingAttention._validate_kv_cache_dtype(dtype)
+    for dtype in ("fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"):
+        with pytest.raises(NotImplementedError, match="ROCm"):
+            amd_attention.InklingAttention._validate_kv_cache_dtype(dtype)
+
+
 @pytest.mark.parametrize("major", [9, 12])
 def test_fp8_gate_rejects_non_sm100(monkeypatch, major):
     monkeypatch.setattr(
