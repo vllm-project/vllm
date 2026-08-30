@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +42,16 @@ def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
             org_vocab_end_index=6,
         ),
     )
+    _set_test_embedding_weight_loader(module.ngram_embedding)
     return module
+
+
+def _set_test_embedding_weight_loader(embedding) -> None:
+    embedding.weight.weight_loader = partial(
+        copy_ple_embedding_shard_,
+        tp_start=embedding.shard_indices.org_vocab_start_index,
+        tp_end=embedding.shard_indices.org_vocab_end_index,
+    )
 
 
 def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -64,6 +74,7 @@ def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
         "weight_scale",
         nn.Parameter(torch.zeros(1, dtype=torch.bfloat16), requires_grad=False),
     )
+    _set_test_embedding_weight_loader(embedding)
     module.ngram_embedding = embedding
     return module
 
