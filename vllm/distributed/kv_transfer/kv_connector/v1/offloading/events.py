@@ -366,7 +366,8 @@ class OffloadingEventsTracker:
                 )
                 continue
 
-            meta.active_residencies.add((event.medium, event.ownership))
+            if event.removal_expected:
+                meta.active_residencies.add((event.medium, event.ownership))
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
