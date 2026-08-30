@@ -15,6 +15,7 @@ import operator
 import textwrap
 from collections.abc import Callable, Sized
 from itertools import chain
+from typing import TypeGuard
 from unittest import mock
 
 import torch
@@ -484,7 +485,7 @@ def is_method(node: object, name: str) -> bool:
     )
 
 
-def is_op(node: object, name: str) -> bool:
+def is_op(node: object, name: str) -> TypeGuard[fx.Node]:
     """
     Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
     """
