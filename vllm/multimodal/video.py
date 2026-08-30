@@ -356,6 +356,14 @@ class Qwen3VLVideoBackend(VideoBackend):
         min_frames = kwargs.get("min_frames", 4)
         max_frames = kwargs.get("max_frames", 768)
 
+        # vLLM reports original_fps == 0 for clips with unknown/variable fps
+        # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
+        if original_fps <= 0:
+            raise ValueError(
+                "Qwen3-VL video sampling needs a known source fps, but the "
+                "container reported 0 (variable or unknown frame rate)."
+            )
+
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
         num_frames = int(total_frames_num / original_fps * fps)

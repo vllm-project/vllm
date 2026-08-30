@@ -1755,3 +1755,18 @@ def test_glm5next_read_frames_dense_walk_matches_stock(tmp_path):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
     # One initial seek, then pure walking -- no re-seek churn.
     assert cap.seeks == 1
+
+
+@pytest.mark.parametrize(
+    "backend_cls",
+    [Qwen3VLVideoBackend, Qwen2VLVideoBackend],
+    ids=["qwen3_vl", "qwen2_vl"],
+)
+def test_video_backend_rejects_unknown_source_fps(backend_cls):
+    """A container reporting 0 fps (VFR/unknown) must raise a clear
+    ValueError instead of ZeroDivisionError."""
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+    # Decoders report fps=0.0 for unknown/variable frame rate clips.
+    source = VideoSourceMetadata(total_frames_num=150, original_fps=0.0, duration=0.0)
+    with pytest.raises(ValueError, match="unknown frame rate"):
+        backend_cls.compute_frames_index_to_sample(source, target)
