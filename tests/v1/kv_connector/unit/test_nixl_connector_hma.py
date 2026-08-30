@@ -1869,3 +1869,50 @@ def test_push_write_hybrid_mla_replicates_attention():
         assert spec.remote_block_ids == [[7, 8], [3]]
         assert call.kwargs["local_xfer_side_handle"] == local_handle
         assert call.kwargs["remote_xfer_side_handle"] == remote_handle
+
+
+def _make_host_buffer_worker(copy_op):
+    """A worker stripped down to what the host-buffer copy paths touch."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.use_host_buffer = True
+    worker.copy_blocks = copy_op
+    return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "group_block_ids,expected_ids",
+    [
+        # Single group (non-hybrid model): one copy, as before.
+        ([[1, 2, 3]], [1, 2, 3]),
+        # Hybrid model: three groups collapse into a single copy.
+        ([[1, 2], [3, 4], [5]], [1, 2, 3, 4, 5]),
+        # An empty group contributes no ids.
+        ([[1, 2], []], [1, 2]),
+    ],
+)
+def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_ids):
+    """h2d copies are issued once per request, not once per KV cache group."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
+
+    calls = []
+    worker = _make_host_buffer_worker(
+        lambda src, dst, src_ids, dst_ids, direction: calls.append(
+            (src_ids, dst_ids, direction)
+        )
+    )
+    worker.host_xfer_buffers = {"layer": None}
+    worker.device_kv_caches = {"layer": None}
+
+    meta = ReqMeta(
+        local_block_ids=group_block_ids,
+        local_physical_block_ids=group_block_ids,
+        tp_size=1,
+    )
+    worker.sync_recved_kv_to_device("req", meta)
+
+    assert calls == [(expected_ids, expected_ids, "h2d")]
