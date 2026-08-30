@@ -769,6 +769,7 @@ class SparseAttnIndexer(CustomOp):
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
         parallel_config = get_current_vllm_config().parallel_config
+        self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
@@ -787,9 +788,7 @@ class SparseAttnIndexer(CustomOp):
         (it's set up in Worker.initialize_from_config, ahead of warmup/serving).
         """
         if self._cp_kv_cache_interleave_size is None:
-            value = (
-                get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
-            )
+            value = self._parallel_config.cp_kv_cache_interleave_size
             if isinstance(get_forward_context().attn_metadata, dict):
                 self._cp_kv_cache_interleave_size = value
             return value
