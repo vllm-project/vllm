@@ -50,11 +50,11 @@ class XPressSpeculator(DFlashSpeculator):
         # Single-launch Triton refine (all K passes on-chip). Latency lever for
         # small batches; needs candidate_topc > 0. Off until GPU-validated.
         self.use_fused_kernel = bool(getattr(hf, "xpress_fused_kernel", False))
-        # TODO(exact-am1): block slot 0's refiner input wants the token BEFORE the
-        # anchor. v0 approximates it with the anchor id itself; slot 0's latent
-        # only reaches draft slots through the mixer column L[:, k, 0], so the
-        # effect is small but nonzero -- quantify at eval and wire the exact id
-        # (previous committed token) through propose() in a follow-up.
+        # Block slot 0 is the anchor: it is a verified token, so its refined output is
+        # discarded and only its latent matters, reaching the draft slots through the
+        # single mixer column L[:, k, 0]. Its own prev token therefore has a narrow
+        # path to the draft, and the anchor id stands in for it -- the predecessor
+        # lives in the KV cache, not in any id buffer the speculator can reach.
         self._anchor_idx = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
@@ -103,7 +103,7 @@ class XPressSpeculator(DFlashSpeculator):
         h_full = head_hidden[:n_rows].view(num_reqs, B, -1)
         base_full = self.model.compute_draft_logits(h_full)     # [R, B, V]
         anchor_ids = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
-        tok_am1 = anchor_ids                              # v0 approximation, see TODO
+        tok_am1 = anchor_ids                              # see the note in __init__
         head = self.model.model.xpress_head
         # fused single-launch kernel is per-request-persistent: wins while
         # launch-latency-bound, loses to cuBLAS weight reuse at large batch
