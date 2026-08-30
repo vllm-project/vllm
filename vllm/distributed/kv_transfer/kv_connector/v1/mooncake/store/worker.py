@@ -28,7 +28,7 @@ import torch
 import zmq
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -1420,6 +1420,41 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
+    @staticmethod
+    def _create_mem_pool(
+        extra_config: dict[str, Any], model_config: ModelConfig
+    ) -> torch.cuda.MemPool | None:
+        pool_type = str(extra_config.get("custom_mem_pool") or "").upper()
+        if not pool_type:
+            return None
+        if pool_type not in ("NVLINK", "BAREX"):
+            raise ValueError(
+                f"Unsupported custom_mem_pool={pool_type!r}, "
+                "expected 'NVLINK' or 'BAREX'"
+            )
+        if model_config.enable_sleep_mode or model_config.enable_cumem_allocator:
+            raise ValueError(
+                "custom_mem_pool is incompatible with enable_sleep_mode "
+                "or enable_cumem_allocator; CuMemAllocator cannot manage "
+                "allocations from the custom pool."
+            )
+        try:
+            if pool_type == "NVLINK":
+                from mooncake.allocator import NVLinkAllocator as allocator_cls
+            else:  # pool_type == "BAREX"
+                from mooncake.allocator import BarexAllocator as allocator_cls
+        except ImportError as e:
+            raise ImportError(
+                f"custom_mem_pool={pool_type!r} requires "
+                "mooncake-transfer-engine>=0.3.8. Please upgrade Mooncake."
+            ) from e
+
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        allocator = allocator_cls.get_allocator(device)
+        mem_pool = torch.cuda.MemPool(allocator.allocator())
+        logger.info("Using Mooncake custom memory pool: %s", pool_type)
+        return mem_pool
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1478,35 +1513,7 @@ class MooncakeStoreWorker:
         store_config = MooncakeStoreConfig.load_from_config()
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
-        self._mem_pool: torch.cuda.MemPool | None = None
-        pool_type = str(extra_config.get("custom_mem_pool") or "").upper()
-        if pool_type:
-            if pool_type not in ("NVLINK", "BAREX"):
-                raise ValueError(
-                    f"Unsupported custom_mem_pool={pool_type!r}, "
-                    "expected 'NVLINK' or 'BAREX'"
-                )
-            if model_config.enable_sleep_mode or model_config.enable_cumem_allocator:
-                raise ValueError(
-                    "custom_mem_pool is incompatible with enable_sleep_mode "
-                    "or enable_cumem_allocator; CuMemAllocator cannot manage "
-                    "allocations from the custom pool."
-                )
-            try:
-                if pool_type == "NVLINK":
-                    from mooncake.allocator import NVLinkAllocator as allocator_cls
-                else:  # pool_type == "BAREX"
-                    from mooncake.allocator import BarexAllocator as allocator_cls
-            except ImportError as e:
-                raise ImportError(
-                    f"custom_mem_pool={pool_type!r} requires "
-                    "mooncake-transfer-engine>=0.3.8. Please upgrade Mooncake."
-                ) from e
-
-            device = torch.device("cuda", torch.cuda.current_device())
-            allocator = allocator_cls.get_allocator(device)
-            self._mem_pool = torch.cuda.MemPool(allocator.allocator())
-            logger.info("Using Mooncake custom memory pool: %s", pool_type)
+        self._mem_pool = self._create_mem_pool(extra_config, model_config)
 
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
