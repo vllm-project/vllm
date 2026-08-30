@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     FunctionDefinition,
 )
+from vllm.parser import abstract_parser as abstract_parser_module
 from vllm.parser import metrics as parser_metrics
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine import parser_engine as parser_engine_module
@@ -1163,6 +1164,66 @@ def test_parser_manager_preserves_tool_choice_capability(monkeypatch):
     assert parser_cls is not None
     assert issubclass(parser_cls, DelegatingParser)
     assert parser_cls.tool_parser_cls is _UnsupportedChoiceToolAdapter
+
+
+def _make_parser_manager_parser(monkeypatch, tool_parser_cls):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: tool_parser_cls),
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    return parser_cls(make_mock_tokenizer(_VOCAB))
+
+
+@pytest.mark.parametrize(
+    ("tool_parser_cls", "expected_calls"),
+    [
+        pytest.param(_CombinedToolAdapter, 0, id="standard_choice_path"),
+        pytest.param(_UnsupportedChoiceToolAdapter, 1, id="tool_parser_path"),
+    ],
+)
+@pytest.mark.parametrize("tool_choice", ["required", "named"])
+@pytest.mark.parametrize(
+    "streaming",
+    [
+        pytest.param(False, id="non_streaming"),
+        pytest.param(True, id="streaming"),
+    ],
+)
+def test_parser_manager_metrics_respect_tool_choice_boundary(
+    monkeypatch, tool_parser_cls, expected_calls, tool_choice, streaming
+):
+    recorder = MagicMock()
+    monkeypatch.setattr(
+        abstract_parser_module,
+        "record_tool_parser_invocation",
+        recorder,
+    )
+    parser = _make_parser_manager_parser(monkeypatch, tool_parser_cls)
+    request = _make_tool_choice_request(tool_choice)
+
+    if streaming:
+        parser.parse_delta("</think>", [201], request, finished=False)
+        parser.parse_delta("Hello", [], request, finished=False)
+        expected_calls *= 2
+    else:
+        parser.parse("</think>Hello", request, enable_auto_tools=True)
+
+    assert recorder.call_count == expected_calls
+    for call in recorder.call_args_list:
+        assert call.kwargs["is_streaming"] is streaming
+        assert call.kwargs["request"] is request
 
 
 @pytest.mark.parametrize("tool_choice", ["required", "named"])
