@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Method,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 
 
 def test_map_wna16_backend_supports_triton():
@@ -313,3 +314,83 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert not hasattr(layer, "w2_weight_packed")
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
+
+
+def _make_awq_moe_wna16_config() -> MoeWNA16Config:
+    return MoeWNA16Config(
+        linear_quant_method="awq",
+        weight_bits=4,
+        group_size=128,
+        has_zp=True,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config={},
+    )
+
+
+def _force_device_capability(monkeypatch, capability):
+    monkeypatch.setattr(
+        current_platform, "get_device_capability", lambda *a, **k: capability
+    )
+
+
+def test_moe_wna16_config_accepts_awq_on_xpu(monkeypatch):
+    """XPU reports no CUDA-style device capability, so the AWQ capability
+    gate must not reject moe_wna16 there."""
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    _force_device_capability(monkeypatch, None)
+
+    _make_awq_moe_wna16_config()
+
+
+@pytest.mark.parametrize(
+    ("capability", "accepted"),
+    [
+        (DeviceCapability(major=7, minor=0), False),
+        (DeviceCapability(major=7, minor=5), True),
+        (DeviceCapability(major=9, minor=0), True),
+        (None, False),
+    ],
+)
+def test_moe_wna16_config_awq_capability_gate_on_cuda_like(
+    monkeypatch, capability, accepted
+):
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    _force_device_capability(monkeypatch, capability)
+
+    if accepted:
+        _make_awq_moe_wna16_config()
+    else:
+        with pytest.raises(ValueError, match="not supported"):
+            _make_awq_moe_wna16_config()
+
+
+def test_is_moe_wna16_compatible_awq_on_xpu(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    _force_device_capability(monkeypatch, None)
+
+    assert MoeWNA16Config.is_moe_wna16_compatible({"quant_method": "awq", "bits": 4})
+    assert MoeWNA16Config.is_moe_wna16_compatible(
+        {"quant_method": "gptq", "bits": 4, "desc_act": False}
+    )
+
+
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [
+        (DeviceCapability(major=7, minor=0), False),
+        (DeviceCapability(major=7, minor=5), True),
+        (DeviceCapability(major=9, minor=0), True),
+        (None, False),
+    ],
+)
+def test_is_moe_wna16_compatible_awq_capability_gate_on_cuda_like(
+    monkeypatch, capability, expected
+):
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    _force_device_capability(monkeypatch, capability)
+
+    assert (
+        MoeWNA16Config.is_moe_wna16_compatible({"quant_method": "awq", "bits": 4})
+        is expected
+    )
