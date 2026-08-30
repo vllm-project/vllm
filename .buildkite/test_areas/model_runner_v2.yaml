@@ -2,7 +2,7 @@ group: Model Runner V2
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Model Runner V2 Core"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Core"
   device: h200_35gb
   key: model-runner-v2-core-tests
   timeout_in_minutes: 35
@@ -24,7 +24,7 @@ steps:
   # Temporary hack filter to exclude ngram spec decoding based tests.
   - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
-- label: ":nvidia: (H200) Model Runner V2 Examples"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Examples"
   device: h200_35gb
   key: model-runner-v2-examples
   timeout_in_minutes: 35
@@ -126,7 +126,7 @@ steps:
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
-- label: ":nvidia: (H200) Model Runner V2 Spec Decode"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Spec Decode"
   device: h200_35gb
   key: model-runner-v2-spec-decode
   timeout_in_minutes: 50
