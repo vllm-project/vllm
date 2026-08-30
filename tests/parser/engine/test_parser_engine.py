@@ -17,8 +17,6 @@ from prometheus_client import REGISTRY
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedFunction,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -1000,7 +998,10 @@ class TestEngineBasedPath:
             parser_metrics.init_parser_metrics(model_name=model_name)
             test_counter = parser_metrics._tool_call_parser_invocations
             request = ChatCompletionRequest(
-                messages=[], model="test", tool_choice="auto"
+                messages=[],
+                model="test",
+                tools=[_make_tool("f", {})],
+                tool_choice="auto",
             )
 
             non_streaming_labels = {**labels, "mode": "non_streaming"}
@@ -1125,16 +1126,18 @@ class _CombinedDelegating(DelegatingParser):
 
 
 def _make_tool_choice_request(tool_choice: str) -> ChatCompletionRequest:
+    parsed_tool_choice: str | dict[str, object] = tool_choice
     if tool_choice == "named":
-        parsed_tool_choice = ChatCompletionNamedToolChoiceParam(
-            function=ChatCompletionNamedFunction(name="f")
-        )
+        parsed_tool_choice = {
+            "type": "function",
+            "function": {"name": "f"},
+        }
     else:
         parsed_tool_choice = tool_choice
     return ChatCompletionRequest(
         messages=[],
         model="test",
-        tools=[_make_tool("f", {})],
+        tools=[_make_tool("f", {}).model_dump()],
         tool_choice=parsed_tool_choice,
     )
 
