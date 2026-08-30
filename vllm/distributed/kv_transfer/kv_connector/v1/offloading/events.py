@@ -131,6 +131,8 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
+        if existing := self._pending_event_metadata.get(offload_key):
+            meta.active_residencies.update(existing.active_residencies)
         self._pending_event_metadata[offload_key] = meta
 
     def record_lookup(
@@ -217,7 +219,7 @@ class OffloadingEventsTracker:
 
         lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
         lora_name = req.lora_request.name if req.lora_request is not None else None
-        self._pending_event_metadata[offload_key] = _OffloadEventMetadata(
+        meta = _OffloadEventMetadata(
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
@@ -229,6 +231,9 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
         )
+        if existing := self._pending_event_metadata.get(offload_key):
+            meta.active_residencies.update(existing.active_residencies)
+        self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
