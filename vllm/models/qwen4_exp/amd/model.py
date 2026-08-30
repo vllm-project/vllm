@@ -581,8 +581,16 @@ class Qwen4ExpModel(nn.Module):
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={substr: None for substr in skip_substrs}
         )
+        # The final HC mixer only exists on the last PP rank; earlier ranks
+        # must drop its checkpoint weights instead of failing to place them.
+        ignore_prefixes = (
+            None
+            if self.hyper_connection_mixer is not None
+            else ["hyper_connection_mixer."]
+        )
         loader = AutoWeightsLoader(
             self,
+            ignore_unexpected_prefixes=ignore_prefixes,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
         loaded = loader.load_weights(
