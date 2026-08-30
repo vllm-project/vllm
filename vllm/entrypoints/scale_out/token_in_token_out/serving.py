@@ -137,7 +137,13 @@ class ServingTokens(GenerateBaseServing):
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
         try:
-            msgspec.msgpack.encode(sampling_params)
+            msgspec.msgpack.encode(
+                (
+                    sampling_params,
+                    request.kv_transfer_params,
+                    request.ec_transfer_params,
+                )
+            )
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
