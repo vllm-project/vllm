@@ -466,7 +466,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 if name.startswith("backbone."):
                     name = name.replace("backbone.", "model.")
 
-            if "scale" in name or "zero_point" in name:
+            if "scale" in name:
                 # ModelOpt serializes KV-cache scales next to k_proj/v_proj,
                 # while vLLM registers them on the Attention module.
                 name = maybe_remap_kv_scale_name(name, params_dict)
