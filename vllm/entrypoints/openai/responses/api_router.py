@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,
@@ -72,8 +73,13 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump(mode="json", by_alias=True))
 
+    args = getattr(raw_request.app.state, "args", None)
+    keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
     return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
+        content=with_sse_keep_alive(
+            _convert_stream_to_sse_events(generator), float(keep_alive_interval)
+        ),
+        media_type="text/event-stream",
     )
 
 
@@ -102,8 +108,13 @@ async def retrieve_responses(
         )
     elif isinstance(response, ResponsesResponse):
         return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
+    args = getattr(raw_request.app.state, "args", None)
+    keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
     return StreamingResponse(
-        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
+        content=with_sse_keep_alive(
+            _convert_stream_to_sse_events(response), float(keep_alive_interval)
+        ),
+        media_type="text/event-stream",
     )
 
 
