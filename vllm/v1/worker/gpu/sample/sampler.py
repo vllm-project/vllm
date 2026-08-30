@@ -11,12 +11,16 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
+    flashinfer_sample_from_probs,
     flashinfer_sampler_supported,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_sample,
+    temperature_softmax,
+)
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
@@ -59,6 +63,8 @@ class Sampler:
             TraceReplayState(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        # Subset of the above that actually mutates the logits in place.
+        self.needs_inplace_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -79,7 +85,7 @@ class Sampler:
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
-        self.needs_logits_processing[req_idx] = (
+        self.needs_inplace_processing[req_idx] = (
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
             or self.bad_words_state.num_bad_words.np[req_idx] > 0
@@ -87,6 +93,9 @@ class Sampler:
                 self.thinking_budget_state.enabled
                 and self.thinking_budget_state.use_thinking_budget[req_idx]
             )
+        )
+        self.needs_logits_processing[req_idx] = (
+            self.needs_inplace_processing[req_idx]
             or (temperature != 0.0 and temperature != 1.0)
             or states.min_p.np[req_idx] != 0.0
             or states.top_k.np[req_idx] != states.vocab_size
@@ -214,8 +223,18 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
+        skip_temperature: bool = False,
     ) -> torch.Tensor:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
+            return logits
+
+        # The FP32 copy exists so the processors below can write in place. When
+        # temperature is fused into a later softmax and no in-place processor
+        # runs, nothing writes to the logits, so the copy is pure memory traffic
+        # and the fused kernel can read the original dtype directly.
+        if skip_temperature and not np.any(
+            self.needs_inplace_processing[idx_mapping_np]
+        ):
             return logits
 
         # Copy logits to a new FP32 tensor.
@@ -255,10 +274,12 @@ class Sampler:
             expanded_local_pos,
         )
 
-        # Apply temperature in place.
-        self.sampling_states.apply_temperature(
-            logits, expanded_idx_mapping, idx_mapping_np
-        )
+        # Apply temperature in place, unless the caller folds it into a
+        # later softmax.
+        if not skip_temperature:
+            self.sampling_states.apply_temperature(
+                logits, expanded_idx_mapping, idx_mapping_np
+            )
 
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
@@ -282,16 +303,6 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        processed_logits = self.apply_sampling_params(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping,
-            idx_mapping_np,
-            pos,
-            input_ids,
-            expanded_local_pos,
-            skip_top_k_top_p=True,
-        )
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
         )
@@ -304,9 +315,37 @@ class Sampler:
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
+        # With exactly one of top_k/top_p set, flashinfer_sample softmaxes the
+        # logits itself, so temperature can be folded into that softmax instead
+        # of costing a separate read-modify-write pass over the whole vocab.
+        # Only safe when nothing downstream reads the scaled logits back.
+        fuse_temperature = (
+            use_flashinfer
+            and (top_k is None) != (top_p is None)
+            and not self.return_sampling_mask
+            and self.sampling_states.no_min_p(idx_mapping_np)
+        )
+        processed_logits = self.apply_sampling_params(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            input_ids,
+            expanded_local_pos,
+            skip_top_k_top_p=True,
+            skip_temperature=fuse_temperature,
+        )
 
         # Sample the next token.
-        if use_flashinfer:
+        if fuse_temperature:
+            probs = temperature_softmax(
+                processed_logits,
+                expanded_idx_mapping,
+                self.sampling_states.temperature.gpu,
+            )
+            sampled = flashinfer_sample_from_probs(probs, top_k, top_p).to(torch.int64)
+        elif use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:
             processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)

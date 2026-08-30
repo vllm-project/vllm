@@ -512,6 +512,30 @@ def flashinfer_sample(
     return next_token_ids.view(-1)
 
 
+def flashinfer_sample_from_probs(
+    probs: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """Sample with FlashInfer from probabilities that the caller already
+    normalized, for the cases `flashinfer_sample` would softmax internally.
+
+    Exactly one of `k` and `p` must be given.
+    """
+    import flashinfer
+
+    assert (k is None) != (p is None)
+    if k is None:
+        next_token_ids = flashinfer.sampling.top_p_sampling_from_probs(
+            probs, p, deterministic=True
+        )
+    else:
+        next_token_ids = flashinfer.sampling.top_k_sampling_from_probs(
+            probs, k, deterministic=True
+        )
+    return next_token_ids.view(-1)
+
+
 def _to_tensor_scalar_tuple(x):
     if isinstance(x, torch.Tensor):
         return (x, 0)

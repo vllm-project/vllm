@@ -65,6 +65,86 @@ def apply_temperature(
 
 
 @triton.jit
+def _temperature_softmax_kernel(
+    logits_ptr,
+    probs_ptr,
+    logits_stride,
+    probs_stride,
+    expanded_idx_mapping_ptr,
+    temperature_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
+    # Divide rather than multiply by a reciprocal so the scaled logits match
+    # _temperature_kernel bit for bit. Dividing by 1.0 is exact, so folding
+    # temperature 1 (and greedy's 0) into the divisor reproduces that kernel's
+    # early return without a branch.
+    denom = tl.where(temperature == 0.0, 1.0, temperature)
+    row_ptr = logits_ptr + token_idx * logits_stride
+
+    # Pass 1: online max and normalizer in a single read of the row.
+    max_val = float("-inf")
+    sum_exp = 0.0
+    for start in range(0, vocab_size, BLOCK_SIZE):
+        block = start + tl.arange(0, BLOCK_SIZE)
+        mask = block < vocab_size
+        x = tl.load(row_ptr + block, mask=mask, other=float("-inf"))
+        x = x.to(tl.float32) / denom
+        new_max = tl.maximum(max_val, tl.max(x, axis=0))
+        sum_exp = sum_exp * tl.exp(max_val - new_max) + tl.sum(
+            tl.where(mask, tl.exp(x - new_max), 0.0), axis=0
+        )
+        max_val = new_max
+
+    # Pass 2: normalize and write the probabilities.
+    inv_sum = 1.0 / sum_exp
+    probs_row_ptr = probs_ptr + token_idx * probs_stride
+    for start in range(0, vocab_size, BLOCK_SIZE):
+        block = start + tl.arange(0, BLOCK_SIZE)
+        mask = block < vocab_size
+        x = tl.load(row_ptr + block, mask=mask, other=0.0)
+        x = x.to(tl.float32) / denom
+        tl.store(probs_row_ptr + block, tl.exp(x - max_val) * inv_sum, mask=mask)
+
+
+def temperature_softmax(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
+    """Temperature scaling fused into the softmax.
+
+    Equivalent to `apply_temperature` followed by
+    `logits.softmax(dim=-1, dtype=torch.float32)`, but avoids writing the
+    scaled logits back to memory and reading them again.
+
+    Args:
+        logits: Logits of shape `[num_tokens, vocab_size]`.
+        expanded_idx_mapping: Maps each token to its request state index.
+        temperature: Per-request-state temperatures.
+
+    Returns:
+        FP32 probabilities of shape `[num_tokens, vocab_size]`.
+    """
+    num_tokens, vocab_size = logits.shape
+    probs = torch.empty_like(logits, dtype=torch.float32)
+    _temperature_softmax_kernel[(num_tokens,)](
+        logits,
+        probs,
+        logits.stride(0),
+        probs.stride(0),
+        expanded_idx_mapping,
+        temperature,
+        vocab_size,
+        BLOCK_SIZE=8192,
+    )
+    return probs
+
+
+@triton.jit
 def tl_rand64(seed, offset, includes_zero: tl.constexpr):
     lo, hi, _, _ = tl.randint4x(seed, offset)
     lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
