@@ -808,6 +808,22 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+def test_ngram_parallel_size_defaults_to_tensor_parallel_size():
+    config = ParallelConfig(tensor_parallel_size=4, data_parallel_size=2)
+
+    assert config.ngram_parallel_size == 4
+
+
+@pytest.mark.parametrize("ngram_parallel_size", [2, 16])
+def test_ngram_parallel_size_rejects_invalid_topology(ngram_parallel_size: int):
+    with pytest.raises(ValueError, match="ngram_parallel_size|DP replicas"):
+        ParallelConfig(
+            tensor_parallel_size=4,
+            data_parallel_size=2,
+            ngram_parallel_size=ngram_parallel_size,
+        )
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port

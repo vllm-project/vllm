@@ -13,8 +13,8 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.forward_context import get_forward_context
+from vllm.distributed import get_np_dp_group, get_np_group, get_tp_group
+from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -117,6 +117,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             padding_size=padding_size,
             prefix=prefix,
             quant_method=embedding_method,
+            parallel_group=get_np_group(),
         )
         self.embedding_method = embedding_method
 
@@ -377,7 +378,7 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         input_ids: torch.Tensor,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Look up local TP rows from pinned memory into a BF16 GPU tensor."""
+        """Look up local NP rows from pinned memory into a BF16 GPU tensor."""
         expected_shape = (*input_ids.shape, self.embedding_dim)
         if output is None:
             output = torch.empty(
@@ -409,9 +410,10 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         return output
 
     def reduce(self, output: torch.Tensor) -> torch.Tensor:
-        """Combine TP-local rows after the pinned-memory lookup."""
+        """Combine NP-local rows after the pinned-memory lookup."""
         if self.tp_size > 1:
-            return tensor_model_parallel_all_reduce(output)
+            assert self.parallel_group is not None
+            return self.parallel_group.all_reduce(output)
         return output
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -540,6 +542,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         max_total_tokens: int,
         max_num_reqs: int,
         *,
+        data_parallel_rank: int,
         prefix: str,
         layer_name: str,
         quant_config: QuantizationConfig | None = None,
@@ -551,6 +554,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
         self.ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
+        self.np_data_parallel_size = (
+            get_np_group().world_size // get_tp_group().world_size
+        )
+        self.data_parallel_rank = data_parallel_rank
         if self.ngram_size < 2:
             raise ValueError(f"ngram_size must be >= 2, got {self.ngram_size}")
         if self.heads_per_ngram <= 0:
@@ -646,7 +653,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 raise TypeError("PLE CPU offload requires a pinned host embedding")
             self._setup_prefetch_stream(self.layer_name)
             self._prefetch_buffer = torch.empty(
-                max_total_tokens,
+                max_total_tokens * self.np_data_parallel_size,
                 embedding_dim,
                 # TODO: use quant dtype
                 dtype=torch.bfloat16,
@@ -776,6 +783,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         return ngram_ids
 
+    def _get_prefetch_buffer(self) -> torch.Tensor:
+        """Return the persistent buffer shared by the prefetch custom ops."""
+        assert self._prefetch_buffer is not None
+        return self._prefetch_buffer
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -793,7 +805,80 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             query_start_loc,
             ngram_context,
         )
+        if self.np_data_parallel_size > 1:
+            output = hidden_states.new_empty((input_ids.shape[0], self.embedding_dim))
+            torch.ops.vllm.qwen4_exp_ple_fetch_np_embeddings(
+                ngram_ids,
+                output,
+                self.layer_name,
+            )
+            return output
         return self.ngram_embedding(ngram_ids).flatten(-2)
+
+    def _get_np_gather_slot(self, local_num_tokens: int) -> tuple[int, int]:
+        """Return the per-DP slot size and this rank's slot offset."""
+        if self.np_data_parallel_size == 1:
+            return local_num_tokens, 0
+        dp_metadata: DPMetadata | None = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            raise RuntimeError("NP spanning DP requires DP token metadata")
+        group_start = (self.data_parallel_rank // self.np_data_parallel_size) * (
+            self.np_data_parallel_size
+        )
+        group_end = group_start + self.np_data_parallel_size
+        token_counts = dp_metadata.num_tokens_across_dp_cpu.tolist()
+        group_counts = token_counts[group_start:group_end]
+        slot_size = max(group_counts)
+        np_dp_rank = get_np_dp_group().rank_in_group
+        return slot_size, np_dp_rank * slot_size
+
+    def _gather_np_ids(
+        self,
+        ngram_ids: torch.Tensor,
+        slot_size: int,
+    ) -> torch.Tensor:
+        """Gather DP-local IDs that share one NP-sharded PLE table."""
+        if self.np_data_parallel_size == 1:
+            return ngram_ids
+        if ngram_ids.shape[0] < slot_size:
+            padding = ngram_ids.new_zeros(
+                slot_size - ngram_ids.shape[0], ngram_ids.shape[1]
+            )
+            ngram_ids = torch.cat((ngram_ids, padding), dim=0)
+        return get_np_dp_group().all_gather(ngram_ids, dim=0)
+
+    def _launch_prefetch(
+        self,
+        ngram_ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Launch the UVA lookup on the dedicated CUDA stream."""
+        if not self._prefetch_enabled:
+            raise RuntimeError("PLE prefetch is not enabled")
+        prefetch_stream = self._get_prefetch_stream(self.layer_name)
+        embedding = self.ngram_embedding
+        if not isinstance(embedding, Qwen4ExpPinnedHostEmbedding):
+            raise TypeError("PLE prefetch requires a pinned host embedding")
+        prefetch_stream.wait_stream(torch.cuda.current_stream())
+        ngram_ids.record_stream(prefetch_stream)
+        with torch.cuda.stream(prefetch_stream):
+            embedding.lookup(
+                ngram_ids,
+                output=output.unflatten(-1, (self.ngram_heads, -1)),
+            )
+
+    def _start_prefetch_impl(
+        self,
+        ngram_ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Gather DP-local IDs and launch their UVA lookup."""
+        slot_size, _ = self._get_np_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_np_ids(ngram_ids, slot_size)
+        self._launch_prefetch(
+            gathered_ids,
+            output[: gathered_ids.shape[0]],
+        )
 
     def start_prefetch(
         self,
@@ -810,7 +895,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             query_start_loc,
             ngram_context,
         )
-        output = self._get_prefetch_output(ngram_ids.shape[0])
+        output = self._get_prefetch_buffer()
         torch.ops.vllm.qwen4_exp_ple_start_prefetch(
             hidden_states,
             ngram_ids,
@@ -818,48 +903,33 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             self.layer_name,
         )
 
-    def _get_prefetch_output(self, num_tokens: int) -> torch.Tensor:
-        """Return the persistent output slice used by eager and graph execution."""
-        assert self._prefetch_buffer is not None
-        assert num_tokens <= self._prefetch_buffer.shape[0]
-        return self._prefetch_buffer[:num_tokens]
+    def _select_embeddings(
+        self,
+        output: torch.Tensor,
+        local_num_tokens: int,
+        slot_offset: int,
+    ) -> torch.Tensor:
+        """Select this DP rank's rows from the NP-reduced embeddings."""
+        if self.np_data_parallel_size == 1:
+            return output
+        return output.narrow(0, slot_offset, local_num_tokens)
 
-    def _launch_prefetch(
+    def _fetch_np_embeddings(
         self,
         ngram_ids: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Launch the UVA lookup on the dedicated CUDA stream."""
-        if not self._prefetch_enabled:
-            raise RuntimeError("PLE prefetch is not enabled")
-        stream = self._get_prefetch_stream(self.layer_name)
-        embedding = self.ngram_embedding
-        if not isinstance(embedding, Qwen4ExpPinnedHostEmbedding):
-            raise TypeError("PLE prefetch requires a pinned host embedding")
-        stream.wait_stream(torch.cuda.current_stream())
-        ngram_ids.record_stream(stream)
-        with torch.cuda.stream(stream):
-            embedding.lookup(
-                ngram_ids,
-                output=output.unflatten(-1, (self.ngram_heads, -1)),
+        """Fetch NP embeddings outside the compiled graph body."""
+        slot_size, slot_offset = self._get_np_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_np_ids(ngram_ids, slot_size)
+        embeddings = self.ngram_embedding(gathered_ids).flatten(-2)
+        output.copy_(
+            self._select_embeddings(
+                embeddings,
+                ngram_ids.shape[0],
+                slot_offset,
             )
-
-    def _finalize_prefetched(
-        self,
-        hidden_states: torch.Tensor,
-        num_tokens: int,
-    ) -> torch.Tensor:
-        """Wait for the side stream and return reduced PLE embeddings."""
-        output = self._get_prefetch_output(num_tokens)
-        torch.ops.vllm.qwen4_exp_ple_wait_prefetch(
-            hidden_states,
-            output,
-            self.layer_name,
         )
-        embedding = self.ngram_embedding
-        if not isinstance(embedding, Qwen4ExpPinnedHostEmbedding):
-            raise TypeError("PLE prefetch requires a pinned host embedding")
-        return embedding.reduce(output)
 
     def _wait_prefetch(self) -> None:
         """Join the PLE side stream to the current compute stream."""
@@ -867,6 +937,43 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             raise RuntimeError("PLE prefetch is not enabled")
         stream = self._get_prefetch_stream(self.layer_name)
         torch.cuda.current_stream().wait_stream(stream)
+
+    def _finalize_prefetched_impl(
+        self,
+        prefetch_output: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Join the PLE stream, reduce NP shards, and return local rows."""
+        self._wait_prefetch()
+        slot_size, slot_offset = self._get_np_gather_slot(output.shape[0])
+        active_output = prefetch_output[: slot_size * self.np_data_parallel_size]
+        embedding = self.ngram_embedding
+        if not isinstance(embedding, Qwen4ExpPinnedHostEmbedding):
+            raise TypeError("PLE prefetch requires a pinned host embedding")
+        embeddings = embedding.reduce(active_output)
+        output.copy_(
+            self._select_embeddings(
+                embeddings,
+                output.shape[0],
+                slot_offset,
+            )
+        )
+
+    def _finalize_prefetched(
+        self,
+        hidden_states: torch.Tensor,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Wait for the side stream and return reduced PLE embeddings."""
+        prefetch_output = self._get_prefetch_buffer()
+        output = hidden_states.new_empty((num_tokens, self.embedding_dim))
+        torch.ops.vllm.qwen4_exp_ple_finalize_prefetched(
+            hidden_states,
+            prefetch_output,
+            output,
+            self.layer_name,
+        )
+        return output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
@@ -971,6 +1078,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.ple_dense_layer_id,
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.scheduler_config.max_num_seqs,
+            data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
             prefix=f"{prefix}.ple_embedding",
             layer_name=prefix,
             quant_config=quant_config,
@@ -1666,7 +1774,7 @@ def qwen4_exp_ple_start_prefetch(
 ) -> None:
     """Launch a PLE pinned-memory lookup outside the compiled graph body."""
     layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding._launch_prefetch(ngram_ids, output)
+    layer.ple_embedding._start_prefetch_impl(ngram_ids, output)
 
 
 def qwen4_exp_ple_start_prefetch_fake(
@@ -1678,18 +1786,38 @@ def qwen4_exp_ple_start_prefetch_fake(
     return
 
 
-def qwen4_exp_ple_wait_prefetch(
+def qwen4_exp_ple_finalize_prefetched(
     hidden_states: torch.Tensor,
+    prefetch_output: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
-    """Join a PLE lookup stream outside the compiled graph body."""
+    """Finish a PLE lookup outside the compiled graph body."""
     layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding._wait_prefetch()
+    layer.ple_embedding._finalize_prefetched_impl(prefetch_output, output)
 
 
-def qwen4_exp_ple_wait_prefetch_fake(
+def qwen4_exp_ple_finalize_prefetched_fake(
     hidden_states: torch.Tensor,
+    prefetch_output: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+def qwen4_exp_ple_fetch_np_embeddings(
+    ngram_ids: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Run a resident NP lookup outside the compiled graph body."""
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer.ple_embedding._fetch_np_embeddings(ngram_ids, output)
+
+
+def qwen4_exp_ple_fetch_np_embeddings_fake(
+    ngram_ids: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -1719,10 +1847,17 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
-    op_name="qwen4_exp_ple_wait_prefetch",
-    op_func=qwen4_exp_ple_wait_prefetch,
-    mutates_args=["hidden_states", "output"],
-    fake_impl=qwen4_exp_ple_wait_prefetch_fake,
+    op_name="qwen4_exp_ple_finalize_prefetched",
+    op_func=qwen4_exp_ple_finalize_prefetched,
+    mutates_args=["hidden_states", "prefetch_output", "output"],
+    fake_impl=qwen4_exp_ple_finalize_prefetched_fake,
+)
+
+direct_register_custom_op(
+    op_name="qwen4_exp_ple_fetch_np_embeddings",
+    op_func=qwen4_exp_ple_fetch_np_embeddings,
+    mutates_args=["output"],
+    fake_impl=qwen4_exp_ple_fetch_np_embeddings_fake,
 )
 
 

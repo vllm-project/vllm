@@ -30,6 +30,19 @@ from vllm.models.qwen4_exp.nvidia.ple_layer import (
 )
 
 
+def _mock_np_group(
+    monkeypatch: pytest.MonkeyPatch,
+    world_size: int = 1,
+    all_reduce=lambda tensor: tensor,
+) -> None:
+    group = SimpleNamespace(
+        rank_in_group=0,
+        world_size=world_size,
+        all_reduce=all_reduce,
+    )
+    monkeypatch.setattr(ple_layer_module, "get_np_group", lambda: group)
+
+
 def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
     module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
     nn.Module.__init__(module)
@@ -163,9 +176,45 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     assert torch.equal(module.ngram_embedding.weight_scale, weight_scale)
 
 
+@pytest.mark.parametrize(("dp_rank", "local_tokens"), [(0, 2), (1, 3)])
+def test_np_lookup_gathers_and_returns_dp_local_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    dp_rank: int,
+    local_tokens: int,
+) -> None:
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    module.np_data_parallel_size = 2
+    module.data_parallel_rank = dp_rank
+    gathered_ids = torch.tensor([[10], [11], [0], [20], [21], [22]])
+    group = SimpleNamespace(
+        rank_in_group=dp_rank,
+        all_gather=lambda input_ids, dim: gathered_ids,
+    )
+    forward_context = SimpleNamespace(
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor([2, 3]),
+        )
+    )
+    monkeypatch.setattr(ple_layer_module, "get_np_dp_group", lambda: group)
+    monkeypatch.setattr(
+        ple_layer_module, "get_forward_context", lambda: forward_context
+    )
+    local_ids = gathered_ids[dp_rank * 3 : dp_rank * 3 + local_tokens]
+    slot_size, slot_offset = module._get_np_gather_slot(local_tokens)
+    lookup_ids = module._gather_np_ids(local_ids, slot_size)
+    embeddings = torch.arange(12).reshape(6, 2)
+    output = module._select_embeddings(embeddings, local_tokens, slot_offset)
+
+    assert torch.equal(lookup_ids, gathered_ids)
+    expected = embeddings[dp_rank * 3 : dp_rank * 3 + local_tokens]
+    assert torch.equal(output, expected)
+
+
 def _make_fp8_embedding_layer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Qwen4ExpPLEDeviceEmbedding:
+    _mock_np_group(monkeypatch)
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
@@ -210,7 +259,7 @@ def test_ple_fp8_embedding_dequantizes_in_ple_layer(monkeypatch) -> None:
     torch.testing.assert_close(output, (weight[[2, 0]] * 0.25).bfloat16())
 
 
-def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
+def test_ple_fp8_embedding_uses_int8_for_parallel_reduce(monkeypatch) -> None:
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 2
@@ -233,11 +282,7 @@ def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
         reduced_dtypes.append(tensor.dtype)
         return tensor.clone()
 
-    monkeypatch.setattr(
-        embedding_module,
-        "tensor_model_parallel_all_reduce",
-        all_reduce,
-    )
+    _mock_np_group(monkeypatch, world_size=2, all_reduce=all_reduce)
     layer = Qwen4ExpPLEDeviceEmbedding(
         4,
         2,
@@ -335,6 +380,7 @@ def test_ple_prefetch_streams_are_scoped_by_layer(
 def test_ple_device_embedding_allocates_on_active_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_np_group(monkeypatch)
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
@@ -365,6 +411,7 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     monkeypatch: pytest.MonkeyPatch,
     fp8_checkpoint: bool,
 ) -> None:
+    _mock_np_group(monkeypatch)
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
