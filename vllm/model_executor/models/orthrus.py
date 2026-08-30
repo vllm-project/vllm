@@ -13,7 +13,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -37,8 +36,6 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
-
-logger = init_logger(__name__)
 
 _BUILDING_DIFFUSION_DRAFT: ContextVar[bool] = ContextVar(
     "orthrus_building_diffusion_draft", default=False
@@ -99,14 +96,23 @@ def _force_write_diffusion_kv(
     pattern, Gemma4 MTP, never calls it at all), and something about that
     combination breaks an internal assumption inside the precompiled
     extension. Rather than debug a prebuilt CUDA kernel's internals,
-    write the same physical slots with plain PyTorch indexing instead:
-    ``do_kv_cache_update``'s own ``kv_cache.transpose(1, 2).split(...)``
-    key_cache/value_cache split is plain tensor ops (not the crashing
-    part), and slot numbers already follow the standard
-    ``physical_block_id * block_size + offset`` convention
+    write the same physical slots with plain PyTorch indexing instead.
+
+    The physical layout was confirmed by inspection rather than assumed:
+    for this checkpoint/backend, ``attn_diff.kv_cache`` is a
+    ``[num_blocks, num_kv_heads, block_size, 2 * head_dim]``-shaped view
+    (matching ``do_kv_cache_update``'s own comment) whose *storage* is
+    actually contiguous in ``[num_blocks, block_size, num_kv_heads,
+    2 * head_dim]`` order (confirmed via ``.stride()`` -- the block-size
+    and head dims are transposed relative to a naively-contiguous view of
+    the reported shape). The last dim holds key then value concatenated
+    per head (``do_kv_cache_update`` splits it the same way via
+    ``.split(head_size, dim=-1)``). Slot numbers already follow the
+    standard ``physical_block_id * block_size + offset`` convention
     ``set_inputs_first_pass`` uses to build slot_mapping in the first
-    place, so indexing the flattened (block, offset) leading dimensions
-    by slot number is the same addressing the CUDA kernel implements.
+    place, so decomposing a slot back into ``(block_idx, offset)`` and
+    indexing directly reproduces the same addressing the CUDA kernel
+    implements, without going through it.
     """
     forward_context = get_forward_context()
     if forward_context.attn_metadata is None:
@@ -117,16 +123,15 @@ def _force_write_diffusion_kv(
     if slot_mapping is None:
         return
     kv_cache = attn_diff.kv_cache
-    logger.info(
-        "DEBUG _force_write_diffusion_kv: kv_cache.shape=%s kv_cache.stride=%s "
-        "key.shape=%s value.shape=%s slot_mapping.shape=%s slot_mapping[:8]=%s",
-        tuple(kv_cache.shape),
-        tuple(kv_cache.stride()),
-        tuple(key.shape),
-        tuple(value.shape),
-        tuple(slot_mapping.shape),
-        slot_mapping[:8].tolist(),
-    )
+    num_blocks, num_kv_heads, block_size, two_head_dim = kv_cache.shape
+    head_dim = two_head_dim // 2
+    num_actual_tokens = slot_mapping.shape[0]
+    block_idx = slot_mapping // block_size
+    offset = slot_mapping % block_size
+    key = key[:num_actual_tokens].view(num_actual_tokens, num_kv_heads, head_dim)
+    value = value[:num_actual_tokens].view(num_actual_tokens, num_kv_heads, head_dim)
+    kv_cache[block_idx, :, offset, :head_dim] = key
+    kv_cache[block_idx, :, offset, head_dim:] = value
 
 
 # Orthrus adds a parallel set of "*_diff" attention projections next to the
