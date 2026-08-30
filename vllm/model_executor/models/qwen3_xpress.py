@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen3 XPress draft model: DFlash parallel drafting + XPress causal refiner.
-
-Like DSpark, XPress drafts a whole block in one DFlash-style parallel pass and
-then injects intra-block causality. Unlike DSpark's SEQUENTIAL Markov head
-(B-1 dependent steps), XPress runs a lightweight r-space refiner over the whole
-block and resolves it with K parallel Jacobi passes (K ~ 4-8 << B-1). Each pass
-is one small batched forward; at T=0 the iteration is deterministic and settled
-prefixes never change, so K passes recover the exact sequential decode on the
-settled prefix.
-
-The parallel backbone is the DFlash Qwen3 draft stack (qwen3_dflash.py).
-XPress adds ``xpress_head`` (see xpress_head.py for the exact math, which is
-parity-tested against the training-side implementation).
-
-T=0 (greedy) only for now: the speculator uses ``jacobi_refine_greedy``; the
-probabilistic path (frozen-Gumbel Jacobi + rejection/coupled verification)
-is intentionally out of scope for this first integration.
-"""
 
 from collections.abc import Iterable
 
@@ -37,7 +19,6 @@ logger = init_logger(__name__)
 
 
 class Qwen3XPressModel(DFlashQwen3Model):
-    """DFlash Qwen3 backbone + XPress causal-refiner head."""
 
     def __init__(
         self,
@@ -53,9 +34,6 @@ class Qwen3XPressModel(DFlashQwen3Model):
         draft_vocab_size = (
             getattr(config, "draft_vocab_size", None) or config.vocab_size
         )
-        # Replicated (not TP-sharded) for the same reason as DSpark's markov head:
-        # the head runs once per Jacobi pass over the whole block; sharding the two
-        # vocab maps would add an all-reduce per pass.
         self.xpress_head = XPressRefinerHead(
             vocab_size=config.vocab_size,
             hidden_size=config.hidden_size,
@@ -65,12 +43,6 @@ class Qwen3XPressModel(DFlashQwen3Model):
             mlp_hidden=getattr(config, "xpress_mlp_hidden", 512),
         )
         self.draft_vocab_size = draft_vocab_size
-        # torch.compile the hot per-pass refine (fuse in_proj/mixer/MLP chains).
-        # Compilation triggers during the pre-capture warmup run, so the CUDA
-        # graph then captures the COMPILED kernels (same pattern as the training
-        # repo's HybridRefineGraphRunner, where compile gave ~-20%/pass). Shapes
-        # are fixed per capture bucket -> dynamic=False recompiles per bucket at
-        # capture time only. Disable via config: "xpress_compile_head": false.
         if getattr(config, "xpress_compile_head", True):
             self.xpress_head.refine_bias = torch.compile(  # type: ignore[method-assign]
                 self.xpress_head.refine_bias, dynamic=False
@@ -137,11 +109,10 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         for name, loaded_weight in weights:
             if "t2d" in name or "d2t" in name:
                 continue
-            # converter emits training-side names under "xpress_head."; remap here
             if name.startswith("xpress_head."):
                 sub = name[len("xpress_head."):]
                 if sub == "mix.L":
-                    raw_mix_L = loaded_weight   # folded after load (mask + identity)
+                    raw_mix_L = loaded_weight
                     continue
                 mapped = XPressRefinerHead.HYBRID_KEY_MAP.get(sub, sub)
                 name = "model.xpress_head." + mapped
@@ -159,7 +130,7 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
             skip_substrs.append("embed_tokens")
         if not includes_lm_head:
             skip_substrs.append("lm_head")
-        skip_substrs.append("xpress_head.mix_L")     # loaded via fold below
+        skip_substrs.append("xpress_head.mix_L")
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
         if raw_mix_L is None:

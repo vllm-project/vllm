@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""XPress refiner head: the invariants the Jacobi rollout depends on.
-
-The head is deliberately importable without a vLLM engine, so these run on CPU in
-milliseconds. They pin three things that are easy to break silently:
-
-* the mixer fold (``L*tril + I`` baked into the parameter, residual add dropped),
-  which is what makes serving equal training;
-* causality across the block, without which Jacobi iteration is not valid;
-* greedy refine being deterministic, which is what lets a settled prefix stay settled.
-"""
 
 import torch
 
@@ -46,19 +36,12 @@ def _inputs(n: int = 3, seed: int = 7):
 
 
 def test_fold_matches_the_unfolded_sublayer():
-    """``fold_from_raw_`` must be exactly ``x + (L*tril) x``, not an approximation.
-
-    Training stores the raw mixer and adds the sublayer residual; serving stores
-    ``L*tril + I`` and drops the residual. If these ever diverge, a checkpoint
-    silently means something different at serving time than it did in training.
-    """
     head = _head()
     torch.manual_seed(3)
     raw_l = torch.randn(R, B, B, dtype=torch.float64) * 0.3
     h, prev = _inputs()
     hcache = head.hidden_cache(h)
 
-    # unfolded reference, computed the way training does
     tril = torch.tril(torch.ones(B, B, dtype=torch.float64))
     lat = head.w1(prev)
     x = head.in_proj(torch.cat([hcache, lat], dim=-1))
@@ -74,11 +57,6 @@ def test_fold_matches_the_unfolded_sublayer():
 
 
 def test_block_mixing_is_causal():
-    """Position k's bias must not depend on any prev token at a position > k.
-
-    Jacobi iteration is only valid because of this: a settled prefix cannot be
-    disturbed by later slots still changing.
-    """
     head = _head()
     head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
     h, prev = _inputs()
@@ -99,7 +77,6 @@ def test_block_mixing_is_causal():
 
 
 def test_jacobi_is_deterministic():
-    """Greedy refine has no sampling, so repeated calls must be identical."""
     head = _head()
     head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
     torch.manual_seed(13)

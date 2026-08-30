@@ -21,13 +21,6 @@ def _get_counter(metrics, name: str) -> float:
 @pytest.mark.slow_test
 @large_gpu_mark(min_gb=80)
 def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
-    """XPress must accept more per step than the drafter it refines.
-
-    The refiner only adds a bias on top of the same block-diffusion draft, so if
-    acceptance is not above the block drafter's own, the head is contributing
-    nothing and something is mis-wired (weights not loaded, K read as 0, the
-    mixer left unfolded).
-    """
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
     llm = LLM(
@@ -59,8 +52,6 @@ def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
 
         assert num_drafts > 0
         acceptance_len = 1 + (num_accepted / num_drafts)
-        # The bare block drafter sits near 6.5 on this pair; anything at or below
-        # ~2 means the refiner is not actually in the loop.
         assert acceptance_len > 2.0, f"acceptance length {acceptance_len:.2f} too low"
     finally:
         del llm
