@@ -46,7 +46,7 @@ def parser(mock_tokenizer):
 
 class TestUnclosedParameterFlush:
     def test_unclosed_parameter_still_streams_valid_json(self, parser, mock_request):
-        """A tool call cut off mid-parameter must not stream unparseable JSON.
+        """A tool call cut off mid-parameter must not stream unparsable JSON.
 
         ``_safe_arg_prefix`` streams unterminated string values on the
         understanding that the flush closes them. When the model reopens a tool
