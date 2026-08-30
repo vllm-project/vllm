@@ -647,7 +647,8 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
-def _make_csa_linear_ple_worker():
+def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
+    """``scratch_aliases`` selects which pages the compressor ring overlays."""
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config
@@ -724,12 +725,22 @@ def _make_csa_linear_ple_worker():
         assert uniform is not None
         return KVCacheGroupSpec(list(specs), uniform)
 
-    tensor_regions = (
-        ("main_kv.0", "mamba.sharded", "mamba.ple"),
-        ("main_kv.1",),
-        ("compressed.0", "compressor_state.0"),
-        ("compressed.1", "compressor_state.1"),
-    )
+    tensor_regions: tuple[tuple[str, ...], ...]
+    if scratch_aliases == "compressed":
+        tensor_regions = (
+            ("main_kv.0", "mamba.sharded", "mamba.ple"),
+            ("main_kv.1",),
+            ("compressed.0", "compressor_state.0"),
+            ("compressed.1", "compressor_state.1"),
+        )
+    else:
+        assert scratch_aliases == "main_kv"
+        tensor_regions = (
+            ("main_kv.0", "mamba.sharded", "mamba.ple", "compressor_state.0"),
+            ("main_kv.1", "compressor_state.1"),
+            ("compressed.0",),
+            ("compressed.1",),
+        )
     region_size = 512
     page_size = 256
     kv_cache_config = KVCacheConfig(
@@ -780,17 +791,45 @@ def _make_csa_linear_ple_worker():
         tensors = [torch.zeros((2, 256), dtype=torch.uint8) for _ in range(4)]
         worker.register_kv_caches(
             {
-                "main_kv.0": tensors[0],
-                "mamba.sharded": tensors[0],
-                "mamba.ple": tensors[0],
-                "main_kv.1": tensors[1],
-                "compressed.0": tensors[2],
-                "compressor_state.0": tensors[2],
-                "compressed.1": tensors[3],
-                "compressor_state.1": tensors[3],
+                layer_name: tensors[region_index]
+                for region_index, layer_names in enumerate(tensor_regions)
+                for layer_name in layer_names
             }
         )
     return worker
+
+
+@pytest.mark.cpu_test
+def test_csa_linear_registration_discovers_shared_regions():
+    worker = _make_csa_linear_ple_worker()
+
+    assert worker._ssm_region_indices == [0]
+    assert worker._ple_group_index == 3
+    assert worker._ple_region_index == 0
+    assert worker._region_is_mla == [False, False, True, True]
+    assert worker._scratch_region_indices == [2, 3]
+
+
+@pytest.mark.cpu_test
+def test_csa_linear_scratch_descs_follow_the_pages_they_overlay():
+    """The scratch ring is addressed by the regions it actually registered in,
+    not by inferring that it must sit on the MLA pages: overlaying the main KV
+    pages instead moves its descriptors with it."""
+    worker = _make_csa_linear_ple_worker(scratch_aliases="main_kv")
+
+    # Same MLA regions as before, but the ring now lives in the non-MLA ones.
+    assert worker._region_is_mla == [False, False, True, True]
+    assert worker._scratch_region_indices == [0, 1]
+
+    desc_ids = worker._compute_desc_ids(
+        block_ids=([1], [0], [1], [1]),
+        dst_num_blocks=2,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+    # Scratch group (block 0) now maps to regions 0 and 1 -> descs 0 and 2,
+    # where the compressed-page placement gave 4 and 6.
+    assert desc_ids.tolist()[4:6] == [0, 2]
 
 
 @pytest.mark.cpu_test

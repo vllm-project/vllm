@@ -156,9 +156,11 @@ class NixlBaseConnectorWorker:
             group_arr = np.asarray(group)
             spec_type = self._group_spec_types[i]
             if _is_attention_spec(spec_type):
+                # A scratch cache lives only in its own regions; every other
+                # attention group spans all of them.
                 fa_region_ids = (
-                    np.flatnonzero(self._region_is_mla)
-                    if self._is_csa_linear and spec_type is CircularBufferSpec
+                    np.asarray(self._scratch_region_indices, dtype=np.int64)
+                    if spec_type is CircularBufferSpec
                     else np.arange(self.num_regions)
                 )[:, None]
                 all_descs.append(
@@ -609,6 +611,10 @@ class NixlBaseConnectorWorker:
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
         self._ssm_region_indices = list[int]()
+        # Regions holding a scratch cache (the CSA compressor circular buffer).
+        # Tracked explicitly because a scratch page shares its address with the
+        # page it overlays, so its regions cannot be recovered from spec type.
+        self._scratch_region_indices = list[int]()
         self._ple_region_index: int | None = None
 
         # Enable different block lengths for different layers *only* when MLA is used.
@@ -1105,6 +1111,7 @@ class NixlBaseConnectorWorker:
         seen_storage_addresses: set[int] = set()
         seen_base_addresses: list[int] = []
         self._ssm_region_indices = []
+        self._scratch_region_indices = []
         self._ple_region_index = None
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
@@ -1237,6 +1244,11 @@ class NixlBaseConnectorWorker:
                         self._ple_region_index = region_index
                     elif region_index not in self._ssm_region_indices:
                         self._ssm_region_indices.append(region_index)
+                elif (
+                    isinstance(layer_spec, CircularBufferSpec)
+                    and region_index not in self._scratch_region_indices
+                ):
+                    self._scratch_region_indices.append(region_index)
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1266,6 +1278,8 @@ class NixlBaseConnectorWorker:
             == len(self._region_is_mla)
             == len(self.block_stride_per_layer)
         )
+        # Descriptor ids must be region-ordered, matching the remote side.
+        self._scratch_region_indices.sort()
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
