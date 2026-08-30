@@ -176,6 +176,7 @@ class RejectionSampler:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
+        verify_draft_sampled: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -190,7 +191,7 @@ class RejectionSampler:
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
-            draft_sampled,
+            verify_draft_sampled,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -217,7 +218,10 @@ class RejectionSampler:
         pos: torch.Tensor,
         max_chunk_logits: int,
         max_num_logprobs: int,
+        verify_draft_sampled: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
+        if verify_draft_sampled is None:
+            verify_draft_sampled = draft_sampled
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
         num_reqs = input_batch.num_reqs
@@ -253,6 +257,7 @@ class RejectionSampler:
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
+                verify_draft_sampled[lo:hi],
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
@@ -291,6 +296,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        invalid_draft_positions: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -298,6 +304,15 @@ class RejectionSampler:
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         pos = input_batch.positions[input_batch.logits_indices]
+
+        # Marking a draft invalid (`is_valid_draft = draft_sampled >= 0`) pins the
+        # accepted length before it reaches a permissive bitmask row. Only
+        # verification sees the copy: `apply_sampling_params` and watermarking
+        # keep the real draft ids.
+        verify_draft_sampled = draft_sampled
+        if invalid_draft_positions is not None:
+            verify_draft_sampled = draft_sampled.clone()
+            verify_draft_sampled[invalid_draft_positions] = -1
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
@@ -311,6 +326,7 @@ class RejectionSampler:
             pos,
             chunk_logit_limit,
             max_num_logprobs,
+            verify_draft_sampled,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(

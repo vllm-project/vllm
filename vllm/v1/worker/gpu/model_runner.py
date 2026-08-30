@@ -180,6 +180,39 @@ from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 logger = init_logger(__name__)
 
 
+def grammar_invalid_draft_positions(
+    input_batch: InputBatch,
+    grammar_req_ids: list[str],
+    num_acceptable_drafts: list[int] | None,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Indices of `draft_sampled` entries whose bitmask row is permissive.
+
+    Drafts from `num_acceptable_drafts` on were verified against rows carrying
+    `_full_mask`, so accepting one would sample with no grammar constraint.
+    Returns None when there is nothing to invalidate.
+    """
+    if not grammar_req_ids or input_batch.num_draft_tokens == 0:
+        return None
+    cu_num_logits = input_batch.cu_num_logits_np.tolist()
+    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
+    positions: list[int] = []
+    for i, req_id in enumerate(grammar_req_ids):
+        req_idx = req_id_to_idx.get(req_id)
+        if req_idx is None:
+            continue
+        # Without the field (an older scheduler, or warmup) invalidate the whole
+        # window, which is the conservative choice.
+        num_acceptable = (
+            num_acceptable_drafts[i] if num_acceptable_drafts is not None else 0
+        )
+        start = cu_num_logits[req_idx] + 1 + num_acceptable
+        positions.extend(range(start, cu_num_logits[req_idx + 1]))
+    if not positions:
+        return None
+    return torch.tensor(positions, dtype=torch.int64, device=device)
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -1528,6 +1561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        invalid_draft_positions = None
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
@@ -1538,6 +1572,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+            invalid_draft_positions = grammar_invalid_draft_positions(
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                grammar_output.num_acceptable_drafts,
+                self.device,
             )
 
         sampler_output: SamplerOutput | None
@@ -1557,6 +1597,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_draft_positions,
             )
 
         if shard_metadata is not None:
