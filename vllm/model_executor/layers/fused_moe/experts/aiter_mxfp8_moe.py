@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP8 (1x32 block, E8M0) MoE via AITER's FlyDSL two-stage grouped GEMM
-(gfx950); alternative to ``Mxfp8NativeTritonExperts``. Routes through
-``aiter.fused_moe`` (per_1x32, gate_mode=INTERLEAVE); weights are preshuffled in
-``convert_to_fp8_moe_kernel_format``.
-"""
+"""MXFP8 (1x32 block, E8M0) MoE via AITER's FlyDSL grouped GEMM."""
 
 import math
 
@@ -101,20 +97,24 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             return False, (
                 "kernel requires the aiter flydsl package, which is not installed"
             )
+        supported_activations = {
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        }
+        if is_supported and moe_config.activation not in supported_activations:
+            return False, (
+                "kernel supports only standard SiLU or uninterleaved "
+                f"SwiGLU-OAI; got activation={moe_config.activation.value}"
+            )
         if (
             is_supported
-            and moe_config.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE
-        ):
-            return False, (
-                "kernel hardcodes SwiGLU-OAI activation and requires "
-                f"activation={MoEActivation.SWIGLUOAI_UNINTERLEAVE.value}; "
-                f"got activation={moe_config.activation.value}"
+            and moe_config.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            and (
+                moe_config.swiglu_alpha is None
+                or not math.isclose(float(moe_config.swiglu_alpha), _AITER_SWIGLU_ALPHA)
+                or moe_config.swiglu_beta is None
+                or not math.isclose(float(moe_config.swiglu_beta), _AITER_SWIGLU_BETA)
             )
-        if is_supported and (
-            moe_config.swiglu_alpha is None
-            or not math.isclose(float(moe_config.swiglu_alpha), _AITER_SWIGLU_ALPHA)
-            or moe_config.swiglu_beta is None
-            or not math.isclose(float(moe_config.swiglu_beta), _AITER_SWIGLU_BETA)
         ):
             return False, (
                 "kernel hardcodes SwiGLU-OAI with "
@@ -147,8 +147,17 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        limit = self.quant_config.gemm1_clamp_limit
-        swiglu_limit = 0.0 if limit is None else float(limit)
+        if activation == MoEActivation.SILU:
+            activation_method = ActivationType.Silu.value
+            gate_mode = GateMode.INTERLEAVE.value
+            swiglu_limit = 0.0
+        elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            activation_method = ActivationType.Swiglu.value
+            gate_mode = GateMode.INTERLEAVE.value
+            limit = self.quant_config.gemm1_clamp_limit
+            swiglu_limit = 0.0 if limit is None else float(limit)
+        else:
+            raise ValueError(f"Unsupported AITER MXFP8 activation: {activation}")
 
         # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
         # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
@@ -165,14 +174,14 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             topk_weights.to(torch.float32),
             topk_ids.to(torch.int32),
             expert_mask=expert_mask,
-            activation_method=ActivationType.Swiglu.value,
+            activation_method=activation_method,
             quant_method=QuantType.per_1x32.value,
             doweight_stage1=apply_router_weight_on_input,
             w1_scale=self.w1_scale_val,
             w2_scale=self.w2_scale_val,
             a1_scale=None,
             a2_scale=None,
-            gate_mode=GateMode.INTERLEAVE.value,
+            gate_mode=gate_mode,
             swiglu_limit=swiglu_limit,
             output_dtype=output.dtype,
         )

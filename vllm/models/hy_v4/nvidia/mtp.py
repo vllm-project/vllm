@@ -324,6 +324,8 @@ class HYV4SharedHead(nn.Module):
 class HYV4MultiTokenPredictorLayer(nn.Module):
     """A single MTP draft block."""
 
+    decoder_layer_cls = HYV4DecoderLayer
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -356,7 +358,7 @@ class HYV4MultiTokenPredictorLayer(nn.Module):
             getattr(mtp_config, "mlp_layer_types", None), layer_idx, "sparse"
         )
 
-        self.mtp_block = HYV4DecoderLayer(
+        self.mtp_block = self.decoder_layer_cls(
             config=mtp_config,
             vllm_config=vllm_config,
             cache_config=cache_config,
@@ -402,6 +404,8 @@ def _extend_layer_types(
 class HYV4MultiTokenPredictor(nn.Module):
     """Owns the MTP draft blocks and their shared embedding / logits path."""
 
+    predictor_layer_cls = HYV4MultiTokenPredictorLayer
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         target_config = vllm_config.model_config.hf_config
@@ -440,7 +444,7 @@ class HYV4MultiTokenPredictor(nn.Module):
 
         self.layers = nn.ModuleDict(
             {
-                str(idx): HYV4MultiTokenPredictorLayer(
+                str(idx): self.predictor_layer_cls(
                     config,
                     f"{prefix}.layers.{idx}",
                     vllm_config=vllm_config,
@@ -525,6 +529,8 @@ class HYV4MTP(nn.Module):
     matching `DeepseekV32MTP` / `KimiK3MTP` / `HYV3MTP`.
     """
 
+    predictor_cls = HYV4MultiTokenPredictor
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         # MLA runs both latent down-projections as one GEMM.
@@ -536,7 +542,7 @@ class HYV4MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        self.model = HYV4MultiTokenPredictor(
+        self.model = self.predictor_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.quant_config = self.model.quant_config
@@ -752,12 +758,13 @@ class HYV4MTP(nn.Module):
         # The split layout is resolved through the shared EPLB helper so the
         # target param names stay in sync with the RoutedExperts module layout;
         # the fused layout is resolved from the live parameter names.
+        num_fused_shared_experts = getattr(self.model, "num_fused_shared_experts", 0)
         split_expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
+            num_experts=num_experts + num_fused_shared_experts,
         )
         fused_expert_param_names: dict[tuple[str, str], str] = {}
         for param_name in params_dict:

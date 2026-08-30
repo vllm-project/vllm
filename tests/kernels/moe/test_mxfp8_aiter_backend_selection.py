@@ -51,18 +51,20 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa:
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
 
-def _config(ep_size: int = 1):
-    # AiterMxfp8Experts hardcodes SwiGLU-OAI: match its required activation and
-    # alpha/beta so is_supported_config doesn't reject the config on those grounds.
+def _config(
+    ep_size: int = 1,
+    activation: MoEActivation = MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+):
     cfg = make_dummy_moe_config(
         num_experts=128,
         experts_per_token=4,
         hidden_dim=6144,
-        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        activation=activation,
     )
-    cfg = dataclasses.replace(
-        cfg, swiglu_alpha=_AITER_SWIGLU_ALPHA, swiglu_beta=_AITER_SWIGLU_BETA
-    )
+    if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        cfg = dataclasses.replace(
+            cfg, swiglu_alpha=_AITER_SWIGLU_ALPHA, swiglu_beta=_AITER_SWIGLU_BETA
+        )
     if ep_size != 1:
         cfg = dataclasses.replace(
             cfg,
@@ -126,6 +128,26 @@ def test_is_supported_config(present, ep_size, supported, reason_substr):
     assert ok is supported
     if reason_substr is not None:
         assert reason_substr in reason
+
+
+@pytest.mark.parametrize(
+    "activation,supported",
+    [
+        (MoEActivation.SILU, True),
+        (MoEActivation.SWIGLUOAI_UNINTERLEAVE, True),
+        (MoEActivation.GELU, False),
+    ],
+)
+def test_supported_activations(activation, supported):
+    with _gfx950(), _flydsl_installed(True):
+        ok, _ = AiterMxfp8Experts.is_supported_config(
+            AiterMxfp8Experts,
+            _config(activation=activation),
+            kMxfp8Static,
+            kMxfp8Dynamic,
+            FusedMoEActivationFormat.Standard,
+        )
+    assert ok is supported
 
 
 def test_explicit_moe_backend_aiter():

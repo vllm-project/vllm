@@ -196,16 +196,20 @@ def generate_sparse_seqlen_kernel(
 
 
 def generate_sparse_seqlen_triton(
-    query_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     cu_query_lens: torch.Tensor,
     topk_token: int,
     num_tokens: int,
     max_query_len: int,
+    out: torch.Tensor | None = None,
 ):
-    num_seqs = query_lens.size(0)
-    # zero initialize the tensor to make sure invalid positions will be zero
-    out = torch.zeros([num_tokens], dtype=torch.int32, device=query_lens.device)
+    num_seqs = seq_lens.size(0)
+    if out is None:
+        out = torch.empty([num_tokens], dtype=torch.int32, device=seq_lens.device)
+    else:
+        out = out[:num_tokens]
+    # Zero initialize the tensor to make sure invalid positions will be zero.
+    out.zero_()
     block_size = 64
     num_block_per_row = triton.cdiv(max_query_len, block_size)
     grid = (
@@ -317,6 +321,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
     slot_mapping: torch.Tensor
 
     block_table: torch.Tensor
@@ -354,6 +359,7 @@ class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    use_persistent_mla_metadata: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -379,7 +385,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         # Sink decode must use AITER's nonpersistent path. In particular,
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic
         # terminates for HY-V4's TP1 H64 shape.
-        self._use_persistent_metadata = all(
+        self._use_persistent_metadata = self.use_persistent_mla_metadata and all(
             getattr(attention_context[name].impl, "sinks", None) is None
             for name in layer_names
         )
@@ -414,6 +420,9 @@ class ROCMAiterMLASparseMetadataBuilder(
         )
         self.paged_kv_indptr = torch.zeros(
             [max_num_batched_tokens + 1], dtype=torch.int32, device=device
+        )
+        self.sparse_seqlen_buffer = torch.zeros(
+            [max_num_batched_tokens], dtype=torch.int32, device=device
         )
 
         # ----- Persistent MLA metadata buffers -----
@@ -532,18 +541,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.req_id_per_token_buffer[:new_req_extent].copy_(
             np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
-        query_lens = (
-            common_attn_metadata.query_start_loc[1:]
-            - common_attn_metadata.query_start_loc[:-1]
-        )
         seq_lens = common_attn_metadata.seq_lens
         sparse_seqlen = generate_sparse_seqlen_triton(
-            query_lens,
             seq_lens,
             common_attn_metadata.query_start_loc,
             self.topk_tokens,
             num_tokens,
             common_attn_metadata.max_query_len,
+            out=self.sparse_seqlen_buffer,
         )
 
         torch.cumsum(sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1])
@@ -557,60 +562,57 @@ class ROCMAiterMLASparseMetadataBuilder(
 
         # ----- Compute persistent MLA metadata -----
         # The aiter sparse decode kernel uses qseqlen=1 (each query token is
-        # treated as its own batch entry), so persistent metadata can always
-        # be precomputed here. The kernel switches to the persistent
-        # work-stealing path automatically when work_meta_data is non-None.
-        # The output is a deterministic function of the per-request query and
-        # context lengths (both clamped to topk_tokens, past which per-token KV
-        # length saturates) and num_heads; fingerprint those CPU-side and skip
-        # the launch when nothing changed.
-        num_reqs = common_attn_metadata.num_reqs
-        clamped_seq_lens = np.minimum(
-            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
-            self.topk_tokens,
-        )
-        clamped_context_lens = np.minimum(
-            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
-            self.topk_tokens,
-        )
-        metadata_key = (
-            num_tokens,
-            int(common_attn_metadata.max_query_len),
-            self._num_attention_heads,
-            clamped_seq_lens.tobytes(),
-            clamped_context_lens.tobytes(),
-            seg_lengths.tobytes(),
-        )
-        if self._use_persistent_metadata and metadata_key != self._prev_metadata_key:
-            from aiter import get_mla_metadata_v1
-
-            max_split_per_batch = self._sparse_decode_max_split(
-                int(common_attn_metadata.max_seq_len)
+        # treated as its own batch entry). The output is a deterministic
+        # function of the per-request query and context lengths and num_heads;
+        # fingerprint those CPU-side and skip the launch when nothing changed.
+        if self._use_persistent_metadata:
+            num_reqs = common_attn_metadata.num_reqs
+            clamped_seq_lens = np.minimum(
+                common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+                self.topk_tokens,
             )
-            get_mla_metadata_v1(
-                qo_indptr,
-                paged_kv_indptr,
-                paged_kv_last_page_len,
+            clamped_context_lens = np.minimum(
+                common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
+                self.topk_tokens,
+            )
+            metadata_key = (
+                num_tokens,
+                int(common_attn_metadata.max_query_len),
                 self._num_attention_heads,
-                1,
-                True,
-                self._mla_work_meta_data,
-                self._mla_work_info_set,
-                self._mla_work_indptr,
-                self._mla_reduce_indptr,
-                self._mla_reduce_final_map,
-                self._mla_reduce_partial_map,
-                page_size=1,
-                kv_granularity=16,
-                max_seqlen_qo=1,
-                uni_seqlen_qo=1,
-                fast_mode=True,
-                max_split_per_batch=max_split_per_batch,
+                clamped_seq_lens.tobytes(),
+                clamped_context_lens.tobytes(),
+                seg_lengths.tobytes(),
             )
-            # The persistent metadata buffers are read by graph replay. Order
-            # the async metadata write before the graph-captured decode kernel.
-            torch.cuda.current_stream(self.device).synchronize()
-            self._prev_metadata_key = metadata_key
+            if metadata_key != self._prev_metadata_key:
+                from aiter import get_mla_metadata_v1
+
+                max_split_per_batch = self._sparse_decode_max_split(
+                    int(common_attn_metadata.max_seq_len)
+                )
+                get_mla_metadata_v1(
+                    qo_indptr,
+                    paged_kv_indptr,
+                    paged_kv_last_page_len,
+                    self._num_attention_heads,
+                    1,
+                    True,
+                    self._mla_work_meta_data,
+                    self._mla_work_info_set,
+                    self._mla_work_indptr,
+                    self._mla_reduce_indptr,
+                    self._mla_reduce_final_map,
+                    self._mla_reduce_partial_map,
+                    page_size=1,
+                    kv_granularity=16,
+                    max_seqlen_qo=1,
+                    uni_seqlen_qo=1,
+                    fast_mode=True,
+                    max_split_per_batch=max_split_per_batch,
+                )
+                # The persistent metadata buffers are read by graph replay. Order
+                # the async metadata write before the graph-captured decode kernel.
+                torch.cuda.current_stream(self.device).synchronize()
+                self._prev_metadata_key = metadata_key
 
         metadata = ROCMAiterMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
@@ -618,6 +620,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             max_seq_len=common_attn_metadata.max_seq_len,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             query_start_loc=common_attn_metadata.query_start_loc,
+            seq_lens=seq_lens,
             slot_mapping=common_attn_metadata.slot_mapping,
             block_table=common_attn_metadata.block_table_tensor,
             req_id_per_token=req_id_per_token,
@@ -651,6 +654,26 @@ class ROCMAiterMLASparseMetadataBuilder(
             ),
         )
         return metadata
+
+    def update_draft_decode_metadata(
+        self, metadata: ROCMAiterMLASparseMetadata
+    ) -> None:
+        assert self.supports_draft_decode_metadata_update
+        assert not self.use_persistent_mla_metadata
+        sparse_seqlen = generate_sparse_seqlen_triton(
+            metadata.seq_lens,
+            metadata.query_start_loc,
+            metadata.topk_tokens,
+            metadata.num_actual_tokens,
+            metadata.max_query_len,
+            out=self.sparse_seqlen_buffer,
+        )
+        metadata.paged_kv_indptr[0].zero_()
+        torch.cumsum(
+            sparse_seqlen,
+            dim=0,
+            out=metadata.paged_kv_indptr[1:],
+        )
 
 
 # Take from
@@ -806,7 +829,10 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                     "query/KV with 64 padded local heads on gfx942; increase "
                     "tensor_parallel_size"
                 )
-        output = torch.empty(
+        # Graph-padded rows are not guaranteed to be written by every AITER
+        # kernel variant. Record the zero-fill in the graph so an inactive row
+        # cannot retain values from an earlier replay.
+        output = torch.zeros(
             [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
             device=q.device,

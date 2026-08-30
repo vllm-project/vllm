@@ -9,6 +9,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
 MXFP8_SCALE_DTYPE = torch.uint8
 MXFP8_BLOCK_SIZE = 32
+FP8_BLOCK_SIZE = 128
 
 
 def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
@@ -126,8 +127,16 @@ def _mxfp8_quant_triton_kernel():
         amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [BLOCK_M]
         sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
         sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
-        descale = tl.exp2(sb - 127.0)
-        xq = (x / descale[:, None]).to(xq_ptr.dtype.element_ty)
+        # Avoid materializing subnormal inverse scales.  In particular, an
+        # all-zero block uses the valid E8M0 scale byte 0 (2^-127); that value
+        # may flush to zero on AMD when computed as ``exp2(-127)``, turning
+        # ``0 / 0`` into NaN.  Apply the power of two in the direction whose
+        # exponent is non-negative instead.  This preserves scale byte 0 and
+        # also handles non-zero values that legitimately select a small scale.
+        scaled_up = x * tl.exp2(127.0 - sb[:, None])
+        scaled_down = x / tl.exp2(sb[:, None] - 127.0)
+        x_scaled = tl.where(sb[:, None] <= 127.0, scaled_up, scaled_down)
+        xq = x_scaled.to(xq_ptr.dtype.element_ty)
         tl.store(
             xq_ptr + offs_m[:, None] * sqm + offs_k[None, :] * sqk,
             xq,
@@ -223,6 +232,18 @@ def mxfp8_e4m3_quantize(
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """Dequantize MXFP8 tensor to BF16."""
+    if x.shape[-1] % MXFP8_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"MXFP8 weight K={x.shape[-1]} must be divisible by {MXFP8_BLOCK_SIZE}."
+        )
+    expected_scale_shape = (*x.shape[:-1], x.shape[-1] // MXFP8_BLOCK_SIZE)
+    if tuple(scales.shape) != expected_scale_shape:
+        raise ValueError(
+            "MXFP8 scale shape must match the weight leading dimensions and "
+            f"have K/{MXFP8_BLOCK_SIZE} columns: expected "
+            f"{expected_scale_shape}, got {tuple(scales.shape)}."
+        )
+
     x_float = x.to(torch.float32)
 
     num_blocks = x.shape[-1] // MXFP8_BLOCK_SIZE
@@ -235,6 +256,86 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     dequantized = dequantized.view(*x.shape)
 
     return dequantized.to(torch.bfloat16)
+
+
+def quantize_bf16_to_block_fp8(
+    weight: torch.Tensor,
+    block_size: int = FP8_BLOCK_SIZE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 2D weight to E4M3FN with square FP32 block scales."""
+    if weight.ndim != 2:
+        raise ValueError(
+            f"Block FP8 conversion requires a 2D weight, got {weight.ndim}D."
+        )
+
+    n, k = weight.shape
+    padded_n = ((n + block_size - 1) // block_size) * block_size
+    padded_k = ((k + block_size - 1) // block_size) * block_size
+    padded = torch.zeros(
+        (padded_n, padded_k), dtype=torch.float32, device=weight.device
+    )
+    padded[:n, :k] = weight.to(torch.float32)
+
+    blocked = padded.view(
+        padded_n // block_size,
+        block_size,
+        padded_k // block_size,
+        block_size,
+    )
+    amax = blocked.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-4)
+    scale = amax / torch.finfo(MXFP8_VALUE_DTYPE).max
+    quantized = (blocked / scale).to(MXFP8_VALUE_DTYPE)
+
+    return (
+        quantized.view(padded_n, padded_k)[:n, :k].contiguous(),
+        scale.view(padded_n // block_size, padded_k // block_size).contiguous(),
+    )
+
+
+def convert_mxfp8_weight_to_block_fp8(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    block_size: int = FP8_BLOCK_SIZE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert a 2D MXFP8 weight to conventional block-scaled FP8."""
+    if weight.ndim != 2 or scale.ndim != 2:
+        raise ValueError("MXFP8-to-block-FP8 conversion requires 2D tensors.")
+    return quantize_bf16_to_block_fp8(
+        dequant_mxfp8_to_bf16(weight, scale), block_size=block_size
+    )
+
+
+def convert_mxfp8_moe_weights_to_block_fp8(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    block_size: int = FP8_BLOCK_SIZE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert expert weights one expert at a time to bound peak memory."""
+    if weight.ndim != 3 or scale.ndim != 3:
+        raise ValueError("MXFP8 MoE conversion requires 3D weight and scale tensors.")
+    if weight.shape[0] != scale.shape[0]:
+        raise ValueError(
+            "MXFP8 MoE weight and scale tensors must have the same expert count."
+        )
+
+    num_experts, n, k = weight.shape
+    quantized = torch.empty_like(weight)
+    block_scales = torch.empty(
+        (
+            num_experts,
+            (n + block_size - 1) // block_size,
+            (k + block_size - 1) // block_size,
+        ),
+        dtype=torch.float32,
+        device=weight.device,
+    )
+    for expert_id in range(num_experts):
+        expert_weight, expert_scale = convert_mxfp8_weight_to_block_fp8(
+            weight[expert_id], scale[expert_id], block_size=block_size
+        )
+        quantized[expert_id].copy_(expert_weight)
+        block_scales[expert_id].copy_(expert_scale)
+    return quantized, block_scales
 
 
 def mxfp8_e4m3_quantize_fake(

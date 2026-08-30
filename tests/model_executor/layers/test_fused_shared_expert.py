@@ -16,6 +16,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -711,6 +712,38 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
     assert reason == (
         "shared-expert FSE quantization compatibility is not implemented for object"
     )
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [
+        ([], True),
+        (["model.layers.0.mlp.shared_experts.down_proj"], False),
+        (["model.layers.0.mlp.experts"], False),
+    ],
+)
+def test_modelopt_mxfp8_shared_expert_fse_compatibility(
+    exclude: list[str], expected: bool
+) -> None:
+    quant_config = ModelOptMxFp8Config(
+        is_checkpoint_mxfp8_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=exclude,
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible is expected
+    if expected:
+        assert reason is None
+    else:
+        assert reason is not None
+        assert "different quantization inclusion" in reason
 
 
 def _fp8_config(**kwargs: Any) -> Fp8Config:

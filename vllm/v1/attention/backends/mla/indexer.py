@@ -632,6 +632,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"(compress_ratio={self.compress_ratio})."
             )
 
+        self.supports_draft_decode_metadata_update = (
+            current_platform.is_rocm()
+            and self.dcp_world_size == 1
+            and self.compress_ratio == 1
+            and self.use_flattening
+            and not self.supports_varlen
+        )
+
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
             # compress_ratio > 1 (DeepseekV4)
@@ -1070,6 +1078,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         return attn_metadata
+
+    def update_draft_decode_metadata(
+        self, metadata: DeepseekV32IndexerMetadata
+    ) -> None:
+        assert self.supports_draft_decode_metadata_update
+        assert metadata.decode is not None
+        assert metadata.num_prefills == 0
+        assert metadata.num_decode_tokens == metadata.num_decodes
+
+        decode_seq_lens = metadata.decode.seq_lens
+        if decode_seq_lens.ndim == 2:
+            assert decode_seq_lens.shape[1] == 1
+            decode_seq_lens = decode_seq_lens[:, 0]
+        decode_seq_lens.copy_(
+            metadata.seq_lens[: metadata.num_decode_tokens], non_blocking=True
+        )
 
 
 def build_prefill_chunk_metadata(

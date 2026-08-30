@@ -92,6 +92,10 @@ class HYV4DecoderLayer(nn.Module):
     otherwise it uses the standard single-stream residual.
     """
 
+    attention_cls = HYV4MLAAttention
+    hc_layer_cls = HYV4HCLayer
+    moe_cls: type[nn.Module] = HYV4MoEFused
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -109,7 +113,7 @@ class HYV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        self.self_attn = HYV4MLAAttention(
+        self.self_attn = self.attention_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
@@ -137,15 +141,15 @@ class HYV4DecoderLayer(nn.Module):
             )
             self.block_type = "feedforward"
         else:
-            self.mlp = HYV4MoEFused(
+            self.mlp = self.moe_cls(
                 config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
             self.block_type = "moe"
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.hc_attn_layer = HYV4HCLayer(
+        self.hc_attn_layer = self.hc_layer_cls(
             config, layer_idx, prefix=f"{prefix}.hc_attn_layer"
         )
-        self.hc_mlp_layer = HYV4HCLayer(
+        self.hc_mlp_layer = self.hc_layer_cls(
             config, layer_idx, prefix=f"{prefix}.hc_mlp_layer"
         )
 
@@ -212,6 +216,8 @@ class HYV4DecoderLayer(nn.Module):
 class HYV4Model(nn.Module):
     """HY V4 backbone."""
 
+    decoder_layer_cls = HYV4DecoderLayer
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -248,7 +254,7 @@ class HYV4Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: HYV4DecoderLayer(
+            lambda prefix: self.decoder_layer_cls(
                 config=config,
                 vllm_config=vllm_config,
                 cache_config=cache_config,
@@ -430,7 +436,16 @@ class HYV4Model(nn.Module):
         # MoE) and make a later reload target orphaned tensors.
         params_dict = dict(self.named_parameters())
         # Split per-expert mapping (V3 style): experts.0.gate_proj.weight
-        split_expert_params_mapping = self.get_expert_mapping()
+        num_experts = getattr(self.config, "num_experts", 0)
+        num_fused_shared_experts = getattr(self, "num_fused_shared_experts", 0)
+        split_expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts + num_fused_shared_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
         loaded_params: set[str] = set()
 
         # Sink weights are sharded like the q/k/v linears.
@@ -450,7 +465,6 @@ class HYV4Model(nn.Module):
             (f"{fused_expert_prefix}w13_weight", ".experts.gate_up_proj", 0, "w1"),
             (f"{fused_expert_prefix}w2_weight", ".experts.down_proj", 0, "w2"),
         ]
-        num_experts = getattr(self.config, "num_experts", 0)
 
         def _should_skip_missing_param(param_name: str) -> bool:
             # Sparse checkpoints may contain indexer weights for layers that
@@ -618,6 +632,8 @@ class HYV4Model(nn.Module):
 
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+    model_cls = HYV4Model
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             ".q_a_proj": (".fused_qkv_a_proj", 0),
@@ -650,7 +666,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        self.model = HYV4Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:

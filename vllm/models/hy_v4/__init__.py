@@ -21,11 +21,12 @@ does not exist in this tree.
 
 from vllm.platforms import current_platform
 
-if current_platform.is_xpu():
+if current_platform.is_rocm():
+    from .amd.model import HYV4ForCausalLM  # type: ignore[assignment]
+    from .amd.mtp import HYV4MTP  # type: ignore[assignment]
+elif current_platform.is_xpu():
     raise NotImplementedError("hy_v4 does not yet support XPU.")
 else:
-    # The implementation is shared by CUDA and ROCm; platform-specific
-    # attention behavior is selected by the normal attention backend router.
     from .nvidia.model import HYV4ForCausalLM
     from .nvidia.mtp import HYV4MTP
 

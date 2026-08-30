@@ -11,6 +11,10 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    AiterFp8BlockScaledMMKernel,
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearKernel,
+    Mxfp8LinearKernel,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -65,21 +69,27 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    FP8_BLOCK_SIZE,
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+    convert_mxfp8_moe_weights_to_block_fp8,
+    convert_mxfp8_weight_to_block_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
     is_layer_skipped,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -91,6 +101,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1795,7 +1806,25 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.kernel = init_mxfp8_linear_kernel()
+        vllm_config = get_current_vllm_config()
+        self.input_dtype = vllm_config.model_config.dtype
+        self.out_dtype = vllm_config.model_config.dtype
+        linear_backend = vllm_config.kernel_config.linear_backend
+        self.convert_mxfp8_to_block_fp8 = False
+        consider_aiter_block_fp8 = (
+            current_platform.is_rocm()
+            and not current_platform.supports_mx()
+            and linear_backend in ("auto", "aiter")
+        )
+        if consider_aiter_block_fp8:
+            aiter_supported, _ = AiterFp8BlockScaledMMKernel.is_supported()
+            self.convert_mxfp8_to_block_fp8 = aiter_supported
+        self.kernel: (
+            Mxfp8LinearKernel
+            | FP8ScaledMMLinearKernel
+            | Fp8BlockScaledMMLinearKernel
+            | None
+        ) = None if self.convert_mxfp8_to_block_fp8 else init_mxfp8_linear_kernel()
 
     def create_weights(
         self,
@@ -1853,11 +1882,30 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
+        if self.convert_mxfp8_to_block_fp8:
+            self.kernel = init_fp8_linear_kernel(
+                activation_quant_key=kFp8Dynamic128Sym,
+                weight_quant_key=kFp8Static128BlockSym,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
+            )
+            if not isinstance(self.kernel, AiterFp8BlockScaledMMKernel):
+                raise RuntimeError(
+                    "MXFP8 block conversion selected a non-AITER linear kernel: "
+                    f"{type(self.kernel).__name__}."
+                )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_mxfp8_processed", False):
+            return
+
         # Idempotent: the emulation kernel may dequant the weight to BF16 at load
         # time (>=2-byte). If already converted, there is nothing left to do --
         # avoid re-running the MXFP8-only validation/conversion below.
         if layer.weight.element_size() >= 2:
+            layer._mxfp8_processed = True
             return
 
         # Validate weight tensor
@@ -1883,7 +1931,26 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f" got {layer.weight_scale.dtype}"
         )
 
+        assert self.kernel is not None
+        if self.convert_mxfp8_to_block_fp8:
+            weight, weight_scale = convert_mxfp8_weight_to_block_fp8(
+                layer.weight.data,
+                layer.weight_scale.data,
+                block_size=FP8_BLOCK_SIZE,
+            )
+            if current_platform.is_fp8_fnuz():
+                weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                    weight, weight_scale
+                )
+            replace_parameter(layer, "weight", weight)
+            replace_parameter(layer, "weight_scale", weight_scale)
+            layer.weight_block_size = [FP8_BLOCK_SIZE, FP8_BLOCK_SIZE]
+            logger.info_once(
+                "Converted MXFP8 dense weights to 128x128 block FP8 for AITER GEMM."
+            )
+
         self.kernel.process_weights_after_loading(layer)
+        layer._mxfp8_processed = True
 
     def apply(
         self,
@@ -1891,6 +1958,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
 
 
@@ -1906,8 +1974,34 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_mxfp8_serialized
+        self.convert_mxfp8_to_block_fp8 = False
+        self.mxfp8_backend: Fp8MoeBackend
 
-        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        if (
+            current_platform.is_rocm()
+            and not current_platform.supports_mx()
+            and self.moe.moe_backend in ("auto", "aiter")
+        ):
+            try:
+                block_backend, block_experts_cls = select_fp8_moe_backend(
+                    config=self.moe,
+                    weight_key=kFp8Static128BlockSym,
+                    activation_key=kFp8Dynamic128Sym,
+                )
+            except (NotImplementedError, ValueError):
+                if self.moe.moe_backend == "aiter":
+                    raise
+            else:
+                if block_backend == Fp8MoeBackend.AITER:
+                    self.convert_mxfp8_to_block_fp8 = True
+                    self.weight_block_size = [FP8_BLOCK_SIZE, FP8_BLOCK_SIZE]
+                    self.mxfp8_backend = block_backend
+                    self.experts_cls = block_experts_cls
+
+        if not self.convert_mxfp8_to_block_fp8:
+            self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+                config=self.moe
+            )
 
     def create_weights(
         self,
@@ -2056,6 +2150,26 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             num_experts,
         )
 
+    @staticmethod
+    def _convert_mxfp8_weights_to_block_fp8(layer: RoutedExperts) -> None:
+        def convert(weight: torch.Tensor, scale: torch.Tensor):
+            quantized, block_scale = convert_mxfp8_moe_weights_to_block_fp8(
+                weight, scale, block_size=FP8_BLOCK_SIZE
+            )
+            if current_platform.is_fp8_fnuz():
+                quantized, block_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                    quantized, block_scale
+                )
+            return quantized, block_scale
+
+        w13, w13_scale = convert(layer.w13_weight.data, layer.w13_weight_scale.data)
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+
+        w2, w2_scale = convert(layer.w2_weight.data, layer.w2_weight_scale.data)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # TODO(bnell): why is this required only for mxfp8?
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -2063,6 +2177,12 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         layer._already_called_process_weights_after_loading = True
 
         self._check_weight_dtypes(layer)
+
+        if self.convert_mxfp8_to_block_fp8:
+            self._convert_mxfp8_weights_to_block_fp8(layer)
+            logger.info_once(
+                "Converted MXFP8 MoE weights to 128x128 block FP8 for AITER fused MoE."
+            )
 
         layer.weight_block_size = self.weight_block_size
 
