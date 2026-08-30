@@ -12,6 +12,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -91,7 +92,17 @@ def _force_write_diffusion_kv(
     new vLLM-wide kv-sharing variant: ``set_inputs_first_pass`` already
     computes a real slot_mapping into the target's cache for every
     position in this block, so this writes to slots nothing else owns.
+
+    Skipped during vLLM's startup dummy/profiling run
+    (``SpecDecodeBaseProposer.dummy_run`` calls ``set_forward_context``
+    with ``attn_metadata=None``, unlike every real step): the physical KV
+    cache tensor isn't in the state this raw op call expects yet at that
+    point, so calling it there crashes with an opaque AOTI tensor-handle
+    error. The dummy run only needs realistic *shapes* for memory
+    profiling, not an actually-populated cache.
     """
+    if get_forward_context().attn_metadata is None:
+        return
     unified_kv_cache_update(key, value, attn_diff.layer_name)
 
 
