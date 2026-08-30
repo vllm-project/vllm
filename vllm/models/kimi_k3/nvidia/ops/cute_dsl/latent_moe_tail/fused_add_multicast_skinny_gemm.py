@@ -19,6 +19,7 @@ from .primitives import (
     bf16x2_to_u32,
     bf16x4_to_packed_u32x2,
     bf16x8_to_packed_u32x4,
+    fma_f32_bf16,
     load_global_u32x4,
     packed_u32x4_to_bf16x8,
     sanitize_negative_zero,
@@ -40,6 +41,13 @@ class SkinnyConfig:
 
 
 def config_for_m(num_rows: int, shard_dim: int = 896) -> SkinnyConfig:
+    if num_rows <= 5 and shard_dim in (448, 896):
+        return SkinnyConfig(
+            block_size=224,
+            outputs_per_block=2,
+            k_unroll=1,
+            vector_width=16,
+        )
     if shard_dim == 448:
         if num_rows >= 6:
             return SkinnyConfig(
@@ -61,7 +69,7 @@ def config_for_m(num_rows: int, shard_dim: int = 896) -> SkinnyConfig:
 def _as_cute(tensor: torch.Tensor):
     return from_dlpack(
         CUDAGraphCompatibleWrapper(tensor.detach()),
-        assumed_align=16,
+        assumed_align=32,
     )
 
 
@@ -220,9 +228,11 @@ class FusedAddMulticastSkinnyGemm:
         for vi in cutlass.range_constexpr(vector_width):
             for mi in cutlass.range_constexpr(num_rows):
                 for ni in cutlass.range_constexpr(outputs_per_block):
-                    acc[mi, ni] = acc[mi, ni] + a_regs[mi, vi].to(Float32) * b_regs[
-                        ni, vi
-                    ].to(Float32)
+                    acc[mi, ni] = fma_f32_bf16(
+                        a_regs[mi, vi],
+                        b_regs[ni, vi],
+                        acc[mi, ni],
+                    )
 
         for k_tile in cutlass.range(1, num_k_tiles, unroll=self.k_unroll):
             for mi in cutlass.range_constexpr(num_rows):
@@ -237,9 +247,11 @@ class FusedAddMulticastSkinnyGemm:
             for vi in cutlass.range_constexpr(vector_width):
                 for mi in cutlass.range_constexpr(num_rows):
                     for ni in cutlass.range_constexpr(outputs_per_block):
-                        acc[mi, ni] = acc[mi, ni] + a_regs[mi, vi].to(Float32) * b_regs[
-                            ni, vi
-                        ].to(Float32)
+                        acc[mi, ni] = fma_f32_bf16(
+                            a_regs[mi, vi],
+                            b_regs[ni, vi],
+                            acc[mi, ni],
+                        )
 
         for mi in cutlass.range_constexpr(num_rows):
             for ni in cutlass.range_constexpr(outputs_per_block):
@@ -376,33 +388,33 @@ def compile_kernel(
         BFloat16,
         (num_rows, latent_dim),
         stride=(latent_dim, 1),
-        assumed_align=16,
+        assumed_align=32,
     )
     b = make_fake_tensor(
         BFloat16,
         (shard_dim, latent_dim),
         stride=(latent_dim, 1),
-        assumed_align=16,
+        assumed_align=32,
     )
     if published_shared:
         shared = make_fake_tensor(
             BFloat16,
             (3, max_m, tp_size, shard_dim),
             stride=(max_m * tp_size * shard_dim, tp_size * shard_dim, shard_dim, 1),
-            assumed_align=16,
+            assumed_align=32,
         )
     else:
         shared = make_fake_tensor(
             BFloat16,
             (num_rows, shard_dim),
             stride=(hidden_dim, 1),
-            assumed_align=16,
+            assumed_align=32,
         )
     shared_flags = make_fake_tensor(
         cutlass.Int32,
         (12,),
         stride=(1,),
-        assumed_align=16,
+        assumed_align=32,
     )
     compiled = cute.compile(
         FusedAddMulticastSkinnyGemm(
@@ -524,6 +536,11 @@ class FusedAddMulticastSkinnyGemmKernel:
             or not mailbox.is_contiguous()
         ):
             raise ValueError("skinny up-projection inputs have unsupported strides")
+        if any(
+            tensor.data_ptr() % 32
+            for tensor in (latent, weight, shared_source, shared_flags)
+        ):
+            raise ValueError("skinny up-projection inputs must be 32-byte aligned")
         if mailbox.shape[1] < self.num_rows:
             raise ValueError("mailbox capacity is smaller than runtime M")
 
