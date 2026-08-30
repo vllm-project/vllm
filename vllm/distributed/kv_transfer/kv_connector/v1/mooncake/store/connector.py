@@ -28,7 +28,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
-    SupportsHiSparseHostExport,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -123,9 +122,7 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         return f"<MooncakeStoreKVEvents events={self.get_all_events()}>"
 
 
-class MooncakeStoreConnector(
-    KVConnectorBase_V1, SupportsHMA, SupportsHiSparseHostExport
-):
+class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @staticmethod
