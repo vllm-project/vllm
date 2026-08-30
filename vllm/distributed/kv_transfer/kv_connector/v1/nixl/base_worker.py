@@ -75,10 +75,12 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheLayout,
+    KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
+    iter_layer_specs,
 )
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
@@ -317,19 +319,22 @@ class NixlBaseConnectorWorker:
             )
         )
 
+        self.kv_cache_config = kv_cache_config
+        # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
+        self._layer_specs: dict[str, KVCacheSpec] = {}
+        for group in kv_cache_config.transfer_groups:
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                self._layer_specs.update(group_spec.kv_cache_specs)
+            else:
+                self._layer_specs.update(dict.fromkeys(group.layer_names, group_spec))
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.transfer_groups
+                not isinstance(spec, FullAttentionSpec)
+                for spec in self._layer_specs.values()
             )
         )
-        self.kv_cache_config = kv_cache_config
-        self._layer_specs = {
-            layer: group.kv_cache_spec
-            for group in kv_cache_config.transfer_groups
-            for layer in group.layer_names
-        }
 
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
@@ -338,8 +343,7 @@ class NixlBaseConnectorWorker:
         # conv sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.transfer_groups
+            isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
         )
         self._is_csa_linear = any(
             get_representative_spec_type(group.kv_cache_spec) is CircularBufferSpec
@@ -350,8 +354,11 @@ class NixlBaseConnectorWorker:
             ple_groups = [
                 (index, group)
                 for index, group in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(group.kv_cache_spec, MambaSpec)
-                and group.kv_cache_spec.tp_replicated
+                if group.layer_names
+                and all(
+                    isinstance(spec, MambaSpec) and spec.tp_replicated
+                    for spec in iter_layer_specs(group.kv_cache_spec)
+                )
             ]
             if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
                 raise ValueError(
@@ -2481,8 +2488,7 @@ class NixlBaseConnectorWorker:
         group_specs = self.kv_cache_config.transfer_groups
         physical_block_ids = []
         for i, group in enumerate(block_ids):
-            spec = group_specs[i].kv_cache_spec
-            if isinstance(spec, MambaSpec):
+            if _is_ssm_spec(get_representative_spec_type(group_specs[i].kv_cache_spec)):
                 physical_block_ids.append(group)
             else:
                 physical_block_ids.append(
