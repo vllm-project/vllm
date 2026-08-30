@@ -327,6 +327,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.retain_full_kv_cache = False
         self.has_sink = extra_impl_args.get("sinks") is not None
 
         # NOTE: model_config may be None during certain tests
@@ -607,7 +608,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
-        if self.sliding_window is not None:
+        if self.sliding_window is not None and not self.retain_full_kv_cache:
             assert not self.attn_backend.is_mla(), (
                 "MLA is not supported for sliding window"
             )
@@ -652,6 +653,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                sliding_window=self.sliding_window,
             )
 
 

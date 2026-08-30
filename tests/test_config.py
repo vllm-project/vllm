@@ -891,6 +891,30 @@ def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slot
     assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
+def test_draft_attention_window_requires_eagle3():
+    with pytest.raises(
+        ValueError,
+        match="draft_attention_window is only supported with method='eagle3'",
+    ):
+        SpeculativeConfig(
+            model="ngram",
+            num_speculative_tokens=3,
+            draft_attention_window=32768,
+        )
+
+
+def test_draft_attention_window_changes_computation_hash():
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=3,
+    )
+    baseline_hash = speculative_config.compute_hash()
+
+    speculative_config.draft_attention_window = 32768
+
+    assert speculative_config.compute_hash() != baseline_hash
+
+
 @dataclass
 class _TestConfigFields:
     a: int

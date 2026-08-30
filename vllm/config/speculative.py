@@ -417,6 +417,9 @@ class SpeculativeConfig:
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
+    draft_attention_window: int | None = Field(default=None, ge=1)
+    """Limit EAGLE3 draft attention to the most recent tokens while retaining
+    the full draft KV cache for prefix reuse."""
     revision: str | None = None
     """The specific model version to use for the draft model. It can be a
     branch name, a tag name, or a commit id. If unspecified, will use the
@@ -622,6 +625,8 @@ class SpeculativeConfig:
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
+
+        factors.append(self.draft_attention_window)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -1670,6 +1675,11 @@ class SpeculativeConfig:
             raise ValueError(
                 "'tensor_parallel_size' is not a valid argument in the "
                 "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
+            )
+
+        if self.draft_attention_window is not None and self.method != "eagle3":
+            raise ValueError(
+                "draft_attention_window is only supported with method='eagle3'."
             )
 
         if self.num_speculative_tokens is None:
