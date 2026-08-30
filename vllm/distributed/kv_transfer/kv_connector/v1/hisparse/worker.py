@@ -134,22 +134,6 @@ class HiSparseConnectorWorker:
         self.cache_handles = cache_handles
         for cache in cache_handles:
             cache.defer_host_mirror = True
-        resident = cache_handles[0].view
-        assert resident is not None
-        staging_blocks = (
-            max_num_batched_tokens + resident.block_size - 1
-        ) // resident.block_size
-        mirror_staging_cache = torch.empty(
-            (staging_blocks, resident.block_size, resident.cache.shape[-1]),
-            dtype=resident.cache.dtype,
-            device=device,
-        )
-        mirror_staging_slots = torch.arange(
-            max_num_batched_tokens, dtype=torch.int64, device=device
-        )
-        for cache in cache_handles:
-            cache.mirror_staging_cache = mirror_staging_cache
-            cache.mirror_staging_slots = mirror_staging_slots
         self.leader_runtimes = [
             cache.runtime for cache in cache_handles if cache.runtime.is_group_leader
         ]

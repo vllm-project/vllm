@@ -307,11 +307,15 @@ def _get_hisparse_cache(
 
 
 def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
-    runtimes = {
-        id(cache.runtime): cache.runtime
+    cache_handles = [
+        cache
         for layer in forward_context.values()
         if (cache := getattr(layer, "hisparse_cache", None)) is not None
-        and hasattr(cache.runtime, "_host_cache")
+    ]
+    runtimes = {
+        id(cache.runtime): cache.runtime
+        for cache in cache_handles
+        if hasattr(cache.runtime, "_host_cache")
     }
     if not runtimes:
         return
@@ -323,6 +327,9 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
         }.values()
     )
     release_pinned_state(list(runtimes.values()), registered_pools)
+    for cache in cache_handles:
+        cache.mirror_staging_cache = None
+        cache.mirror_staging_slots = None
 
 
 def _bind_hisparse_kv_caches(
@@ -334,6 +341,7 @@ def _bind_hisparse_kv_caches(
     block_tables: "BlockTables",
     pinned_host_pools: dict[int, torch.Tensor],
     max_num_reqs: int,
+    max_num_batched_tokens: int,
 ) -> None:
     tensor_configs = {
         name: tensor_config
@@ -419,8 +427,23 @@ def _bind_hisparse_kv_caches(
         kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
     )
     source_slot_mapping = block_tables.slot_mappings[source_group_id]
+    resident = cache_handles[0].view
+    assert resident is not None
+    staging_blocks = (
+        max_num_batched_tokens + resident.block_size - 1
+    ) // resident.block_size
+    mirror_staging_cache = torch.empty(
+        (staging_blocks, resident.block_size, resident.cache.shape[-1]),
+        dtype=resident.cache.dtype,
+        device=hot_backing.device,
+    )
+    mirror_staging_slots = torch.arange(
+        max_num_batched_tokens, dtype=torch.int64, device=hot_backing.device
+    )
     for cache_handle in cache_handles:
         cache_handle.mirror_slot_mapping = source_slot_mapping
+        cache_handle.mirror_staging_cache = mirror_staging_cache
+        cache_handle.mirror_staging_slots = mirror_staging_slots
 
 
 def init_kv_cache(
@@ -447,6 +470,9 @@ def init_kv_cache(
                 block_tables=block_tables,
                 pinned_host_pools=pinned_host_pools,
                 max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
             )
         else:
             kv_caches = allocate_kv_cache(
