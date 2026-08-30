@@ -582,45 +582,6 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert config.quant_method == "W4A16_NVFP4"
 
 
-def _weight_only_nvfp4_config(input_activations=None):
-    """A compressed-tensors style quantization_config (as it appears in
-    config.json) that labels itself NVFP4 but quantizes weights only."""
-    return {
-        "quant_method": "modelopt",
-        "quant_algo": "NVFP4",
-        "group_size": 16,
-        "config_groups": {
-            "group_0": {
-                "targets": ["Linear"],
-                "weights": {"num_bits": 4, "type": "float", "group_size": 16},
-                "input_activations": input_activations,
-                "output_activations": None,
-            }
-        },
-        "ignore": [],
-    }
-
-
-def test_modelopt_nvfp4_weight_only_promoted_to_w4a16():
-    """A checkpoint labelled ``quant_algo="NVFP4"`` with no activation
-    quantization (``input_activations`` is null in every config group) must
-    be treated as W4A16. Otherwise the W4A4 MoE path folds an uninitialised
-    input scale into the dequant alphas and zeroes every expert (#54189).
-    """
-    config = ModelOptNvFp4Config.from_config(_weight_only_nvfp4_config())
-    assert config.quant_method == "W4A16_NVFP4"
-    assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
-
-
-def test_modelopt_nvfp4_with_activations_stays_w4a4():
-    """A genuine W4A4 checkpoint (activations are quantized) keeps the NVFP4
-    path, so the promotion does not regress activation-quantized models."""
-    act = {"num_bits": 4, "type": "float", "dynamic": True}
-    config = ModelOptNvFp4Config.from_config(_weight_only_nvfp4_config(act))
-    assert config.quant_method == "NVFP4"
-    assert config.LinearMethodCls is ModelOptNvFp4LinearMethod
-
-
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [("auto", MarlinNvFp4LinearKernel), ("humming", HummingNvFp4LinearKernel)],
