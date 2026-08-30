@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
@@ -35,7 +36,13 @@ def make_manager(
     return manager
 
 
-def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatch):
+@pytest.mark.parametrize(
+    "target_support",
+    [AttentionCGSupport.VARLEN_DECODE, AttentionCGSupport.ALWAYS],
+)
+def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(
+    monkeypatch, target_support
+):
     class Backend:
         @classmethod
         def supports_device_cpu_query_lens_mismatch(cls):
@@ -59,7 +66,7 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
 
     groups = [
         [
-            group("target", AttentionCGSupport.ALWAYS),
+            group("target", target_support),
             group("draft", AttentionCGSupport.UNIFORM_BATCH),
         ]
     ]
@@ -87,6 +94,37 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
 
     assert manager is created
     assert runner_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+
+
+def test_manager_rejects_backend_without_varlen_decode_cudagraphs():
+    class Backend:
+        @classmethod
+        def supports_device_cpu_query_lens_mismatch(cls):
+            return True
+
+    builder = SimpleNamespace(
+        get_cudagraph_support=lambda *_args: AttentionCGSupport.UNIFORM_BATCH
+    )
+    group = SimpleNamespace(
+        layer_names=["target"],
+        backend=Backend,
+        kv_cache_spec=None,
+        get_metadata_builder=lambda _index: builder,
+    )
+    support = AttentionCGSupportInfo(AttentionCGSupport.UNIFORM_BATCH, "TargetBackend")
+
+    with pytest.raises(ValueError, match="VARLEN_DECODE or AttentionCGSupport.ALWAYS"):
+        maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=True,
+            attn_groups=[[group]],
+            attn_cg_support=support,
+            req_states=object(),
+            query_start_loc=object(),
+            num_bonus_tokens=1,
+            max_total_logits=1,
+            vllm_config=None,
+            target_layer_names={"target"},
+        )
 
 
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():

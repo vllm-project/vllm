@@ -64,9 +64,10 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
+    # uniform_token_count unset and use this bound for compatible decode batches.
     max_query_len: int | None = None
     num_active_loras: int = 0
+    decode_only: bool = False
 
 
 class CreateForwardFn(Protocol):
@@ -88,6 +89,7 @@ def _is_compatible(
     uniform_token_count: int | None,
     num_active_loras: int,
     max_query_len: int | None,
+    has_prefill: bool,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -105,6 +107,7 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+        and not (desc.decode_only and has_prefill)
     )
 
 
@@ -245,6 +248,7 @@ class CudaGraphManager:
                     num_reqs=min(num_tokens, self.max_num_reqs),
                     max_query_len=self.decode_query_len,
                     num_active_loras=num_active_loras,
+                    decode_only=True,
                 )
                 descs_by_mode[decode_mode].append(desc)
             # Capture uniform decode specfifc graphs if required
@@ -267,6 +271,7 @@ class CudaGraphManager:
                         num_reqs=rounded_num_reqs,
                         uniform_token_count=decode_query_len,
                         num_active_loras=num_active_loras,
+                        decode_only=True,
                     )
 
                     # avoid duplicate graphs
@@ -413,6 +418,7 @@ class CudaGraphManager:
         uniform_token_count: int | None,
         num_active_loras: int,
         max_query_len: int | None = None,
+        has_prefill: bool = False,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -427,6 +433,7 @@ class CudaGraphManager:
                     uniform_token_count,
                     effective_loras,
                     max_query_len,
+                    has_prefill,
                 ):
                     return desc
         return BatchExecutionDescriptor(

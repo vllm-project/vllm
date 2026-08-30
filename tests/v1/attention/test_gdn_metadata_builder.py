@@ -17,7 +17,9 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
@@ -169,6 +171,14 @@ def _build(
     return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
 
 
+def test_gdn_advertises_varlen_decode_cudagraph_support():
+    assert GDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
+    assert (
+        GDNAttentionMetadataBuilder.get_cudagraph_support(None, None)
+        == AttentionCGSupport.VARLEN_DECODE
+    )
+
+
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
@@ -221,3 +231,26 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_adaptive_varlen_uses_device_query_start_loc():
+    """Spec-decode boundaries must come from the device-side ragged layout."""
+    builder = _create_gdn_builder(num_speculative_tokens=3)
+    batch = BatchSpec(seq_lens=[64, 64, 64, 0], query_lens=[4, 1, 1, 0])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+
+    query_start_loc_cpu = torch.tensor([0, 2, 4, 6, 6], dtype=torch.int32)
+    common = common.replace(query_start_loc_cpu=query_start_loc_cpu)
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.ones(batch.batch_size, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3, 3, -1], dtype=torch.int32),
+    )
+
+    expected_query_start_loc = torch.tensor([0, 4, 5, 6, 6], dtype=torch.int32)
+    assert meta.num_spec_decodes == 3
+    assert meta.num_spec_decode_tokens == 6
+    assert meta.spec_query_start_loc is not None
+    torch.testing.assert_close(meta.spec_query_start_loc, expected_query_start_loc)
+    assert not torch.equal(meta.spec_query_start_loc, query_start_loc_cpu)

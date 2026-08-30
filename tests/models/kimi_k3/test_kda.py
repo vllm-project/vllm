@@ -592,6 +592,97 @@ def test_kda_spec_decode_correctness(
     assert torch.isnan(output_storage[..., H * D :]).all()
 
 
+@torch.inference_mode()
+def test_kda_spec_decode_ragged_matches_per_request():
+    """The KDA path inheriting GDN varlen support must consume device cu_seqlens."""
+    query_lens = [4, 2, 1]
+    num_seqs, max_query_len, H, D = len(query_lens), max(query_lens), 12, 128
+    total_tokens = sum(query_lens)
+    torch.manual_seed(5678)
+
+    q, k, v, raw_g = [
+        torch.randn(
+            1,
+            total_tokens,
+            H,
+            D,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+        for _ in range(4)
+    ]
+    raw_beta = torch.randn(
+        1,
+        total_tokens,
+        H,
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    A_log = 0.5 * torch.randn(H, dtype=torch.float32, device=DEVICE)
+    dt_bias = 0.1 * torch.randn(H, D, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor(
+        [0, *torch.tensor(query_lens).cumsum(0).tolist()],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    state_indices = torch.arange(
+        1,
+        num_seqs * max_query_len + 1,
+        dtype=torch.int32,
+        device=DEVICE,
+    ).view(num_seqs, max_query_len)
+    num_accepted_tokens = torch.tensor([1, 2, 1], dtype=torch.int32, device=DEVICE)
+    initial_state = 0.01 * torch.randn(
+        num_seqs * max_query_len + 1,
+        H,
+        D,
+        D,
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+
+    ragged_state = initial_state.clone()
+    ragged_output, _ = fused_recurrent_kda(
+        q=q,
+        k=k,
+        v=v,
+        raw_g=raw_g,
+        raw_beta=raw_beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=-5.0,
+        initial_state=ragged_state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+
+    reference_state = initial_state.clone()
+    reference_outputs = []
+    for request_idx, (start, end) in enumerate(
+        zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())
+    ):
+        request_output, _ = fused_recurrent_kda(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            raw_g=raw_g[:, start:end],
+            raw_beta=raw_beta[:, start:end],
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=-5.0,
+            initial_state=reference_state,
+            cu_seqlens=torch.tensor([0, end - start], dtype=torch.int32, device=DEVICE),
+            ssm_state_indices=state_indices[request_idx : request_idx + 1],
+            num_accepted_tokens=num_accepted_tokens[request_idx : request_idx + 1],
+        )
+        reference_outputs.append(request_output)
+
+    reference_output = torch.cat(reference_outputs, dim=1)
+    assert_close("ragged output", reference_output, ragged_output, 1e-3, err_atol=1e-3)
+    assert_close("ragged state", reference_state, ragged_state, 3e-3, err_atol=3e-3)
+
+
 @pytest.mark.parametrize(
     (
         "conv_state_dim_first",

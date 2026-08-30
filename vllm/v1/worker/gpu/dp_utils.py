@@ -33,6 +33,9 @@ class DPSyncState:
     # Whether the ranks agreed to run eager. A dispatch reusing this must run
     # eager too; no shape was agreed, so picking a graph per rank would diverge.
     eager: bool
+    # Whether any rank has prefill work. Decode-only graphs must not be selected
+    # when this is true.
+    has_prefill: bool
 
 
 def sync_cudagraph_and_dp_padding(
@@ -45,6 +48,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    has_prefill: bool = False,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -53,17 +57,20 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    tensor[4][dp_rank] = has_prefill
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
+    has_prefill_across_dp = tensor[4]
+    synced_has_prefill = bool(has_prefill_across_dp.any().item())
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -93,6 +100,7 @@ def sync_cudagraph_and_dp_padding(
                 num_tokens_across_dp=num_tokens_across_dp,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
+                has_prefill=synced_has_prefill,
             ),
         )
 
@@ -107,7 +115,6 @@ def sync_cudagraph_and_dp_padding(
     synced_max_query_len: int | None = None
     if bool(torch.all(max_query_lens_across_dp != -1).item()):
         synced_max_query_len = int(max_query_lens_across_dp.max().item())
-
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
     # num_active_loras is per-rank and doesn't need cross-rank agreement.
@@ -117,6 +124,7 @@ def sync_cudagraph_and_dp_padding(
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
         max_query_len=synced_max_query_len,
+        has_prefill=synced_has_prefill,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -126,6 +134,7 @@ def sync_cudagraph_and_dp_padding(
         num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
+        has_prefill=synced_has_prefill,
     )
 
 
@@ -139,6 +148,7 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    has_prefill: bool = False,
     dp_sync: DPSyncState | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
@@ -163,6 +173,8 @@ def dispatch_cg_and_sync_dp(
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.
+        has_prefill: Whether this rank has prefill work. It is synchronized
+            across ranks before the final graph is selected.
         dp_sync: Agreement from a prior dispatch over this same batch, to reuse.
             Must come from a batch with this same padded `num_tokens` and the
             same `uniform_token_count`; `num_reqs` may differ, as neither
@@ -193,6 +205,7 @@ def dispatch_cg_and_sync_dp(
             dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
             num_active_loras=num_active_loras,
             max_query_len=max_query_len,
+            has_prefill=dp_sync.has_prefill if dp_sync is not None else has_prefill,
         )
 
     if dp_size == 1:
@@ -227,4 +240,5 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        has_prefill=has_prefill,
     )

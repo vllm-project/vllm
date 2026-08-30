@@ -196,6 +196,73 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
+@torch.inference_mode()
+def test_causal_conv1d_update_spec_varlen_matches_per_request() -> None:
+    """Speculative varlen batching must match independent request updates."""
+    set_random_seed(0)
+    device = DEVICE
+    query_lens = [4, 2, 0]
+    num_reqs, dim, width = len(query_lens), 64, 4
+    max_query_len = max(query_lens)
+    num_tokens = sum(query_lens)
+    state_len = width - 1 + max_query_len - 1
+
+    x = torch.randn(num_tokens, dim, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(dim, width, dtype=torch.bfloat16, device=device)
+    bias = torch.randn(dim, dtype=torch.bfloat16, device=device)
+    state_seed = torch.randn(
+        num_reqs + 1,
+        dim,
+        state_len,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    state_indices = torch.tensor([1, 2, 0], dtype=torch.int32, device=device)
+    num_accepted_tokens = torch.ones(num_reqs, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 4, 6, 6], dtype=torch.int32, device=device)
+
+    actual_state = state_seed.clone()
+    actual = causal_conv1d_update(
+        x,
+        actual_state,
+        weight,
+        bias,
+        activation="silu",
+        conv_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        query_start_loc=query_start_loc,
+        max_query_len=max_query_len,
+        out=torch.empty_like(x),
+    )
+
+    expected_state = state_seed.clone()
+    expected_parts = []
+    for req_idx, request_x in enumerate(torch.split(x, query_lens)):
+        if request_x.shape[0] == 0:
+            continue
+        request_out = causal_conv1d_update(
+            request_x.T.unsqueeze(0),
+            expected_state,
+            weight,
+            bias,
+            activation="silu",
+            conv_state_indices=state_indices[req_idx : req_idx + 1],
+            num_accepted_tokens=num_accepted_tokens[req_idx : req_idx + 1],
+            out=torch.empty(
+                1,
+                dim,
+                request_x.shape[0],
+                dtype=request_x.dtype,
+                device=device,
+            ),
+        )
+        expected_parts.append(request_out.squeeze(0).T)
+    expected = torch.cat(expected_parts)
+
+    torch.testing.assert_close(actual, expected, atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(actual_state, expected_state, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])

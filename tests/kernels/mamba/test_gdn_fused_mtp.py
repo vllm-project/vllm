@@ -236,18 +236,50 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,draft_tokens,expected_fused_calls",
+    (
+        "seq_lens,query_lens,draft_tokens,expected_fused_calls,"
+        "cpu_query_lens,num_accepted_tokens"
+    ),
     [
-        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, id="pure-mtp"),
+        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, None, [1], id="pure-mtp"),
+        pytest.param(
+            [128, 96, 80],
+            [4, 2, 1],
+            [NUM_SPEC, NUM_SPEC, NUM_SPEC],
+            1,
+            [3, 2, 2],
+            [1, 1, 1],
+            id="ragged-mtp-full-rejection",
+        ),
+        pytest.param(
+            [128, 96, 80],
+            [4, 2, 1],
+            [NUM_SPEC, NUM_SPEC, NUM_SPEC],
+            1,
+            [3, 2, 2],
+            [2, 1, 1],
+            id="ragged-mtp-partial-acceptance",
+        ),
+        pytest.param(
+            [128, 96, 80],
+            [4, 2, 1],
+            [NUM_SPEC, NUM_SPEC, NUM_SPEC],
+            1,
+            [3, 2, 2],
+            [4, 2, 1],
+            id="ragged-mtp-full-acceptance",
+        ),
         pytest.param(
             [128, 96],
             [SPEC_TOKENS, 64],
             [NUM_SPEC, -1],
             0,
+            None,
+            [1, 1],
             id="mixed-mtp-falls-back",
         ),
-        pytest.param([96], [64], [-1], 0, id="pure-prefill"),
-        pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        pytest.param([96], [64], [-1], 0, None, [1], id="pure-prefill"),
+        pytest.param([128], [1], [-1], 0, None, [1], id="pure-decode"),
     ],
 )
 @torch.inference_mode()
@@ -256,6 +288,8 @@ def test_fused_model_path_matches_reference(
     query_lens: list[int],
     draft_tokens: list[int],
     expected_fused_calls: int,
+    cpu_query_lens: list[int] | None,
+    num_accepted_tokens: list[int],
 ) -> None:
     """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
     torch.manual_seed(1)
@@ -276,13 +310,21 @@ def test_fused_model_path_matches_reference(
     common = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
+    if cpu_query_lens is not None:
+        query_start_loc_cpu = torch.zeros(len(cpu_query_lens) + 1, dtype=torch.int32)
+        torch.cumsum(
+            torch.tensor(cpu_query_lens, dtype=torch.int32),
+            dim=0,
+            out=query_start_loc_cpu[1:],
+        )
+        common = common.replace(query_start_loc_cpu=query_start_loc_cpu)
     common.block_table_tensor.add_(1)
     with set_current_vllm_config(vllm_config):
         metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common,
-            num_accepted_tokens=torch.ones(
-                batch.batch_size, dtype=torch.int32, device=device
+            num_accepted_tokens=torch.tensor(
+                num_accepted_tokens, dtype=torch.int32, device=device
             ),
             num_decode_draft_tokens_cpu=torch.tensor(draft_tokens, dtype=torch.int32),
         )

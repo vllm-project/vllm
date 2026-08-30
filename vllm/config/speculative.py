@@ -845,11 +845,15 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in (
-            "qwen3_5",
-            "qwen3_5_moe",
-            "qwen3_5_text",
-            "qwen3_5_moe_text",
+        if (
+            hf_config.model_type
+            in (
+                "qwen3_5",
+                "qwen3_5_moe",
+                "qwen3_5_text",
+                "qwen3_5_moe_text",
+            )
+            and initial_architecture != "Qwen3DSparkModel"
         ):
             # Checkpoints that ship only the text config resolve to the
             # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
