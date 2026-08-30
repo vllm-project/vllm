@@ -54,6 +54,7 @@ def _reset_ple_mmap_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "VLLM_PLE_MMAP_PREWARM",
         "VLLM_PLE_MMAP_READAHEAD",
         "VLLM_PLE_MMAP_PINNED",
+        "VLLM_PLE_MMAP_SERIAL",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -511,6 +512,266 @@ def test_mmap_table_gather_empty_input_returns_empty(tmp_path: Path) -> None:
     out = table.gather(np.empty(0, dtype=np.int64))
 
     assert out.shape == (0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# Serial small-gather dispatch (VLLM_PLE_MMAP_SERIAL)
+# --------------------------------------------------------------------------- #
+
+
+def test_serial_gather_matches_pool_gather_for_the_same_ids(tmp_path: Path) -> None:
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    ids = np.array([0, 39, 12, 13, 14, 5, 5, 20, 31], dtype=np.int64)
+
+    gathered = []
+    for serial in (0, 64):  # off (pool) vs on (inline, uniq.size <= 64)
+        table = ple_mmap.MmapPleTable(
+            layer_shards.shards,
+            10,
+            8,
+            torch.float8_e4m3fn,
+            workers=4,
+            chunk=2,
+            model_path=str(tmp_path),
+            serial=serial,
+        )
+        gathered.append(torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn))
+        table.close()
+
+    assert torch.equal(gathered[0], full[ids])
+    assert torch.equal(gathered[1], gathered[0])
+
+
+def _count_pool_dispatches(
+    monkeypatch: pytest.MonkeyPatch, table: ple_mmap.MmapPleTable
+) -> list[int]:
+    """Count table.pool.map calls without disturbing what it returns.
+
+    One sentinel appended per call, so len(...) reads as the dispatch count.
+    """
+    calls: list[int] = []
+    real_map = table.pool.map
+
+    def _counting_map(fn: object, tasks: object) -> object:
+        calls.append(1)
+        return real_map(fn, tasks)
+
+    monkeypatch.setattr(table.pool, "map", _counting_map)
+    return calls
+
+
+def test_serial_threshold_boundary_switches_inline_vs_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uniq.size == N stays inline (pool.map never called); uniq.size ==
+    N + 1 crosses the threshold back onto the pool. Keyed on uniq.size
+    (distinct rows), not task count -- the boundary here spans a gather
+    whose task count also happens to differ, which is exactly the
+    distinction the knob is keyed to catch."""
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=1,
+        model_path=str(tmp_path),
+        serial=2,
+    )
+    calls = _count_pool_dispatches(monkeypatch, table)
+
+    table.gather(np.array([0, 5], dtype=np.int64))  # uniq.size == 2 == N
+    assert len(calls) == 0
+
+    table.gather(np.array([0, 5, 12], dtype=np.int64))  # uniq.size == 3 > N
+    assert len(calls) == 1
+
+    table.close()
+
+
+def test_serial_threshold_keys_on_distinct_rows_not_task_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large chunk coalesces each shard's span into a single task, so a
+    16-distinct-row gather spanning exactly 2 shards produces only 2 tasks
+    -- fewer than the serial=6 threshold. The previous boundary test used
+    chunk=1, where len(tasks) == uniq.size, so it could not tell a
+    uniq.size-keyed gate from a len(tasks)-keyed one; this one can: with
+    uniq.size=16 > 6 the gate must still route to the pool even though
+    len(tasks)=2 <= 6."""
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=20, parts=2, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=2048,
+        model_path=str(tmp_path),
+        serial=6,
+    )
+    calls = _count_pool_dispatches(monkeypatch, table)
+
+    # 8 rows from shard 0 ([0, 9]) + 8 rows from shard 1 ([10, 19]):
+    # uniq.size == 16, but chunk=2048 coalesces each shard's span into one
+    # task each, so len(tasks) == 2.
+    ids = np.array(
+        [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17], dtype=np.int64
+    )
+    table.gather(ids)
+
+    assert len(calls) == 1  # pooled: uniq.size (16) > serial (6)
+
+    table.close()
+
+
+def test_serial_branch_raises_the_same_named_indexerror_on_a_closed_table(
+    tmp_path: Path,
+) -> None:
+    """The serial dispatch loop reuses run() verbatim, so a missing shard
+    raises the identical named IndexError regardless of branch -- exercised
+    here with more than one task, which the existing len(tasks) == 1
+    special case never reaches. The contract under test is "a missing shard
+    slot" (run()'s `mm is None` check); this test simulates that cheaply by
+    closing the table first, which nulls every mm slot, rather than
+    constructing a table with a genuinely missing shard. That's also why
+    this test only exercises the serial branch: gathering through the pool
+    branch on a CLOSED table instead hits a pre-existing, unrelated
+    divergence -- pool.map raises RuntimeError("cannot schedule new futures
+    after shutdown") straight from the shut-down executor, before run()
+    ever gets a chance to raise its own IndexError. That divergence
+    predates SERIAL and is not this knob's contract."""
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=1,
+        model_path=str(tmp_path),
+        serial=64,
+    )
+    table.close()
+
+    with pytest.raises(IndexError, match="shard"):
+        table.gather(np.array([0, 5], dtype=np.int64))
+
+
+def test_serial_composes_with_readahead_and_gathers_correctly(
+    tmp_path: Path,
+) -> None:
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=2,
+        model_path=str(tmp_path),
+        readahead=64,
+        serial=64,
+    )
+    ids = np.array([0, 39, 12, 13, 14, 5, 5, 20, 31], dtype=np.int64)
+
+    got = torch.from_numpy(table.gather(ids)).view(torch.float8_e4m3fn)
+
+    assert torch.equal(got, full[ids])
+    assert table._latencies_ms[-1][3] > 0  # the readahead pre-pass ran too
+    # Prove serial itself engaged too, not just readahead: uniq.size == 8
+    # (see the ids above) is <= serial=64.
+    assert table._serial_engaged_since_log == 1
+    assert len(table._latencies_ms) == 1
+    table.close()
+
+
+def test_serial_field_in_the_gather_log_line_reflects_the_engaged_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_record's rate-limited log line gains an appended serial= field
+    (append-only -- rows=/p99_ms=/populate_ms=/copy_ms=/runs=/pending=/
+    errors= keep their names, order, and meaning) reporting engaged/total
+    gathers in the window, not the p99 SAMPLE's own engaged flag: keying on
+    the p99 sample -- by construction the window's biggest gather -- would
+    report the wrong branch whenever the biggest gather in a window isn't
+    representative of how most calls in it were actually dispatched (see
+    the mixed-window test below for the failure this avoids)."""
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=40, parts=4, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        10,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=2,
+        model_path=str(tmp_path),
+        serial=2,
+    )
+    logged = _record_info(monkeypatch)
+
+    table._last_log = 0.0  # simulate the interval having elapsed
+    table.gather(np.array([0, 5], dtype=np.int64))  # uniq.size == 2 <= serial
+    assert len(logged) == 1
+    msg, args = logged[0]
+    assert "serial=" in msg
+    assert args[-2:] == (1, 1)  # this window's one gather engaged serial
+
+    logged.clear()
+    table._last_log = 0.0
+    table.gather(np.array([0, 5, 12], dtype=np.int64))  # uniq.size == 3 > serial
+    assert len(logged) == 1
+    assert logged[0][1][-2:] == (0, 1)  # this window's one gather did not
+
+    table.close()
+
+
+def test_mixed_window_serial_field_reports_engaged_over_total_gathers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape the serial= field's window-keying exists for: a window
+    mixing many small (serial-engaged) gathers with one large pooled
+    gather. p99 is, by construction, the window's slowest call -- for a
+    mixed-size window that's the large pooled gather, not a representative
+    sample of the window's actual engagement. Keying serial= on that one
+    sample's flag reports serial=0 for the 19-of-20-engaged window driven
+    below; this test asserts the field instead reports the window's true
+    engaged/total gather counts, independent of which single call happened
+    to be slowest."""
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=600, parts=4, cols=8, scale=0.5)
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    table = ple_mmap.MmapPleTable(
+        layer_shards.shards,
+        150,
+        8,
+        torch.float8_e4m3fn,
+        workers=4,
+        chunk=16,
+        model_path=str(tmp_path),
+        serial=5,
+    )
+    logged = _record_info(monkeypatch)
+
+    small_ids = np.array([0, 1], dtype=np.int64)  # uniq.size == 2 <= serial
+    for _ in range(19):
+        table.gather(small_ids)
+    large_ids = np.arange(500, dtype=np.int64)  # uniq.size == 500 > serial
+    table._last_log = 0.0  # simulate the interval having elapsed on this call
+    table.gather(large_ids)  # pooled, the window's slowest call by far
+
+    assert len(logged) == 1
+    msg, args = logged[0]
+    assert "serial=" in msg
+    assert args[-2:] == (19, 20)  # 19 of this window's 20 gathers engaged
+
+    table.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -1529,6 +1790,7 @@ def test_ple_mmap_tuning_knobs_are_not_compile_factors() -> None:
     # readahead knob would force a recompile and poison its own A/B.
     assert "VLLM_PLE_MMAP_READAHEAD" not in factors
     assert "VLLM_PLE_MMAP_PINNED" not in factors
+    assert "VLLM_PLE_MMAP_SERIAL" not in factors
 
 
 # --------------------------------------------------------------------------- #
@@ -2082,13 +2344,14 @@ def _model_config(directory: Path) -> SimpleNamespace:
 def test_build_tables_wires_the_tuning_knobs_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """VLLM_PLE_MMAP_WORKERS/_CHUNK/_READAHEAD must reach the attached
-    MmapPleTable's workers/chunk/readahead in the right order — a
-    swapped-args regression would still construct a table, just with the
-    wrong concurrency knobs, and nothing else would notice."""
+    """VLLM_PLE_MMAP_WORKERS/_CHUNK/_READAHEAD/_SERIAL must reach the
+    attached MmapPleTable's workers/chunk/readahead/serial in the right
+    order — a swapped-args regression would still construct a table, just
+    with the wrong concurrency knobs, and nothing else would notice."""
     monkeypatch.setenv("VLLM_PLE_MMAP_WORKERS", "3")
     monkeypatch.setenv("VLLM_PLE_MMAP_CHUNK", "7")
     monkeypatch.setenv("VLLM_PLE_MMAP_READAHEAD", "11")
+    monkeypatch.setenv("VLLM_PLE_MMAP_SERIAL", "13")
     _write_ple_layer(tmp_path, layer_idx=0, vocab=10, parts=3, cols=2, scale=0.25)
     emb = _loaded_placeholder(10, 2, 0.25)
     cc = SimpleNamespace(static_forward_context={"a.ple": _fake_ple_layer(0, emb, 3)})
@@ -2099,6 +2362,7 @@ def test_build_tables_wires_the_tuning_knobs_from_the_environment(
     assert emb.table.workers == 3
     assert emb.table.chunk == 7
     assert emb.table.readahead == 11
+    assert emb.table.serial == 13
 
 
 def test_build_tables_attaches_a_table_per_ple_layer_without_cross_contamination(

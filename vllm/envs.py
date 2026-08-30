@@ -327,6 +327,7 @@ if TYPE_CHECKING:
     VLLM_PLE_MMAP_PREWARM: bool = False
     VLLM_PLE_MMAP_READAHEAD: int = 0
     VLLM_PLE_MMAP_PINNED: bool = False
+    VLLM_PLE_MMAP_SERIAL: int = 0
     VLLM_ENABLE_HPC_OPS: bool = False
 
 
@@ -2180,6 +2181,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # host buffer before the H2D copy, instead of copying straight out of
     # gather()'s pageable numpy array.
     "VLLM_PLE_MMAP_PINNED": lambda: bool(int(os.getenv("VLLM_PLE_MMAP_PINNED", "0"))),
+    # Rows threshold at or under which a PLE mmap gather runs its tasks
+    # inline on the calling thread instead of through the worker pool; 0
+    # (default) disables this and always dispatches through the pool.
+    "VLLM_PLE_MMAP_SERIAL": lambda: int(os.getenv("VLLM_PLE_MMAP_SERIAL", "0")),
     # If set to 1, enable the HPC fused kernels (requires the hpc package
     # (.so) and an sm100/sm103 device). Covers:
     #   * the HY V4 iHC ops -- each of the eager HYV4HCPreLayer /
@@ -2364,6 +2369,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_PLE_MMAP_PREWARM",
         "VLLM_PLE_MMAP_READAHEAD",
         "VLLM_PLE_MMAP_PINNED",
+        "VLLM_PLE_MMAP_SERIAL",
     }
 
     from vllm.config.utils import normalize_value

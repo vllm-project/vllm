@@ -51,6 +51,10 @@ Knobs (env, registered in ``vllm/envs.py``):
                              per-call pinned host buffer before the H2D
                              copy, instead of copying straight out of
                              gather()'s pageable numpy array
+  VLLM_PLE_MMAP_SERIAL=0     N > 0 = a gather touching at most N distinct
+                             rows runs its tasks inline on the calling
+                             thread instead of dispatching through the
+                             worker pool
 """
 
 from __future__ import annotations
@@ -362,6 +366,7 @@ class MmapPleTable:
         chunk: int,
         model_path: str,
         readahead: int = 0,
+        serial: int = 0,
     ) -> None:
         # First, and before anything below that can raise (the memmap loop,
         # _open_readahead_fds, the thread pool): __del__ unconditionally
@@ -384,6 +389,7 @@ class MmapPleTable:
         # readahead mechanism at all, so the knob simply reads as off rather
         # than growing a fallback ladder.
         self.readahead = max(0, int(readahead)) if _HAS_POSIX_FADVISE else 0
+        self.serial = max(0, int(serial))
         n_slots = max(shards) + 1
         self.mm = [None] * n_slots
         self.rows_total = 0
@@ -430,6 +436,10 @@ class MmapPleTable:
         self._rows_since_log = 0
         # (elapsed_ms, populate_ms, copy_ms, coalesced runs) per gather.
         self._latencies_ms: list[tuple[float, float, float, int]] = []
+        # Per-window engaged count backing the serial= log field -- see
+        # _record for why it's window-scoped rather than the p99 sample's
+        # own flag.
+        self._serial_engaged_since_log = 0
         self._last_log = time.monotonic()
 
     def _open_readahead_fds(self, shards: dict[int, tuple[str, int, int]]) -> None:
@@ -612,8 +622,24 @@ class MmapPleTable:
         self._pending = len(tasks)
         copy_t = time.monotonic()
         try:
-            if len(tasks) == 1:
-                run(tasks[0])
+            # VLLM_PLE_MMAP_SERIAL: an opt-in bypass of the executor for
+            # small gathers, keyed on uniq.size (distinct rows), not task
+            # count -- a 96-row batch-1 gather over 128 hash-scattered
+            # shards degrades to ~96 one-row tasks and still pays pool
+            # dispatch even though the len(tasks) == 1 case below already
+            # runs inline. Measured 2026-08-29, estrella159 sm120: 0.18 ms
+            # direct fancy-index vs 3.7 ms via the 32-worker pool at 96 warm
+            # rows. The readahead pre-pass above only runs when
+            # VLLM_PLE_MMAP_READAHEAD is also set (it defaults off and is
+            # otherwise independent of this knob) -- serial has no upper
+            # bound of its own, so a high threshold with readahead left off
+            # serializes page faults on the calling thread for a cold,
+            # prefill-sized gather with nothing to mitigate it. Accepted for
+            # an opt-in knob with no default-behavior change.
+            serial = self.serial > 0 and uniq.size <= self.serial
+            if serial or len(tasks) == 1:
+                for task in tasks:
+                    run(task)
             else:
                 for _ in self.pool.map(run, tasks):
                     pass
@@ -622,8 +648,10 @@ class MmapPleTable:
             raise
         finally:
             # Snapshot before resetting: _record's log line (fired at most
-            # once per _LOG_INTERVAL_S) needs the concurrency depth THIS
-            # call actually ran at, not the always-zero post-reset value.
+            # once per _LOG_INTERVAL_S) needs THIS call's task count, not
+            # the always-zero post-reset value. This is a task count, not a
+            # concurrency depth: VLLM_PLE_MMAP_SERIAL can run ~96 pending
+            # tasks at depth 1 on the calling thread.
             pending_snapshot = self._pending
             self._pending = 0
         copy_ms = (time.monotonic() - copy_t) * 1000.0
@@ -635,6 +663,7 @@ class MmapPleTable:
             populate_ms,
             copy_ms,
             runs,
+            serial,
         )
         return gathered
 
@@ -646,9 +675,21 @@ class MmapPleTable:
         populate_ms: float,
         copy_ms: float,
         runs: int,
+        serial: bool,
     ) -> None:
         self._latencies_ms.append((elapsed_ms, populate_ms, copy_ms, runs))
         self._rows_since_log += rows
+        # serial= is a WINDOW statistic (engaged/total gathers), not the p99
+        # SAMPLE's own flag: the p99 sample is, by construction, the biggest
+        # gather in the window, and a mixed window's biggest gather is
+        # exactly the one most likely to have crossed the serial threshold
+        # into the pool branch -- keying on it reported serial=0 for a
+        # window in which 19 of 20 gathers had engaged, the shape this
+        # commit's regression test drives. Counting every call instead of
+        # sampling one reflects what actually happened. The window's total
+        # is len(self._latencies_ms), just appended to above.
+        if serial:
+            self._serial_engaged_since_log += 1
         now = time.monotonic()
         if now - self._last_log < _LOG_INTERVAL_S:
             return
@@ -662,7 +703,7 @@ class MmapPleTable:
         )
         logger.info(
             "rows=%d p99_ms=%.2f populate_ms=%.2f copy_ms=%.2f runs=%d "
-            "pending=%d errors=%d",
+            "pending=%d errors=%d serial=%d/%d",
             self._rows_since_log,
             p99,
             p99_populate,
@@ -670,9 +711,12 @@ class MmapPleTable:
             p99_runs,
             pending,
             self._errors,
+            self._serial_engaged_since_log,
+            len(self._latencies_ms),
         )
         self._latencies_ms.clear()
         self._rows_since_log = 0
+        self._serial_engaged_since_log = 0
         self._last_log = now
 
     def prewarm(self, max_bytes: int) -> int:
@@ -982,11 +1026,12 @@ class MmapNgramEmbedding(nn.Module):
         list is already sorted, so this is nearly free — gives a reader
         both ends without guessing which population p99 came from.
 
-        `pinned=` reports a per-window engaged/total count, not the p99
-        sample's own flag: a window can mix an engaged call with one that
-        fell back to the pageable path, and the p99 sample -- by
-        construction the window's biggest call -- would misreport
-        whichever way that happened to sort.
+        `pinned=` reports a per-window engaged/total count -- the same
+        shape as MmapPleTable's serial= field -- not the p99 sample's own
+        flag: a window can mix an engaged call with one that fell back to
+        the pageable path, and the p99 sample -- by construction the
+        window's biggest call -- would misreport whichever way that
+        happened to sort.
         """
         total_ms = sync_ms + gather_ms + h2d_ms
         self._fwd_timings_ms.append((total_ms, sync_ms, gather_ms, h2d_ms))
@@ -1433,6 +1478,7 @@ def _attach_table(
             chunk=envs.VLLM_PLE_MMAP_CHUNK,
             model_path=model_path,
             readahead=envs.VLLM_PLE_MMAP_READAHEAD,
+            serial=envs.VLLM_PLE_MMAP_SERIAL,
         )
         embedding.torch_dtype = table.torch_dtype
         # Snapshotted once here, not read inside forward: forward currently
