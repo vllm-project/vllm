@@ -237,6 +237,12 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     return dequantized.to(torch.bfloat16)
 
 
+def quant_dequant_mxfp8(x: torch.Tensor) -> torch.Tensor:
+    """Apply dynamic MXFP8 E4M3 quantize-dequantize emulation."""
+    quantized, scales = mxfp8_e4m3_quantize(x)
+    return dequant_mxfp8_to_bf16(quantized, scales).to(x.dtype)
+
+
 def mxfp8_e4m3_quantize_fake(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,

@@ -13,6 +13,7 @@ from vllm.model_executor.kernels.linear import (
     MxFp6LinearKernel,
     init_mxfp4_linear_kernel,
     init_mxfp6_linear_kernel,
+    is_mxfp6_sm120_available,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E2M3Static,
     kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -48,6 +50,7 @@ _ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
     "mxfp4": kMxfp4Dynamic,
     "mxfp6_e3m2": kMxfp6E3M2Dynamic,
     "mxfp6_e2m3": kMxfp6E2M3Dynamic,
+    "mxfp8_e4m3": kMxfp8Dynamic,
 }
 
 
@@ -96,7 +99,14 @@ class QuarkOCP_MX(QuarkScheme):
                 "implemented. Please open an issue."
             )
 
-        if not current_platform.supports_mx():
+        is_sm120_w6a8 = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability(120)
+            and self.weight_dtype == "mxfp6_e3m2"
+            and self.input_dtype == "mxfp8_e4m3"
+            and is_mxfp6_sm120_available()
+        )
+        if not current_platform.supports_mx() and not is_sm120_w6a8:
             logger.warning_once(
                 "The current platform does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
@@ -104,8 +114,10 @@ class QuarkOCP_MX(QuarkScheme):
                 "layers computed in high precision."
             )
 
-        if current_platform.supports_mx() and (
-            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        if (
+            current_platform.supports_mx()
+            and not is_sm120_w6a8
+            and (self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4")
         ):
             logger.warning_once(
                 "The current platform supports native MXFP4/MXFP6 "
