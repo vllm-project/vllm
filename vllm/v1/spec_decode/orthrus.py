@@ -67,7 +67,7 @@ proposer *quality* (acceptance rate per round), not correctness.
 import torch
 from typing_extensions import override
 
-from vllm.config import CUDAGraphMode, VllmConfig, replace
+from vllm.config import VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
@@ -134,25 +134,19 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             attention_config=replace(base.attention_config, backend=target_backend),
         )
 
-    @override
-    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """Never capture cudagraphs for the diffusion draft.
-
-        The base class's PIECEWISE path (see
-        ``SpecDecodeBaseProposer.initialize_cudagraph_keys``) assumes the
-        draft's forward pass goes through the model's ``forward()`` --
-        the method ``@support_torch_compile`` instruments on
-        ``OrthrusModel``. Orthrus's diffusion path instead calls
-        ``forward_diffusion_paged`` directly (see ``OrthrusForCausalLM.
-        forward``), bypassing that compiled entry point entirely. Enabling
-        PIECEWISE capture here would set up a cudagraph dispatcher for
-        graphs the diffusion forward never populates -- a real hazard
-        (either a crash on replay, or worse, silently replaying stale
-        buffers from an unrelated capture), not just a missed optimization.
-        Forcing NONE keeps the draft correct and eager until
-        forward_diffusion_paged is made to run through the compiled path.
-        """
-        self.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
+    # initialize_cudagraph_keys: no longer overridden. It used to force
+    # CUDAGraphMode.NONE unconditionally, because forward_diffusion_paged
+    # was called directly (bypassing the compiled __call__ entry point
+    # @support_torch_compile instruments on OrthrusModel) -- PIECEWISE
+    # capture would have set up a dispatcher for graphs that forward never
+    # actually populated. OrthrusModel.forward now dispatches to
+    # forward_diffusion_paged internally instead of being bypassed from
+    # the outer LM's forward, so both paths go through the same compiled
+    # entry point and the base class's real PIECEWISE-when-eligible logic
+    # (SpecDecodeBaseProposer.initialize_cudagraph_keys) applies. UNTESTED
+    # under actual capture as of this change -- forward_diffusion_paged's
+    # data-dependent slot_mapping lookups and the manual KV-cache indexing
+    # in _force_write_diffusion_kv have never run under CUDA graph replay.
 
     @override
     def _get_model(self) -> torch.nn.Module:
