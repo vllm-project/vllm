@@ -156,6 +156,7 @@ def test_vllm_config_post_init_syncs_class_vars(restore_aiter_class_vars):
 def _worker_class_var_probe(vllm_config, q):
     """Runs in a spawned process: mimics a worker receiving VllmConfig by value."""
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
 
     # Fresh process, VllmConfig arrived by (multiprocessing) serialization but
     # __post_init__ did not re-run -> class vars still at import-time env defaults.
@@ -165,7 +166,7 @@ def _worker_class_var_probe(vllm_config, q):
         rocm_aiter_ops._MLA_ENABLED,
     )
     # What WorkerBase.__init__ does:
-    rocm_aiter_ops.init_from_config(vllm_config.aiter_config)
+    current_platform.sync_process_config_state(vllm_config)
     after = _class_var_tuple(rocm_aiter_ops)
     q.put({"before": before, "after": after})
 

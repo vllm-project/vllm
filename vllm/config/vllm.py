@@ -1460,11 +1460,11 @@ class VllmConfig:
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
 
-        # Sync ROCm AITER op toggles from aiter_config. Runs here for the
-        # front-end / engine-core process and the single-GPU (UniProcExecutor)
-        # path; worker subprocesses re-sync in WorkerBase.__init__ because
-        # pickle does not re-run __post_init__.
-        self._maybe_sync_aiter_ops()
+        # Apply per-process config state (e.g. ROCm AITER class vars from
+        # aiter_config). Runs here for the front-end / engine-core process and
+        # the single-GPU (UniProcExecutor) path; worker subprocesses re-apply
+        # in WorkerBase.__init__ because pickle does not re-run __post_init__.
+        current_platform.sync_process_config_state(self)
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
@@ -2795,22 +2795,6 @@ class VllmConfig:
                 interleave,
                 local_block_size,
             )
-
-    def _maybe_sync_aiter_ops(self) -> None:
-        """Set the ``rocm_aiter_ops`` AITER enablement class vars from ``aiter_config``.
-
-        ``rocm_aiter_ops`` reads these into class variables at import (from
-        env vars) so the hot path is a plain attribute read. When an
-        ``AITERConfig`` is present it is the source of truth instead: typed,
-        part of the compilation hash, and serialized to workers.
-        """
-        from vllm.platforms import current_platform
-
-        if not current_platform.is_rocm() or self.aiter_config is None:
-            return
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        rocm_aiter_ops.init_from_config(self.aiter_config)
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.

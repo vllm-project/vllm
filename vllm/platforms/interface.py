@@ -586,6 +586,21 @@ class Platform:
         pass
 
     @classmethod
+    def sync_process_config_state(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Apply process-global state derived from ``vllm_config`` that must be
+        set once per process and does not survive pickling into a worker
+        subprocess.
+
+        Called from ``VllmConfig.__post_init__`` (front-end / engine-core /
+        single-GPU path) and again from ``WorkerBase.__init__`` in each worker
+        subprocess, where ``__post_init__`` is not re-run.
+
+        Default: no-op.
+        """
+        pass
+
+    @classmethod
     def _find_non_ssm_backend(
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":
