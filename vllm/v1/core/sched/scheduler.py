@@ -71,6 +71,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -1962,7 +1963,14 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        return GrammarOutput(structured_output_request_ids, bitmask)
+        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_acceptable_drafts = [
+            len(strip_speculative_padding(spec_tokens.get(req_id, [])))
+            for req_id in structured_output_request_ids
+        ]
+        return GrammarOutput(
+            structured_output_request_ids, bitmask, num_acceptable_drafts
+        )
 
     def update_from_output(
         self,
