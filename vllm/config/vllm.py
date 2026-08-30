@@ -1431,6 +1431,14 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        # Apply per-process config state (e.g. ROCm AITER class vars from
+        # aiter_config). Must precede apply_config_platform_defaults, which
+        # reads rocm_aiter_ops.is_*_enabled() to decide custom_ops. Runs here
+        # for the front-end / engine-core / single-GPU (UniProcExecutor) path;
+        # worker subprocesses re-apply in WorkerBase.__init__ because pickle
+        # does not re-run __post_init__.
+        current_platform.sync_process_config_state(self)
+
         current_platform.apply_config_platform_defaults(self)
 
         if self.compilation_config.mode is None:
@@ -1459,12 +1467,6 @@ class VllmConfig:
         # must happen after compilation mode and backend are decided,
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
-
-        # Apply per-process config state (e.g. ROCm AITER class vars from
-        # aiter_config). Runs here for the front-end / engine-core process and
-        # the single-GPU (UniProcExecutor) path; worker subprocesses re-apply
-        # in WorkerBase.__init__ because pickle does not re-run __post_init__.
-        current_platform.sync_process_config_state(self)
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
