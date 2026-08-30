@@ -946,10 +946,6 @@ class Scheduler(SchedulerInterface):
                                     self.connector.prefix_completion_group_ids,
                                 )
                             )
-                            if self.kv_cache_manager.hisparse_coordinator.needs_hot(
-                                new_computed_blocks.blocks
-                            ):
-                                request.hisparse_host_import = True
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -1132,13 +1128,6 @@ class Scheduler(SchedulerInterface):
                     reserved_blocks=reserved_blocks,
                     reserved_host_blocks=reserved_host_blocks,
                     has_scheduled_reqs=bool(self.running),
-                    allow_hisparse_host_import=(
-                        load_kv_async
-                        and self.kv_cache_config.hisparse_host_num_blocks is not None
-                        and self.vllm_config.kv_transfer_config is not None
-                        and self.vllm_config.kv_transfer_config.kv_connector
-                        in ("NixlConnector", "NixlPullConnector")
-                    ),
                 )
 
                 if new_blocks is None:
@@ -2847,7 +2836,6 @@ class Scheduler(SchedulerInterface):
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
-            hisparse_host_import=request.hisparse_host_import,
         )
 
     def _request_remaining_host_blocks(self, request: Request) -> int:
@@ -2890,9 +2878,6 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        host_import_pending = request.hisparse_host_import_pending
-        request.hisparse_host_import_pending = False
-
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
@@ -2917,7 +2902,8 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            if host_import_pending:
+            # Async external loads always land on host for HiSparse.
+            if self.kv_cache_manager.hisparse_coordinator.has_host_cache:
                 self.kv_cache_manager.hisparse_coordinator.complete_host_import(
                     request.request_id, request.num_computed_tokens
                 )

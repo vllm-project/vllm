@@ -1430,8 +1430,13 @@ def _get_hisparse_hma_config(
     )
     assert config is not None
 
-    # Host pages retain the scheduler block size. The packed GPU slab uses
-    # native kernel pages so indexer and hot-cache block IDs share one layout.
+    # Host pages match the GPU latent layout: same kernel block size and page
+    # shape, so the pool registers as the DRAM counterpart of P's latent
+    # group. All transfer-visible groups then share one manager block size.
+    host_specs = {
+        name: spec.copy_with_new_block_size(gpu_block_size)
+        for name, spec in host_specs.items()
+    }
     gpu_indexer_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(gpu_block_size)
         for name, spec in indexer_specs.items()
@@ -1457,12 +1462,7 @@ def _get_hisparse_hma_config(
             and layer_spec.is_index_group_leader
         ) or not hot_units:
             hot_units.append([])
-        hot_units[-1].append(
-            (
-                f"{layer_name}{HISPARSE_HOT_SUFFIX}",
-                layer_spec.copy_with_new_block_size(gpu_block_size),
-            )
-        )
+        hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
 
     resident_groups: list[KVCacheGroupSpec] = []
     hot_groups: list[KVCacheGroupSpec] = []
@@ -1489,7 +1489,7 @@ def _get_hisparse_hma_config(
                 ),
                 block_pool_id=0,
                 enable_prefix_caching=False,
-                enable_kv_transfer=True,
+                enable_kv_transfer=False,
             )
         )
         hot_groups.append(
@@ -1523,7 +1523,7 @@ def _get_hisparse_hma_config(
         list(host_specs),
         source_group_spec,
         block_pool_id=None,
-        enable_kv_transfer=False,
+        enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
     )
 

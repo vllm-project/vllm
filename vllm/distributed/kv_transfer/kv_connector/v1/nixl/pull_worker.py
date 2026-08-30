@@ -152,17 +152,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        if meta.hisparse_host_block_ids is not None:
-            if self._nixl_adapter is None:
-                raise RuntimeError("HiSparse NIXL metadata requires its adapter")
-            self._nixl_adapter.read_host_blocks(
-                self,
-                req_id,
-                meta,
-                plan,
-                remote_region_groups,
-            )
-            return
         groups_differ = local_region_groups != remote_region_groups
         if groups_differ:
             if not self.use_mla or self._has_mamba:

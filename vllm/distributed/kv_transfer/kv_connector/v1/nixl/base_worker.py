@@ -38,9 +38,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.hisparse import (
-    make_hisparse_nixl_adapter,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -348,7 +345,6 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        self._nixl_adapter = make_hisparse_nixl_adapter(kv_cache_config)
         attention_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
@@ -1064,8 +1060,6 @@ class NixlBaseConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
-        if self._nixl_adapter is not None:
-            self._nixl_adapter.reset_regions()
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1122,17 +1116,11 @@ class NixlBaseConnectorWorker:
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
-        def transfer_layer_name(layer_name: str) -> str:
-            if self._nixl_adapter is None:
-                return layer_name
-            return self._nixl_adapter.transfer_layer_name(layer_name)
 
         # P and D may allocate equivalent transferable layers in different
         # cache-group orders. Keep their region lists aligned without putting
         # layers.10 before layers.2, which would break PP region slicing.
-        for layer_name in sorted(
-            xfer_buffers, key=lambda name: _region_sort_key(transfer_layer_name(name))
-        ):
+        for layer_name in sorted(xfer_buffers, key=lambda name: _region_sort_key(name)):
             cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
             # kernel requires a specific block size. This leads to SSM and FA layers
@@ -1160,17 +1148,16 @@ class NixlBaseConnectorWorker:
             )
             group = self.kv_cache_config.transfer_groups[group_index]
             if group.block_pool_id is None:
-                logical_num_blocks = self._logical_num_blocks
+                # Dedicated non-device manager (e.g. a host-resident pool):
+                # its block count lives outside num_blocks_by_pool, so read it
+                # off the tensor view the manager allocated.
+                logical_num_blocks = (
+                    cache.shape[0] // self._physical_blocks_per_logical_kv_block
+                )
             else:
                 logical_num_blocks = self.kv_cache_config.num_blocks_by_pool[
                     group.block_pool_id
                 ]
-            if self._nixl_adapter is not None:
-                logical_num_blocks = self._nixl_adapter.logical_num_blocks(
-                    group, logical_num_blocks
-                )
-            elif group.block_pool_id is None:
-                raise ValueError("NIXL transfer group has no block pool")
             group_id = group_index
             num_blocks = (
                 logical_num_blocks
@@ -1180,9 +1167,6 @@ class NixlBaseConnectorWorker:
             base_addr = cache.data_ptr()
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            ) or (
-                self._nixl_adapter is not None
-                and self._nixl_adapter.is_mla_region(layer_spec)
             )
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
@@ -1291,14 +1275,10 @@ class NixlBaseConnectorWorker:
                     else layer_spec.block_size
                     // self._physical_blocks_per_logical_kv_block
                 )
-                self.region_names.append(transfer_layer_name(layer_name))
+                self.region_names.append(layer_name)
                 self.region_num_blocks.append(num_blocks)
                 self._region_is_mla.append(is_mla_region)
                 region_mem_types.append(mem_type)
-                if self._nixl_adapter is not None:
-                    self._nixl_adapter.register_region(
-                        layer_name, group, block_len, kv_caches
-                    )
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1333,9 +1313,6 @@ class NixlBaseConnectorWorker:
             == len(self.region_names)
             == len(self.region_num_blocks)
         )
-        if self._nixl_adapter is not None:
-            assert len(self._nixl_adapter.host_regions) == len(self.region_names)
-
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
         self.region_mem_types = region_mem_types
@@ -1373,8 +1350,6 @@ class NixlBaseConnectorWorker:
             descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
-        if self._nixl_adapter is not None:
-            self._nixl_adapter.register_host_memory(self)
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
@@ -2448,10 +2423,6 @@ class NixlBaseConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
-            if meta.hisparse_host_block_ids is not None:
-                direct_device_recving.add(req_id)
-                continue
-
             direct_device_recving.add(req_id)
 
             # Post processing for heteroblocksize/layout, and for blocks the
@@ -2536,9 +2507,7 @@ class NixlBaseConnectorWorker:
 
     def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
         """Make direct NIXL writes visible before model execution."""
-        requires_sync = (current_platform.is_rocm() and self._has_mamba) or (
-            current_platform.is_cuda() and self._nixl_adapter is not None
-        )
+        requires_sync = current_platform.is_rocm() and self._has_mamba
         if self.use_host_buffer or not done_recving or not requires_sync:
             return
 
@@ -3054,8 +3023,6 @@ class NixlBaseConnectorWorker:
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
         try:
-            if self._nixl_adapter is not None:
-                self._nixl_adapter.release(self)
             for handle in self.src_xfer_handles_by_block_size.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
             for handles in self.src_xfer_handles_by_tp_ratio.values():
