@@ -14,8 +14,8 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
-    # Whether blocks in this cache hold tokens, which is what makes
-    # tokens_per_block meaningful and a block count convertible to a token
+    # Whether blocks in this cache hold tokens, which means that
+    # tokens_per_block is meaningful and a block count convertible to a token
     # count. False for Mamba, for example.
     blocks_hold_tokens: bool = False
 

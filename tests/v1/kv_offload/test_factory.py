@@ -181,7 +181,11 @@ def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
         cpu_bytes_to_use=alignment * 12,
         worker_kv_bytes_per_block=alignment,
         blocks_per_chunk=blocks_per_chunk,
-        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+        groups=(
+            OffloadingGroupConfig(
+                tokens_per_block, ("layer",), blocks_hold_tokens=True
+            ),
+        ),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -206,7 +210,11 @@ def test_cpu_spec_tier_info_capacity_accounts_for_tensor_parallel_copies(
         cpu_bytes_to_use=alignment * 12,
         worker_kv_bytes_per_block=alignment,
         world_size=world_size,
-        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+        groups=(
+            OffloadingGroupConfig(
+                tokens_per_block, ("layer",), blocks_hold_tokens=True
+            ),
+        ),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -230,7 +238,11 @@ def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
         worker_kv_bytes_per_block=alignment,
         world_size=4,
         replicated_layout=True,
-        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+        groups=(
+            OffloadingGroupConfig(
+                tokens_per_block, ("layer",), blocks_hold_tokens=True
+            ),
+        ),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -255,7 +267,10 @@ def test_cpu_spec_tier_info_mirrors_spec_sizing():
 
 def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
     """A tier sized to nothing holds zero tokens; that is known, not unknown."""
-    spec = _create_spec(worker_kv_bytes_per_block=0)
+    spec = _create_spec(
+        worker_kv_bytes_per_block=0,
+        groups=(OffloadingGroupConfig(16, ("layer",), blocks_hold_tokens=True),),
+    )
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks == 0
@@ -273,6 +288,15 @@ def test_cpu_spec_tier_info_no_token_capacity_for_stateful_blocks():
     assert spec.tier_info.capacity_tokens is None
 
 
+def test_cpu_spec_tier_info_no_token_capacity_for_an_unclassified_group():
+    """An unclassified group fails closed: no capacity rather than a guess."""
+    spec = _create_spec(groups=(OffloadingGroupConfig(16, ("layer",)),))
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks > 0
+    assert spec.tier_info.capacity_tokens is None
+
+
 def test_cpu_spec_tier_info_no_token_capacity_for_multiple_groups():
     """A slot holds one group's chunk, so a slot count is in token*group units.
 
@@ -281,8 +305,8 @@ def test_cpu_spec_tier_info_no_token_capacity_for_multiple_groups():
     """
     spec = _create_spec(
         groups=(
-            OffloadingGroupConfig(16, ("full_layer",)),
-            OffloadingGroupConfig(16, ("mamba_layer",)),
+            OffloadingGroupConfig(16, ("full_layer",), blocks_hold_tokens=True),
+            OffloadingGroupConfig(16, ("swa_layer",), blocks_hold_tokens=True),
         ),
     )
 
