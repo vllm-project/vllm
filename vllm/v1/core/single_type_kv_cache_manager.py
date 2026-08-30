@@ -923,6 +923,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )
+
+        # Avoid walking every prompt block on a cold cache. Unlike full attention,
+        # sliding-window lookup searches from the end and cannot stop at the first
+        # miss, so the empty-cache case would otherwise scan the entire prompt.
+        if len(block_pool.cached_block_hash_to_block) == 0:
+            return tuple([] for _ in kv_cache_group_ids), 0
+
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,

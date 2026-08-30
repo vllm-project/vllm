@@ -336,6 +336,38 @@ def test_sliding_window_possible_cached_prefix():
     )
 
 
+def test_sliding_window_empty_cache_skips_hash_lookups(monkeypatch):
+    block_size = 2
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    def fail_on_lookup(*args, **kwargs):
+        raise AssertionError("empty prefix cache should not perform hash lookups")
+
+    monkeypatch.setattr(block_pool, "get_cached_block", fail_on_lookup)
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=[BlockHash(str(i).encode()) for i in range(100)],
+        max_length=100 * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+    )
+
+    assert computed_blocks == ([],)
+    assert hit_length == 0
+
+
 def test_chunked_local_attention_remove_skipped_blocks():
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=2,
