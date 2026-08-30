@@ -64,10 +64,12 @@ def test_request_finished_producer_emits_params(monkeypatch):
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
     assert params == {
-        "ec_items": [{"mm_hash": "h1"}],
-        "transfers": {
-            "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
-        },
+        "h1": {
+            "metadata": {},
+            "peer_host": "1.2.3.4",
+            "peer_port": 5601,
+            "size_bytes": 2 * 32 * 2,
+        }
     }
     s.shutdown()
 
@@ -86,10 +88,12 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
     assert params == {
-        "ec_items": [{"mm_hash": "h1"}],
-        "transfers": {
-            "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
-        },
+        "h1": {
+            "metadata": {},
+            "peer_host": "1.2.3.4",
+            "peer_port": 5601,
+            "size_bytes": 2 * 32 * 2,
+        }
     }
     s.shutdown()
 
@@ -104,6 +108,6 @@ def test_request_finished_skips_unallocated_entry(monkeypatch):
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
     # The item's placeholder metadata is still reported even though there's
-    # no cache entry to transfer.
-    assert params == {"ec_items": [{"mm_hash": "h1"}], "transfers": {}}
+    # no cache entry to transfer (empty "metadata": no fields, no transfer).
+    assert params == {"h1": {"metadata": {}}}
     s.shutdown()

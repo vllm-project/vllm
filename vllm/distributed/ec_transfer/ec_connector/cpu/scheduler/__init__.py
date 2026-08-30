@@ -178,10 +178,9 @@ class ECCPUScheduler:
         NIXL READ is still in flight (or was just started this step) defers
         the request, which the scheduler re-presents on a later step.
         """
-        transfer_params: dict[str, Any] = (
+        params: dict[str, dict[str, Any]] = (
             getattr(request, "ec_transfer_params", None) or {}
         )
-        params: dict[str, dict[str, Any]] = transfer_params.get("transfers") or {}
         if not params:
             return True
         pending = False
@@ -211,7 +210,10 @@ class ECCPUScheduler:
                 # mm_hash already in the cache.
                 continue
             info = params.get(mm_hash)
-            if info is None:
+            # Absent entirely, or present with only placeholder metadata (no
+            # cache entry existed on the producer side at request_finished
+            # time): nothing to fetch, fall back to local compute.
+            if not info or "peer_host" not in info:
                 continue
             expected = pos.length * self._hidden_dim * self._element_size
             if int(info.get("size_bytes", -1)) != expected:
@@ -442,7 +444,6 @@ class ECCPUScheduler:
 
         items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
 
-        transfers: dict[str, dict[str, Any]] = {}
         for feature in request.mm_features:
             mm_hash = feature.identifier
             entry = self._cache.get(mm_hash)
@@ -456,19 +457,17 @@ class ECCPUScheduler:
             size_bytes = (
                 feature.mm_position.length * self._hidden_dim * self._element_size
             )
-            transfers[mm_hash] = {
-                "peer_host": self._peer_host,
-                "peer_port": self._peer_port,
-                "size_bytes": size_bytes,
-            }
+            items[mm_hash].update(
+                peer_host=self._peer_host,
+                peer_port=self._peer_port,
+                size_bytes=size_bytes,
+            )
         logger.debug(
-            "EC producer: announcing NIXL-readable encodings req_id=%s "
-            "items=%s transfers=%s",
+            "EC producer: announcing NIXL-readable encodings req_id=%s items=%s",
             request.request_id,
             items,
-            transfers,
         )
-        return False, {"ec_items": items, "transfers": transfers}
+        return False, items
 
     def shutdown(self) -> None:
         self._pending_saves.clear()

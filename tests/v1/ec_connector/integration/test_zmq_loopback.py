@@ -113,7 +113,7 @@ def _free_port() -> int:
 
 def _build_info(producer: ECCPUScheduler, *, size_bytes: int) -> dict:
     """The dict an orchestrator would put in
-    `request.ec_transfer_params["transfers"][mm_hash]`. Carries only the side-channel
+    `request.ec_transfer_params[mm_hash]`. Carries only the side-channel
     address and size; the consumer learns the producer's NIXL metadata from
     the live XferAck."""
     return {
@@ -315,7 +315,7 @@ def test_end_to_end_single_xfer(stack):
 
     # 4. Consumer arrives with ec_transfer_params pointing at the producer.
     info = _build_info(p_sched, size_bytes=_HIDDEN_DIM * _ELEMENT_SIZE)
-    c_request = _request([feature], params={"transfers": {mm_hash: info}})
+    c_request = _request([feature], params={mm_hash: info})
     accepted = c_sched.ensure_cache_available(c_request, num_computed_tokens=0)
     assert accepted is False, (
         "consumer must defer the request while waiting for the transfer"
@@ -390,9 +390,7 @@ def test_concurrent_xfers_different_mm_hashes(stack):
 
     # Consumer requests both at once.
     info = _build_info(p_sched, size_bytes=_HIDDEN_DIM * _ELEMENT_SIZE)
-    c_request = _request(
-        [f_a, f_b], params={"transfers": {"img_a": info, "img_b": info}}
-    )
+    c_request = _request([f_a, f_b], params={"img_a": info, "img_b": info})
     c_sched.ensure_cache_available(c_request, num_computed_tokens=0)
     assert {"img_a", "img_b"} <= c_sched._in_flight
 

@@ -52,6 +52,7 @@ spec:
         - "32768"
         - --enforce-eager
         - --no-enable-prefix-caching
+        - --mm-tensor-ipc=torch_shm
         env:
         - name: VLLM_MODEL
           value: "Qwen/Qwen2.5-VL-3B-Instruct"    # CONFIGURE: set by driver

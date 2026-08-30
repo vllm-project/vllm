@@ -99,12 +99,10 @@ def _consumer_sched(monkeypatch):
 
 def _params(mm_hash, length):
     return {
-        "transfers": {
-            mm_hash: {
-                "peer_host": "h",
-                "peer_port": 1,
-                "size_bytes": length * _HID * _ES,
-            }
+        mm_hash: {
+            "peer_host": "h",
+            "peer_port": 1,
+            "size_bytes": length * _HID * _ES,
         }
     }
 
@@ -195,8 +193,22 @@ def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
 def test_size_mismatch_skips_transfer(monkeypatch):
     s = _consumer_sched(monkeypatch)
     # Advertised size disagrees with pos.length * hidden_dim * element_size.
-    bad = {"transfers": {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}}
+    bad = {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}
     req = _Request([_Feature("h1", 1)], params=bad)
+    assert s.ensure_cache_available(req, 0) is True
+    assert "h1" not in s._in_flight
+    assert s._cache.get("h1") is None
+    s.shutdown()
+
+
+def test_metadata_only_entry_admits_without_transfer(monkeypatch):
+    # A producer that reported placeholder metadata but had no cache entry
+    # to transfer omits peer_host/peer_port/size_bytes entirely; the consumer
+    # must fall back to local compute rather than treating that as a size
+    # mismatch.
+    s = _consumer_sched(monkeypatch)
+    metadata_only = {"h1": {"image_grid_thw": [1, 2, 3]}}
+    req = _Request([_Feature("h1", 1)], params=metadata_only)
     assert s.ensure_cache_available(req, 0) is True
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None

@@ -188,7 +188,7 @@ class ECExampleConnector(ECConnectorBase):
         items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
         if not items:
             return False, None
-        return False, {"ec_items": items}
+        return False, items
 
     # ==============================
     # Helper functions

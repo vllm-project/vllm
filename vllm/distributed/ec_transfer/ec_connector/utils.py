@@ -54,16 +54,19 @@ class PlaceholderMetadataResolver:
 def collect_ec_item_metadata(
     mm_features: "list[MultiModalFeatureSpec]",
     resolver: PlaceholderMetadataResolver,
-) -> list[dict[str, Any]]:
-    """Build one `ec_items` entry per feature for `request_finished()`.
+) -> dict[str, dict[str, Any]]:
+    """Build one `ec_transfer_params` entry per feature for `request_finished()`.
 
-    Each entry carries the feature's mm_hash plus whatever placeholder
-    metadata `resolver` says this model needs published for its modality, so
-    a consumer can skip the image transform. `data` is None for items served
-    from the processor cache, in which case the metadata is unavailable here
-    and the consumer has to fall back to processing the media itself.
+    Keyed by mm_hash, each entry carries a `metadata` dict with whatever
+    placeholder fields `resolver` says this model needs published for its
+    modality, so a consumer can skip the image transform. `data` is None for
+    items served from the processor cache, in which case the metadata is
+    unavailable here and the consumer has to fall back to processing the
+    media itself. A connector that also has transfer coordinates to report
+    (e.g. NIXL peer_host/peer_port/size_bytes) merges those in alongside
+    `metadata`, not into it.
     """
-    items: list[dict[str, Any]] = []
+    items: dict[str, dict[str, Any]] = {}
     for feature in mm_features:
         metadata: dict[str, Any] = {}
         if feature.data is not None:
@@ -73,7 +76,7 @@ def collect_ec_item_metadata(
                 for key, value in feature.data.get_data().items()
                 if key in wanted and isinstance(value, torch.Tensor)
             }
-        items.append({"mm_hash": feature.identifier, **metadata})
+        items[feature.identifier] = {"metadata": metadata}
     return items
 
 
