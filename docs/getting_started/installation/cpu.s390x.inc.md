@@ -3,7 +3,7 @@
 
 vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
 
-Currently, the CPU implementation for s390x architecture supports FP32, BF16 and FP16.
+Currently, the CPU implementation for s390x architecture supports FP32, BF16 and FP16, as well as AWQ and GPTQ 4-bit quantization and compressed-tensors INT8 W8A8.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -116,6 +116,27 @@ VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
     VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
         pip install dist/*.whl
     ```
+
+!!! warning "set `LD_PRELOAD` for TCMalloc"
+    For best memory allocation performance, build and install
+    [gperftools](https://github.com/gperftools/gperftools) (TCMalloc) from
+    source and add it to `LD_PRELOAD`:
+
+    ```bash
+    # Build and install TCMalloc from source
+    curl -LO https://github.com/gperftools/gperftools/releases/download/gperftools-2.16/gperftools-2.16.tar.gz
+    tar -xzf gperftools-2.16.tar.gz
+    cd gperftools-2.16
+    ./configure --enable-minimal && make -j$(nproc) && sudo make install
+    sudo ldconfig
+    cd ..
+
+    # Add to LD_PRELOAD
+    export LD_PRELOAD="/usr/local/lib/libtcmalloc_minimal.so.4:$LD_PRELOAD"
+    ```
+
+    The Docker image (`Dockerfile.s390x`) already includes TCMalloc and sets
+    `LD_PRELOAD` automatically.
 
 !!! warning "Protobuf workaround for s390x"
     The C++ protobuf extension crashes on s390x. After installation, set the
