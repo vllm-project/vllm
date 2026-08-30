@@ -892,9 +892,10 @@ class AsyncLLM(EngineClient):
                 finished = out.finished
                 yield out
 
-        # If the request is disconnected by the client, generate()
-        # is cancelled. So, we abort the request if we end up here.
-        except asyncio.CancelledError:
+        # If the request is disconnected by the client, encode()
+        # is cancelled or the generator is garbage collected. So,
+        # we abort the request if we end up here.
+        except (asyncio.CancelledError, GeneratorExit):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:

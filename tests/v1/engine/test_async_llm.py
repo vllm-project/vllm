@@ -3,10 +3,12 @@
 
 import asyncio
 import time
+from collections.abc import Iterable
 from contextlib import ExitStack
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
@@ -21,11 +23,13 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import PromptType
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.output_processor import RequestOutputCollector
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -1016,3 +1020,46 @@ async def test_pause_keep_multi_request():
         for result in results:
             assert result.finished
             assert len(result.outputs[0].token_ids) == 10
+
+
+class MockEncodeEngine:
+    def __init__(self, collector: RequestOutputCollector):
+        self._collector = collector
+        self.log_requests = False
+        self.aborted: list[str] = []
+
+    async def add_request(
+        self, request_id: str, *args, **kwargs
+    ) -> RequestOutputCollector:
+        return self._collector
+
+    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -> None:
+        assert isinstance(request_id, str)
+        self.aborted.append(request_id)
+
+
+@pytest.mark.asyncio
+async def test_encode_aborts_when_caller_stops_early():
+    request_id = "encode-abort-0"
+    collector = RequestOutputCollector(RequestOutputKind.DELTA, request_id=request_id)
+    collector.put(
+        PoolingRequestOutput(
+            request_id=request_id,
+            outputs=PoolingOutput(data=torch.tensor([1.0])),
+            prompt_token_ids=[1],
+            finished=False,
+            num_cached_tokens=0,
+        )
+    )
+    engine = MockEncodeEngine(collector)
+
+    generator = AsyncLLM.encode(
+        engine, prompt="prompt", pooling_params=PoolingParams(), request_id=request_id
+    )
+    async for _ in generator:
+        break
+    await generator.aclose()
+
+    assert engine.aborted == [request_id]
