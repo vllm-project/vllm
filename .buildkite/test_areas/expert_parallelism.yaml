@@ -39,6 +39,19 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) EPLB Execution"
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/eplb
+      - tests/distributed/test_eplb_execute.py
+      - tests/distributed/test_eplb_spec_decode.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) Elastic EP Scaling"
   key: elastic-ep-scaling-test
