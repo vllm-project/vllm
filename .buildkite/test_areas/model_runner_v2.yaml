@@ -65,7 +65,6 @@ steps:
   key: model-runner-v2-distributed-2-gpus
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
-  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -113,7 +112,6 @@ steps:
   key: model-runner-v2-pipeline-parallelism-4-gpus
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
-  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/v1/worker/gpu/

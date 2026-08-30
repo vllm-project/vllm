@@ -32,7 +32,6 @@ steps:
   key: eplb-execution
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
-  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/eplb

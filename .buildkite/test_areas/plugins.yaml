@@ -6,7 +6,6 @@ steps:
   key: plugin-tests-2-gpus
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
-  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/plugins/
@@ -97,7 +96,6 @@ steps:
   key: bitsandbytes-plugin-2-gpus
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
-  device: l4
   num_devices: 2
   soft_fail: true
   optional: true

@@ -150,7 +150,6 @@ steps:
 - label: ":nvidia: (L4) Extract Hidden States Integration"
   key: extract-hidden-states-integration-2-gpus
   timeout_in_minutes: 20
-  device: l4
   num_devices: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
@@ -235,7 +234,6 @@ steps:
 - label: ":nvidia: (L4) Metrics, Tracing"
   key: metrics-tracing-2-gpus
   timeout_in_minutes: 25
-  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/config/
