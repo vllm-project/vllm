@@ -2,7 +2,7 @@ group: Model Runner V2
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Model Runner V2 Core"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Core"
   device: h200_35gb
   key: model-runner-v2-core-tests
   timeout_in_minutes: 35
@@ -41,7 +41,7 @@ steps:
       - tests/entrypoints/llm/test_struct_output_generate.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Model Runner V2 Examples"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Examples"
   device: h200_35gb
   key: model-runner-v2-examples
   timeout_in_minutes: 35
@@ -101,6 +101,7 @@ steps:
   key: model-runner-v2-distributed-2-gpus
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -148,6 +149,7 @@ steps:
   key: model-runner-v2-pipeline-parallelism-4-gpus
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -162,7 +164,7 @@ steps:
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
-- label: ":nvidia: (H200) Model Runner V2 Spec Decode"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Spec Decode"
   device: h200_35gb
   key: model-runner-v2-spec-decode
   timeout_in_minutes: 50

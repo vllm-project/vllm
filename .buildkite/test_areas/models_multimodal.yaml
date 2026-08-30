@@ -2,7 +2,7 @@ group: Models - Multimodal
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Multimodal Models (Standard) 1: qwen2"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 1: qwen2"
   key: multi-modal-models-standard-1-qwen2
   timeout_in_minutes: 68
   device: h200_18gb
@@ -22,7 +22,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (Standard) 2: qwen3 + gemma"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 2: qwen3 + gemma"
   key: multi-modal-models-standard-2-qwen3-gemma
   timeout_in_minutes: 75
   device: h200_18gb
@@ -43,7 +43,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (Standard) 3: llava + qwen2_vl"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 3: llava + qwen2_vl"
   device: h200_35gb
   key: multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 40
@@ -62,7 +62,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (Standard) 4: other + whisper"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
   device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 75
@@ -108,7 +108,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Processor"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
   key: multi-modal-processor
   timeout_in_minutes: 98
   device: h200_18gb
@@ -128,7 +128,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Accuracy Eval (Small Models)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Accuracy Eval (Small Models)"
   device: h200_35gb
   key: multi-modal-accuracy-eval-small-models
   timeout_in_minutes: 30
@@ -154,7 +154,7 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (H200) Multimodal Models (Extended Generation 1)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
@@ -175,7 +175,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (PPL)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
   optional: true
@@ -193,7 +193,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (Extended Generation 2) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 2) Shard %N"
   device: h200_35gb
   key: multi-modal-models-extended-generation-2
   parallelism: 4
@@ -213,7 +213,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (Extended Generation 3)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 3)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-3
   optional: true
@@ -232,7 +232,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Multimodal Models (Extended Pooling)"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
   optional: true
   device: h200_18gb
