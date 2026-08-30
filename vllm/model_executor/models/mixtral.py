@@ -92,7 +92,6 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
 
         # Expert Parallelism Load balancing settings.
@@ -105,11 +104,6 @@ class MixtralMoE(nn.Module):
         self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         # Gate always runs at half / full precision for now.
 
         self.gate = ReplicatedLinear(
@@ -409,7 +403,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
