@@ -1640,7 +1640,8 @@ def _get_packed_kv_cache_groups(
     counts per page size are treated as a repeating layer pattern (one layer
     per page size) and split into groups covering the same number of pattern
     repeats (picked by ``_approximate_gcd`` to minimize padding), so all
-    groups pack into the same per-block layout.
+    groups pack into the same per-block layout. Mamba buckets are additionally
+    split to fit the block the attention buckets already need.
     Returns None when the layout is not block-outermost or all layers already
     share one page size.
     """
@@ -1696,13 +1697,44 @@ def _get_packed_kv_cache_groups(
         else None
     )
 
+    def num_groups_for(spec: UniformTypeKVCacheSpecs, balanced: bool) -> int:
+        if balanced and repeats_per_group is not None:
+            return cdiv(spec.get_max_layers_per_page_size(), repeats_per_group)
+        return 1
+
+    def widest_group_bytes(page_size_layers: dict[int, list[str]], n: int) -> int:
+        """Page bytes of the largest of the n groups a bucket splits into."""
+        return sum(
+            cdiv(len(names), n) * page for page, names in page_size_layers.items()
+        )
+
+    # Bytes a block must hold however the mamba buckets end up split: a mamba
+    # bucket can go down to one state per group, every other bucket's split is
+    # already fixed by the repeat pattern.
+    anchor_bytes = max(
+        (
+            widest_group_bytes(
+                page_size_layers,
+                len(spec.kv_cache_specs)
+                if isinstance(spec.first_spec, MambaSpec)
+                else num_groups_for(spec, balanced),
+            )
+            for spec, page_size_layers, balanced in bucketed
+        ),
+        default=0,
+    )
+
     groups = []
     for spec, page_size_layers, balanced in bucketed:
-        num_groups = (
-            cdiv(spec.get_max_layers_per_page_size(), repeats_per_group)
-            if balanced and repeats_per_group is not None
-            else 1
-        )
+        num_groups = num_groups_for(spec, balanced)
+        # `_align_hybrid_block_size` pads a mamba state up to one attention
+        # page, so cap a mamba group at the states a block already fits rather
+        # than let it widen the block.
+        if anchor_bytes and isinstance(spec.first_spec, MambaSpec):
+            states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
+            num_groups = max(
+                num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
+            )
         if num_groups == 1:
             groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
             continue
@@ -2004,6 +2036,7 @@ def _max_memory_usage_bytes_from_groups(
                 spec.max_memory_usage_bytes(vllm_config),
                 spec.page_size_bytes,
             )
+
     return bytes_per_block * total_blocks
 
 
