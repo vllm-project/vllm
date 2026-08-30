@@ -36,7 +36,8 @@ def _inputs(n: int = 3, seed: int = 7):
 
 
 # Serving stores L*tril + I and drops the residual; training stores raw L and adds it.
-# If these ever diverge, a checkpoint silently means something different at serving time.
+# If these ever diverge, a checkpoint silently means something different at
+# serving time.
 def test_fold_matches_the_unfolded_sublayer():
     head = _head()
     torch.manual_seed(3)
@@ -49,9 +50,7 @@ def test_fold_matches_the_unfolded_sublayer():
     x = head.in_proj(torch.cat([hcache, lat], dim=-1))
     mixed = torch.bmm((raw_l * tril), x.permute(2, 1, 0)).permute(2, 1, 0)
     x = x + mixed
-    x = x + head.mlp_down(
-        torch.nn.functional.silu(head.mlp_gate(x)) * head.mlp_up(x)
-    )
+    x = x + head.mlp_down(torch.nn.functional.silu(head.mlp_gate(x)) * head.mlp_up(x))
     expected = head.w2(x)
 
     head.fold_from_raw_(raw_l)

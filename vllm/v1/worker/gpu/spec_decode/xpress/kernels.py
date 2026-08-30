@@ -2,16 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
 def _xpress_add_argmax_partial_kernel(
-    base_ptr, bias_ptr, out_val_ptr, out_idx_ptr,
+    base_ptr,
+    bias_ptr,
+    out_val_ptr,
+    out_idx_ptr,
     V,
-    stride_base_r, stride_bias_r,
-    stride_ov_r, stride_oi_r,
+    stride_base_r,
+    stride_bias_r,
+    stride_ov_r,
+    stride_oi_r,
     BLOCK_V: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
@@ -30,9 +35,12 @@ def _xpress_add_argmax_partial_kernel(
 
 @triton.jit
 def _xpress_add_argmax_reduce_kernel(
-    out_val_ptr, out_idx_ptr, token_ptr,
+    out_val_ptr,
+    out_idx_ptr,
+    token_ptr,
     N,
-    stride_ov_r, stride_oi_r,
+    stride_ov_r,
+    stride_oi_r,
     BLOCK_N: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -41,8 +49,9 @@ def _xpress_add_argmax_reduce_kernel(
     for start in range(0, N, BLOCK_N):
         offs = start + tl.arange(0, BLOCK_N)
         mask = offs < N
-        vals = tl.load(out_val_ptr + row * stride_ov_r + offs,
-                       mask=mask, other=-float("inf"))
+        vals = tl.load(
+            out_val_ptr + row * stride_ov_r + offs, mask=mask, other=-float("inf")
+        )
         pos = tl.argmax(vals, axis=0)
         val = tl.max(vals, axis=0)
         idx = tl.load(out_idx_ptr + row * stride_oi_r + start + pos)
@@ -64,15 +73,27 @@ def fused_add_argmax(
     rows, v = base.shape
     num_v_blocks = (v + block_v - 1) // block_v
     _xpress_add_argmax_partial_kernel[(num_v_blocks, rows)](
-        base, bias, out_val, out_idx, v,
-        base.stride(0), bias.stride(0),
-        out_val.stride(0), out_idx.stride(0),
-        BLOCK_V=block_v, num_warps=8,
+        base,
+        bias,
+        out_val,
+        out_idx,
+        v,
+        base.stride(0),
+        bias.stride(0),
+        out_val.stride(0),
+        out_idx.stride(0),
+        BLOCK_V=block_v,
+        num_warps=8,
     )
     _xpress_add_argmax_reduce_kernel[(rows,)](
-        out_val, out_idx, tokens, num_v_blocks,
-        out_val.stride(0), out_idx.stride(0),
-        BLOCK_N=64, num_warps=1,
+        out_val,
+        out_idx,
+        tokens,
+        num_v_blocks,
+        out_val.stride(0),
+        out_idx.stride(0),
+        BLOCK_N=64,
+        num_warps=1,
     )
 
 
@@ -85,10 +106,14 @@ def _xpress_latent_kernel(
     w1_ptr,
     wlat_ptr,
     mixl_ptr,
-    wg_ptr, wu_ptr,
+    wg_ptr,
+    wu_ptr,
     wd_ptr,
-    B: tl.constexpr, R: tl.constexpr, H: tl.constexpr,
-    BP: tl.constexpr, HT: tl.constexpr,
+    B: tl.constexpr,
+    R: tl.constexpr,
+    H: tl.constexpr,
+    BP: tl.constexpr,
+    HT: tl.constexpr,
 ):
     n = tl.program_id(0).to(tl.int64)
     offs_b = tl.arange(0, BP)
@@ -97,7 +122,8 @@ def _xpress_latent_kernel(
 
     xh = tl.load(
         xh_ptr + n * B * R + offs_b[:, None] * R + offs_r[None, :],
-        mask=mask_b[:, None], other=0.0,
+        mask=mask_b[:, None],
+        other=0.0,
     ).to(tl.float32)
     wlat = tl.load(wlat_ptr + offs_r[:, None] * R + offs_r[None, :])
 
@@ -107,7 +133,8 @@ def _xpress_latent_kernel(
 
     lat = tl.load(
         w1_ptr + prev[:, None] * R + offs_r[None, :],
-        mask=mask_b[:, None], other=0.0,
+        mask=mask_b[:, None],
+        other=0.0,
     )
     x = xh + tl.dot(lat, wlat, out_dtype=tl.float32)
 
@@ -115,7 +142,8 @@ def _xpress_latent_kernel(
     for j in tl.static_range(B):
         lj = tl.load(
             mixl_ptr + offs_b[:, None] * B * R + j * R + offs_r[None, :],
-            mask=mask_b[:, None], other=0.0,
+            mask=mask_b[:, None],
+            other=0.0,
         ).to(tl.float32)
         xj = tl.sum(tl.where(offs_b[:, None] == j, x, 0.0), axis=0)
         u += lj * xj[None, :]
@@ -124,13 +152,20 @@ def _xpress_latent_kernel(
     x = u
     for h0 in range(0, H, HT):
         offs_ht = h0 + tl.arange(0, HT)
-        g = tl.dot(ub, tl.load(wg_ptr + offs_r[:, None] * H + offs_ht[None, :]),
-                   out_dtype=tl.float32)
-        v = tl.dot(ub, tl.load(wu_ptr + offs_r[:, None] * H + offs_ht[None, :]),
-                   out_dtype=tl.float32)
+        g = tl.dot(
+            ub,
+            tl.load(wg_ptr + offs_r[:, None] * H + offs_ht[None, :]),
+            out_dtype=tl.float32,
+        )
+        v = tl.dot(
+            ub,
+            tl.load(wu_ptr + offs_r[:, None] * H + offs_ht[None, :]),
+            out_dtype=tl.float32,
+        )
         m = (g * tl.sigmoid(g) * v).to(wd_ptr.dtype.element_ty)
         x += tl.dot(
-            m, tl.load(wd_ptr + offs_ht[:, None] * R + offs_r[None, :]),
+            m,
+            tl.load(wd_ptr + offs_ht[:, None] * R + offs_r[None, :]),
             out_dtype=tl.float32,
         )
 
@@ -142,24 +177,42 @@ def _xpress_latent_kernel(
 
 
 # One Jacobi pass up to the readout: prev gather, hcache add, causal mix, SwiGLU.
-def xpress_latent_pass(blk, tok_am1, xh, lat_out, w1_weight, wlat_t, mix_kjc,
-                       wg_t, wu_t, wd_t) -> None:
+def xpress_latent_pass(
+    blk, tok_am1, xh, lat_out, w1_weight, wlat_t, mix_kjc, wg_t, wu_t, wd_t
+) -> None:
     N, B = blk.shape
     R = xh.shape[-1]
     H = wg_t.shape[-1]
     _xpress_latent_kernel[(N,)](
-        blk, tok_am1, xh, lat_out,
-        w1_weight, wlat_t, mix_kjc, wg_t, wu_t, wd_t,
-        B=B, R=R, H=H, BP=triton.next_power_of_2(B), HT=64,
-        num_warps=8, num_stages=1,
+        blk,
+        tok_am1,
+        xh,
+        lat_out,
+        w1_weight,
+        wlat_t,
+        mix_kjc,
+        wg_t,
+        wu_t,
+        wd_t,
+        B=B,
+        R=R,
+        H=H,
+        BP=triton.next_power_of_2(B),
+        HT=64,
+        num_warps=8,
+        num_stages=1,
     )
 
 
 @triton.jit
 def _xpress_add_argmax_reduce_to_blk_kernel(
-    out_val_ptr, out_idx_ptr, blk_ptr,
-    N, Bm1,
-    stride_ov_r, stride_oi_r,
+    out_val_ptr,
+    out_idx_ptr,
+    blk_ptr,
+    N,
+    Bm1,
+    stride_ov_r,
+    stride_oi_r,
     BLOCK_N: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -168,8 +221,9 @@ def _xpress_add_argmax_reduce_to_blk_kernel(
     for start in range(0, N, BLOCK_N):
         offs = start + tl.arange(0, BLOCK_N)
         mask = offs < N
-        vals = tl.load(out_val_ptr + row * stride_ov_r + offs,
-                       mask=mask, other=-float("inf"))
+        vals = tl.load(
+            out_val_ptr + row * stride_ov_r + offs, mask=mask, other=-float("inf")
+        )
         pos = tl.argmax(vals, axis=0)
         val = tl.max(vals, axis=0)
         idx = tl.load(out_idx_ptr + row * stride_oi_r + start + pos)
@@ -183,17 +237,32 @@ def _xpress_add_argmax_reduce_to_blk_kernel(
 
 # As fused_add_argmax, but writes the winning ids straight into the block buffer,
 # which keeps a pass at three launches inside the captured graph.
-def fused_add_argmax_to_blk(base, bias, out_val, out_idx, blk, block_v: int = 4096) -> None:
+def fused_add_argmax_to_blk(
+    base, bias, out_val, out_idx, blk, block_v: int = 4096
+) -> None:
     rows, v = base.shape
     num_v_blocks = (v + block_v - 1) // block_v
     _xpress_add_argmax_partial_kernel[(num_v_blocks, rows)](
-        base, bias, out_val, out_idx, v,
-        base.stride(0), bias.stride(0),
-        out_val.stride(0), out_idx.stride(0),
-        BLOCK_V=block_v, num_warps=8,
+        base,
+        bias,
+        out_val,
+        out_idx,
+        v,
+        base.stride(0),
+        bias.stride(0),
+        out_val.stride(0),
+        out_idx.stride(0),
+        BLOCK_V=block_v,
+        num_warps=8,
     )
     _xpress_add_argmax_reduce_to_blk_kernel[(rows,)](
-        out_val, out_idx, blk, num_v_blocks, blk.shape[1] - 1,
-        out_val.stride(0), out_idx.stride(0),
-        BLOCK_N=64, num_warps=1,
+        out_val,
+        out_idx,
+        blk,
+        num_v_blocks,
+        blk.shape[1] - 1,
+        out_val.stride(0),
+        out_idx.stride(0),
+        BLOCK_N=64,
+        num_warps=1,
     )

@@ -1,9 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def _kernels() -> Any:
+    # The Triton kernels are optional: this head must stay importable on a build
+    # without them, and every call site has an eager fallback.
+    try:
+        from vllm.v1.worker.gpu.spec_decode.xpress import kernels
+
+        return kernels
+    except ImportError:
+        return None
 
 
 class XPressRefinerHead(nn.Module):
@@ -26,20 +39,22 @@ class XPressRefinerHead(nn.Module):
         self.down_g = nn.Linear(hidden_size, r, bias=False)
         self.in_proj = nn.Linear(3 * r, r, bias=False)
         # Stored FOLDED (L*tril + I), so a refine pass is one bmm with no mask and no
-        # residual add. Identity here means "no mixing" for a head built without weights.
+        # residual add. Identity here means "no mixing" for a head built without
+        # weights.
         self.mix_L = nn.Parameter(torch.eye(block_size).expand(r, -1, -1).contiguous())
         self.mlp_gate = nn.Linear(r, mlp_hidden, bias=False)
         self.mlp_up = nn.Linear(r, mlp_hidden, bias=False)
         self.mlp_down = nn.Linear(mlp_hidden, r, bias=False)
         self.w2 = nn.Linear(r, vocab_size, bias=False)
-        self._latent_fn = None
+        self._latent_fn: Any = None
         self._scratch: dict = {}
 
     @torch.no_grad()
     def fold_from_raw_(self, raw_L: torch.Tensor) -> None:
         # Training stores the raw mixer and adds the sublayer residual: x + (L*tril)x.
         # Baking the mask and the identity into the parameter makes that one bmm, and
-        # keeps a checkpoint meaning the same thing at serving time as it did in training.
+        # keeps a checkpoint meaning the same thing at serving time as it did in
+        # training.
         B = self.block_size
         tril = torch.tril(torch.ones(B, B, dtype=raw_L.dtype, device=raw_L.device))
         eye = torch.eye(B, dtype=raw_L.dtype, device=raw_L.device)
@@ -64,6 +79,7 @@ class XPressRefinerHead(nn.Module):
     def _get_latent_fn(self, device_is_cuda: bool):
         if self._latent_fn is None:
             import os
+
             if device_is_cuda and os.environ.get("XPRESS_NO_COMPILE") != "1":
                 try:
                     self._latent_fn = torch.compile(self._refine_latent, dynamic=True)
@@ -73,9 +89,7 @@ class XPressRefinerHead(nn.Module):
                 self._latent_fn = self._refine_latent
         return self._latent_fn
 
-    def refine_bias(
-        self, prev_ids: torch.Tensor, hcache: torch.Tensor
-    ) -> torch.Tensor:
+    def refine_bias(self, prev_ids: torch.Tensor, hcache: torch.Tensor) -> torch.Tensor:
         return self.w2(self._refine_latent(prev_ids, hcache))
 
     def jacobi_refine_greedy(
@@ -94,15 +108,13 @@ class XPressRefinerHead(nn.Module):
         blk[:, 0] = anchor_ids
         blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)
         import os as _os
-        if base_logits_full.is_cuda and _os.environ.get("XPRESS_NO_FUSED_LATENT") != "1":
-            try:
-                from vllm.v1.worker.gpu.spec_decode.xpress.kernels import (
-                    fused_add_argmax_to_blk,
-                    xpress_latent_pass,
-                )
-            except ImportError:
-                xpress_latent_pass = None
-            if xpress_latent_pass is not None:
+
+        if (
+            base_logits_full.is_cuda
+            and _os.environ.get("XPRESS_NO_FUSED_LATENT") != "1"
+        ):
+            k = _kernels()
+            if k is not None:
                 buf = self.fused_buffers()
                 rows = N * (B - 1)
                 v = base_logits_full.shape[-1]
@@ -115,40 +127,55 @@ class XPressRefinerHead(nn.Module):
                     mrows = N * (B - 1)
                     self._scratch = {
                         "cap": N,
-                        "lat": torch.empty(N, B - 1, self.rank,
-                                           dtype=base_logits_full.dtype, device=dev),
-                        "bias": torch.empty(mrows, v,
-                                            dtype=base_logits_full.dtype, device=dev),
-                        "base": torch.empty(mrows, v,
-                                            dtype=base_logits_full.dtype, device=dev),
+                        "lat": torch.empty(
+                            N,
+                            B - 1,
+                            self.rank,
+                            dtype=base_logits_full.dtype,
+                            device=dev,
+                        ),
+                        "bias": torch.empty(
+                            mrows, v, dtype=base_logits_full.dtype, device=dev
+                        ),
+                        "base": torch.empty(
+                            mrows, v, dtype=base_logits_full.dtype, device=dev
+                        ),
                         "ov": torch.empty(mrows, nvb, dtype=torch.float32, device=dev),
                         "oi": torch.empty(mrows, nvb, dtype=torch.int64, device=dev),
                     }
-                sc = {k: (v_ if k == "cap" else v_[:N] if k == "lat" else v_[:rows])
-                      for k, v_ in self._scratch.items()}
+                sc = {
+                    k: (v_ if k == "cap" else v_[:N] if k == "lat" else v_[:rows])
+                    for k, v_ in self._scratch.items()
+                }
                 sc["base"].copy_(base_logits_full[:, 1:, :].reshape(rows, v))
-                xh = torch.mm(hcache.view(N * B, -1), buf["whc_t"]).view(N, B, self.rank)
+                xh = torch.mm(hcache.view(N * B, -1), buf["whc_t"]).view(
+                    N, B, self.rank
+                )
                 # Three launches per pass: latent, the w2 GEMM, then add+argmax straight
                 # into blk. The [N, B, V] sum is never materialized.
                 for _ in range(num_passes):
-                    xpress_latent_pass(
-                        blk, tok_am1_ids, xh, sc["lat"], self.w1.weight,
-                        buf["wlat_t"], buf["mix_kjc"],
-                        buf["wg_t"], buf["wu_t"], buf["wd_t"],
+                    k.xpress_latent_pass(
+                        blk,
+                        tok_am1_ids,
+                        xh,
+                        sc["lat"],
+                        self.w1.weight,
+                        buf["wlat_t"],
+                        buf["mix_kjc"],
+                        buf["wg_t"],
+                        buf["wu_t"],
+                        buf["wd_t"],
                     )
-                    torch.mm(sc["lat"].view(rows, self.rank), buf["w2_t"], out=sc["bias"])
-                    fused_add_argmax_to_blk(sc["base"], sc["bias"], sc["ov"], sc["oi"], blk)
+                    torch.mm(
+                        sc["lat"].view(rows, self.rank), buf["w2_t"], out=sc["bias"]
+                    )
+                    k.fused_add_argmax_to_blk(
+                        sc["base"], sc["bias"], sc["ov"], sc["oi"], blk
+                    )
                 return blk[:, 1:]
 
-        _fused_add_argmax = None
-        if base_logits_full.is_cuda:
-            try:
-                from vllm.v1.worker.gpu.spec_decode.xpress.kernels import (
-                    fused_add_argmax as _fused_add_argmax,
-                )
-            except ImportError:
-                _fused_add_argmax = None
-        if _fused_add_argmax is not None:
+        k = _kernels() if base_logits_full.is_cuda else None
+        if k is not None:
             rows = N * (B - 1)
             base_rows = base_logits_full[:, 1:, :].reshape(rows, -1).contiguous()
             v = base_rows.shape[-1]
@@ -161,7 +188,7 @@ class XPressRefinerHead(nn.Module):
                 prev[:, 0] = tok_am1_ids
                 x = latent_fn(prev, hcache)
                 bias_rows = self.w2(x[:, 1:, :].contiguous()).reshape(rows, -1)
-                _fused_add_argmax(base_rows, bias_rows, ov, oi, toks)
+                k.fused_add_argmax(base_rows, bias_rows, ov, oi, toks)
                 blk[:, 1:] = toks.view(N, B - 1)
             return blk[:, 1:]
         for _ in range(num_passes):
@@ -209,4 +236,6 @@ class XPressRefinerHead(nn.Module):
             else:
                 p = dict(self.named_parameters())[dst]
                 p.copy_(sd[src].to(p.dtype))
+        if raw_L is None:
+            raise KeyError("XPress head: checkpoint has no mixer weight to fold")
         self.fold_from_raw_(raw_L.to(self.mix_L.dtype))

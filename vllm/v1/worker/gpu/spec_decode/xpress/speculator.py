@@ -11,7 +11,6 @@ from vllm.v1.cudagraph_dispatcher import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
-
 logger = init_logger(__name__)
 
 
@@ -23,13 +22,15 @@ class XPressSpeculator(DFlashSpeculator):
         hf = self.draft_model_config.hf_config
         self.num_query_per_req = 1 + self.num_speculative_steps
         import os
-        self.num_jacobi_passes = int(
-            os.environ.get("XPRESS_NUM_PASSES") or getattr(hf, "xpress_num_passes", 6)
+
+        env_passes = os.environ.get("XPRESS_NUM_PASSES")
+        self.num_jacobi_passes = (
+            int(env_passes) if env_passes else int(getattr(hf, "xpress_num_passes", 6))
         )
         logger.info("XPress: K=%d Jacobi passes", self.num_jacobi_passes)
         # Block slot 0 holds the anchor -- a verified token. Its refined output is
-        # discarded, so only its latent matters, and that reaches the draft slots through
-        # the single mixer column L[:, k, 0].
+        # discarded, so only its latent matters, and that reaches the draft slots
+        # through the single mixer column L[:, k, 0].
         self._anchor_idx = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
@@ -73,7 +74,7 @@ class XPressSpeculator(DFlashSpeculator):
         self._jacobi_refine(num_reqs, head_hidden)
 
     def _jacobi_refine(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
-        B = self.num_query_per_req                        # 1 anchor + N draft slots
+        B = self.num_query_per_req  # 1 anchor + N draft slots
         n_rows = num_reqs * B
         h_full = head_hidden[:n_rows].view(num_reqs, B, -1)
         base_full = self.model.compute_draft_logits(h_full)

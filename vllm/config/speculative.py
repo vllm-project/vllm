@@ -1268,9 +1268,7 @@ class SpeculativeConfig:
                     in self.draft_model_config.architectures
                 ):
                     self.method = "dflash"
-                elif (
-                    "xpress" in self.draft_model_config.model.lower()
-                ):
+                elif "xpress" in self.draft_model_config.model.lower():
                     self.method = "xpress"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()

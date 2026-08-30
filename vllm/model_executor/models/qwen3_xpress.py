@@ -19,7 +19,6 @@ logger = init_logger(__name__)
 
 
 class Qwen3XPressModel(DFlashQwen3Model):
-
     def __init__(
         self,
         *,
@@ -110,7 +109,7 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
             if "t2d" in name or "d2t" in name:
                 continue
             if name.startswith("xpress_head."):
-                sub = name[len("xpress_head."):]
+                sub = name[len("xpress_head.") :]
                 if sub == "mix.L":
                     raw_mix_L = loaded_weight
                     continue
