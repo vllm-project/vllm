@@ -1172,9 +1172,9 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         p = p.transpose(1, 2)  # (batch, head, time1, d_k)
 
         # (batch, head, time1, d_k)
-        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
+        q_with_bias_u = (q + self.pos_bias_u.to(q.dtype)).transpose(1, 2)
         # (batch, head, time1, d_k)
-        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
+        q_with_bias_v = (q + self.pos_bias_v.to(q.dtype)).transpose(1, 2)
 
         # compute attention score
         # first compute matrix a and matrix c
