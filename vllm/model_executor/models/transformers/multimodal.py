@@ -1254,10 +1254,15 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 mm_token_type_ids[offset : offset + length] = mm_token_type_id
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
+        # Only forward grids for modalities that are present because
+        # `get_rope_index` signatures vary across Transformers models.
+        if image_grid_thw is not None:
+            kwargs["image_grid_thw"] = image_grid_thw
+        if video_grid_thw is not None:
+            kwargs["video_grid_thw"] = video_grid_thw
+
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             **kwargs,
         )
 
