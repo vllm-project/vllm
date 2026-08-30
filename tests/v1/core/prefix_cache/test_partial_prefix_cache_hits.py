@@ -192,7 +192,9 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
     token_budget = 8192
     prompt_length = 30000
     mock = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=block_size),
+        cache_config=SimpleNamespace(
+            block_size=block_size, mamba_cache_mode="align"
+        ),
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
@@ -229,7 +231,9 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
     long_prefill_threshold = 384
     prompt_length = 1300
     mock = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=block_size),
+        cache_config=SimpleNamespace(
+            block_size=block_size, mamba_cache_mode="align"
+        ),
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(
             long_prefill_token_threshold=long_prefill_threshold

@@ -454,8 +454,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 query_start_loc.device,
             )
 
+        # Computed unconditionally: the all-mode prefix-caching block below
+        # needs it even for decode-only batches (e.g. cudagraph capture).
+        context_lens_tensor = m.compute_num_computed_tokens()
         if num_prefills > 0:
-            context_lens_tensor = m.compute_num_computed_tokens()
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
