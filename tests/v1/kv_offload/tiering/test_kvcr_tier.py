@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+pytest.importorskip("kvcr")
+
 from kvcr import KVCRBindings
 from kvcr.config import G3Options, KVCRBackendConfigs, KVCRConfig, KVCRGuardConfig
 from kvcr.policy import FIFOPolicy, G3FIFOPolicy, G3LRUPolicy, LRUPolicy
