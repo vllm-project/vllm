@@ -2391,8 +2391,8 @@ def test_hisparse_prefill_staging_remap():
     assert new_bt.shape == block_table.shape
     assert row_ids.dtype == torch.int32 and new_bt.dtype == torch.int32
     n_unique = len({0, 2, 3, 5, 7, 9})  # -1 clamps to block 0
-    assert row_ids.shape == (1, n_unique * block_size)
     flat_rows = row_ids.flatten()
+    assert (flat_rows >= 0).sum() == n_unique * block_size
     for i in range(block_table.shape[0]):
         for j in range(block_table.shape[1]):
             orig = max(int(block_table[i, j]), 0)
@@ -2407,14 +2407,17 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
         block_table,
         seq_lens=torch.tensor([5, 8], dtype=torch.int32),
         block_size=4,
+        staging_block_capacity=4,
     )
 
-    expected_bounded = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
-    expected_block_table, expected_rows = hisparse_prefill_staging_remap(
-        expected_bounded, 4
-    )
-    torch.testing.assert_close(plan.block_table, expected_block_table)
-    torch.testing.assert_close(plan.row_ids, expected_rows)
+    assert (plan.block_table[:, 2] == 0).all()
+    valid_rows = plan.row_ids[plan.row_ids >= 0]
+    assert set((valid_rows[::4] // 4).tolist()) == {0, 2, 3, 5, 9}
+    for row, used in enumerate((2, 2)):
+        for column in range(used):
+            staged_block = int(plan.block_table[row, column])
+            host_block = int(block_table[row, column])
+            assert int(valid_rows[staged_block * 4]) == host_block * 4
 
 
 def test_hisparse_prefill_staging_plan_resolves_resident_sources():
@@ -2423,7 +2426,9 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     resident_block_size = 2
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32)
-    plan = build_hisparse_prefill_staging_plan(block_table, seq_lens, block_size)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table, seq_lens, block_size, staging_block_capacity=4
+    )
     # Two resident pages per host block; 0 entries are null (not resident).
     resident_table = torch.tensor(
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]], dtype=torch.int32
@@ -2437,6 +2442,9 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     reps = {5: (0, 0), 2: (0, 1), 9: (1, 0), 3: (1, 1)}
     for u, host_id in enumerate(unique_hosts):
         for t in range(block_size):
+            if host_id < 0:
+                assert int(gpu_rows[u, t]) == -1
+                continue
             if host_id == 0:
                 assert int(gpu_rows[u, t]) == -1
                 continue
@@ -2449,8 +2457,11 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
                 else -1
             )
             assert int(gpu_rows[u, t]) == expected
+    valid_rows = plan.row_ids >= 0
     torch.testing.assert_close(
-        plan.miss_mask, (plan.gpu_row_ids < 0).int(), check_dtype=False
+        plan.miss_mask,
+        ((plan.gpu_row_ids < 0) & valid_rows).int(),
+        check_dtype=False,
     )
 
     plan.ensure_gpu_sources(torch.zeros_like(resident_table), resident_block_size)
@@ -2468,7 +2479,9 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
     block_size, resident_block_size, row_width = 4, 2, 16
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
-    plan = build_hisparse_prefill_staging_plan(block_table, seq_lens, block_size)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table, seq_lens, block_size, staging_block_capacity=4
+    )
     resident_table = torch.tensor(
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]],
         dtype=torch.int32,
@@ -2503,6 +2516,9 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
     gpu_rows = plan.gpu_row_ids[0].cpu()
     host_rows = plan.row_ids[0].cpu()
     for i in range(staged_flat.shape[0]):
+        if int(host_rows[i]) < 0:
+            assert int(plan.miss_mask[0, i]) == 0
+            continue
         expected = (
             resident_flat[int(gpu_rows[i])]
             if int(gpu_rows[i]) >= 0
@@ -3001,14 +3017,10 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
         calls.append((kv_cache, staging_plan, resident_cache))
         return staged
 
-    def unexpected_stage(*args):
-        raise AssertionError("per-layer staging-plan construction is not allowed")
-
     impl = object.__new__(FlashMLASparseImpl)
     impl.hisparse_cache = SimpleNamespace(
         runtime=SimpleNamespace(
             gather_prefill_cache=gather,
-            stage_prefill_cache=unexpected_stage,
         ),
     )
     source = torch.empty((1, 1, 8))

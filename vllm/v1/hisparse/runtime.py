@@ -192,12 +192,39 @@ def release_pinned_state(
 def hisparse_prefill_staging_remap(
     block_table: torch.Tensor, block_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Renumber a block table against its unique referenced blocks."""
-    unique_ids, inverse = torch.unique(block_table.clamp(min=0), return_inverse=True)
-    new_bt = inverse.to(torch.int32)
+    """Renumber blocks without a data-dependent CUDA output allocation."""
+    block_ids = torch.cat(
+        (
+            torch.zeros(1, dtype=torch.int32, device=block_table.device),
+            block_table.flatten().clamp(min=0).to(torch.int32),
+        )
+    )
+    sorted_ids, permutation = torch.sort(block_ids)
+    is_new = torch.cat(
+        (
+            torch.ones(1, dtype=torch.bool, device=block_table.device),
+            sorted_ids[1:] != sorted_ids[:-1],
+        )
+    )
+    compact_sorted = torch.cumsum(is_new, dim=0, dtype=torch.int32) - 1
+    inverse = torch.empty_like(compact_sorted)
+    inverse.scatter_(0, permutation, compact_sorted)
+
+    unique_ids = torch.full_like(sorted_ids, -1)
+    unique_ids.scatter_(0, compact_sorted, sorted_ids)
+    valid = (
+        torch.arange(sorted_ids.numel(), device=block_table.device)
+        <= compact_sorted[-1]
+    )
+    unique_ids = torch.where(valid, unique_ids, -1)
+    new_bt = inverse[1:].view_as(block_table)
+    offsets = torch.arange(block_size, dtype=torch.int32, device=block_table.device)
     row_ids = (
-        unique_ids.to(torch.int32).unsqueeze(1) * block_size
-        + torch.arange(block_size, dtype=torch.int32, device=block_table.device)
+        torch.where(
+            valid[:, None],
+            unique_ids[:, None] * block_size + offsets,
+            -1,
+        )
     ).view(1, -1)
     return new_bt, row_ids
 
@@ -270,9 +297,10 @@ class HiSparsePrefillStagingPlan:
             + (offsets % resident_block_size)[None, :]
         )
         # Block id 0 is the null block in both id spaces.
-        hit = (per_off_block > 0) & (host_ids[:, None] > 0)
+        valid_rows = self.row_ids.view(num_unique, block_size) >= 0
+        hit = (per_off_block > 0) & (host_ids[:, None] > 0) & valid_rows
         self.gpu_row_ids = torch.where(hit, gpu_rows, -1).reshape(1, -1).to(torch.int32)
-        self.miss_mask = (self.gpu_row_ids < 0).int()
+        self.miss_mask = ((self.gpu_row_ids < 0) & valid_rows.view(1, -1)).int()
         self.gpu_source_key = source_key
 
 
@@ -280,16 +308,31 @@ def build_hisparse_prefill_staging_plan(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     block_size: int,
+    staging_block_capacity: int,
 ) -> HiSparsePrefillStagingPlan:
-    """Build the layer-independent remap for host-cache prefill staging."""
+    """Build an asynchronous layer-independent host-cache staging remap."""
     device = block_table.device
     used = (seq_lens.to(torch.int64) + block_size - 1) // block_size
-    bounded = torch.where(
-        torch.arange(block_table.shape[1], device=device)[None, :] < used[:, None],
-        block_table,
-        0,
+    packed_offsets = torch.arange(staging_block_capacity, device=device)
+    row_ends = torch.cumsum(used, dim=0)
+    rows = torch.searchsorted(row_ends, packed_offsets, right=True)
+    valid = rows < block_table.shape[0]
+    rows = rows.clamp(max=block_table.shape[0] - 1)
+    row_starts = torch.cat((torch.zeros_like(row_ends[:1]), row_ends[:-1]))
+    columns = packed_offsets - row_starts[rows]
+    valid &= columns < block_table.shape[1]
+    flat_positions = rows * block_table.shape[1] + columns.clamp(
+        max=block_table.shape[1] - 1
     )
-    new_bt, row_ids = hisparse_prefill_staging_remap(bounded, block_size)
+    referenced = torch.where(valid, block_table.flatten()[flat_positions], 0)
+    referenced_bt, row_ids = hisparse_prefill_staging_remap(referenced, block_size)
+    scratch_index = block_table.numel()
+    scatter_positions = torch.where(valid, flat_positions, scratch_index)
+    remapped = torch.where(valid, referenced_bt.flatten(), 0)
+    new_bt_storage = torch.zeros(scratch_index + 1, dtype=torch.int32, device=device)
+    new_bt_storage.scatter_(0, scatter_positions, remapped)
+    new_bt = new_bt_storage[:-1].view_as(block_table)
+    valid_rows = row_ids >= 0
     dst_rows = torch.arange(row_ids.shape[1], dtype=torch.int32, device=device).view(
         1, -1
     )
@@ -297,7 +340,7 @@ def build_hisparse_prefill_staging_plan(
         block_table=new_bt,
         row_ids=row_ids,
         dst_rows=dst_rows,
-        miss_mask=torch.ones_like(row_ids),
+        miss_mask=valid_rows.to(torch.int32),
         block_size=block_size,
     )
 
@@ -489,21 +532,6 @@ class HiSparseRuntime:
             registered_host_pool if registered_host_pool is not None else kv_cache
         )
 
-    def stage_prefill_cache(
-        self,
-        kv_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather referenced host context blocks into a compact GPU cache."""
-        block_size = kv_cache.shape[1]
-        plan = build_hisparse_prefill_staging_plan(
-            block_table,
-            seq_lens,
-            block_size,
-        )
-        return self.gather_prefill_cache(kv_cache, plan), plan.block_table
-
     def gather_prefill_cache(
         self,
         kv_cache: torch.Tensor,
@@ -563,7 +591,13 @@ class HiSparseRuntime:
         slots = slots.to(device=self.device, dtype=torch.int32)
         state_indices = request_state_indices.to(device=self.device, dtype=torch.long)
         active_indices = device_global_indices.index_select(0, state_indices)
-        active_indices.masked_fill_(torch.isin(active_indices, slots), -1)
+        sorted_slots = torch.sort(slots).values
+        positions = torch.searchsorted(sorted_slots, active_indices)
+        positions.clamp_(max=sorted_slots.numel() - 1)
+        active_indices.masked_fill_(
+            sorted_slots[positions] == active_indices,
+            -1,
+        )
         device_global_indices.index_copy_(0, state_indices, active_indices)
 
     def invalidate_written_slots(

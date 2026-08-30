@@ -374,10 +374,20 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             staging_plan = None
             if self.vllm_config.attention_config.hisparse_config is not None:
+                prefill_seq_lens_cpu = seq_lens_cpu[
+                    num_decodes : num_decodes + num_prefills
+                ]
+                staging_block_capacity = int(
+                    (
+                        (prefill_seq_lens_cpu + self.kv_cache_spec.block_size - 1)
+                        // self.kv_cache_spec.block_size
+                    ).sum()
+                )
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
                     self.kv_cache_spec.block_size,
+                    staging_block_capacity,
                 )
                 if chunked_context is not None:
                     block_table = staging_plan.block_table
@@ -933,20 +943,13 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         assert self.hisparse_cache is not None
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert attn_metadata.seq_lens is not None
         prefill = attn_metadata.prefill
         staging_plan = prefill.hisparse_staging_plan if prefill is not None else None
-        if staging_plan is None:
-            staged_cache, staged_bt = self.hisparse_cache.runtime.stage_prefill_cache(
-                kv_cache,
-                attn_metadata.block_table[num_decodes:],
-                attn_metadata.seq_lens[num_decodes:],
-            )
-        else:
-            staged_cache = self.hisparse_cache.runtime.gather_prefill_cache(
-                kv_cache, staging_plan
-            )
-            staged_bt = staging_plan.block_table
+        assert staging_plan is not None
+        staged_cache = self.hisparse_cache.runtime.gather_prefill_cache(
+            kv_cache, staging_plan
+        )
+        staged_bt = staging_plan.block_table
         prefill_req_ids = attn_metadata.req_id_per_token[num_decode_tokens:]
         if num_decodes > 0:
             prefill_req_ids = prefill_req_ids - num_decodes
