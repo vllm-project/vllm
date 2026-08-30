@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -55,8 +56,10 @@ class PromptEmbedsState:
         if is_token_ids is not None:
             mask = async_tensor_h2d(is_token_ids, device=self.device, dtype=torch.uint8)
         self.gpu_tensors[new_req_data.req_id] = (embeds, mask)
-        self.embeds_ptrs.np[req_index] = embeds.data_ptr()
-        self.mask_ptrs.np[req_index] = 0 if mask is None else mask.data_ptr()
+        self.embeds_ptrs.np[req_index] = np.uint64(embeds.data_ptr()).view(np.int64)
+        self.mask_ptrs.np[req_index] = (
+            0 if mask is None else np.uint64(mask.data_ptr()).view(np.int64)
+        )
         self.embeds_lens.np[req_index] = embeds.shape[0]
 
     def remove_request(self, req_id: str) -> None:
