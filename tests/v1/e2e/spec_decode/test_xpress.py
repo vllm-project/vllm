@@ -12,6 +12,15 @@ TARGET = "Qwen/Qwen3-8B"
 DRAFT = "UIUC-SSAIL/Qwen3-8B-XPress-b16"
 
 
+PROMPTS = [
+    "What is the capital of the United Kingdom?",
+    "Write a Python function that returns the square of a number.",
+    "Explain in one sentence why the sky appears blue.",
+    "List the first five prime numbers.",
+]
+SAMPLING = SamplingParams(temperature=0.0, max_tokens=64, ignore_eos=True)
+
+
 def _get_counter(metrics, name: str) -> float:
     metric = next((m for m in metrics if m.name == name), None)
     assert metric is not None, f"Missing metric: {name}"
@@ -20,6 +29,9 @@ def _get_counter(metrics, name: str) -> float:
 
 @pytest.mark.slow_test
 @large_gpu_mark(min_gb=80)
+# The refiner only biases the same block-diffusion draft, so acceptance at or below the
+# bare drafter's (~6.3 on this pair) means it is not in the loop at all: weights not
+# loaded, K read as 0, or the mixer left unfolded.
 def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
@@ -36,14 +48,8 @@ def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
     )
 
     try:
-        outputs = llm.generate(
-            [
-                "What is the capital of the United Kingdom?",
-                "Write a Python function that returns the square of a number.",
-            ],
-            SamplingParams(temperature=0.0, max_tokens=64, ignore_eos=True),
-        )
-        assert len(outputs) == 2
+        outputs = llm.generate(PROMPTS, SAMPLING)
+        assert len(outputs) == len(PROMPTS)
         assert all(output.outputs[0].text for output in outputs)
 
         metrics = llm.get_metrics()
@@ -57,3 +63,44 @@ def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
         del llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+# Speculative decoding is meant to be lossless: every drafted token is verified against
+# the target, so at temperature 0 the text should be what plain autoregressive decoding
+# would have produced. A mismatch means the verify/accept path is wrong, which acceptance
+# length alone would not reveal -- a broken sampler can still accept plenty of tokens.
+@pytest.mark.slow_test
+@large_gpu_mark(min_gb=80)
+def test_xpress_output_matches_non_speculative(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+    def _run(spec):
+        kwargs = dict(
+            model=TARGET,
+            max_model_len=4096,
+            enforce_eager=True,
+        )
+        if spec:
+            kwargs["speculative_config"] = {
+                "method": "xpress",
+                "model": DRAFT,
+                "num_speculative_tokens": 15,
+            }
+        llm = LLM(**kwargs)
+        try:
+            return [o.outputs[0].text for o in llm.generate(PROMPTS, SAMPLING)]
+        finally:
+            del llm
+            torch.accelerator.empty_cache()
+            cleanup_dist_env_and_memory()
+
+    spec_texts = _run(spec=True)
+    ref_texts = _run(spec=False)
+
+    matches = sum(a == b for a, b in zip(spec_texts, ref_texts))
+    # bf16 verification is not bit-reproducible across the two engine configurations, so
+    # follow the threshold the existing spec-decode e2e tests use rather than demanding
+    # every prompt match.
+    assert matches >= int(0.66 * len(PROMPTS)), (
+        f"only {matches}/{len(PROMPTS)} outputs matched non-speculative decoding"
+    )

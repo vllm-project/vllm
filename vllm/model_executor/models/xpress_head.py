@@ -25,6 +25,8 @@ class XPressRefinerHead(nn.Module):
         self.down_h = nn.Linear(hidden_size, r, bias=False)
         self.down_g = nn.Linear(hidden_size, r, bias=False)
         self.in_proj = nn.Linear(3 * r, r, bias=False)
+        # Stored FOLDED (L*tril + I), so a refine pass is one bmm with no mask and no
+        # residual add. Identity here means "no mixing" for a head built without weights.
         self.mix_L = nn.Parameter(torch.eye(block_size).expand(r, -1, -1).contiguous())
         self.mlp_gate = nn.Linear(r, mlp_hidden, bias=False)
         self.mlp_up = nn.Linear(r, mlp_hidden, bias=False)
@@ -35,12 +37,17 @@ class XPressRefinerHead(nn.Module):
 
     @torch.no_grad()
     def fold_from_raw_(self, raw_L: torch.Tensor) -> None:
+        # Training stores the raw mixer and adds the sublayer residual: x + (L*tril)x.
+        # Baking the mask and the identity into the parameter makes that one bmm, and
+        # keeps a checkpoint meaning the same thing at serving time as it did in training.
         B = self.block_size
         tril = torch.tril(torch.ones(B, B, dtype=raw_L.dtype, device=raw_L.device))
         eye = torch.eye(B, dtype=raw_L.dtype, device=raw_L.device)
         self.mix_L.copy_(raw_L * tril + eye)
 
     def hidden_cache(self, h_full: torch.Tensor) -> torch.Tensor:
+        # Pass-invariant: only prev_ids changes between Jacobi passes, so compute the
+        # hidden half once per block and reuse it for all K passes.
         g = h_full.mean(dim=1, keepdim=True).expand_as(h_full)
         return torch.cat([self.down_h(h_full), self.down_g(g)], dim=-1)
 
@@ -49,6 +56,8 @@ class XPressRefinerHead(nn.Module):
     ) -> torch.Tensor:
         lat = self.w1(prev_ids)
         x = self.in_proj(torch.cat([hcache, lat], dim=-1))
+        # Per-channel causal mix: position k sees only j <= k, which is what makes
+        # Jacobi iteration valid -- a settled prefix cannot be disturbed by later slots.
         x = torch.bmm(self.mix_L.to(x.dtype), x.permute(2, 1, 0)).permute(2, 1, 0)
         return x + self.mlp_down(F.silu(self.mlp_gate(x)) * self.mlp_up(x))
 
@@ -77,6 +86,7 @@ class XPressRefinerHead(nn.Module):
         tok_am1_ids: torch.Tensor,
         num_passes: int,
     ) -> torch.Tensor:
+        # Greedy, so a settled prefix stays settled and K passes converge monotonically.
         N, B, _ = base_logits_full.shape
         hcache = self.hidden_cache(h_full)
         latent_fn = self._get_latent_fn(base_logits_full.is_cuda)
@@ -96,6 +106,8 @@ class XPressRefinerHead(nn.Module):
                 buf = self.fused_buffers()
                 rows = N * (B - 1)
                 v = base_logits_full.shape[-1]
+                # ONE scratch set sized for the largest N seen. vLLM captures many batch
+                # buckets, and a per-N cache would pin GBs that belong to the KV cache.
                 cap = self._scratch.get("cap", 0)
                 if cap < N:
                     nvb = (v + 4095) // 4096
@@ -116,6 +128,8 @@ class XPressRefinerHead(nn.Module):
                       for k, v_ in self._scratch.items()}
                 sc["base"].copy_(base_logits_full[:, 1:, :].reshape(rows, v))
                 xh = torch.mm(hcache.view(N * B, -1), buf["whc_t"]).view(N, B, self.rank)
+                # Three launches per pass: latent, the w2 GEMM, then add+argmax straight
+                # into blk. The [N, B, V] sum is never materialized.
                 for _ in range(num_passes):
                     xpress_latent_pass(
                         blk, tok_am1_ids, xh, sc["lat"], self.w1.weight,

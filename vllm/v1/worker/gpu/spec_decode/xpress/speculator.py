@@ -27,10 +27,15 @@ class XPressSpeculator(DFlashSpeculator):
             os.environ.get("XPRESS_NUM_PASSES") or getattr(hf, "xpress_num_passes", 6)
         )
         logger.info("XPress: K=%d Jacobi passes", self.num_jacobi_passes)
+        # Block slot 0 holds the anchor -- a verified token. Its refined output is
+        # discarded, so only its latent matters, and that reaches the draft slots through
+        # the single mixer column L[:, k, 0].
         self._anchor_idx = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
         )
+        # XPress consumes the DRAFTER's own hidden width; the base class widens
+        # self.hidden_size for HC-multiplexed models, which this is not.
         draft_hidden = self.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             self.max_num_tokens, draft_hidden, dtype=self.dtype, device=device
@@ -41,6 +46,8 @@ class XPressSpeculator(DFlashSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
+        # The DSpark loader body is architecture-agnostic (embed/lm_head sharing,
+        # non-causal attention config, KV setup), so it is reused as-is.
         return load_dspark_model(target_model, self.vllm_config)
 
     def _generate_draft(
@@ -52,6 +59,10 @@ class XPressSpeculator(DFlashSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        # Backbone forward over all query blocks, then K Jacobi passes over each
+        # request's block. Both stages are fixed-shape and loop-free per pass, so the
+        # whole draft step is CUDA-graph capturable -- K passes cost K matmuls, not K
+        # kernel launches.
         head_hidden = self._run_model(
             num_tokens_padded,
             attn_metadata,
@@ -62,11 +73,13 @@ class XPressSpeculator(DFlashSpeculator):
         self._jacobi_refine(num_reqs, head_hidden)
 
     def _jacobi_refine(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
-        B = self.num_query_per_req
+        B = self.num_query_per_req                        # 1 anchor + N draft slots
         n_rows = num_reqs * B
         h_full = head_hidden[:n_rows].view(num_reqs, B, -1)
         base_full = self.model.compute_draft_logits(h_full)
         anchor_ids = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        # The anchor's own predecessor lives in the KV cache, not in any id buffer the
+        # speculator can reach, so the anchor id stands in for it (see __init__).
         tok_am1 = anchor_ids
         head = self.model.model.xpress_head
         draft = head.jacobi_refine_greedy(

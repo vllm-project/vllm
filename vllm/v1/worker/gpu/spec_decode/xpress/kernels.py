@@ -52,6 +52,7 @@ def _xpress_add_argmax_reduce_kernel(
     tl.store(token_ptr + row, best_idx)
 
 
+# base + bias and the argmax in one pass, so the [rows, V] sum is never materialized.
 def fused_add_argmax(
     base: torch.Tensor,
     bias: torch.Tensor,
@@ -140,6 +141,7 @@ def _xpress_latent_kernel(
     )
 
 
+# One Jacobi pass up to the readout: prev gather, hcache add, causal mix, SwiGLU.
 def xpress_latent_pass(blk, tok_am1, xh, lat_out, w1_weight, wlat_t, mix_kjc,
                        wg_t, wu_t, wd_t) -> None:
     N, B = blk.shape
@@ -179,6 +181,8 @@ def _xpress_add_argmax_reduce_to_blk_kernel(
     tl.store(blk_ptr + n * (Bm1 + 1) + 1 + b, best_idx)
 
 
+# As fused_add_argmax, but writes the winning ids straight into the block buffer,
+# which keeps a pass at three launches inside the captured graph.
 def fused_add_argmax_to_blk(base, bias, out_val, out_idx, blk, block_v: int = 4096) -> None:
     rows, v = base.shape
     num_v_blocks = (v + block_v - 1) // block_v

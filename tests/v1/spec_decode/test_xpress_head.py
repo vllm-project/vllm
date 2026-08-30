@@ -35,6 +35,8 @@ def _inputs(n: int = 3, seed: int = 7):
     return h, prev
 
 
+# Serving stores L*tril + I and drops the residual; training stores raw L and adds it.
+# If these ever diverge, a checkpoint silently means something different at serving time.
 def test_fold_matches_the_unfolded_sublayer():
     head = _head()
     torch.manual_seed(3)
@@ -56,6 +58,8 @@ def test_fold_matches_the_unfolded_sublayer():
     torch.testing.assert_close(head.refine_bias(prev, hcache), expected)
 
 
+# Jacobi iteration is only valid because of this: a settled prefix cannot be disturbed
+# by later slots that are still changing.
 def test_block_mixing_is_causal():
     head = _head()
     head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
@@ -76,6 +80,7 @@ def test_block_mixing_is_causal():
     )
 
 
+# Greedy refine has no sampling, so repeated calls must agree exactly.
 def test_jacobi_is_deterministic():
     head = _head()
     head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
