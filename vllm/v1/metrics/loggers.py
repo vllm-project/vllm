@@ -579,9 +579,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_kv_cache_capacity = create_metric_per_engine(
             gauge_kv_cache_capacity, per_engine_labelvalues
         )
-        capacity_bytes = vllm_config.cache_config.kv_cache_capacity_bytes
-        if capacity_bytes is not None:
-            for gauge in self.gauge_kv_cache_capacity.values():
+        capacity_by_engine = vllm_config.cache_config.kv_cache_capacity_bytes
+        for engine_idx, gauge in self.gauge_kv_cache_capacity.items():
+            if (capacity_bytes := capacity_by_engine.get(engine_idx)) is not None:
                 gauge.set(capacity_bytes)
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:

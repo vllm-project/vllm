@@ -316,7 +316,7 @@ def test_apply_ready_response_syncs_block_size():
         cache_config=SimpleNamespace(
             block_size=16,
             num_gpu_blocks=0,
-            kv_cache_capacity_bytes=None,
+            kv_cache_capacity_bytes={},
         ),
         model_config=SimpleNamespace(max_model_len=8192),
     )
@@ -346,7 +346,7 @@ def test_apply_ready_response_syncs_block_size():
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.block_size == 1056
-    assert client.vllm_config.cache_config.kv_cache_capacity_bytes == 123456
+    assert client.vllm_config.cache_config.kv_cache_capacity_bytes == {0: 123456}
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
