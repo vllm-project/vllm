@@ -60,6 +60,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "glm47_moe_reasoning_parser",
         "Glm47MoeParserReasoningAdapter",
     ),
+    "ling3": (
+        "ling3_reasoning_parser",
+        "Ling3ParserReasoningAdapter",
+    ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
         "GptOssReasoningParser",
@@ -79,6 +83,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "hy_v3": (
         "hy_v3_reasoning_parser",
         "HYV3ReasoningParser",
+    ),
+    "hy_v4": (
+        "hy_v4_reasoning_parser",
+        "HYV4ReasoningParser",
     ),
     "kimi_k2": (
         "kimi_k2_reasoning_parser",
@@ -115,6 +123,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_reasoning_parser",
+        "MuseGlimmerReasoningParser",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",

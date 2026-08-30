@@ -174,6 +174,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(single_request, raw_request)
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -183,6 +184,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     trace_headers=trace_headers,
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=None,
                 )
             )
@@ -289,7 +291,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if request.echo:
                     conversation = all_conversations[prompt_idx]
                     last_msg_content: str | list[dict[str, str]] = ""
-                    if conversation and "content" in conversation[-1]:
+                    if (
+                        conversation
+                        and "content" in conversation[-1]
+                        and conversation[-1].get("role") == role
+                    ):
                         last_msg_content = conversation[-1]["content"] or ""
                     if isinstance(last_msg_content, list):
                         last_msg_content = "\n".join(

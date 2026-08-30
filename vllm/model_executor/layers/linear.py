@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -11,7 +10,7 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -22,7 +21,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.batch_invariant import (
+from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
 from vllm.model_executor.layers.quantization.base_config import (
@@ -96,23 +95,6 @@ def adjust_block_scale_shard(
     return shard_size, shard_offset
 
 
-def adjust_bitsandbytes_4bit_shard(
-    param: Parameter,
-    shard_offsets: dict[str, tuple[int, int]],
-    loaded_shard_id: str,
-) -> tuple[int, int]:
-    """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
-
-    total, _ = shard_offsets["total"]
-    orig_offset, orig_size = shard_offsets[loaded_shard_id]
-
-    quantized_total = param.data.shape[0]
-    quantized_offset = orig_offset * quantized_total // total
-    quantized_size = orig_size * quantized_total // total
-
-    return quantized_size, quantized_offset
-
-
 def adjust_scalar_to_fused_array(
     param_data: torch.Tensor,
     loaded_weight: torch.Tensor,
@@ -184,6 +166,13 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    def __init__(self) -> None:
+        config = get_current_vllm_config_or_none()
+        linear_backend = (
+            config.kernel_config.linear_backend if config is not None else "auto"
+        )
+        self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -215,6 +204,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
+            # MLA's kv_b_proj (see `_cpu_skip_gemm_dispatch`): not
+            # perf-critical, so skip packing and use a plain fallback.
+            if getattr(layer, "_cpu_skip_gemm_dispatch", False):
+                layer.cpu_linear = torch.nn.functional.linear
+                return
+
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
@@ -227,7 +222,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_impl(layer, x, layer.weight, bias)
 
 
 class LinearBase(PluggableLayer):
@@ -561,10 +556,6 @@ class ColumnParallelLinear(LinearBase):
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -775,16 +766,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 else self.output_sizes
             )
             current_shard_offset = 0
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-            if (
-                use_bitsandbytes_4bit
-                and isinstance(loaded_shard_id, tuple)
-                and self.tp_size > 1
-            ):
-                raise NotImplementedError(
-                    "Shard id with multiple indices is not supported "
-                    "for BNB quantization with TP yet."
-                )
             shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
@@ -807,17 +788,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset
-                    )
-
-                if use_bitsandbytes_4bit:
-                    index = list(itertools.accumulate([0] + self.output_sizes))
-                    orig_offsets = {
-                        str(i): (index[i], size)
-                        for i, size in enumerate(self.output_sizes)
-                    }
-                    orig_offsets["total"] = (self.output_size, 0)
-                    shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                        param, orig_offsets, str(shard_id)
                     )
 
                 loaded_weight_shard = loaded_weight.narrow(
@@ -851,21 +821,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     param, shard_size, shard_offset
                 )
 
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
-            # bitsandbytes loads the weights of the specific portion
-            # no need to narrow
-            is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-            if use_bitsandbytes_4bit:
-                index = list(itertools.accumulate([0] + self.output_sizes))
-                orig_offsets = {
-                    str(i): (index[i], size) for i, size in enumerate(self.output_sizes)
-                }
-                orig_offsets["total"] = (self.output_size, 0)
-                shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                    param, orig_offsets, str(loaded_shard_id)
-                )
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = self.tp_rank * shard_size
             if not is_sharded_weight:
@@ -1259,8 +1215,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     self.total_num_kv_heads * self.v_head_size,
                 ),
             ]
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-
             packed_dim = getattr(param, "packed_dim", None)
             for shard_id, shard_offset, shard_size in shard_offsets:
                 # Special case for Quantized Weights.
@@ -1280,30 +1234,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset
-                    )
-
-                if use_bitsandbytes_4bit:
-                    orig_qkv_offsets = {
-                        "q": (0, self.total_num_heads * self.head_size),
-                        "k": (
-                            self.total_num_heads * self.head_size,
-                            self.total_num_kv_heads * self.head_size,
-                        ),
-                        "v": (
-                            (self.total_num_heads + self.total_num_kv_heads)
-                            * self.head_size,
-                            self.total_num_kv_heads * self.v_head_size,
-                        ),
-                        "total": (
-                            (self.total_num_heads + self.total_num_kv_heads)
-                            * self.head_size
-                            + self.total_num_kv_heads * self.v_head_size,
-                            0,
-                        ),
-                    }
-
-                    shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                        param, orig_qkv_offsets, shard_id
                     )
 
                 loaded_weight_shard = loaded_weight.narrow(
@@ -1345,33 +1275,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     param, shard_size, shard_offset
                 )
 
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
-            # bitsandbytes loads the weights of the specific portion
-            # no need to narrow
-            is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-            if use_bitsandbytes_4bit:
-                orig_qkv_offsets = {
-                    "q": (0, self.num_heads * self.head_size),
-                    "k": (
-                        self.num_heads * self.head_size,
-                        self.num_kv_heads * self.head_size,
-                    ),
-                    "v": (
-                        (self.num_heads + self.num_kv_heads) * self.head_size,
-                        self.num_kv_heads * self.v_head_size,
-                    ),
-                    "total": (
-                        (self.num_heads + self.num_kv_heads) * self.head_size
-                        + self.num_kv_heads * self.v_head_size,
-                        0,
-                    ),
-                }
-                shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                    param, orig_qkv_offsets, loaded_shard_id
-                )
-
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if loaded_shard_id == "q":
                 shard_rank = self.tp_rank
@@ -1608,6 +1512,95 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
+    """Kimi-K3 QKV-A projection fused with its output-gate projection.
+
+    NOTE: Kimi-K3-specific. This is tailored to its replicated Q/KV latent
+    projections and tensor-parallel output gate; it is not a general-purpose
+    linear layer. It lives here alongside ``MergedColumnParallelLinear``, whose
+    sharding and weight-loading machinery it reuses.
+
+    The per-rank shard layout is ``[q_a | kv_a | gate]``. The latent shards
+    stay replicated across tensor-parallel ranks while the gate shard is
+    tensor-parallel, matching the standalone projections they replace.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        total_num_heads: int,
+        v_head_dim: int,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # MergedColumnParallelLinear divides every logical shard by TP size.
+        # Inflate the replicated latent shards to retain their checkpoint widths.
+        output_sizes = [
+            q_lora_rank * tp_size,
+            (kv_lora_rank + qk_rope_head_dim) * tp_size,
+            total_num_heads * v_head_dim,
+        ]
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=output_sizes,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def _load_with_replicated_latents(
+        self,
+        loader: Callable[..., None],
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None,
+    ) -> None:
+        is_replicated = isinstance(loaded_shard_id, int) and loaded_shard_id < 2
+        if not is_replicated:
+            loader(param, loaded_weight, loaded_shard_id)
+            return
+
+        # The base loader narrows every checkpoint shard using its TP rank.
+        # Replicated latent shards instead load the rank-zero slice on every rank.
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        self.tp_rank = 0
+        if param_tp_rank is not None:
+            param.tp_rank = 0
+        try:
+            loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        self._load_with_replicated_latents(
+            super().weight_loader, param, loaded_weight, loaded_shard_id
+        )
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        self._load_with_replicated_latents(
+            super().weight_loader_v2, param, loaded_weight, loaded_shard_id
+        )
+
+
 # --8<-- [start:row_parallel_linear]
 @PluggableLayer.register("row_parallel_linear")
 class RowParallelLinear(LinearBase):
@@ -1716,11 +1709,7 @@ class RowParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
         param_data = param.data
         if input_dim is not None and not is_sharded_weight:

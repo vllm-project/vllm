@@ -42,8 +42,11 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
+#   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
+#   8: Add dcp_size and pcp_size to NixlAgentMetadata
+#   9: Add block_strides
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 9
 
 
 @dataclass
@@ -54,11 +57,14 @@ class NixlAgentMetadata:
     device_id: int
     num_blocks: int
     block_lens: list[int]
+    block_strides: list[int]
     kv_cache_layout: str
     block_size: int
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    dcp_size: int = 1
+    pcp_size: int = 1
 
 
 @dataclass
@@ -123,7 +129,9 @@ def _get_speculative_compatibility_factors(
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
+    vllm_config: VllmConfig,
+    attn_backend_name: str,
+    transfer_mode: str = "pull",
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
@@ -137,6 +145,11 @@ def compute_nixl_compatibility_hash(
     - KV cache format (dtype, sliding window)
     - Attention backend
     - EAGLE/MTP configuration that affects transferred state
+    - Transfer mode (push vs pull)
+
+    The transfer mode is included because the push (WRITE) and pull (READ)
+    connectors use incompatible transfer protocols; a push connector and a
+    pull connector must never complete a handshake with each other.
 
     Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
     are validated at runtime in _validate_remote_agent_handshake and are not
@@ -168,9 +181,10 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
-        "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
+        # push (WRITE) and pull (READ) connectors are protocol-incompatible
+        "transfer_mode": transfer_mode,
     }
 
     compat_hash = hash_factors(factors)
@@ -195,6 +209,7 @@ class HeartbeatInfo:
     host: str
     port: int
     tp_size: int
+    dcp_size: int = 1
     pp_size: int = 1
 
 
@@ -214,6 +229,12 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    dcp_size: int = 1
+    # Per-KV-cache-group logical blocks this rank already holds, i.e. its
+    # prefix-cache hit. Fixes where this rank's DCP slice starts relative to
+    # the remote's; kept per-group since hybrid models (e.g. SWA+FA) can have
+    # different cache-hit counts per group.
+    local_num_computed_blocks: tuple[int, ...] = ()
     remote: RemoteMeta | None = None
     # Remote block size, discovered during NIXL handshake (push mode).
     remote_block_size: int | None = None
@@ -247,14 +268,17 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: tuple[int, ...] = (),
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
             local_physical_block_ids=local_block_ids,
-            # P workers don't need to receive tp_size from proxy here.
+            # P workers don't need to receive these from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            dcp_size=kv_transfer_params.get("dcp_size", 1),
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
+            local_num_computed_blocks=local_num_computed_blocks,
         )
 
     def add_new_req_to_save(
@@ -272,8 +296,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: tuple[int, ...] = (),
     ):
-        req = self._add_new_req(local_block_ids, kv_transfer_params)
+        req = self._add_new_req(
+            local_block_ids, kv_transfer_params, local_num_computed_blocks
+        )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
             engine_id=kv_transfer_params["remote_engine_id"],
