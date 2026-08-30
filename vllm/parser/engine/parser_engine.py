@@ -996,7 +996,7 @@ class ParserEngine(Parser):
         of what was already sent. Returning ``None`` there ends the stream with
         ``finish_reason`` set while the client holds a half-written string, which
         no JSON parser accepts. Close what was already sent instead: the client
-        gets the truncated value rather than an unparseable message.
+        gets the truncated value rather than an unparsable message.
         """
         suffix = self._json_prefix_terminator(prev)
         if not suffix:
