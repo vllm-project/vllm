@@ -39,8 +39,6 @@ steps:
 - label: ":nvidia: (L4) V1 Engine"
   key: engine-1-gpu
   timeout_in_minutes: 45
-  device: l4
-  num_devices: 1
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/

@@ -22,7 +22,6 @@ steps:
   key: sharded-rdt-weight-transfer
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
-  device: l4
   num_devices: 1
   source_file_dependencies:
   - vllm/distributed/weight_transfer/

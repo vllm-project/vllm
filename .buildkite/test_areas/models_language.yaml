@@ -93,8 +93,6 @@ steps:
 - label: ":nvidia: (L4) Granite Language Model Compatibility"
   key: language-models-tests-granite-l4-compatibility
   timeout_in_minutes: 65
-  device: l4
-  num_devices: 1
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
