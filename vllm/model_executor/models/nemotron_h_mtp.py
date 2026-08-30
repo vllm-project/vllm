@@ -29,6 +29,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import (
     WeightsMapper,
+    get_draft_quant_config,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -223,7 +224,12 @@ class NemotronHMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config.get_text_config()
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        config = draft_model_config.hf_config.get_text_config()
+        quant_config = get_draft_quant_config(vllm_config)
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -263,9 +269,9 @@ class NemotronHMultiTokenPredictor(nn.Module):
             common_kwargs = dict(
                 config=config,
                 layer_idx=self.mtp_start_layer_idx + i,
-                model_config=vllm_config.model_config,
+                model_config=draft_model_config,
                 cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 parallel_config=vllm_config.parallel_config,
                 prefix=layer_prefix,
                 has_start_projections=is_start_of_step,
@@ -339,10 +345,14 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config.get_text_config()
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        config = draft_model_config.hf_config.get_text_config()
         self.vllm_config = vllm_config
         self.config = config
-        self.quant_config = vllm_config.quant_config
+        self.quant_config = get_draft_quant_config(vllm_config)
 
         # Needed for load_weights mapping
         self.mtp_start_layer_idx = config.num_hidden_layers
