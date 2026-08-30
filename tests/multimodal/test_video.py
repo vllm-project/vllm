@@ -1755,3 +1755,16 @@ def test_glm5next_read_frames_dense_walk_matches_stock(tmp_path):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
     # One initial seek, then pure walking -- no re-seek churn.
     assert cap.seeks == 1
+
+
+def test_glmga_video_backend_rejects_unknown_source_fps():
+    """A container reporting 0 fps (VFR/unknown) must raise a clear
+    ValueError instead of ZeroDivisionError."""
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+    # Duration may or may not be reported; either path divides by original_fps.
+    for duration in (5.0, 0.0):
+        source = VideoSourceMetadata(
+            total_frames_num=150, original_fps=0.0, duration=duration
+        )
+    with pytest.raises(ValueError, match="unknown frame rate"):
+        GLMGAVideoBackend.compute_frames_index_to_sample(source, target)
