@@ -44,7 +44,9 @@ def test_traces(
                 gpu_memory_utilization=0.3,
                 disable_log_stats=False,
             )
-            prompts = ["This is a short prompt"]
+            # Longer than one KV block so a repeat request can hit the
+            # prefix cache (cached tokens are counted in whole blocks).
+            prompts = ["The quick brown fox jumps over the lazy dog. " * 10]
             outputs = llm.generate(prompts, sampling_params=sampling_params)
             print(f"test_traces outputs is : {outputs}")
 
@@ -102,6 +104,37 @@ def test_traces(
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) > 0
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
+
+            # A second identical request reads the prefix cache (enabled by
+            # default), so its span must report a nonzero cache read. The
+            # first request has num_cached_tokens == 0, which cannot
+            # distinguish a correct attribute from a missing or constant one.
+            outputs = llm.generate(prompts, sampling_params=sampling_params)
+            assert outputs[0].num_cached_tokens > 0
+
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                all_spans = trace_service.get_all_spans()
+                llm_request_spans = [s for s in all_spans if s["name"] == "llm_request"]
+                if len(llm_request_spans) == 2:
+                    break
+                time.sleep(0.5)
+
+            assert len(llm_request_spans) == 2, (
+                f"Expected 2 'llm_request' spans after the second request, "
+                f"but got {len(llm_request_spans)}."
+            )
+
+            attributes = next(
+                s["attributes"]
+                for s in llm_request_spans
+                if s["attributes"].get(SpanAttributes.GEN_AI_REQUEST_ID)
+                == outputs[0].request_id
+            )
+            assert (
+                attributes.get(SpanAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS)
+                == outputs[0].num_cached_tokens
+            )
         finally:
             if llm is not None:
                 shutdown_timeout = 60.0 if current_platform.is_rocm() else 5.0
